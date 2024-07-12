@@ -22,7 +22,7 @@ zeromq = "0.4.0"
 zmq = "0.10"
 
 [dependencies.mongodb]
-version = "2.8.2"
+version = "3.0.1"
 features = ["tokio-runtime"]
 
 [[bin]]
