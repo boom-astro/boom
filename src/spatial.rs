@@ -304,3 +304,150 @@ pub async fn xmatch(
 
     xmatch_docs
 }
+
+pub async fn xmatch_partitioned(
+    ra: f64,
+    dec: f64,
+    xmatch_config: &types::CatalogXmatchConfig,
+    db: &mongodb::Database
+) -> mongodb::bson::Document {
+
+    let ra_geojson = ra - 180.0;
+    let dec_geojson = dec;
+
+    // so, first we want to figure out the healpix indexes that are within the search radius of the ra,dec
+    let healpix_indexes = ra_dec_to_healpix(ra, dec, xmatch_config.radius, xmatch_config.healpix_partition_order.unwrap());
+    
+    // then generate the catalog names based on the catalog name and the healpix index
+    // like: catalog_1, catalog_2, catalog_3, etc
+    let catalog_names = healpix_indexes.iter().map(|x| format!("{}_{}", xmatch_config.catalog, x)).collect::<Vec<_>>();
+
+    let collection: mongodb::Collection<mongodb::bson::Document> = db.collection(catalog_names[0].as_str());
+
+    let mut xmatch_docs = doc! {
+        xmatch_config.catalog.clone(): mongodb::bson::Array::new()
+    };
+
+    let mut x_matches_pipeline = vec![
+        doc! {
+            "$match": {
+                "coordinates.radec_geojson": {
+                    "$geoWithin": {
+                        "$centerSphere": [[ra_geojson, dec_geojson], xmatch_config.radius]
+                    }
+                }
+            }
+        },
+        doc! {
+            "$project": xmatch_config.projection.clone()
+        },
+        doc! {
+            "$group": {
+                "_id": mongodb::bson::Bson::Null,
+                "matches": {
+                    "$push": "$$ROOT"
+                }
+            }
+        },
+        doc! {
+            "$project": {
+                "_id": 0,
+                xmatch_config.catalog.clone(): "$matches"
+            }
+        }
+    ];
+
+    for catalog_name in catalog_names.iter().skip(1) {
+        x_matches_pipeline.push(doc! {
+            "$unionWith": {
+                "coll": catalog_name.clone(),
+                "pipeline": [
+                    doc! {
+                        "$match": {
+                            "coordinates.radec_geojson": {
+                                "$geoWithin": {
+                                    "$centerSphere": [[ra_geojson, dec_geojson], xmatch_config.radius]
+                                }
+                            }
+                        }
+                    },
+                    doc! {
+                        "$project": xmatch_config.projection.clone()
+                    },
+                    doc! {
+                        "$group": {
+                            "_id": mongodb::bson::Bson::Null,
+                            "matches": {
+                                "$push": "$$ROOT"
+                            }
+                        }
+                    },
+                    doc! {
+                        "$project": {
+                            "_id": 0,
+                            xmatch_config.catalog.clone(): "$matches"
+                        }
+                    }
+                ]
+            }
+        });
+    }
+
+    let mut cursor = collection.aggregate(x_matches_pipeline).await.unwrap();
+
+    while let Some(doc) = cursor.next().await {
+        let mut doc = doc.unwrap();
+        if doc.contains_key(&xmatch_config.catalog) {
+            // extend the array
+            let matches = xmatch_docs.get_array_mut(&xmatch_config.catalog).unwrap();
+            let new_matches = doc.get_array_mut(&xmatch_config.catalog).unwrap();
+            matches.extend(new_matches.iter().cloned());
+        }
+    }
+
+    xmatch_docs
+}
+
+// let's implement some healpix utilities
+// we want to be able to:
+// - get the list of healpix indexes overlap with a given ra,dec and radius at a given order
+
+fn get_flat_cells(bmoc: cdshealpix::nested::bmoc::BMOC) -> (Vec<u64>, Vec<u8>, Vec<u8>) {
+    let len = bmoc.deep_size();
+    let mut ipix = Vec::<u64>::with_capacity(len);
+    let mut depth = Vec::<u8>::with_capacity(len);
+    let mut fully_covered = Vec::<u8>::with_capacity(len);
+  
+    for c in bmoc.flat_iter_cell() {
+      ipix.push(c.hash);
+      depth.push(c.depth);
+      fully_covered.push(c.is_full as u8);
+    }
+  
+    depth.shrink_to_fit();
+    ipix.shrink_to_fit();
+    fully_covered.shrink_to_fit();
+  
+    (ipix.into(), depth.into(), fully_covered.into())
+  }
+
+pub fn ra_dec_to_healpix(ra: f64, dec: f64, radius: f64, order: i32) -> Vec<u64> {
+    // convert ra, dec to radians
+    let lon = ra * DEGRA;
+    let lat = dec * DEGRA;
+    // let mut delta_order = order + 2;
+    // let mut ipix = vec![];
+    // while delta_order < 30 {
+    //     let bmoc = cdshealpix::nested::cone_coverage_approx_custom(order as u8, (delta_order) as u8, lon, lat, radius);
+    //     (ipix, _, _) = get_flat_cells(bmoc);
+    //     if ipix.len() > 0 {
+    //         break;
+    //     }
+    //     delta_order += 1;
+    // }
+    // ipix
+    let delta_order = 16; // at 16, the angular resolution is 3.221" per pixel, so with a radius of 2" = diameter of 4", we should be good
+    let bmoc = cdshealpix::nested::cone_coverage_approx_custom(order as u8, (delta_order) as u8, lon, lat, radius);
+    let (ipix, _, _) = get_flat_cells(bmoc);
+    ipix
+}

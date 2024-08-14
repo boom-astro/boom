@@ -975,6 +975,7 @@ pub struct CatalogXmatchConfig {
     pub distance_unit: Option<DistanceUnit>, // type of distance to use
     pub distance_max: Option<f64>, // maximum distance in kpc
     pub distance_max_near: Option<f64>, // maximum distance in arcsec for nearby objects
+    pub healpix_partition_order: Option<i32>, // healpix partition order
 }
 
 impl CatalogXmatchConfig {
@@ -986,7 +987,8 @@ impl CatalogXmatchConfig {
         distance_key: Option<String>,
         distance_unit: Option<DistanceUnit>,
         distance_max: Option<f64>,
-        distance_max_near: Option<f64>
+        distance_max_near: Option<f64>,
+        healpix_partition_order: Option<i32>
     ) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
@@ -996,7 +998,8 @@ impl CatalogXmatchConfig {
             distance_key,
             distance_unit,
             distance_max,
-            distance_max_near
+            distance_max_near,
+            healpix_partition_order
         }
     }
 
@@ -1101,6 +1104,14 @@ impl CatalogXmatchConfig {
             }
         }
 
+        let healpix_partition_order = {
+            if let Some(healpix_partition_order) = hashmap_xmatch.get("healpix_partition_order") {
+                Some(healpix_partition_order.clone().into_int().unwrap() as i32)
+            } else {
+                None
+            }
+        };
+
         CatalogXmatchConfig::new(
             &catalog,
             radius,
@@ -1109,7 +1120,8 @@ impl CatalogXmatchConfig {
             distance_key,
             distance_unit,
             distance_max,
-            distance_max_near
+            distance_max_near,
+            healpix_partition_order
         )
     }
 }

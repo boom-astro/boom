@@ -2,11 +2,11 @@ hello: world
 database:
   host: localhost
   port: 27017
-  name: boom
+  name: zvar
   max_pool_size: 200
   replica_set: null
-  username: mongoadmin
-  password: mongoadminsecret
+  username: null
+  password: null
   srv: false
 crossmatch:
   - catalog: PS1_DR1
@@ -28,6 +28,7 @@ crossmatch:
   - catalog: Gaia_DR3
     radius: 2.0 # 2 arcseconds
     use_distance: false
+    healpix_partition_order: 2
     projection:
       _id: 1
       coordinates.radec_str: 1
@@ -78,7 +79,7 @@ crossmatch:
       Descrip: 1
       Qpct: 1
   - catalog: CLU
-    radius: 10800.0 # 3 degrees
+    radius: 300.0 # 300 arcseconds
     use_distance: true
     distance_key: "z"
     distance_max: 30.0
@@ -98,7 +99,7 @@ crossmatch:
       sfr_ha: 1
       coordinates.radec_str: 1
   - catalog: NED
-    radius: 10800.0 # 3 degrees
+    radius: 300 # 300 arcseconds
     use_distance: true
     distance_key: "DistMpc"
     distance_max: 30.0

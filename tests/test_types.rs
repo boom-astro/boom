@@ -154,7 +154,8 @@ fn test_catalogxmatchconfig() {
         distance_unit: None,
         distance_max: None,
         distance_max_near: None,
-        projection: ps1_projection.clone()
+        projection: ps1_projection.clone(),
+        healpix_partition_order: None,
     };
 
     assert_eq!(xmatch_config.catalog, "PS1_DR1");
