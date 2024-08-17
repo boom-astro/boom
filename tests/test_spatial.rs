@@ -38,7 +38,7 @@ fn test_in_ellipse() {
 #[tokio::test]
 async fn test_xmatch() {
     let conf = conf::load_config("tests/data/config.test.yaml").unwrap();
-    let db = conf::build_db(&conf).await;
+    let db = conf::build_db(&conf, false).await;
 
     let catalog_xmatch_configs = conf::build_xmatch_configs(&conf);
     assert_eq!(catalog_xmatch_configs.len(), 9);

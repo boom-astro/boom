@@ -2,6 +2,7 @@ use mongodb::bson::doc;
 
 use crate::spatial;
 use crate::types;
+use crate::time;
 
 pub async fn process_alert(
     avro_bytes: Vec<u8>,
@@ -53,14 +54,16 @@ pub async fn process_alert(
 
     let start = std::time::Instant::now();
     
-    // insert the alert into the alerts collection
-    let alert_doc = alert_no_history.mongify();
+    // insert the alert into the alerts collection (with a created_at timestamp)
+    let mut alert_doc = alert_no_history.mongify();
+    alert_doc.insert("created_at", time::jd_now());
     collection_alert.insert_one(alert_doc).await.unwrap();
 
     println!("Inserted alert into alerts collection in {:.6} seconds", start.elapsed().as_secs_f64());
 
     // - new objects - new entry with prv_candidates, fp_hists, xmatches
     // - existing objects - update prv_candidates, fp_hists
+    // (with created_at and updated_at timestamps)
     let collection_alert_aux: mongodb::Collection<mongodb::bson::Document> = db.collection("alerts_aux");
 
     let start = std::time::Instant::now();
@@ -74,10 +77,13 @@ pub async fn process_alert(
 
     if collection_alert_aux.find_one(doc! { "_id": &object_id }).await.unwrap().is_none() {
         let start_new = std::time::Instant::now();
+        let jd_timestamp = time::jd_now();
         let mut doc = doc! {
             "_id": &object_id,
             "prv_candidates": prv_candidates_doc,
             "fp_hists": fp_hist_doc,
+            "created_at": jd_timestamp,
+            "updated_at": jd_timestamp,
         };
         let start_xmatch = std::time::Instant::now();
         doc.insert("cross_matches", spatial::xmatch(ra, dec, xmatch_configs, &db).await);
@@ -93,6 +99,9 @@ pub async fn process_alert(
             "$addToSet": {
                 "prv_candidates": { "$each": prv_candidates_doc },
                 "fp_hists": { "$each": fp_hist_doc }
+            },
+            "$set": {
+                "updated_at": time::jd_now(),
             }
         };
 

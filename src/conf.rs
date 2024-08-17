@@ -24,7 +24,7 @@ pub fn build_xmatch_configs(conf: &Config) -> Vec<types::CatalogXmatchConfig> {
     catalog_xmatch_configs
 }
 
-pub async fn build_db(conf: &Config) -> mongodb::Database {
+pub async fn build_db(conf: &Config, initialize: bool) -> mongodb::Database {
     let db_conf = conf.get_table("database").unwrap();
 
     let host = {
@@ -152,5 +152,15 @@ pub async fn build_db(conf: &Config) -> mongodb::Database {
 
     let client_mongo = mongodb::Client::with_uri_str(&uri).await.unwrap();
     let db = client_mongo.database(&name);
+
+    if initialize {
+        let collection_alert: mongodb::Collection<mongodb::bson::Document> = db.collection("alerts");
+        let alert_candid_index = mongodb::IndexModel::builder()
+            .keys(mongodb::bson::doc! { "candid": 1 })
+            .options(mongodb::options::IndexOptions::builder().unique(true).build())
+            .build();
+        collection_alert.create_index(alert_candid_index).await.unwrap();
+        // TODO: build indexes programmatically, reading from config
+    }
     db
 }
