@@ -1,3 +1,4 @@
+use cdshealpix::nested::get;
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
 
@@ -316,7 +317,11 @@ pub async fn xmatch_partitioned(
     let dec_geojson = dec;
 
     // so, first we want to figure out the healpix indexes that are within the search radius of the ra,dec
-    let healpix_indexes = ra_dec_to_healpix(ra, dec, xmatch_config.radius, xmatch_config.healpix_partition_order.unwrap());
+    let healpix_indexes = cone_to_healpix(ra, dec, xmatch_config.radius, xmatch_config.healpix_partition_order.unwrap());
+
+    if healpix_indexes.len() == 0 {
+        println!("No healpix indexes found for ra,dec, radius, order: {}, {}, {}, {}", ra, dec, xmatch_config.radius, xmatch_config.healpix_partition_order.unwrap());
+    }
     
     // then generate the catalog names based on the catalog name and the healpix index
     // like: catalog_1, catalog_2, catalog_3, etc
@@ -417,37 +422,100 @@ fn get_flat_cells(bmoc: cdshealpix::nested::bmoc::BMOC) -> (Vec<u64>, Vec<u8>, V
     let mut ipix = Vec::<u64>::with_capacity(len);
     let mut depth = Vec::<u8>::with_capacity(len);
     let mut fully_covered = Vec::<u8>::with_capacity(len);
-  
+
     for c in bmoc.flat_iter_cell() {
       ipix.push(c.hash);
       depth.push(c.depth);
       fully_covered.push(c.is_full as u8);
     }
-  
+
     depth.shrink_to_fit();
     ipix.shrink_to_fit();
     fully_covered.shrink_to_fit();
-  
-    (ipix.into(), depth.into(), fully_covered.into())
-  }
 
-pub fn ra_dec_to_healpix(ra: f64, dec: f64, radius: f64, order: i32) -> Vec<u64> {
-    // convert ra, dec to radians
+    (ipix.into(), depth.into(), fully_covered.into())
+}
+
+pub fn cone_to_healpix(ra: f64, dec: f64, radius: f64, order: i32) -> Vec<u64> {
+    // convert the ra, dec and radius to radians
     let lon = ra * DEGRA;
     let lat = dec * DEGRA;
-    // let mut delta_order = order + 2;
-    // let mut ipix = vec![];
-    // while delta_order < 30 {
-    //     let bmoc = cdshealpix::nested::cone_coverage_approx_custom(order as u8, (delta_order) as u8, lon, lat, radius);
-    //     (ipix, _, _) = get_flat_cells(bmoc);
-    //     if ipix.len() > 0 {
-    //         break;
-    //     }
-    //     delta_order += 1;
-    // }
-    // ipix
-    let delta_order = 16; // at 16, the angular resolution is 3.221" per pixel, so with a radius of 2" = diameter of 4", we should be good
+    let radius = radius * DEGRA;
+
+    // if order is  < 10, set delta_order to 20
+    // above that, set delta_order to 0
+    let delta_order = if order < 10 { 20 } else { 0 };
     let bmoc = cdshealpix::nested::cone_coverage_approx_custom(order as u8, (delta_order) as u8, lon, lat, radius);
     let (ipix, _, _) = get_flat_cells(bmoc);
+
+    // this is in nested scheme, we need to convert to ring scheme
+    let n6 = get(order as u8);
+    let ipix = ipix.into_iter().map(|i| n6.to_ring(i)).collect();
     ipix
+}
+
+// in this version, we do not try to figure out what catalog to query,
+// but we have just one catalog, where each document has a healpix index
+// + the regular ra,dec coordinates
+pub async fn xmatch_partitioned_v2(
+    ra: f64,
+    dec: f64,
+    xmatch_config: &types::CatalogXmatchConfig,
+    db: &mongodb::Database
+) -> mongodb::bson::Document {
+
+    let ra_geojson = ra - 180.0;
+    let dec_geojson = dec;
+
+    // so, first we want to figure out the healpix indexes that are within the search radius of the ra,dec
+    let healpix_indexes = cone_to_healpix(ra, dec, xmatch_config.radius, xmatch_config.healpix_partition_order.unwrap());
+    // convert to a vec of i64
+    let healpix_indexes = healpix_indexes.iter().map(|x| *x as i32).collect::<Vec<_>>();
+
+    if healpix_indexes.len() == 0 {
+        println!("No healpix indexes found for ra,dec, radius, order: {}, {}, {}, {}", ra, dec, xmatch_config.radius, xmatch_config.healpix_partition_order.unwrap());
+    }
+
+    let collection: mongodb::Collection<mongodb::bson::Document> = db.collection(xmatch_config.catalog.as_str());
+
+    // the field name is hp + healpix_order
+    let hp_field_name = format!("coordinates.hp{}", xmatch_config.healpix_partition_order.unwrap());
+
+    let x_matches_pipeline = vec![
+        doc! {
+            "$match": {
+                hp_field_name: {
+                    "$in": healpix_indexes
+                },
+                "coordinates.radec_geojson": {
+                    "$geoWithin": {
+                        "$centerSphere": [[ra_geojson, dec_geojson], xmatch_config.radius]
+                    }
+                }
+            }
+        },
+        doc! {
+            "$project": xmatch_config.projection.clone()
+        },
+    ];
+
+    // // print the pipeline
+    // println!("{:?}", x_matches_pipeline);
+    // // print the catalog name
+    // println!("{}", xmatch_config.catalog);
+
+    let mut cursor = collection.aggregate(x_matches_pipeline).await.unwrap();
+
+    let mut matches = mongodb::bson::Array::new();
+    while let Some(doc) = cursor.next().await {
+        // just append the matches to the matches array
+        let doc = doc.unwrap();
+        matches.push(mongodb::bson::Bson::from(doc));
+    }
+
+    let xmatch_docs = doc! {
+        xmatch_config.catalog.clone(): matches
+    };
+
+    xmatch_docs
 }
