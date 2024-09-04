@@ -28,7 +28,30 @@ crossmatch:
   - catalog: Gaia_DR3
     radius: 2.0 # 2 arcseconds
     use_distance: false
+    projection:
+      _id: 1
+      coordinates.radec_str: 1
+      parallax: 1
+      parallax_error: 1
+      phot_g_mean_mag: 1
+      phot_bp_mean_mag: 1
+      phot_rp_mean_mag: 1
+  - catalog: Gaia_DR3_test
+    radius: 2.0 # 2 arcseconds
+    use_distance: false
     healpix_partition_order: 2
+    projection:
+      _id: 1
+      coordinates.radec_str: 1
+      parallax: 1
+      parallax_error: 1
+      phot_g_mean_mag: 1
+      phot_bp_mean_mag: 1
+      phot_rp_mean_mag: 1
+  - catalog: Gaia_DR3_hpidx
+    radius: 2.0 # 2 arcseconds
+    use_distance: false
+    healpix_partition_order: 6
     projection:
       _id: 1
       coordinates.radec_str: 1
