@@ -28,7 +28,7 @@ pub fn build_xmatch_configs(conf: &Config, stream_name: &str) -> Vec<types::Cata
     catalog_xmatch_configs
 }
 
-pub async fn build_db(conf: &Config, initialize: bool) -> mongodb::Database {
+pub async fn build_db(conf: &Config, _initialize: bool) -> mongodb::Database {
     let db_conf = conf.get_table("database").unwrap();
 
     let host = {

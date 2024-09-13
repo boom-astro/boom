@@ -59,10 +59,18 @@ impl Filter {
             println!("Got ERROR when retrieving filter from database: {}", e);
             return Result::Err(Box::new(e));
         }
-
-        // get document from cursor
-        let filter_obj = filter_obj
-            .unwrap().deserialize_current().unwrap();
+        
+        let filter_obj = match filter_obj {
+            Ok(cursor) => {
+                let filter_obj = cursor.deserialize_current() // returns Result<Document, Error>
+                    .expect("Error deserializing filter object");
+                filter_obj
+            },
+            Err(e) => {
+                println!("Got ERROR when retrieving filter from database: {}", e);
+                return Result::Err(Box::new(e));
+            }
+        };
 
         let catalog = filter_obj.get("catalog")
             .unwrap().as_str().unwrap();
