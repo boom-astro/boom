@@ -141,21 +141,6 @@ fn test_alert() {
 }
 
 #[test]
-fn test_distance_unit() {
-    let dist = types::DistanceUnit::from_str("redshift");
-    assert_eq!(dist, types::DistanceUnit::Redshift);
-
-    let dist = types::DistanceUnit::from_str("z");
-    assert_eq!(dist, types::DistanceUnit::Redshift);
-
-    let dist = types::DistanceUnit::from_str("Mpc");
-    assert_eq!(dist, types::DistanceUnit::Mpc);
-
-    let dist = types::DistanceUnit::from_str("mpc");
-    assert_eq!(dist, types::DistanceUnit::Mpc);
-}
-
-#[test]
 fn test_catalogxmatchconfig() {
     let ps1_projection = mongodb::bson::doc! {
         "_id": 1,
@@ -168,7 +153,6 @@ fn test_catalogxmatchconfig() {
         radius: 2.0 * std::f64::consts::PI / 180.0 / 3600.0,
         use_distance: false,
         distance_key: None,
-        distance_unit: None,
         distance_max: None,
         distance_max_near: None,
         projection: ps1_projection.clone()
@@ -178,7 +162,6 @@ fn test_catalogxmatchconfig() {
     assert_eq!(xmatch_config.radius, 2.0 * std::f64::consts::PI / 180.0 / 3600.0);
     assert_eq!(xmatch_config.use_distance, false);
     assert_eq!(xmatch_config.distance_key, None);
-    assert_eq!(xmatch_config.distance_unit, None);
     assert_eq!(xmatch_config.distance_max, None);
     assert_eq!(xmatch_config.distance_max_near, None);
 

@@ -79,12 +79,11 @@ crossmatch:
         Descrip: 1
         Qpct: 1
     - catalog: CLU
-      radius: 300.0 # 5 arcminutes, 300 arcseconds
+      radius: 300.0 # 300 arcseconds
       use_distance: true
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      distance_unit: "redshift"
       projection: 
         _id: 1
         name: 1
@@ -99,12 +98,11 @@ crossmatch:
         sfr_ha: 1
         coordinates.radec_str: 1
     - catalog: NED
-      radius: 300.0 # 5 arcminutes, 300 arcseconds
+      radius: 300.0 # 300 arcseconds
       use_distance: true
-      distance_key: "DistMpc"
+      distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      distance_unit: "Mpc"
       projection: 
         coordinates.radec_str: 1
         ra: 1

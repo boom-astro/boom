@@ -90,8 +90,7 @@ impl fmt::Display for WorkerType {
         match self {
             WorkerType::Alert => { enum_str = "Alert"; },
             WorkerType::Filter => { enum_str = "Filter" },
-            WorkerType::ML => { enum_str = "ML" },
-            _ => { enum_str = "'display not implemented for this worker type'"; }
+            WorkerType::ML => { enum_str = "ML" }
         }
         write!(f, "{}", enum_str)
     }
@@ -107,8 +106,7 @@ impl fmt::Display for WorkerCmd {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let enum_str;
         match self {
-            WorkerCmd::TERM => { enum_str = "TERM"; },
-            _ => { enum_str = "'display not implemented for this WorkerCmd type'"; }
+            WorkerCmd::TERM => { enum_str = "TERM"; }
         }
         write!(f, "{}", enum_str)
     }

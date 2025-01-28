@@ -992,32 +992,6 @@ impl FpHist {
     }
 }
 
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum DistanceUnit {
-    Redshift, // use the redshift to compute the distance
-    Mpc // use the distance in Mpc
-}
-
-impl DistanceUnit {
-    pub fn to_string(&self) -> String {
-        match self {
-            DistanceUnit::Redshift => "redshift".to_string(),
-            DistanceUnit::Mpc => "Mpc".to_string()
-        }
-    }
-
-    pub fn from_str(s: &str) -> DistanceUnit {
-        match s {
-            "redshift" => DistanceUnit::Redshift,
-            "z" => DistanceUnit::Redshift,
-            "Mpc" => DistanceUnit::Mpc,
-            "mpc" => DistanceUnit::Mpc,
-            _ => panic!("Invalid distance unit")
-        }
-    }
-}
-
 #[derive(Debug)]    
 pub struct CatalogXmatchConfig {
     pub catalog: String, // name of the collection in the database
@@ -1025,7 +999,6 @@ pub struct CatalogXmatchConfig {
     pub projection: mongodb::bson::Document, // projection to apply to the catalog
     pub use_distance: bool, // whether to use the distance field in the crossmatch
     pub distance_key: Option<String>, // name of the field to use for distance
-    pub distance_unit: Option<DistanceUnit>, // type of distance to use
     pub distance_max: Option<f64>, // maximum distance in kpc
     pub distance_max_near: Option<f64>, // maximum distance in arcsec for nearby objects
 }
@@ -1037,7 +1010,6 @@ impl CatalogXmatchConfig {
         projection: mongodb::bson::Document,
         use_distance: bool,
         distance_key: Option<String>,
-        distance_unit: Option<DistanceUnit>,
         distance_max: Option<f64>,
         distance_max_near: Option<f64>
     ) -> CatalogXmatchConfig {
@@ -1047,7 +1019,6 @@ impl CatalogXmatchConfig {
             projection,
             use_distance,
             distance_key,
-            distance_unit,
             distance_max,
             distance_max_near
         }
@@ -1099,14 +1070,6 @@ impl CatalogXmatchConfig {
             }
         };
 
-        let distance_unit = {
-            if let Some(distance_unit) = hashmap_xmatch.get("distance_unit") {
-                Some(distance_unit.clone().into_string().unwrap())
-            } else {
-                None
-            }
-        };
-
         let distance_max = {
             if let Some(distance_max) = hashmap_xmatch.get("distance_max") {
                 Some(distance_max.clone().into_float().unwrap())
@@ -1131,18 +1094,9 @@ impl CatalogXmatchConfig {
             projection_doc.insert(key, value);
         }
 
-        let distance_unit = match distance_unit {
-            Some(unit) => Some(DistanceUnit::from_str(&unit)),
-            None => None
-        };
-
         if use_distance {
             if distance_key.is_none() {
                 panic!("must provide a distance_key if use_distance is true");
-            }
-
-            if distance_unit.is_none() {
-                panic!("must provide a distance_unit if use_distance is true");
             }
 
             if distance_max.is_none() {
@@ -1160,7 +1114,6 @@ impl CatalogXmatchConfig {
             projection_doc,
             use_distance,
             distance_key,
-            distance_unit,
             distance_max,
             distance_max_near
         )

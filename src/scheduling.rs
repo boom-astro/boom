@@ -151,16 +151,13 @@ impl Worker {
             },
             WorkerType::Filter => {
                 thread::spawn(|| {
-                    filter_worker::filter_worker(id, receiver, stream_name, config_path);
+                    let _ = filter_worker::filter_worker(id, receiver, stream_name, config_path);
                 })
             },
             WorkerType::ML => {
                 thread::spawn(|| {
                     fake_ml_worker::fake_ml_worker(id, receiver, stream_name, config_path);
                 })
-            }
-            _ => {
-                panic!("worker type not yet implemnted");
             }
         };
 
