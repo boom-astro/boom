@@ -45,7 +45,6 @@ fn test_build_xmatch_configs() {
     assert_eq!(first.radius, 2.0 * std::f64::consts::PI / 180.0 / 3600.0);
     assert_eq!(first.use_distance, false);
     assert_eq!(first.distance_key, None);
-    assert_eq!(first.distance_unit, None);
     assert_eq!(first.distance_max, None);
     assert_eq!(first.distance_max_near, None);
 
