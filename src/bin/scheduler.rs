@@ -5,7 +5,7 @@ use config::Config;
 fn get_num_workers(conf: Config, stream_name: &str, worker_type: &str) -> i64 {
     let table = conf.get_table("workers")
         .expect("worker table not found in config");
-    let stream_table = table.get(stream_name.to_ascii_lowercase().as_str())
+    let stream_table = table.get(stream_name)
         .expect(format!("stream name {} not found in config", stream_name).as_str())
         .to_owned().into_table().unwrap();
     let worker_entry = stream_table.get(worker_type)

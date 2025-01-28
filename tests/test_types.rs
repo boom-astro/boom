@@ -188,7 +188,7 @@ fn test_catalogxmatchconfig() {
     // validate the from_config method
     let config = conf::load_config("tests/config.test.yaml").unwrap();
     let crossmatches = config.get_table("crossmatch").unwrap();
-    let crossmatches_ztf = crossmatches.get(&"ZTF".to_lowercase()).cloned().unwrap();
+    let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
     assert!(crossmatches_ztf.len() > 0);
     

@@ -9,8 +9,8 @@ fn test_load_config() {
 
     let crossmatches = conf.get_table("crossmatch").unwrap();
     // check that ZTF is one of the keys
-    assert!(crossmatches.get(&"ZTF".to_lowercase()).is_some());
-    let crossmatches_ztf = crossmatches.get(&"ZTF".to_lowercase()).clone().cloned();
+    assert!(crossmatches.get("ZTF").is_some());
+    let crossmatches_ztf = crossmatches.get("ZTF").clone().cloned();
     assert!(crossmatches_ztf.is_some());
     let crossmatches_ztf = crossmatches_ztf.unwrap().clone().into_array().unwrap();
     // check that the crossmatch for ZTF is an array
@@ -31,7 +31,7 @@ fn test_build_xmatch_configs() {
     let conf = conf.unwrap();
 
     let crossmatches = conf.get_table("crossmatch").unwrap();
-    let crossmatches_ztf = crossmatches.get(&"ZTF".to_lowercase()).cloned().unwrap();
+    let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
     assert!(crossmatches_ztf.len() > 0);
 

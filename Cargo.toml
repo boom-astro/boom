@@ -4,29 +4,27 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-futures = "0.3.30"
-redis = { version = "0.26.1", features = ["tokio-comp"] }
-tokio = { version = "1.39.2", features = ["full"] }
-rdkafka = "0.36.2"
-uuid = { version = "1.10", features = ["v4"] }
+futures = "0.3.31"
+redis = { version = "0.28.2", features = ["tokio-comp"] }
+tokio = { version = "1.43.0", features = ["full"] }
+rdkafka = "0.37.0"
+uuid = { version = "1.12", features = ["v4"] }
 apache-avro = "0.17.0"
-rsgen-avro = "0.14.1"
+rsgen-avro = "0.15.3"
 serde = { version = "1.0", features = ["derive"] }
-rand = "0.8.5"
-config = "0.14.0"
-chrono = "0.4.38"
-serde_json = "1.0.125"
+rand = "0.9.0"
+config = "0.15.6"
+chrono = "0.4.39"
+serde_json = "1.0.138"
 flare = "0.1.0"
+mongodb = "3.2.0"
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.5"
 
 [[bench]]
 name = "filter_benchmark"
 harness = false
-
-[dependencies.mongodb]
-version = "3.0.1"
 
 [[bin]]
 name = "alert_worker"
