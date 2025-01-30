@@ -1,6 +1,7 @@
 
 use std::{sync::{mpsc, Arc, Mutex}, error::Error, collections::HashMap};
 use redis::AsyncCommands;
+use tracing::{info, warn, error};
 use crate::{conf, filter, worker_util::WorkerCmd, worker_util};
 use redis::streams::StreamReadOptions;
 
@@ -14,7 +15,7 @@ pub async fn filter_worker(
 ) -> Result<(), Box<dyn Error>> {
 
     let catalog = stream_name.clone();
-    let filters = vec![3];
+    let filters = vec![1];
     let mut filter_ids: Vec<i32> = Vec::new();
 
     for i in 0..filters.len() {
@@ -22,7 +23,7 @@ pub async fn filter_worker(
             filter_ids.push(filters[i]);
         }
     }
-    println!("Starting filter worker for {} with filters {:?}", catalog, filter_ids);
+    info!("Starting filter worker for {} with filters {:?}", catalog, filter_ids);
 
     // connect to mongo and redis
     let config_file = conf::load_config(&config_path).unwrap();
@@ -48,7 +49,7 @@ pub async fn filter_worker(
                 filter_table.entry(perms.clone()).and_modify(|filters| filters.push(filter));
             },
             Err(e) => {
-                println!("got error when trying to build filter {}: {}", id, e);
+                error!("got error when trying to build filter {}: {}", id, e);
                 return Err(e);
             }
         }
@@ -78,10 +79,10 @@ pub async fn filter_worker(
                 &consumer_group, "0").await;
             match consumer_group_res {
                 Ok(()) => {
-                    println!("Created consumer group for filter {}", filter.id);
+                    info!("Created consumer group for filter {}", filter.id);
                 },
                 Err(e) => {
-                    println!("Consumer group already exists for filter {}: {:?}", filter.id, e);
+                    info!("Consumer group already exists for filter {}: {:?}", filter.id, e);
                 }
             }
             let opts = StreamReadOptions::default()
@@ -104,7 +105,7 @@ pub async fn filter_worker(
             if let Ok(command) = receiver.lock().unwrap().try_recv() {
                 match command {
                     WorkerCmd::TERM => {
-                        println!("alert worker {} received termination command", id);
+                        warn!("alert worker {} received termination command", id);
                         return Ok(());
                     },
                 }
@@ -124,8 +125,7 @@ pub async fn filter_worker(
                 let in_count = candids.len();
                 alert_counter += in_count as i64;
 
-                println!("got {} candids from redis stream for filter {}", in_count, redis_streams[&perm]);
-                println!("running filter with id {} on {} alerts", filter.id, in_count);
+                info!("running filter with id {} on {} alerts", filter.id, in_count);
 
                 let start = std::time::Instant::now();
 
@@ -143,19 +143,19 @@ pub async fn filter_worker(
                     &filter_results_queues[&filter.id],
                     &out_documents).await.unwrap();
 
-                println!(
+                info!(
                     "{}/{} alerts passed filter {} in {}s", 
                     out_documents.len(), in_count, filter.id, start.elapsed().as_secs_f64());
             }
         }
         if empty_stream_counter == filter_ids.len() {
-            println!("FILTER WORKER {}: All streams empty", id);
+            info!("FILTER WORKER {}: All streams empty", id);
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             alert_counter = 0;
             if let Ok(command) = receiver.lock().unwrap().try_recv() {
                 match command {
                     WorkerCmd::TERM => {
-                        println!("alert worker {} received termination command", id);
+                        warn!("alert worker {} received termination command", id);
                         return Ok(());
                     },
                 }

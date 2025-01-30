@@ -1,6 +1,7 @@
 use flare::spatial::great_circle_distance;
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
+use tracing::warn;
 
 use crate::types;
 
@@ -115,28 +116,28 @@ pub async fn xmatch(
                 let xmatch_ra = match xmatch_doc.get_f64("ra") {
                     Ok(x) => x,
                     _ => {
-                        println!("No ra in xmatch doc");
+                        warn!("No ra in xmatch doc");
                         continue;
                     }
                 };
                 let xmatch_dec = match xmatch_doc.get_f64("dec") {
                     Ok(x) => x,
                     _ => {
-                        println!("No dec in xmatch doc");
+                        warn!("No dec in xmatch doc");
                         continue;
                     }
                 };
                 let doc_z_option = match xmatch_doc.get(&distance_key) {
                     Some(z) => z.as_f64(),
                     _ => {
-                        println!("No z in xmatch doc");
+                        warn!("No z in xmatch doc");
                         continue;
                     }
                 };
                 let doc_z = match doc_z_option {
                     Some(z) => z,
                     None => {
-                        println!("No z in xmatch doc");
+                        warn!("No z in xmatch doc");
                         continue;
                     }
                 };

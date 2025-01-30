@@ -44,10 +44,10 @@ jobs:
         sed -i 's/username: mongoadmin/username:/g' tests/config.test.yaml
         sed -i 's/password: mongoadminsecret/password:/g' tests/config.test.yaml
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --release
     - name: Tests
       if: ${{ matrix.test_subset == 'unit_tests' }}
-      run: cargo test --verbose
+      run: cargo test --release
     - name: Filter benchmark
       if: ${{ matrix.test_subset == 'benchmark' }}
       run: cargo bench filter_benchmark --

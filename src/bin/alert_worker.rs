@@ -2,16 +2,25 @@ use redis::AsyncCommands;
 use std::env;
 use boom::{worker_util, conf, alert, types::ztf_alert_schema};
 use std::sync::{Arc, Mutex};
+use tracing::{info, warn, error, Level};
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() {
+    let subscriber = FmtSubscriber::builder()
+    .with_max_level(Level::TRACE)
+    .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("setting default subscriber failed");
+
     let args: Vec<String> = env::args().collect();
     // user can pass the path to a config file, but it is optional.
     // if not provided, we use the default config.default.yaml
     // the user also needs to pass the name of the alert stream to process
     // stream name comes first, optional config file comes second
     if args.len() < 2 {
-        println!("Usage: alert_worker <stream_name> <config_file>, where config_file is optional");
+        error!("Usage: alert_worker <stream_name> <config_file>, where config_file is optional");
         return;
     }
 
@@ -23,7 +32,7 @@ async fn main() {
     let config_file = if args.len() > 2 {
         conf::load_config(&args[2]).unwrap()
     } else {
-        println!("No config file provided, using config.yaml");
+        warn!("No config file provided, using config.yaml");
         conf::load_config("./config.yaml").unwrap()
     };
 
@@ -33,7 +42,7 @@ async fn main() {
     // DATABASE
     let db: mongodb::Database = conf::build_db(&config_file).await;
     if let Err(e) = db.list_collection_names().await {
-        println!("Error connecting to the database: {}", e);
+        error!("Error connecting to the database: {}", e);
         return;
     }
 
@@ -47,7 +56,7 @@ async fn main() {
         .build();
     match alert_collection.create_index(alert_candid_index).await {
         Err(e) => {
-            println!("Error when creating index for candidate.candid in collection {}: {}", 
+            error!("Error when creating index for candidate.candid in collection {}: {}", 
                 format!("{}_alerts", stream_name), e);
         },
         Ok(_x) => {}
@@ -77,18 +86,18 @@ async fn main() {
                 let candid = alert::process_alert(value[0].clone(), &xmatch_configs, &db, &alert_collection, &alert_aux_collection, &schema).await;
                 match candid {
                     Ok(Some(candid)) => {
-                        println!("Processed alert with candid: {}, queueing for classification", candid);
+                        info!("Processed alert with candid: {}, queueing for classification", candid);
                         // queue the candid for processing by the classifier
                         con.lpush::<&str, i64, isize>(&classifer_queue_name, candid).await.unwrap();
                         con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone()).await.unwrap();
                     }
                     Ok(None) => {
-                        println!("Alert already exists");
+                        info!("Alert already exists");
                         // remove the alert from the queue
                         con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone()).await.unwrap();
                     }
                     Err(e) => {
-                        println!("Error processing alert: {}, requeueing", e);
+                        error!("Error processing alert: {}, requeueing", e);
                         // put it back in the alertpacketqueue, to the left (pop from the right, push to the left)
                         con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone()).await.unwrap();
                         con.lpush::<&str, Vec<u8>, isize>(&queue_name, value[0].clone()).await.unwrap();
@@ -96,12 +105,12 @@ async fn main() {
                 }
                 if count > 1 && count % 100 == 0 {
                     let elapsed = start.elapsed().as_secs();
-                    println!("\nProcessed {} {} alerts in {} seconds, avg: {:.4} alerts/s\n", count, stream_name, elapsed, count as f64 / elapsed as f64);
+                    info!("\nProcessed {} {} alerts in {} seconds, avg: {:.4} alerts/s\n", count, stream_name, elapsed, count as f64 / elapsed as f64);
                 }
                 count += 1;
             }
             None => {
-                println!("Queue is empty");
+                info!("Queue is empty");
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         }

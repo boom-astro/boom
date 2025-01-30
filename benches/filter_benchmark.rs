@@ -4,6 +4,7 @@ use std::{
     num::NonZero,
     error::Error,
 };
+use tracing::info;
 use boom::{
     filter,
     conf,
@@ -19,9 +20,9 @@ pub async fn setup_benchmark(queue_name: &str) -> Result<(), Box<dyn std::error:
     drop_alert_collections("ZTF_alerts", "ZTF_alerts_aux").await?;
     // get alert files and process alerts and send candids into queue of choice
     fake_kafka_consumer("benchalertpacketqueue", "20240617").await?;
-    println!("processing alerts...");
+    info!("processing alerts...");
     alert_worker("benchalertpacketqueue", queue_name, "ZTF_alerts", "ZTF_alerts_aux").await;
-    println!("candids successfully placed into redis queue '{}'", queue_name);
+    info!("candids successfully placed into redis queue '{}'", queue_name);
     Ok(())
 }
 
@@ -56,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         insert_test_filter().await;
     }
     
-    println!("running filter benchmark...");
+    info!("running filter benchmark...");
 
     let mut runs: Vec<(i32, usize, f64)> = Vec::new();
 
@@ -72,11 +73,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match res {
             Ok(candids) => {
                 if candids.len() == 0 {
-                    println!("Queue empty");
+                    info!("Queue empty");
                     return Ok(());
                 }
 
-                // println!("Found a total of {} candids to process", candids.len());
+                // info!("Found a total of {} candids to process", candids.len());
                 
                 let _out_candids = test_filter.run(candids.clone(), &db).await?;
 
@@ -91,13 +92,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             },
             Err(e) => {
-                println!("Got error: {:?}", e);
+                info!("Got error: {:?}", e);
             },
         }
     }
-    // println!("=========================\n   FULL OUTPUT\n=========================");
+    // info!("=========================\n   FULL OUTPUT\n=========================");
     // for run in runs.clone() {
-    //     println!("run {} filtered {} candids in {} seconds", run.0, run.1, run.2);
+    //     info!("run {} filtered {} candids in {} seconds", run.0, run.1, run.2);
     // }
 
     let mut total_alerts = 0;
@@ -114,12 +115,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_time = (i.0, i.2);
         }
     }
-    println!("=========================\n   SUMMARY\n");
+    info!("=========================\n   SUMMARY\n");
     let total_alerts = total_alerts as f64;
     let average = total_alerts / total_time;
-    println!("   average speed: {} alerts filtered / sec", average);
-    println!("   fastest run: {} @ {}\n   slowest run: {} @ {}", min_time.0, min_time.1, max_time.0, max_time.1);
-    println!("=========================");
+    info!("   average speed: {} alerts filtered / sec", average);
+    info!("   fastest run: {} @ {}\n   slowest run: {} @ {}", min_time.0, min_time.1, max_time.0, max_time.1);
+    info!("=========================");
 
     // if filter_id is -1, then we are running the benchmark on the test filter
     // we remove it from the database

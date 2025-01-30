@@ -1,6 +1,8 @@
 use std::{env, sync::{Arc, Mutex}, thread};
 use boom::{worker_util::WorkerType, worker_util, scheduling::ThreadPool, conf};
 use config::Config;
+use tracing::{info, warn, Level};
+use tracing_subscriber::FmtSubscriber;
 
 fn get_num_workers(conf: Config, stream_name: &str, worker_type: &str) -> i64 {
     let table = conf.get_table("workers")
@@ -19,6 +21,13 @@ fn get_num_workers(conf: Config, stream_name: &str, worker_type: &str) -> i64 {
 
 #[tokio::main]
 async fn main() {
+    let subscriber = FmtSubscriber::builder()
+    .with_max_level(Level::TRACE)
+    .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("setting default subscriber failed");
+    
     // get env::args for stream_name and config_path
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -30,7 +39,7 @@ async fn main() {
     let config_path = if args.len() > 2 {
         &args[2]
     } else {
-        println!("No config file provided, using `config.yaml`");
+        warn!("No config file provided, using `config.yaml`");
         "./config.yaml"
     }.to_string();
 
@@ -45,18 +54,18 @@ async fn main() {
     let interrupt = Arc::new(Mutex::new(false));
     worker_util::sig_int_handler(Arc::clone(&interrupt)).await;
     
-    println!("creating alert, ml, and filter workers...");
+    info!("creating alert, ml, and filter workers...");
     // note: maybe use &str instead of String for stream_name and config_path to reduce clone calls
     let alert_pool = ThreadPool::new(WorkerType::Alert, n_alert as usize, stream_name.clone(), config_path.clone());
     let ml_pool = ThreadPool::new(WorkerType::ML, n_ml as usize, stream_name.clone(), config_path.clone());
     let filter_pool = ThreadPool::new(WorkerType::Filter, n_filter as usize, stream_name.clone(), config_path.clone());
-    println!("created workers");
+    info!("created workers");
 
     loop {
-        println!("heart beat (MAIN)");
+        info!("heart beat (MAIN)");
         let exit = worker_util::check_flag(Arc::clone(&interrupt));
         if exit {
-            println!("killed thread(s)");
+            warn!("killed thread(s)");
             drop(alert_pool);
             drop(ml_pool);
             drop(filter_pool);
@@ -64,6 +73,5 @@ async fn main() {
         }
         thread::sleep(std::time::Duration::from_secs(1));
     }
-    println!("reached the end sir");
     std::process::exit(0);
 }

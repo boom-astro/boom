@@ -3,6 +3,7 @@ use crate::alert;
 use crate::types;
 use mongodb::bson::doc;
 use redis::AsyncCommands;
+use tracing::{info, error};
 // Utility for unit tests
 
 // drops alert collections from the database
@@ -33,7 +34,7 @@ pub async fn fake_kafka_consumer(output_packet_queue: &str, alert_date: &str) ->
 
     let mut total = 0;
 
-    println!("Pushing {} alerts to the queue", total_nb_alerts);
+    info!("Pushing {} alerts to the queue", total_nb_alerts);
     // start timer
     let start = std::time::Instant::now();
     // poll one message at a time
@@ -45,7 +46,7 @@ pub async fn fake_kafka_consumer(output_packet_queue: &str, alert_date: &str) ->
         con.rpush::<&str, Vec<u8>, usize>(output_packet_queue, payload.to_vec()).await.unwrap();
         total += 1;
         if total % 1000 == 0 {
-            println!("Pushed {} items since {:?}", total, start.elapsed());
+            info!("Pushed {} items since {:?}", total, start.elapsed());
         }
     }
     Ok(())
@@ -64,7 +65,7 @@ pub async fn alert_worker(
     let db: mongodb::Database = conf::build_db(&config_file).await;
 
     if let Err(e) = db.list_collection_names().await {
-        println!("Error connecting to the database: {}", e);
+        error!("Error connecting to the database: {}", e);
         return;
     }
     let alert_collection = db.collection(alert_collection_name);
@@ -97,7 +98,7 @@ pub async fn alert_worker(
                         con.lrem::<&str, Vec<u8>, isize>(&input_packet_queue_temp, 1, value[0].clone()).await.unwrap();
                     }
                     Ok(None) => {
-                        println!("Alert already exists");
+                        info!("Alert already exists");
                         // remove the alert from the queue
                         con.lrem::<&str, Vec<u8>, isize>(&input_packet_queue_temp, 1, value[0].clone()).await.unwrap();
                     }
@@ -152,7 +153,7 @@ pub async fn insert_test_filter() {
     let x = db.collection::<mongodb::bson::Document>("filters").insert_one(filter_obj).await;
     match x {
         Err(e) => {
-            println!("error inserting filter obj: {}", e);
+            error!("error inserting filter obj: {}", e);
         },
         _ => {}
     }
@@ -181,14 +182,14 @@ fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::E
 
     // if it already exists and has the alerts, we don't need to download them again
     if std::path::Path::new(&data_folder).exists() && std::fs::read_dir(&data_folder)?.count() > 0 {
-        println!("Alerts already downloaded to {}", data_folder);
+        info!("Alerts already downloaded to {}", data_folder);
         let count = std::fs::read_dir(&data_folder)?.count();
         return Ok(count as i64);
     }
 
     std::fs::create_dir_all(&data_folder)?;
 
-    println!("Downloading alerts for date {}", date);
+    info!("Downloading alerts for date {}", date);
     // download the alerts to data folder
     let url = format!("https://ztf.uw.edu/alerts/public/ztf_public_{}.tar.gz", date);
     let output = std::process::Command::new("wget")
@@ -199,7 +200,7 @@ fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::E
     if !output.status.success() {
         return Err("Failed to download alerts".into());
     } else {
-        println!("Downloaded alerts to {}", data_folder);
+        info!("Downloaded alerts to {}", data_folder);
     }
 
     // extract the alerts
@@ -212,7 +213,7 @@ fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::E
     if !output.status.success() {
         return Err("Failed to extract alerts".into());
     } else {
-        println!("Extracted alerts to {}", data_folder);
+        info!("Extracted alerts to {}", data_folder);
     }
 
     // remove the tar.gz file

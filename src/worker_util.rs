@@ -2,12 +2,13 @@ use std::{sync::{Mutex, Arc}, fmt};
 use redis::AsyncCommands;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use config::Config;
+use tracing::warn;
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
 pub async fn sig_int_handler(flag: Arc<Mutex<bool>>) {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.unwrap();
-        println!("Received interrupt signal. Finishing up...");
+        warn!("Received interrupt signal. Finishing up...");
         let mut flag = flag.try_lock().unwrap();
         *flag = true;
     });
@@ -55,7 +56,7 @@ pub async fn get_candids_from_stream(con: &mut redis::aio::MultiplexedConnection
                         candids.push(x);
                     },
                     _ => {
-                        println!("Candid unknown type: {:?}", candid);
+                        warn!("Candid unknown type: {:?}", candid);
                     }
                 }
             }

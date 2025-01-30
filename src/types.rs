@@ -6,6 +6,7 @@ use config::Value;
 use flare::spatial::{radec2lb, deg2hms, deg2dms};
 use mongodb::bson::doc;
 use mongodb::bson::to_document;
+use tracing::error;
 
 pub fn ztf_alert_schema() -> Option<Schema> {
     // infer the schema from an avro file directly,
@@ -14,7 +15,7 @@ pub fn ztf_alert_schema() -> Option<Schema> {
     let reader = match Reader::new(avro_file) {
         Ok(reader) => reader,
         Err(e) => {
-            println!("Error creating avro reader: {}", e);
+            error!("Error creating avro reader: {}", e);
             return None;
         }
     };
@@ -898,7 +899,7 @@ impl Alert {
         let reader = match Reader::new(&avro_bytes[..]) {
             Ok(reader) => reader,
             Err(e) => {
-                println!("Error creating avro reader: {}", e);
+                error!("Error creating avro reader: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -938,7 +939,7 @@ impl Alert {
                 Ok(alert)
             }
             Err(e) => {
-                println!("Error deserializing avro message: {}", e);
+                error!("Error deserializing avro message: {}", e);
                 Err(Box::new(e))
             }
         }

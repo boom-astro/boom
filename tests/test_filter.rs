@@ -1,6 +1,7 @@
 use std::num::NonZero;
 use mongodb::bson::{Document, doc};
 use redis::AsyncCommands;
+use tracing::{info, error};
 
 use boom::{filter, conf, testing_util as tu};
 
@@ -59,7 +60,7 @@ async fn test_run_filter() {
             if candids.len() == 0 {
                 panic!("test_run_filter failed: no candids in queue");
             }
-            println!("received {} candids from redis", candids.len());
+            info!("received {} candids from redis", candids.len());
             let out_candids = thisfilter.run(candids.clone(), &db).await;
             match out_candids {
                 Ok(out) => {
@@ -97,12 +98,10 @@ async fn test_filter_no_alerts() {
         Ok(candids) => {
             let out_candids = thisfilter.run(candids.clone(), &db).await;
             match out_candids {
-                Ok(_) => {
-                    println!("everything is ok!");
-                },
                 Err(e) => {
-                    println!("There seems to be an error here ! {}", e);
-                }
+                    error!("Error running filter: {}", e);
+                },
+                _ => {}
             }
         },
         Err(e) => {
@@ -119,7 +118,7 @@ async fn test_no_filter_found() {
     match thisfilter {
         Err(e) => {
             assert!(e.is::<filter::FilterError>());
-            println!("error: {}", e);
+            error!("error: {}", e);
         },
         _ => {
             panic!("Was supposed to get error");
@@ -136,7 +135,7 @@ async fn test_filter_found() {
     tu::remove_test_filter().await;
     match thisfilter {
         Ok(_) => {
-            println!("successfully got filter from db");
+            info!("successfully got filter from db");
         }
         Err(e) => {
             panic!("ERROR, was supposed to find filter in database. {}", e);

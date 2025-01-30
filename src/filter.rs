@@ -1,4 +1,5 @@
 use std::{error::Error, fmt};
+use tracing::error;
 use mongodb::bson::{doc, Document};
 use futures::stream::StreamExt;
 
@@ -70,7 +71,7 @@ impl Filter {
         ).await;
 
         if let Err(e) = filter_obj {
-            println!("Got ERROR when retrieving filter from database: {}", e);
+            error!("Got ERROR when retrieving filter from database: {}", e);
             return Result::Err(Box::new(e));
         }
 
@@ -92,7 +93,6 @@ impl Filter {
         }
 
         // get permissions
-        println!("permissions: {:?}", filter_obj.get("permissions").unwrap());
         let permissions = filter_obj.get("permissions")
             .unwrap().as_array().unwrap()
             .iter().map(|x| x.as_i32().unwrap() as i64).collect();
