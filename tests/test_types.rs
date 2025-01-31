@@ -1,5 +1,5 @@
-use boom::types;
 use boom::conf;
+use boom::types;
 
 #[test]
 fn test_avro_to_alert() {
@@ -79,20 +79,33 @@ fn test_alert() {
     assert_eq!(fp_positive_flux.procstatus.as_ref().unwrap(), "0");
 
     // validate the cutouts
-    assert_eq!(alert.cutout_science.clone().unwrap().file_name, "candid2695378462115010012_pid2695378462115_targ_sci.fits.gz");
-    assert_eq!(alert.cutout_template.clone().unwrap().file_name, "candid2695378462115010012_ref.fits.gz");
-    assert_eq!(alert.cutout_difference.clone().unwrap().file_name, "candid2695378462115010012_pid2695378462115_targ_refmsci.fits.gz");
-    assert_eq!(alert.cutout_science.clone().unwrap().stamp_data.len(), 13107);
-    assert_eq!(alert.cutout_template.clone().unwrap().stamp_data.len(), 12410);
-    assert_eq!(alert.cutout_difference.clone().unwrap().stamp_data.len(), 14878);
-
+    assert_eq!(
+        alert.cutout_science.clone().unwrap().file_name,
+        "candid2695378462115010012_pid2695378462115_targ_sci.fits.gz"
+    );
+    assert_eq!(
+        alert.cutout_template.clone().unwrap().file_name,
+        "candid2695378462115010012_ref.fits.gz"
+    );
+    assert_eq!(
+        alert.cutout_difference.clone().unwrap().file_name,
+        "candid2695378462115010012_pid2695378462115_targ_refmsci.fits.gz"
+    );
+    assert_eq!(
+        alert.cutout_science.clone().unwrap().stamp_data.len(),
+        13107
+    );
+    assert_eq!(
+        alert.cutout_template.clone().unwrap().stamp_data.len(),
+        12410
+    );
+    assert_eq!(
+        alert.cutout_difference.clone().unwrap().stamp_data.len(),
+        14878
+    );
 
     // split alert from its history
-    let (
-        alert_no_history,
-        prv_candidates,
-        fp_hist
-    ) = alert.pop_history();
+    let (alert_no_history, prv_candidates, fp_hist) = alert.pop_history();
 
     // validate the alert_no_history
     assert_eq!(alert_no_history.schemavsn, "4.02");
@@ -113,14 +126,35 @@ fn test_alert() {
     // validate the conversion to bson
     let alert_doc = alert_no_history.mongify();
     assert_eq!(alert_doc.get_str("schemavsn").unwrap(), "4.02");
-    assert_eq!(alert_doc.get_str("publisher").unwrap(), "ZTF (www.ztf.caltech.edu)");
+    assert_eq!(
+        alert_doc.get_str("publisher").unwrap(),
+        "ZTF (www.ztf.caltech.edu)"
+    );
     assert_eq!(alert_doc.get_str("objectId").unwrap(), "ZTF18abudxnw");
     assert_eq!(alert_doc.get_i64("candid").unwrap(), 2695378462115010012);
-    assert_eq!(alert_doc.get_document("candidate").unwrap().get_f64("ra").unwrap(), 295.3031995);
-    assert_eq!(alert_doc.get_document("candidate").unwrap().get_f64("dec").unwrap(), -10.3958989);
+    assert_eq!(
+        alert_doc
+            .get_document("candidate")
+            .unwrap()
+            .get_f64("ra")
+            .unwrap(),
+        295.3031995
+    );
+    assert_eq!(
+        alert_doc
+            .get_document("candidate")
+            .unwrap()
+            .get_f64("dec")
+            .unwrap(),
+        -10.3958989
+    );
 
     // validate the conversion to bson for prv_candidates
-    let prv_candidates_doc = prv_candidates.unwrap().into_iter().map(|x| x.mongify()).collect::<Vec<_>>();
+    let prv_candidates_doc = prv_candidates
+        .unwrap()
+        .into_iter()
+        .map(|x| x.mongify())
+        .collect::<Vec<_>>();
     assert_eq!(prv_candidates_doc.len(), 10);
 
     let non_detection = prv_candidates_doc.get(0).unwrap();
@@ -130,14 +164,24 @@ fn test_alert() {
     assert_eq!(detection.get_f64("magpsf").unwrap(), 16.800199508666992);
 
     // validate the conversion to bson for fp_hist
-    let fp_hist_doc = fp_hist.unwrap().into_iter().map(|x| x.mongify()).collect::<Vec<_>>();
+    let fp_hist_doc = fp_hist
+        .unwrap()
+        .into_iter()
+        .map(|x| x.mongify())
+        .collect::<Vec<_>>();
     assert_eq!(fp_hist_doc.len(), 10);
 
     let fp_negative_flux = fp_hist_doc.get(0).unwrap();
-    assert_eq!(fp_negative_flux.get_f64("forcediffimflux").unwrap(), -11859.8798828125);
+    assert_eq!(
+        fp_negative_flux.get_f64("forcediffimflux").unwrap(),
+        -11859.8798828125
+    );
 
     let fp_positive_flux = fp_hist_doc.get(9).unwrap();
-    assert_eq!(fp_positive_flux.get_f64("forcediffimflux").unwrap(), 138.2030029296875);
+    assert_eq!(
+        fp_positive_flux.get_f64("forcediffimflux").unwrap(),
+        138.2030029296875
+    );
 }
 
 #[test]
@@ -155,11 +199,14 @@ fn test_catalogxmatchconfig() {
         distance_key: None,
         distance_max: None,
         distance_max_near: None,
-        projection: ps1_projection.clone()
+        projection: ps1_projection.clone(),
     };
 
     assert_eq!(xmatch_config.catalog, "PS1_DR1");
-    assert_eq!(xmatch_config.radius, 2.0 * std::f64::consts::PI / 180.0 / 3600.0);
+    assert_eq!(
+        xmatch_config.radius,
+        2.0 * std::f64::consts::PI / 180.0 / 3600.0
+    );
     assert_eq!(xmatch_config.use_distance, false);
     assert_eq!(xmatch_config.distance_key, None);
     assert_eq!(xmatch_config.distance_max, None);
@@ -174,7 +221,7 @@ fn test_catalogxmatchconfig() {
     let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
     assert!(crossmatches_ztf.len() > 0);
-    
+
     for crossmatch in crossmatches_ztf {
         let catalog_xmatch_config = types::CatalogXmatchConfig::from_config(crossmatch);
         assert!(catalog_xmatch_config.catalog.len() > 0);

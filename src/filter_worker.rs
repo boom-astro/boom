@@ -1,9 +1,12 @@
-
-use std::{sync::{mpsc, Arc, Mutex}, error::Error, collections::HashMap};
-use redis::AsyncCommands;
-use tracing::{info, warn, error};
-use crate::{conf, filter, worker_util::WorkerCmd, worker_util};
+use crate::{conf, filter, worker_util, worker_util::WorkerCmd};
 use redis::streams::StreamReadOptions;
+use redis::AsyncCommands;
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{mpsc, Arc, Mutex},
+};
+use tracing::{error, info, warn};
 
 // filter worker as a standalone function run by the scheduler
 #[tokio::main]
@@ -13,7 +16,6 @@ pub async fn filter_worker(
     stream_name: String,
     config_path: String,
 ) -> Result<(), Box<dyn Error>> {
-
     let catalog = stream_name.clone();
     let filters = vec![1];
     let mut filter_ids: Vec<i32> = Vec::new();
@@ -23,19 +25,23 @@ pub async fn filter_worker(
             filter_ids.push(filters[i]);
         }
     }
-    info!("Starting filter worker for {} with filters {:?}", catalog, filter_ids);
+    info!(
+        "Starting filter worker for {} with filters {:?}",
+        catalog, filter_ids
+    );
 
     // connect to mongo and redis
     let config_file = conf::load_config(&config_path).unwrap();
     let db = conf::build_db(&config_file).await;
-    let client_redis = redis::Client::open(
-        "redis://localhost:6379".to_string()).unwrap();
+    let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
     let mut con = client_redis
-        .get_multiplexed_async_connection().await.unwrap();
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
 
     let mut alert_counter = 0;
     let command_interval = worker_util::get_check_command_interval(config_file, &stream_name);
-    
+
     // build filters and organize by permission level
     let mut filter_table: HashMap<i64, Vec<filter::Filter>> = HashMap::new();
     for id in filter_ids.clone() {
@@ -46,8 +52,10 @@ pub async fn filter_worker(
                 if !filter_table.contains_key(perms) {
                     filter_table.insert(perms.clone(), Vec::new());
                 }
-                filter_table.entry(perms.clone()).and_modify(|filters| filters.push(filter));
-            },
+                filter_table
+                    .entry(perms.clone())
+                    .and_modify(|filters| filters.push(filter));
+            }
             Err(e) => {
                 error!("got error when trying to build filter {}: {}", id, e);
                 return Err(e);
@@ -60,8 +68,11 @@ pub async fn filter_worker(
     for filter_vec in filter_table.values() {
         for filter in filter_vec {
             let perms = filter.permissions.iter().max().unwrap();
-            let stream = format!("{stream}_programid_{programid}_filter_stream",
-                stream = filter.catalog, programid = perms);
+            let stream = format!(
+                "{stream}_programid_{programid}_filter_stream",
+                stream = filter.catalog,
+                programid = perms
+            );
             if !redis_streams.contains_key(perms) {
                 redis_streams.insert(perms.clone(), stream);
             }
@@ -74,15 +85,22 @@ pub async fn filter_worker(
     for filter_vec in filter_table.values() {
         for filter in filter_vec {
             let consumer_group = format!("filter_{filter_id}_group", filter_id = filter.id);
-            let consumer_group_res: Result<(), redis::RedisError> = con.xgroup_create(
-                &redis_streams[filter.permissions.iter().max().unwrap()], 
-                &consumer_group, "0").await;
+            let consumer_group_res: Result<(), redis::RedisError> = con
+                .xgroup_create(
+                    &redis_streams[filter.permissions.iter().max().unwrap()],
+                    &consumer_group,
+                    "0",
+                )
+                .await;
             match consumer_group_res {
                 Ok(()) => {
                     info!("Created consumer group for filter {}", filter.id);
-                },
+                }
                 Err(e) => {
-                    info!("Consumer group already exists for filter {}: {:?}", filter.id, e);
+                    info!(
+                        "Consumer group already exists for filter {}: {:?}",
+                        filter.id, e
+                    );
                 }
             }
             let opts = StreamReadOptions::default()
@@ -90,8 +108,9 @@ pub async fn filter_worker(
                 .count(100);
             read_options.insert(filter.id, opts);
             filter_results_queues.insert(
-                filter.id, 
-                format!("filter_{filter_id}_results", filter_id = filter.id));
+                filter.id,
+                format!("filter_{filter_id}_results", filter_id = filter.id),
+            );
         }
     }
 
@@ -107,17 +126,19 @@ pub async fn filter_worker(
                     WorkerCmd::TERM => {
                         warn!("alert worker {} received termination command", id);
                         return Ok(());
-                    },
+                    }
                 }
             }
         }
-        
+
         for (perm, filters) in &mut filter_table {
             for filter in filters {
                 let candids = worker_util::get_candids_from_stream(
                     &mut con,
                     &redis_streams[&perm],
-                    &read_options[&filter.id]).await;
+                    &read_options[&filter.id],
+                )
+                .await;
                 if candids.len() == 0 {
                     empty_stream_counter += 1;
                     continue;
@@ -125,7 +146,10 @@ pub async fn filter_worker(
                 let in_count = candids.len();
                 alert_counter += in_count as i64;
 
-                info!("running filter with id {} on {} alerts", filter.id, in_count);
+                info!(
+                    "running filter with id {} on {} alerts",
+                    filter.id, in_count
+                );
 
                 let start = std::time::Instant::now();
 
@@ -135,17 +159,27 @@ pub async fn filter_worker(
                 }
                 // convert the documents to a format that any other worker (even in python) can read
                 // for that we can deserialize the Document to json
-                let out_documents: Vec<String> = out_documents.iter().map(|doc| {
-                    let json = serde_json::to_string(doc).unwrap();
-                    json
-                }).collect();
+                let out_documents: Vec<String> = out_documents
+                    .iter()
+                    .map(|doc| {
+                        let json = serde_json::to_string(doc).unwrap();
+                        json
+                    })
+                    .collect();
                 con.lpush::<&str, &Vec<String>, isize>(
                     &filter_results_queues[&filter.id],
-                    &out_documents).await.unwrap();
+                    &out_documents,
+                )
+                .await
+                .unwrap();
 
                 info!(
-                    "{}/{} alerts passed filter {} in {}s", 
-                    out_documents.len(), in_count, filter.id, start.elapsed().as_secs_f64());
+                    "{}/{} alerts passed filter {} in {}s",
+                    out_documents.len(),
+                    in_count,
+                    filter.id,
+                    start.elapsed().as_secs_f64()
+                );
             }
         }
         if empty_stream_counter == filter_ids.len() {
@@ -157,7 +191,7 @@ pub async fn filter_worker(
                     WorkerCmd::TERM => {
                         warn!("alert worker {} received termination command", id);
                         return Ok(());
-                    },
+                    }
                 }
             }
         }

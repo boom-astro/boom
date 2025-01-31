@@ -1,6 +1,6 @@
 use redis::AsyncCommands;
 use std::env;
-use tracing::{info, error, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::Error>> {
@@ -28,7 +28,10 @@ fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::E
 
     info!("Downloading alerts for date {}", date);
     // download the alerts to data folder
-    let url = format!("https://ztf.uw.edu/alerts/public/ztf_public_{}.tar.gz", date);
+    let url = format!(
+        "https://ztf.uw.edu/alerts/public/ztf_public_{}.tar.gz",
+        date
+    );
     let output = std::process::Command::new("wget")
         .arg(&url)
         .arg("-P")
@@ -65,11 +68,10 @@ fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::E
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
-    .with_max_level(Level::TRACE)
-    .finish();
+        .with_max_level(Level::TRACE)
+        .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
@@ -79,13 +81,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let date = &args[1];
     let total_nb_alerts = download_alerts_from_archive(date)?;
 
-    let client = redis::Client::open(
-        "redis://localhost:6379".to_string()
-    )?;
+    let client = redis::Client::open("redis://localhost:6379".to_string())?;
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
     // empty the queue
-    con.del::<&str, usize>("ZTF_alerts_packet_queue").await.unwrap();
+    con.del::<&str, usize>("ZTF_alerts_packet_queue")
+        .await
+        .unwrap();
 
     let mut total = 0;
 
@@ -98,7 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = entry.path();
         let payload = std::fs::read(path)?;
 
-        con.rpush::<&str, Vec<u8>, usize>("ZTF_alerts_packet_queue", payload.to_vec()).await.unwrap();
+        con.rpush::<&str, Vec<u8>, usize>("ZTF_alerts_packet_queue", payload.to_vec())
+            .await
+            .unwrap();
         total += 1;
         if total % 1000 == 0 {
             info!("Pushed {} items since {:?}", total, start.elapsed());

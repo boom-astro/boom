@@ -1,9 +1,9 @@
 use std::io::Read;
 
 use apache_avro::from_value;
-use apache_avro::{Reader, Schema, from_avro_datum};
+use apache_avro::{from_avro_datum, Reader, Schema};
 use config::Value;
-use flare::spatial::{radec2lb, deg2hms, deg2dms};
+use flare::spatial::{deg2dms, deg2hms, radec2lb};
 use mongodb::bson::doc;
 use mongodb::bson::to_document;
 use tracing::error;
@@ -138,136 +138,224 @@ pub struct PrvCandidate {
 }
 
 #[inline(always)]
-fn default_prvcandidate_diffmaglim() -> Option<f32> { None }
+fn default_prvcandidate_diffmaglim() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_pdiffimfilename() -> Option<String> { None }
+fn default_prvcandidate_pdiffimfilename() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_programpi() -> Option<String> { None }
+fn default_prvcandidate_programpi() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_tblid() -> Option<i64> { None }
+fn default_prvcandidate_tblid() -> Option<i64> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_nid() -> Option<i32> { None }
+fn default_prvcandidate_nid() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_rcid() -> Option<i32> { None }
+fn default_prvcandidate_rcid() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_field() -> Option<i32> { None }
+fn default_prvcandidate_field() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_xpos() -> Option<f32> { None }
+fn default_prvcandidate_xpos() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_ypos() -> Option<f32> { None }
+fn default_prvcandidate_ypos() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_chipsf() -> Option<f32> { None }
+fn default_prvcandidate_chipsf() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magap() -> Option<f32> { None }
+fn default_prvcandidate_magap() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_sigmagap() -> Option<f32> { None }
+fn default_prvcandidate_sigmagap() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_distnr() -> Option<f32> { None }
+fn default_prvcandidate_distnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magnr() -> Option<f32> { None }
+fn default_prvcandidate_magnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_sigmagnr() -> Option<f32> { None }
+fn default_prvcandidate_sigmagnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_chinr() -> Option<f32> { None }
+fn default_prvcandidate_chinr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_sharpnr() -> Option<f32> { None }
+fn default_prvcandidate_sharpnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_sky() -> Option<f32> { None }
+fn default_prvcandidate_sky() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magdiff() -> Option<f32> { None }
+fn default_prvcandidate_magdiff() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_fwhm() -> Option<f32> { None }
+fn default_prvcandidate_fwhm() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_classtar() -> Option<f32> { None }
+fn default_prvcandidate_classtar() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_mindtoedge() -> Option<f32> { None }
+fn default_prvcandidate_mindtoedge() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magfromlim() -> Option<f32> { None }
+fn default_prvcandidate_magfromlim() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_seeratio() -> Option<f32> { None }
+fn default_prvcandidate_seeratio() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_aimage() -> Option<f32> { None }
+fn default_prvcandidate_aimage() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_bimage() -> Option<f32> { None }
+fn default_prvcandidate_bimage() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_aimagerat() -> Option<f32> { None }
+fn default_prvcandidate_aimagerat() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_bimagerat() -> Option<f32> { None }
+fn default_prvcandidate_bimagerat() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_elong() -> Option<f32> { None }
+fn default_prvcandidate_elong() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_nneg() -> Option<i32> { None }
+fn default_prvcandidate_nneg() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_nbad() -> Option<i32> { None }
+fn default_prvcandidate_nbad() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_rb() -> Option<f32> { None }
+fn default_prvcandidate_rb() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_ssdistnr() -> Option<f32> { None }
+fn default_prvcandidate_ssdistnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_ssmagnr() -> Option<f32> { None }
+fn default_prvcandidate_ssmagnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_ssnamenr() -> Option<String> { None }
+fn default_prvcandidate_ssnamenr() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_sumrat() -> Option<f32> { None }
+fn default_prvcandidate_sumrat() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magapbig() -> Option<f32> { None }
+fn default_prvcandidate_magapbig() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_sigmagapbig() -> Option<f32> { None }
+fn default_prvcandidate_sigmagapbig() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_scorr() -> Option<f64> { None }
+fn default_prvcandidate_scorr() -> Option<f64> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magzpsci() -> Option<f32> { None }
+fn default_prvcandidate_magzpsci() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magzpsciunc() -> Option<f32> { None }
+fn default_prvcandidate_magzpsciunc() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_magzpscirms() -> Option<f32> { None }
+fn default_prvcandidate_magzpscirms() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_clrcoeff() -> Option<f32> { None }
+fn default_prvcandidate_clrcoeff() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_prvcandidate_clrcounc() -> Option<f32> { None }
+fn default_prvcandidate_clrcounc() -> Option<f32> {
+    None
+}
 
 /// avro alert schema
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
@@ -326,70 +414,114 @@ pub struct FpHist {
 }
 
 #[inline(always)]
-fn default_fphist_field() -> Option<i32> { None }
+fn default_fphist_field() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_rcid() -> Option<i32> { None }
+fn default_fphist_rcid() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_sciinpseeing() -> Option<f32> { None }
+fn default_fphist_sciinpseeing() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_scibckgnd() -> Option<f32> { None }
+fn default_fphist_scibckgnd() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_scisigpix() -> Option<f32> { None }
+fn default_fphist_scisigpix() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_magzpsci() -> Option<f32> { None }
+fn default_fphist_magzpsci() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_magzpsciunc() -> Option<f32> { None }
+fn default_fphist_magzpsciunc() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_magzpscirms() -> Option<f32> { None }
+fn default_fphist_magzpscirms() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_clrcoeff() -> Option<f32> { None }
+fn default_fphist_clrcoeff() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_clrcounc() -> Option<f32> { None }
+fn default_fphist_clrcounc() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_exptime() -> Option<f32> { None }
+fn default_fphist_exptime() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_adpctdif1() -> Option<f32> { None }
+fn default_fphist_adpctdif1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_adpctdif2() -> Option<f32> { None }
+fn default_fphist_adpctdif2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_diffmaglim() -> Option<f32> { None }
+fn default_fphist_diffmaglim() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_forcediffimflux() -> Option<f32> { None }
+fn default_fphist_forcediffimflux() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_forcediffimfluxunc() -> Option<f32> { None }
+fn default_fphist_forcediffimfluxunc() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_procstatus() -> Option<String> { None }
+fn default_fphist_procstatus() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_distnr() -> Option<f32> { None }
+fn default_fphist_distnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_magnr() -> Option<f32> { None }
+fn default_fphist_magnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_sigmagnr() -> Option<f32> { None }
+fn default_fphist_sigmagnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_chinr() -> Option<f32> { None }
+fn default_fphist_chinr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_fphist_sharpnr() -> Option<f32> { None }
+fn default_fphist_sharpnr() -> Option<f32> {
+    None
+}
 
 /// avro alert schema
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
@@ -581,248 +713,409 @@ pub struct Candidate {
 }
 
 #[inline(always)]
-fn default_candidate_diffmaglim() -> Option<f32> { None }
+fn default_candidate_diffmaglim() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_pdiffimfilename() -> Option<String> { None }
+fn default_candidate_pdiffimfilename() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_programpi() -> Option<String> { None }
+fn default_candidate_programpi() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_tblid() -> Option<i64> { None }
+fn default_candidate_tblid() -> Option<i64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_nid() -> Option<i32> { None }
+fn default_candidate_nid() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_rcid() -> Option<i32> { None }
+fn default_candidate_rcid() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_field() -> Option<i32> { None }
+fn default_candidate_field() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_xpos() -> Option<f32> { None }
+fn default_candidate_xpos() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_ypos() -> Option<f32> { None }
+fn default_candidate_ypos() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_chipsf() -> Option<f32> { None }
+fn default_candidate_chipsf() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magap() -> Option<f32> { None }
+fn default_candidate_magap() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sigmagap() -> Option<f32> { None }
+fn default_candidate_sigmagap() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_distnr() -> Option<f32> { None }
+fn default_candidate_distnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magnr() -> Option<f32> { None }
+fn default_candidate_magnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sigmagnr() -> Option<f32> { None }
+fn default_candidate_sigmagnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_chinr() -> Option<f32> { None }
+fn default_candidate_chinr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sharpnr() -> Option<f32> { None }
+fn default_candidate_sharpnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sky() -> Option<f32> { None }
+fn default_candidate_sky() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magdiff() -> Option<f32> { None }
+fn default_candidate_magdiff() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_fwhm() -> Option<f32> { None }
+fn default_candidate_fwhm() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_classtar() -> Option<f32> { None }
+fn default_candidate_classtar() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_mindtoedge() -> Option<f32> { None }
+fn default_candidate_mindtoedge() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magfromlim() -> Option<f32> { None }
+fn default_candidate_magfromlim() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_seeratio() -> Option<f32> { None }
+fn default_candidate_seeratio() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_aimage() -> Option<f32> { None }
+fn default_candidate_aimage() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_bimage() -> Option<f32> { None }
+fn default_candidate_bimage() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_aimagerat() -> Option<f32> { None }
+fn default_candidate_aimagerat() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_bimagerat() -> Option<f32> { None }
+fn default_candidate_bimagerat() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_elong() -> Option<f32> { None }
+fn default_candidate_elong() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_nneg() -> Option<i32> { None }
+fn default_candidate_nneg() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_nbad() -> Option<i32> { None }
+fn default_candidate_nbad() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_rb() -> Option<f32> { None }
+fn default_candidate_rb() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_ssdistnr() -> Option<f32> { None }
+fn default_candidate_ssdistnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_ssmagnr() -> Option<f32> { None }
+fn default_candidate_ssmagnr() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_ssnamenr() -> Option<String> { None }
+fn default_candidate_ssnamenr() -> Option<String> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sumrat() -> Option<f32> { None }
+fn default_candidate_sumrat() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magapbig() -> Option<f32> { None }
+fn default_candidate_magapbig() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sigmagapbig() -> Option<f32> { None }
+fn default_candidate_sigmagapbig() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sgmag1() -> Option<f32> { None }
+fn default_candidate_sgmag1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_srmag1() -> Option<f32> { None }
+fn default_candidate_srmag1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_simag1() -> Option<f32> { None }
+fn default_candidate_simag1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_szmag1() -> Option<f32> { None }
+fn default_candidate_szmag1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sgscore1() -> Option<f32> { None }
+fn default_candidate_sgscore1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_distpsnr1() -> Option<f32> { None }
+fn default_candidate_distpsnr1() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_jdstarthist() -> Option<f64> { None }
+fn default_candidate_jdstarthist() -> Option<f64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_jdendhist() -> Option<f64> { None }
+fn default_candidate_jdendhist() -> Option<f64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_scorr() -> Option<f64> { None }
+fn default_candidate_scorr() -> Option<f64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_tooflag() -> Option<i32> { None }
+fn default_candidate_tooflag() -> Option<i32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_objectidps1() -> Option<i64> { None }
+fn default_candidate_objectidps1() -> Option<i64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_objectidps2() -> Option<i64> { None }
+fn default_candidate_objectidps2() -> Option<i64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sgmag2() -> Option<f32> { None }
+fn default_candidate_sgmag2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_srmag2() -> Option<f32> { None }
+fn default_candidate_srmag2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_simag2() -> Option<f32> { None }
+fn default_candidate_simag2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_szmag2() -> Option<f32> { None }
+fn default_candidate_szmag2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sgscore2() -> Option<f32> { None }
+fn default_candidate_sgscore2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_distpsnr2() -> Option<f32> { None }
+fn default_candidate_distpsnr2() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_objectidps3() -> Option<i64> { None }
+fn default_candidate_objectidps3() -> Option<i64> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sgmag3() -> Option<f32> { None }
+fn default_candidate_sgmag3() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_srmag3() -> Option<f32> { None }
+fn default_candidate_srmag3() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_simag3() -> Option<f32> { None }
+fn default_candidate_simag3() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_szmag3() -> Option<f32> { None }
+fn default_candidate_szmag3() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_sgscore3() -> Option<f32> { None }
+fn default_candidate_sgscore3() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_distpsnr3() -> Option<f32> { None }
+fn default_candidate_distpsnr3() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_dsnrms() -> Option<f32> { None }
+fn default_candidate_dsnrms() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_ssnrms() -> Option<f32> { None }
+fn default_candidate_ssnrms() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_dsdiff() -> Option<f32> { None }
+fn default_candidate_dsdiff() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magzpsci() -> Option<f32> { None }
+fn default_candidate_magzpsci() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magzpsciunc() -> Option<f32> { None }
+fn default_candidate_magzpsciunc() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_magzpscirms() -> Option<f32> { None }
+fn default_candidate_magzpscirms() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_clrcoeff() -> Option<f32> { None }
+fn default_candidate_clrcoeff() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_clrcounc() -> Option<f32> { None }
+fn default_candidate_clrcounc() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_zpclrcov() -> Option<f32> { None }
+fn default_candidate_zpclrcov() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_zpmed() -> Option<f32> { None }
+fn default_candidate_zpmed() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_clrmed() -> Option<f32> { None }
+fn default_candidate_clrmed() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_clrrms() -> Option<f32> { None }
+fn default_candidate_clrrms() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_neargaia() -> Option<f32> { None }
+fn default_candidate_neargaia() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_neargaiabright() -> Option<f32> { None }
+fn default_candidate_neargaiabright() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_maggaia() -> Option<f32> { None }
+fn default_candidate_maggaia() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_maggaiabright() -> Option<f32> { None }
+fn default_candidate_maggaiabright() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_exptime() -> Option<f32> { None }
+fn default_candidate_exptime() -> Option<f32> {
+    None
+}
 
 #[inline(always)]
-fn default_candidate_drb() -> Option<f32> { None }
-
+fn default_candidate_drb() -> Option<f32> {
+    None
+}
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Alert {
@@ -840,24 +1133,37 @@ pub struct Alert {
     pub cutout_science: Option<Cutout>,
     #[serde(default = "default_alert_cutout_template", rename = "cutoutTemplate")]
     pub cutout_template: Option<Cutout>,
-    #[serde(default = "default_alert_cutout_difference", rename = "cutoutDifference")]
-    pub cutout_difference: Option<Cutout>
+    #[serde(
+        default = "default_alert_cutout_difference",
+        rename = "cutoutDifference"
+    )]
+    pub cutout_difference: Option<Cutout>,
 }
 
 #[inline(always)]
-fn default_alert_prv_candidates() -> Option<Vec<PrvCandidate>> { None }
+fn default_alert_prv_candidates() -> Option<Vec<PrvCandidate>> {
+    None
+}
 
 #[inline(always)]
-fn default_alert_fp_hists() -> Option<Vec<FpHist>> { None }
+fn default_alert_fp_hists() -> Option<Vec<FpHist>> {
+    None
+}
 
 #[inline(always)]
-fn default_alert_cutout_science() -> Option<Cutout> { None }
+fn default_alert_cutout_science() -> Option<Cutout> {
+    None
+}
 
 #[inline(always)]
-fn default_alert_cutout_template() -> Option<Cutout> { None }
+fn default_alert_cutout_template() -> Option<Cutout> {
+    None
+}
 
 #[inline(always)]
-fn default_alert_cutout_difference() -> Option<Cutout> { None }
+fn default_alert_cutout_difference() -> Option<Cutout> {
+    None
+}
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct AlertNoHistory {
@@ -871,14 +1177,23 @@ pub struct AlertNoHistory {
     pub cutout_science: Option<Cutout>,
     #[serde(default = "default_alert_cutout_template", rename = "cutoutTemplate")]
     pub cutout_template: Option<Cutout>,
-    #[serde(default = "default_alert_cutout_difference", rename = "cutoutDifference")]
-    pub cutout_difference: Option<Cutout>
+    #[serde(
+        default = "default_alert_cutout_difference",
+        rename = "cutoutDifference"
+    )]
+    pub cutout_difference: Option<Cutout>,
 }
 
 // make a function for the Alert type, that creates a AlertNoHistory type
 // and returns a tuple with the AlertNoHistory, the prv_candidates and the fp_hist
 impl Alert {
-    pub fn pop_history(self) -> (AlertNoHistory, Option<Vec<PrvCandidate>>, Option<Vec<FpHist>>) {
+    pub fn pop_history(
+        self,
+    ) -> (
+        AlertNoHistory,
+        Option<Vec<PrvCandidate>>,
+        Option<Vec<FpHist>>,
+    ) {
         (
             AlertNoHistory {
                 schemavsn: self.schemavsn,
@@ -903,13 +1218,16 @@ impl Alert {
                 return Err(Box::new(e));
             }
         };
-        
+
         let value = reader.map(|x| x.unwrap()).next().unwrap();
         let alert: Alert = from_value::<Alert>(&value).unwrap();
         Ok(alert)
     }
 
-    pub fn from_avro_bytes_unsafe(avro_bytes: Vec<u8>, schema: &apache_avro::Schema) -> Result<Alert, Box<dyn std::error::Error>> {
+    pub fn from_avro_bytes_unsafe(
+        avro_bytes: Vec<u8>,
+        schema: &apache_avro::Schema,
+    ) -> Result<Alert, Box<dyn std::error::Error>> {
         let mut cursor = std::io::Cursor::new(avro_bytes);
 
         let mut buf = [0; 4];
@@ -944,7 +1262,6 @@ impl Alert {
             }
         }
     }
-
 }
 
 impl AlertNoHistory {
@@ -993,15 +1310,15 @@ impl FpHist {
     }
 }
 
-#[derive(Debug)]    
+#[derive(Debug)]
 pub struct CatalogXmatchConfig {
-    pub catalog: String, // name of the collection in the database
-    pub radius: f64, // radius in radians
+    pub catalog: String,                     // name of the collection in the database
+    pub radius: f64,                         // radius in radians
     pub projection: mongodb::bson::Document, // projection to apply to the catalog
-    pub use_distance: bool, // whether to use the distance field in the crossmatch
-    pub distance_key: Option<String>, // name of the field to use for distance
-    pub distance_max: Option<f64>, // maximum distance in kpc
-    pub distance_max_near: Option<f64>, // maximum distance in arcsec for nearby objects
+    pub use_distance: bool,                  // whether to use the distance field in the crossmatch
+    pub distance_key: Option<String>,        // name of the field to use for distance
+    pub distance_max: Option<f64>,           // maximum distance in kpc
+    pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
 }
 
 impl CatalogXmatchConfig {
@@ -1012,7 +1329,7 @@ impl CatalogXmatchConfig {
         use_distance: bool,
         distance_key: Option<String>,
         distance_max: Option<f64>,
-        distance_max_near: Option<f64>
+        distance_max_near: Option<f64>,
     ) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
@@ -1021,7 +1338,7 @@ impl CatalogXmatchConfig {
             use_distance,
             distance_key,
             distance_max,
-            distance_max_near
+            distance_max_near,
         }
     }
 
@@ -1116,7 +1433,7 @@ impl CatalogXmatchConfig {
             use_distance,
             distance_key,
             distance_max,
-            distance_max_near
+            distance_max_near,
         )
     }
 }

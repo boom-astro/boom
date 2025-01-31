@@ -1,11 +1,11 @@
 pub mod alert;
+pub mod alert_worker;
 pub mod conf;
+pub mod fake_ml_worker;
 pub mod filter;
-pub mod types;
+pub mod filter_worker;
+pub mod scheduling;
 pub mod spatial;
 pub mod testing_util;
+pub mod types;
 pub mod worker_util;
-pub mod scheduling;
-pub mod alert_worker;
-pub mod filter_worker;
-pub mod fake_ml_worker;

@@ -2,22 +2,19 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use redis::AsyncCommands;
-use uuid::Uuid;
-use tracing::{info, error, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
-    .with_max_level(Level::TRACE)
-    .finish();
+        .with_max_level(Level::TRACE)
+        .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
-    
-    let client = redis::Client::open(
-        "redis://localhost:6379".to_string()
-    )?;
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let client = redis::Client::open("redis://localhost:6379".to_string())?;
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
     // empty the queue
@@ -45,7 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match message {
             Some(Ok(msg)) => {
                 let payload = msg.payload().unwrap();
-                con.rpush::<&str, Vec<u8>, usize>("alertpacketqueue", payload.to_vec()).await.unwrap();
+                con.rpush::<&str, Vec<u8>, usize>("alertpacketqueue", payload.to_vec())
+                    .await
+                    .unwrap();
                 total += 1;
                 if total % 1000 == 0 {
                     info!("Pushed {} items since {:?}", total, start.elapsed());

@@ -1,7 +1,7 @@
+use futures::stream::StreamExt;
+use mongodb::bson::{doc, Document};
 use std::{error::Error, fmt};
 use tracing::error;
-use mongodb::bson::{doc, Document};
-use futures::stream::StreamExt;
 
 const ALLOWED_CATALOGS: [&str; 1] = ["ZTF_alerts"];
 
@@ -28,47 +28,49 @@ impl Filter {
     pub async fn build(filter_id: i32, db: &mongodb::Database) -> Result<Filter, Box<dyn Error>> {
         // grab filter from database
         // >> pipeline returns document with group_id, permissions, and filter pipeline
-        let filter_obj = db.collection::<Document>("filters")
+        let filter_obj = db
+            .collection::<Document>("filters")
             .aggregate(vec![
-            doc! {
-                "$match": doc! {
-                    "filter_id": filter_id,
-                    "active": true,
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "fv": doc! {
-                        "$filter": doc! {
-                            "input": "$fv",
-                            "as": "x",
-                            "cond": doc! {
-                                "$eq": [
-                                    "$$x.fid",
-                                    "$active_fid"
-                                ]
+                doc! {
+                    "$match": doc! {
+                        "filter_id": filter_id,
+                        "active": true,
+                    }
+                },
+                doc! {
+                    "$project": doc! {
+                        "fv": doc! {
+                            "$filter": doc! {
+                                "input": "$fv",
+                                "as": "x",
+                                "cond": doc! {
+                                    "$eq": [
+                                        "$$x.fid",
+                                        "$active_fid"
+                                    ]
+                                }
                             }
-                        }
-                    },
-                    "group_id": 1,
-                    "permissions": 1,
-                    "catalog": 1
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "pipeline": doc! {
-                        "$arrayElemAt": [
-                            "$fv.pipeline",
-                            0
-                        ]
-                    },
-                    "group_id": 1,
-                    "permissions": 1,
-                    "catalog": 1
-                }
-            }]
-        ).await;
+                        },
+                        "group_id": 1,
+                        "permissions": 1,
+                        "catalog": 1
+                    }
+                },
+                doc! {
+                    "$project": doc! {
+                        "pipeline": doc! {
+                            "$arrayElemAt": [
+                                "$fv.pipeline",
+                                0
+                            ]
+                        },
+                        "group_id": 1,
+                        "permissions": 1,
+                        "catalog": 1
+                    }
+                },
+            ])
+            .await;
 
         if let Err(e) = filter_obj {
             error!("Got ERROR when retrieving filter from database: {}", e);
@@ -81,11 +83,12 @@ impl Filter {
         let filter_obj = if advance {
             filter_obj.deserialize_current().unwrap()
         } else {
-            return Err(Box::new(FilterError { message: format!("Filter {} not found in database", filter_id)}));
+            return Err(Box::new(FilterError {
+                message: format!("Filter {} not found in database", filter_id),
+            }));
         };
 
-        let catalog = filter_obj.get("catalog")
-            .unwrap().as_str().unwrap();
+        let catalog = filter_obj.get("catalog").unwrap().as_str().unwrap();
 
         // check if catalog is allowed
         if !ALLOWED_CATALOGS.contains(&catalog) {
@@ -93,9 +96,14 @@ impl Filter {
         }
 
         // get permissions
-        let permissions = filter_obj.get("permissions")
-            .unwrap().as_array().unwrap()
-            .iter().map(|x| x.as_i32().unwrap() as i64).collect();
+        let permissions = filter_obj
+            .get("permissions")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_i32().unwrap() as i64)
+            .collect();
 
         // filter prefix (with permissions)
         let mut out_filter = vec![
@@ -167,12 +175,11 @@ impl Filter {
                         }
                     },
                 }
-            }
+            },
         ];
 
         // get filter pipeline as str and convert to Vec<Bson>
-        let filter = filter_obj.get("pipeline")
-            .unwrap().as_str().unwrap();
+        let filter = filter_obj.get("pipeline").unwrap().as_str().unwrap();
         let filter = serde_json::from_str::<serde_json::Value>(filter).expect("Invalid input");
         let filter = filter.as_array().unwrap();
 
@@ -182,7 +189,6 @@ impl Filter {
             out_filter.push(x);
         }
 
-        
         let out_filter = Filter {
             pipeline: out_filter,
             permissions: permissions,
@@ -195,9 +201,10 @@ impl Filter {
 
     // runs the built filter on the provided mongodb::Database and returns the resulting candids
     pub async fn run(
-        &mut self, candids: Vec<i64>, db: &mongodb::Database,
+        &mut self,
+        candids: Vec<i64>,
+        db: &mongodb::Database,
     ) -> Result<Vec<Document>, Box<dyn Error>> {
-
         if candids.len() == 0 {
             return Ok(vec![]);
         }
@@ -206,17 +213,21 @@ impl Filter {
         }
 
         // insert candids into filter
-        self.pipeline[0].insert("$match", doc! {
-            "candid": doc! {
-                "$in": candids
-            }
-        });
+        self.pipeline[0].insert(
+            "$match",
+            doc! {
+                "candid": doc! {
+                    "$in": candids
+                }
+            },
+        );
 
         // run filter
-        let mut result = db.collection::<Document>(
-            &self.catalog
-        ).aggregate(self.pipeline.to_owned()).await?; // is to_owned the fastest way to access self fields?
-        
+        let mut result = db
+            .collection::<Document>(&self.catalog)
+            .aggregate(self.pipeline.to_owned())
+            .await?; // is to_owned the fastest way to access self fields?
+
         let mut out_documents: Vec<Document> = Vec::new();
 
         while let Some(doc) = result.next().await {

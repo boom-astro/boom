@@ -9,15 +9,12 @@ pub async fn xmatch(
     ra: f64,
     dec: f64,
     xmatch_configs: &Vec<types::CatalogXmatchConfig>,
-    db: &mongodb::Database
+    db: &mongodb::Database,
 ) -> mongodb::bson::Document {
-
     let ra_geojson = ra - 180.0;
     let dec_geojson = dec;
 
-
-    let mut xmatch_docs = doc! {
-    };
+    let mut xmatch_docs = doc! {};
 
     let mut x_matches_pipeline = vec![
         doc! {
@@ -45,7 +42,7 @@ pub async fn xmatch(
                 "_id": 0,
                 xmatch_configs[0].catalog.clone(): "$matches"
             }
-        }
+        },
     ];
 
     // then for all the other xmatch_configs, use a unionWith stage
@@ -85,25 +82,32 @@ pub async fn xmatch(
         });
     }
 
-    let collection: mongodb::Collection<mongodb::bson::Document> = db.collection(&xmatch_configs[0].catalog.clone());
+    let collection: mongodb::Collection<mongodb::bson::Document> =
+        db.collection(&xmatch_configs[0].catalog.clone());
     let mut cursor = collection.aggregate(x_matches_pipeline).await.unwrap();
 
     while let Some(doc) = cursor.next().await {
         let doc = doc.unwrap();
         for xmatch_config in xmatch_configs.iter() {
             if doc.contains_key(&xmatch_config.catalog) {
-                xmatch_docs.insert(xmatch_config.catalog.clone(), doc.get_array(&xmatch_config.catalog).unwrap());
+                xmatch_docs.insert(
+                    xmatch_config.catalog.clone(),
+                    doc.get_array(&xmatch_config.catalog).unwrap(),
+                );
             }
         }
     }
 
     for xmatch_config in xmatch_configs {
         if !xmatch_docs.contains_key(&xmatch_config.catalog) {
-            xmatch_docs.insert::<&str, mongodb::bson::Array>(&xmatch_config.catalog, mongodb::bson::Array::new());
+            xmatch_docs.insert::<&str, mongodb::bson::Array>(
+                &xmatch_config.catalog,
+                mongodb::bson::Array::new(),
+            );
         }
         // if we are using a distance field, we project the source at ra,dec to the distance of
         // the crossmatch, then compute the distance between the two points in kpc
-        
+
         if xmatch_config.use_distance {
             let distance_key = xmatch_config.distance_key.clone().unwrap();
             let distance_max = xmatch_config.distance_max.clone().unwrap();
@@ -147,7 +151,8 @@ pub async fn xmatch(
                 } else {
                     distance_max * (0.05 / doc_z) / 3600.0 // to degrees
                 };
-                let angular_separation = great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0;
+                let angular_separation =
+                    great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0;
 
                 if angular_separation < cm_radius {
                     // calculate the distance between objs in kpc

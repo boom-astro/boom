@@ -1,5 +1,5 @@
-use boom::spatial;
 use boom::conf;
+use boom::spatial;
 
 #[tokio::test]
 async fn test_xmatch() {

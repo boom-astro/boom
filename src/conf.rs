@@ -13,7 +13,9 @@ pub fn load_config(filepath: &str) -> Result<Config, ConfigError> {
 }
 
 pub fn build_xmatch_configs(conf: &Config, stream_name: &str) -> Vec<types::CatalogXmatchConfig> {
-    let crossmatches = conf.get_table("crossmatch").expect("crossmatches key not found");
+    let crossmatches = conf
+        .get_table("crossmatch")
+        .expect("crossmatches key not found");
     let crossmatches_stream = crossmatches.get(stream_name).cloned();
     if crossmatches_stream.is_none() {
         return Vec::new();

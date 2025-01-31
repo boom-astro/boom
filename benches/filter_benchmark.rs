@@ -1,16 +1,11 @@
+use boom::testing_util::{
+    alert_worker, drop_alert_collections, empty_processed_alerts_queue, fake_kafka_consumer,
+    insert_test_filter, remove_test_filter,
+};
+use boom::{conf, filter};
 use redis::AsyncCommands;
-use std::{
-    env,
-    num::NonZero,
-    error::Error,
-};
+use std::{env, error::Error, num::NonZero};
 use tracing::info;
-use boom::{
-    filter,
-    conf,
-};
-use boom::testing_util::{fake_kafka_consumer, alert_worker, drop_alert_collections, remove_test_filter, insert_test_filter, empty_processed_alerts_queue};
-
 
 // puts candids of processed alerts into a redis queue queue_name
 pub async fn setup_benchmark(queue_name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -21,15 +16,23 @@ pub async fn setup_benchmark(queue_name: &str) -> Result<(), Box<dyn std::error:
     // get alert files and process alerts and send candids into queue of choice
     fake_kafka_consumer("benchalertpacketqueue", "20240617").await?;
     info!("processing alerts...");
-    alert_worker("benchalertpacketqueue", queue_name, "ZTF_alerts", "ZTF_alerts_aux").await;
-    info!("candids successfully placed into redis queue '{}'", queue_name);
+    alert_worker(
+        "benchalertpacketqueue",
+        queue_name,
+        "ZTF_alerts",
+        "ZTF_alerts_aux",
+    )
+    .await;
+    info!(
+        "candids successfully placed into redis queue '{}'",
+        queue_name
+    );
     Ok(())
 }
 
 // run: cargo bench filter_benchmark -- <filter_id> <num_iterations_on_candids>
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-
     let queue_name = "benchmarkqueue";
     setup_benchmark(&queue_name).await?;
 
@@ -45,10 +48,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // connect to mongo and redis
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
-    let client_redis = redis::Client::open(
-        "redis://localhost:6379".to_string()).unwrap();
+    let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
     let mut con = client_redis
-        .get_multiplexed_async_connection().await.unwrap();
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
 
     // if filter_id is -1, then we are running the benchmark on the test filter
     // as part of the CI/CD pipeline. In which case we need to insert the test filter
@@ -56,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if filter_id == -1 {
         insert_test_filter().await;
     }
-    
+
     info!("running filter benchmark...");
 
     let mut runs: Vec<(i32, usize, f64)> = Vec::new();
@@ -67,8 +71,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for i in 0..n {
         let start = std::time::Instant::now();
         // retrieve candids from redis queue
-        let res: Result<Vec<i64>, redis::RedisError> = con.rpop::<&str, Vec<i64>>(
-                &queue_name, NonZero::new(1000)).await;
+        let res: Result<Vec<i64>, redis::RedisError> = con
+            .rpop::<&str, Vec<i64>>(&queue_name, NonZero::new(1000))
+            .await;
 
         match res {
             Ok(candids) => {
@@ -78,7 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 // info!("Found a total of {} candids to process", candids.len());
-                
+
                 let _out_candids = test_filter.run(candids.clone(), &db).await?;
 
                 let total_time = (std::time::Instant::now() - start).as_secs_f64();
@@ -86,14 +91,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 if i < n - 1 {
                     // push all candids back onto the redis queue
-                    con.lpush::<&str, Vec<i64>, isize>(
-                        &queue_name, candids.clone()
-                    ).await?;
+                    con.lpush::<&str, Vec<i64>, isize>(&queue_name, candids.clone())
+                        .await?;
                 }
-            },
+            }
             Err(e) => {
                 info!("Got error: {:?}", e);
-            },
+            }
         }
     }
     // info!("=========================\n   FULL OUTPUT\n=========================");
@@ -119,7 +123,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let total_alerts = total_alerts as f64;
     let average = total_alerts / total_time;
     info!("   average speed: {} alerts filtered / sec", average);
-    info!("   fastest run: {} @ {}\n   slowest run: {} @ {}", min_time.0, min_time.1, max_time.0, max_time.1);
+    info!(
+        "   fastest run: {} @ {}\n   slowest run: {} @ {}",
+        min_time.0, min_time.1, max_time.0, max_time.1
+    );
     info!("=========================");
 
     // if filter_id is -1, then we are running the benchmark on the test filter

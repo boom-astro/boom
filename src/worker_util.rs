@@ -1,7 +1,10 @@
-use std::{sync::{Mutex, Arc}, fmt};
-use redis::AsyncCommands;
-use redis::streams::{StreamReadOptions, StreamReadReply};
 use config::Config;
+use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::AsyncCommands;
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 use tracing::warn;
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
@@ -18,8 +21,10 @@ pub async fn sig_int_handler(flag: Arc<Mutex<bool>>) {
 pub fn check_exit(flag: Arc<Mutex<bool>>) {
     match flag.try_lock() {
         Ok(x) => {
-            if *x { std::process::exit(0) }
-        },
+            if *x {
+                std::process::exit(0)
+            }
+        }
         _ => {}
     }
 }
@@ -33,14 +38,20 @@ pub fn check_flag(flag: Arc<Mutex<bool>>) -> bool {
             } else {
                 false
             }
-        },
-        _ => { false }
+        }
+        _ => false,
     }
 }
 
-pub async fn get_candids_from_stream(con: &mut redis::aio::MultiplexedConnection, stream: &str, options: &StreamReadOptions) -> Vec<i64> {
-    let result: Option<StreamReadReply> = con.xread_options(
-        &[stream.to_owned()], &[">"], options).await.unwrap();
+pub async fn get_candids_from_stream(
+    con: &mut redis::aio::MultiplexedConnection,
+    stream: &str,
+    options: &StreamReadOptions,
+) -> Vec<i64> {
+    let result: Option<StreamReadReply> = con
+        .xread_options(&[stream.to_owned()], &[">"], options)
+        .await
+        .unwrap();
     let mut candids: Vec<i64> = Vec::new();
     if let Some(reply) = result {
         for stream_key in reply.keys {
@@ -51,10 +62,13 @@ pub async fn get_candids_from_stream(con: &mut redis::aio::MultiplexedConnection
                 match candid {
                     redis::Value::BulkString(x) => {
                         // then x is a Vec<u8> type, so we need to convert it an i64
-                        let x = String::from_utf8(x.to_vec()).unwrap().parse::<i64>().unwrap();
+                        let x = String::from_utf8(x.to_vec())
+                            .unwrap()
+                            .parse::<i64>()
+                            .unwrap();
                         // append to candids
                         candids.push(x);
-                    },
+                    }
                     _ => {
                         warn!("Candid unknown type: {:?}", candid);
                     }
@@ -66,13 +80,21 @@ pub async fn get_candids_from_stream(con: &mut redis::aio::MultiplexedConnection
 }
 
 pub fn get_check_command_interval(conf: Config, stream_name: &str) -> i64 {
-    let table = conf.get_table("workers")
+    let table = conf
+        .get_table("workers")
         .expect("worker table not found in config");
-    let stream_table = table.get(stream_name)
+    let stream_table = table
+        .get(stream_name)
         .expect(format!("stream name {} not found in config", stream_name).as_str())
-        .to_owned().into_table().unwrap();
-    let check_command_interval = stream_table.get("command_interval")
-        .expect("command_interval not found in config").to_owned().into_int().unwrap();
+        .to_owned()
+        .into_table()
+        .unwrap();
+    let check_command_interval = stream_table
+        .get("command_interval")
+        .expect("command_interval not found in config")
+        .to_owned()
+        .into_int()
+        .unwrap();
     return check_command_interval;
 }
 
@@ -89,14 +111,15 @@ impl fmt::Display for WorkerType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let enum_str;
         match self {
-            WorkerType::Alert => { enum_str = "Alert"; },
-            WorkerType::Filter => { enum_str = "Filter" },
-            WorkerType::ML => { enum_str = "ML" }
+            WorkerType::Alert => {
+                enum_str = "Alert";
+            }
+            WorkerType::Filter => enum_str = "Filter",
+            WorkerType::ML => enum_str = "ML",
         }
         write!(f, "{}", enum_str)
     }
 }
-
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WorkerCmd {
@@ -107,9 +130,10 @@ impl fmt::Display for WorkerCmd {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let enum_str;
         match self {
-            WorkerCmd::TERM => { enum_str = "TERM"; }
+            WorkerCmd::TERM => {
+                enum_str = "TERM";
+            }
         }
         write!(f, "{}", enum_str)
     }
 }
-

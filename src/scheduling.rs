@@ -1,10 +1,13 @@
+use crate::{
+    alert_worker, fake_ml_worker, filter_worker,
+    worker_util::{WorkerCmd, WorkerType},
+};
 use std::{
     collections::HashMap,
-    sync::{mpsc, Arc, Mutex}, 
+    sync::{mpsc, Arc, Mutex},
     thread,
 };
 use tracing::{info, warn};
-use crate::{worker_util::{WorkerType, WorkerCmd}, alert_worker, filter_worker, fake_ml_worker};
 
 // Thread pool
 // allows spawning, killing, and managing of various worker threads through
@@ -18,22 +21,21 @@ pub struct ThreadPool {
 }
 
 /// Threadpool
-/// 
+///
 /// The threadpool manages an array of workers of one type
 impl ThreadPool {
     /// Create a new threadpool
-    /// 
+    ///
     /// worker_type: a `WorkerType` enum to designate which type of workers this threadpool contains
     /// size: number of workers initially inside of threadpool
     /// stream_name: source stream. e.g. 'ZTF'
     /// config_path: path to config file
     pub fn new(
-        worker_type: WorkerType, 
-        size: usize, 
+        worker_type: WorkerType,
+        size: usize,
         stream_name: String,
-        config_path: String
+        config_path: String,
     ) -> ThreadPool {
-
         let mut workers = HashMap::new();
         let mut senders = HashMap::new();
 
@@ -41,13 +43,16 @@ impl ThreadPool {
             let id = uuid::Uuid::new_v4().to_string();
             let (sender, receiver) = mpsc::channel();
             let receiver = Arc::new(Mutex::new(receiver));
-            workers.insert(id.clone(), Worker::new(
-                worker_type, 
-                id.clone(), 
-                Arc::clone(&receiver),
-                stream_name.clone(),
-                config_path.clone()
-            ));
+            workers.insert(
+                id.clone(),
+                Worker::new(
+                    worker_type,
+                    id.clone(),
+                    Arc::clone(&receiver),
+                    stream_name.clone(),
+                    config_path.clone(),
+                ),
+            );
             senders.insert(id.clone(), Some(sender));
         }
 
@@ -72,7 +77,6 @@ impl ThreadPool {
             //     if let Some(thread) = worker.thread.take() {
             //     thread.join().unwrap();
             // }
-
         }
     }
 
@@ -84,11 +88,13 @@ impl ThreadPool {
         self.workers.insert(
             id.clone(),
             Worker::new(
-                self.worker_type, id.clone(), 
+                self.worker_type,
+                id.clone(),
                 Arc::clone(&receiver),
                 self.stream_name.clone(),
                 self.config_path.clone(),
-            ));
+            ),
+        );
         self.senders.insert(id.clone(), Some(sender));
         info!("Added worker with id: {}", &id);
     }
@@ -101,7 +107,7 @@ impl Drop for ThreadPool {
 
         // get the ids of all workers
         let ids: Vec<String> = self.senders.keys().cloned().collect();
-        
+
         for id in ids {
             self.remove_worker(id);
         }
@@ -130,36 +136,30 @@ pub struct Worker {
 
 impl Worker {
     /// Create a new pipeline worker
-    /// 
+    ///
     /// worker_type: an instance of enum `WorkerType`
     /// id: unique string identifier
     /// receiver: receiver by which the owning threadpool communicates with the worker
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
     fn new(
-        worker_type: WorkerType, 
-        id: String, 
+        worker_type: WorkerType,
+        id: String,
         receiver: Arc<Mutex<mpsc::Receiver<WorkerCmd>>>,
         stream_name: String,
-        config_path: String
+        config_path: String,
     ) -> Worker {
         let id_copy = id.clone();
         let thread = match worker_type {
-            WorkerType::Alert => {
-                thread::spawn(|| {
-                    alert_worker::alert_worker(id, receiver, stream_name, config_path);
-                })
-            },
-            WorkerType::Filter => {
-                thread::spawn(|| {
-                    let _ = filter_worker::filter_worker(id, receiver, stream_name, config_path);
-                })
-            },
-            WorkerType::ML => {
-                thread::spawn(|| {
-                    fake_ml_worker::fake_ml_worker(id, receiver, stream_name, config_path);
-                })
-            }
+            WorkerType::Alert => thread::spawn(|| {
+                alert_worker::alert_worker(id, receiver, stream_name, config_path);
+            }),
+            WorkerType::Filter => thread::spawn(|| {
+                let _ = filter_worker::filter_worker(id, receiver, stream_name, config_path);
+            }),
+            WorkerType::ML => thread::spawn(|| {
+                fake_ml_worker::fake_ml_worker(id, receiver, stream_name, config_path);
+            }),
         };
 
         Worker {

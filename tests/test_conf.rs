@@ -15,7 +15,6 @@ fn test_load_config() {
     let crossmatches_ztf = crossmatches_ztf.unwrap().clone().into_array().unwrap();
     // check that the crossmatch for ZTF is an array
     assert_eq!(crossmatches_ztf.len(), 9);
-    
 
     let hello = conf.get_string("hello");
     assert!(hello.is_ok());
@@ -51,9 +50,19 @@ fn test_build_xmatch_configs() {
     let projection = &first.projection;
     // test reading a few of the expected fields
     assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(projection.get("coordinates.radec_str").unwrap().as_i64().unwrap(), 1);
+    assert_eq!(
+        projection
+            .get("coordinates.radec_str")
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1
+    );
     assert_eq!(projection.get("gMeanPSFMag").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(), 1);
+    assert_eq!(
+        projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(),
+        1
+    );
 }
 
 #[tokio::test]

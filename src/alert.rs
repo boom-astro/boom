@@ -1,8 +1,8 @@
-use flare::time::Time;
-use mongodb::bson::doc;
-use tracing::{info, error};
 use crate::spatial;
 use crate::types;
+use flare::time::Time;
+use mongodb::bson::doc;
+use tracing::{error, info};
 
 pub async fn process_alert(
     avro_bytes: Vec<u8>,
@@ -12,7 +12,6 @@ pub async fn process_alert(
     alert_aux_collection: &mongodb::Collection<mongodb::bson::Document>,
     schema: &apache_avro::Schema,
 ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
-
     // decode the alert
     let alert = match types::Alert::from_avro_bytes_unsafe(avro_bytes, schema) {
         Ok(alert) => alert,
@@ -23,7 +22,12 @@ pub async fn process_alert(
     };
 
     // check if the alert already exists in the alerts collection
-    if !alert_collection.find_one(doc! { "candid": &alert.candid }).await.unwrap().is_none() {
+    if !alert_collection
+        .find_one(doc! { "candid": &alert.candid })
+        .await
+        .unwrap()
+        .is_none()
+    {
         // we return early if there is already an alert with the same candid
         info!("alert with candid {} already exists", &alert.candid);
         return Ok(None);
@@ -36,12 +40,8 @@ pub async fn process_alert(
     let dec = alert.candidate.dec;
 
     // separate the alert and its history components
-    let (
-        alert_no_history,
-        prv_candidates,
-        fp_hist
-    ) = alert.pop_history();
-    
+    let (alert_no_history, prv_candidates, fp_hist) = alert.pop_history();
+
     // insert the alert into the alerts collection (with a created_at timestamp)
     let mut alert_doc = alert_no_history.mongify();
     alert_doc.insert("created_at", Time::now().to_jd());
@@ -51,10 +51,23 @@ pub async fn process_alert(
     // - existing objects - update prv_candidates, fp_hists
     // (with created_at and updated_at timestamps)
 
-    let prv_candidates_doc = prv_candidates.unwrap_or(vec![]).into_iter().map(|x| x.mongify()).collect::<Vec<_>>();
-    let fp_hist_doc = fp_hist.unwrap_or(vec![]).into_iter().map(|x| x.mongify()).collect::<Vec<_>>();
+    let prv_candidates_doc = prv_candidates
+        .unwrap_or(vec![])
+        .into_iter()
+        .map(|x| x.mongify())
+        .collect::<Vec<_>>();
+    let fp_hist_doc = fp_hist
+        .unwrap_or(vec![])
+        .into_iter()
+        .map(|x| x.mongify())
+        .collect::<Vec<_>>();
 
-    if alert_aux_collection.find_one(doc! { "_id": &object_id }).await.unwrap().is_none() {
+    if alert_aux_collection
+        .find_one(doc! { "_id": &object_id })
+        .await
+        .unwrap()
+        .is_none()
+    {
         let jd_timestamp = Time::now().to_jd();
         let mut doc = doc! {
             "_id": &object_id,
@@ -63,7 +76,10 @@ pub async fn process_alert(
             "created_at": jd_timestamp,
             "updated_at": jd_timestamp,
         };
-        doc.insert("cross_matches", spatial::xmatch(ra, dec, xmatch_configs, &db).await);
+        doc.insert(
+            "cross_matches",
+            spatial::xmatch(ra, dec, xmatch_configs, &db).await,
+        );
 
         alert_aux_collection.insert_one(doc).await.unwrap();
     } else {
@@ -77,7 +93,10 @@ pub async fn process_alert(
             }
         };
 
-        alert_aux_collection.update_one(doc! { "_id": &object_id }, update_doc).await.unwrap();
+        alert_aux_collection
+            .update_one(doc! { "_id": &object_id }, update_doc)
+            .await
+            .unwrap();
     }
 
     Ok(Some(candid))
