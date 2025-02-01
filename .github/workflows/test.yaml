@@ -44,8 +44,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     - name: Build docker-compose
       run: docker buildx bake --file docker-compose.yaml --file .github/workflows/docker-compose-cache.json
-    - name: Start containers
-      run: docker compose up -d
+    - name: Run docker-compose
+      run: docker-compose up --build -d
     - name: Tests
       if: ${{ matrix.test_subset == 'unit_tests' }}
       run: cargo test --release
