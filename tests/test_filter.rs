@@ -3,7 +3,7 @@ use redis::AsyncCommands;
 use std::num::NonZero;
 use tracing::{error, info};
 
-use boom::{conf, filter, testing_util as tu};
+use boom::{conf, filter, kafka, testing_util as tu};
 
 #[tokio::test]
 async fn test_build_filter() {
@@ -39,9 +39,13 @@ async fn test_run_filter() {
     let test_col_name = "ZTF_alerts";
     let test_aux_col_name = "ZTF_alerts_aux";
     let _ = tu::drop_alert_collections(&test_col_name, &test_aux_col_name).await;
-    let _ = tu::fake_kafka_consumer("alert_packet_queue", "20240617").await;
+    let result = kafka::produce_from_archive("20240617", 0).await;
+    assert!(result.is_ok());
+    let result = kafka::consume_alerts("ztf_20240617_programid1", None, true).await;
+    assert!(result.is_ok());
+
     let _ = tu::alert_worker(
-        "alert_packet_queue",
+        "alertpacketqueue",
         "worker_output_queue",
         &test_col_name,
         &test_aux_col_name,

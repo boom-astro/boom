@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 apache-avro = "0.17.0"
+chrono = "0.4.39"
 config = "0.15.6"
 flare = "0.1.0"
 futures = "0.3.31"

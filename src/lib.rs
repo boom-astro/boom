@@ -4,6 +4,7 @@ pub mod conf;
 pub mod fake_ml_worker;
 pub mod filter;
 pub mod filter_worker;
+pub mod kafka;
 pub mod scheduling;
 pub mod spatial;
 pub mod testing_util;

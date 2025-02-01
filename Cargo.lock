@@ -233,6 +233,7 @@ name = "boom"
 version = "0.1.0"
 dependencies = [
  "apache-avro",
+ "chrono",
  "config",
  "criterion",
  "flare",
