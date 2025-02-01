@@ -31,10 +31,15 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
+    # load the cached docker images
+    - name: Load Docker cache
+      uses: actions/cache@v2
+      with:
+        path: |
+          /var/lib/docker/overlay2
+        key: ${{ runner.os }}-docker-${{ hashFiles('**/docker-compose.yaml') }}
     - name: Start containers
       run: docker compose up -d
-    - name: Build
-      run: cargo build --release
     - name: Tests
       if: ${{ matrix.test_subset == 'unit_tests' }}
       run: cargo test --release
