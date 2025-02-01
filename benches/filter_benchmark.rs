@@ -14,17 +14,13 @@ pub async fn setup_benchmark(queue_name: &str) -> Result<(), Box<dyn std::error:
     empty_processed_alerts_queue("benchalertpacketqueue", queue_name).await?;
     // drop alert and alert_aux collections in database
     drop_alert_collections("ZTF_alerts", "ZTF_alerts_aux").await?;
-    // get alert files and process alerts and send candids into queue of choice
-    // fake_kafka_consumer("benchalertpacketqueue", "20240617").await?;
-    produce_from_archive("benchalertpacketqueue", 0)
-        .await
-        .unwrap();
-    consume_alerts("benchalertpacketqueue", None, true)
+    produce_from_archive("20240617", 0).await.unwrap();
+    consume_alerts("ztf_20240617_programid1", None, true)
         .await
         .unwrap();
     info!("processing alerts...");
     alert_worker(
-        "benchalertpacketqueue",
+        "ZTF_alerts_packets_queue",
         queue_name,
         "ZTF_alerts",
         "ZTF_alerts_aux",

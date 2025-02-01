@@ -74,8 +74,8 @@ async fn main() {
         .get_multiplexed_async_connection()
         .await
         .unwrap();
-    let queue_name = format!("{}_alerts_packet_queue", stream_name);
-    let queue_temp_name = format!("{}_alerts_packet_queuetemp", stream_name);
+    let queue_name = format!("{}_alerts_packets_queue", stream_name);
+    let queue_temp_name = format!("{}_alerts_packets_queuetemp", stream_name);
     let classifer_queue_name = format!("{}_alerts_classifier_queue", stream_name);
 
     // ALERT SCHEMA (for fast avro decoding)
@@ -123,7 +123,7 @@ async fn main() {
                     }
                     Err(e) => {
                         error!("Error processing alert: {}, requeueing", e);
-                        // put it back in the alertpacketqueue, to the left (pop from the right, push to the left)
+                        // put it back in the ZTF_alerts_packets_queue, to the left (pop from the right, push to the left)
                         con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
                             .await
                             .unwrap();

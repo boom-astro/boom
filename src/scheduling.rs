@@ -70,7 +70,14 @@ impl ThreadPool {
     /// id: string identifier for the worker to be removed
     pub fn remove_worker(&mut self, id: String) {
         if let Some(sender) = &self.senders[&id] {
-            sender.send(WorkerCmd::TERM).unwrap();
+            match sender.send(WorkerCmd::TERM) {
+                Ok(_) => {
+                    warn!("Sent terminate message to worker {}", &id);
+                }
+                Err(e) => {
+                    warn!("Failed to send terminate message to worker {}: {}", &id, e);
+                }
+            }
             self.senders.remove(&id);
 
             // if let Some(worker) = self.workers.get_mut(&id) {

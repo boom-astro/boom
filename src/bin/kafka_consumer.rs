@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        error!("Usage: kafka_consumer <topic> <group_id>");
+        error!("Usage: kafka_consumer <topic> <group_id> <exit_on_eof>");
         return Ok(());
     }
 

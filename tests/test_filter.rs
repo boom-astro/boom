@@ -45,7 +45,7 @@ async fn test_run_filter() {
     assert!(result.is_ok());
 
     let _ = tu::alert_worker(
-        "alertpacketqueue",
+        "ZTF_alerts_packets_queue",
         "worker_output_queue",
         &test_col_name,
         &test_aux_col_name,
