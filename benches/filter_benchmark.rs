@@ -1,8 +1,8 @@
+use boom::kafka::{consume_alerts, produce_from_archive};
 use boom::testing_util::{
-    alert_worker, drop_alert_collections, empty_processed_alerts_queue,
-    insert_test_filter, remove_test_filter,
+    alert_worker, drop_alert_collections, empty_processed_alerts_queue, insert_test_filter,
+    remove_test_filter,
 };
-use boom::kafka::{produce_from_archive, consume_alerts};
 use boom::{conf, filter};
 use redis::AsyncCommands;
 use std::{env, error::Error, num::NonZero};
@@ -16,8 +16,12 @@ pub async fn setup_benchmark(queue_name: &str) -> Result<(), Box<dyn std::error:
     drop_alert_collections("ZTF_alerts", "ZTF_alerts_aux").await?;
     // get alert files and process alerts and send candids into queue of choice
     // fake_kafka_consumer("benchalertpacketqueue", "20240617").await?;
-    produce_from_archive("benchalertpacketqueue", 0).await.unwrap();
-    consume_alerts("benchalertpacketqueue", None, true).await.unwrap();
+    produce_from_archive("benchalertpacketqueue", 0)
+        .await
+        .unwrap();
+    consume_alerts("benchalertpacketqueue", None, true)
+        .await
+        .unwrap();
     info!("processing alerts...");
     alert_worker(
         "benchalertpacketqueue",

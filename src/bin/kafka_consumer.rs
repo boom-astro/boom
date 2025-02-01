@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = &args[1];
     let group_id = match args.get(2) {
         Some(id) => Some(id.to_string()),
-        None => None
+        None => None,
     };
 
     let mut exit_on_eof = false;
