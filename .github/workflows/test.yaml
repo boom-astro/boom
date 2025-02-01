@@ -33,7 +33,6 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Start containers
       run: docker-compose up -d
-    - run: redis-cli ping
     - name: Build
       run: cargo build --release
     - name: Tests
