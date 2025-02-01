@@ -1,11 +1,33 @@
 {
     "target": {
-      "service-name": {
+      "mongo": {
         "cache-from": [
-          "type=registry,ref=ghcr.io/boom/service-name:cache"
+          "type=registry,ref=ghcr.io/boom/mongo:cache"
         ],
         "cache-to": [
-          "type=registry,ref=ghcr.io/boom/service-name:cache"
+          "type=registry,ref=ghcr.io/boom/mongo:cache"
+        ],
+        "output": [
+          "type=docker"
+        ]
+      },
+      "valkey": {
+        "cache-from": [
+          "type=registry,ref=ghcr.io/boom/valkey:cache"
+        ],
+        "cache-to": [
+          "type=registry,ref=ghcr.io/boom/valkey:cache"
+        ],
+        "output": [
+          "type=docker"
+        ]
+      },
+      "broker": {
+        "cache-from": [
+          "type=registry,ref=ghcr.io/boom/broker:cache"
+        ],
+        "cache-to": [
+          "type=registry,ref=ghcr.io/boom/broker:cache"
         ],
         "output": [
           "type=docker"
