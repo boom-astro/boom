@@ -43,7 +43,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     - name: Build docker-compose
-      run: docker buildx bake --file docker-compose.yml --file .github/workflows/docker-compose-cache.json
+      run: docker buildx bake --file docker-compose.yaml --file .github/workflows/docker-compose-cache.json
     - name: Start containers
       run: docker compose up -d
     - name: Tests
