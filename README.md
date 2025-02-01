@@ -62,7 +62,7 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Running BOOM:
 
-BOOM is meant to be run in production, reading from a real-time stream of astronomical alerts. **That said, we can create our own Kafka stream using the ZTF alerts public archive to test BOOM.** To do so, you can start the `Kafka` producer with:
+BOOM is meant to be run in production, reading from a real-time stream of astronomical alerts. **That said, we can create our own Kafka stream using the[ZTF alerts public archive](https://ztf.uw.edu/alerts/public/) to test BOOM.** To do so, you can start the `Kafka` producer with:
 ```bash
 cargo run --release --bin kafka_producer <date_in_YYYMMDD_format> <limit>
 ```
