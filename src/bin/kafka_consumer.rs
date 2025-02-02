@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => 1000,
     };
 
-    let _ = consume_alerts(topic, group_id, exit_on_eof, max_in_queue)
+    let _ = consume_alerts(topic, group_id, exit_on_eof, max_in_queue, None)
         .await
         .unwrap();
 

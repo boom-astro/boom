@@ -184,7 +184,7 @@ pub async fn filter_worker(
         }
         if empty_stream_counter == filter_ids.len() {
             info!("FILTER WORKER {}: All streams empty", id);
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             alert_counter = 0;
             if let Ok(command) = receiver.lock().unwrap().try_recv() {
                 match command {

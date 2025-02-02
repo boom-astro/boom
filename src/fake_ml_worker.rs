@@ -76,8 +76,7 @@ pub async fn fake_ml_worker(
         }
 
         if alerts.len() == 0 {
-            info!("ML WORKER {}: queue empty", id);
-            thread::sleep(time::Duration::from_secs(5));
+            thread::sleep(time::Duration::from_secs(1));
             alert_counter = 0;
             if let Ok(command) = receiver.lock().unwrap().try_recv() {
                 match command {

@@ -73,18 +73,11 @@ Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We 
 docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
 
-
-Next, you can start the `Kafka` consumer with:
-```bash
-cargo run --release --bin kafka_consumer <topic> <group_id> <exit_on_eof> <max_in_queue>
-```
-Where `<topic>` is the name of the `Kafka` topic you want to read from. In our case, it would be `ztf_YYYYMMDD_programid1`. This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. Last but not least `<max_in_queue>` allows you to set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
-
 Instead of starting each worker manually, we provide the `scheduler`. It reads the number of workers for each type from `config.yaml`. Run the scheduler with:
 ```bash
-cargo run --release --bin scheduler <stream_name> <config_path>
+cargo run --release --bin scheduler <stream_name> <config_path> <topic>
 ```
-Where `<stream_name>` is the name of the stream you want to process. In our case, it would be `ZTF`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
+Where `<stream_name>` is the name of the stream you want to process (e.g. ZTF). `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted. `<topic>` is the name of the `Kafka` topic you want to read from. In our case, it would be `ztf_YYYYMMDD_programid1`, corresponding to the topic to which the `Kafka` producer is writing the alerts. The scheduler will start the consumer for that topic, alert workers, ML workers, and filter workers as defined in the config file. Once the scheduler - which is BOOM's main process - is running, you can leave it running in the background, and monitor the logs to see the alerts being processed in real-time.
 
 *Before running the scheduler, make sure that you are in your Python virtual environment. This is required for the ML worker, that will run Python-based ML models. If you created it with `uv` as instructed earlier, you can enter the virtual environment with `source .venv/bin/activate`.*
 

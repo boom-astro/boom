@@ -1,5 +1,6 @@
 use crate::{
     alert_worker, fake_ml_worker, filter_worker,
+    kafka::consume_alerts,
     worker_util::{WorkerCmd, WorkerType},
 };
 use std::{
@@ -18,6 +19,7 @@ pub struct ThreadPool {
     pub config_path: String,
     pub workers: HashMap<String, Worker>,
     pub senders: HashMap<String, Option<mpsc::Sender<WorkerCmd>>>,
+    pub topic: Option<String>,
 }
 
 /// Threadpool
@@ -35,6 +37,7 @@ impl ThreadPool {
         size: usize,
         stream_name: String,
         config_path: String,
+        topic: Option<String>,
     ) -> ThreadPool {
         let mut workers = HashMap::new();
         let mut senders = HashMap::new();
@@ -51,6 +54,7 @@ impl ThreadPool {
                     Arc::clone(&receiver),
                     stream_name.clone(),
                     config_path.clone(),
+                    topic.clone(),
                 ),
             );
             senders.insert(id.clone(), Some(sender));
@@ -62,6 +66,7 @@ impl ThreadPool {
             config_path,
             workers,
             senders,
+            topic,
         }
     }
 
@@ -71,19 +76,12 @@ impl ThreadPool {
     pub fn remove_worker(&mut self, id: String) {
         if let Some(sender) = &self.senders[&id] {
             match sender.send(WorkerCmd::TERM) {
-                Ok(_) => {
-                    warn!("Sent terminate message to worker {}", &id);
-                }
+                Ok(_) => {}
                 Err(e) => {
                     warn!("Failed to send terminate message to worker {}: {}", &id, e);
                 }
             }
             self.senders.remove(&id);
-
-            // if let Some(worker) = self.workers.get_mut(&id) {
-            //     if let Some(thread) = worker.thread.take() {
-            //     thread.join().unwrap();
-            // }
         }
     }
 
@@ -100,6 +98,7 @@ impl ThreadPool {
                 Arc::clone(&receiver),
                 self.stream_name.clone(),
                 self.config_path.clone(),
+                self.topic.clone(),
             ),
         );
         self.senders.insert(id.clone(), Some(sender));
@@ -110,8 +109,6 @@ impl ThreadPool {
 // shut down all workers from the thread pool and drop the threadpool
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        warn!("Sending terminate message to all workers.");
-
         // get the ids of all workers
         let ids: Vec<String> = self.senders.keys().cloned().collect();
 
@@ -119,16 +116,21 @@ impl Drop for ThreadPool {
             self.remove_worker(id);
         }
 
-        warn!("Shutting down all workers.");
-
         for (id, worker) in &mut self.workers {
-            warn!("Shutting down worker {}", &id);
+            warn!("Shutting down worker {}: {}", &self.worker_type, &id);
 
             if let Some(thread) = worker.thread.take() {
                 thread.join().unwrap();
             }
         }
     }
+}
+
+#[tokio::main]
+pub async fn kafka_consumer_worker(topic: &str, receiver: Arc<Mutex<mpsc::Receiver<WorkerCmd>>>) {
+    consume_alerts(&topic, None, false, 1000, Some(receiver))
+        .await
+        .unwrap();
 }
 
 /// Worker Struct
@@ -155,6 +157,7 @@ impl Worker {
         receiver: Arc<Mutex<mpsc::Receiver<WorkerCmd>>>,
         stream_name: String,
         config_path: String,
+        topic: Option<String>,
     ) -> Worker {
         let id_copy = id.clone();
         let thread = match worker_type {
@@ -167,6 +170,15 @@ impl Worker {
             WorkerType::ML => thread::spawn(|| {
                 fake_ml_worker::fake_ml_worker(id, receiver, stream_name, config_path);
             }),
+            WorkerType::Consumer => {
+                // if the topic isn't provided, we can't consume alerts so we throw an error
+                match topic {
+                    Some(topic) => thread::spawn(move || {
+                        kafka_consumer_worker(&topic, receiver);
+                    }),
+                    None => panic!("No topic provided for consumer worker"),
+                }
+            }
         };
 
         Worker {

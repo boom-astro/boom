@@ -1,8 +1,10 @@
+use crate::worker_util::WorkerCmd;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use redis::AsyncCommands;
-use tracing::{error, info};
+use std::sync::{mpsc, Arc, Mutex};
+use tracing::{error, info, warn};
 
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 
@@ -65,6 +67,7 @@ pub async fn consume_alerts(
     group_id: Option<String>,
     exit_on_eof: bool,
     max_in_queue: usize,
+    interrupt_handler: Option<Arc<Mutex<mpsc::Receiver<WorkerCmd>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let group_id = match group_id {
         Some(id) => id,
@@ -103,6 +106,25 @@ pub async fn consume_alerts(
     let start = std::time::Instant::now();
     // poll one message at a time
     loop {
+        if !interrupt_handler.is_none() {
+            if let Ok(command) = interrupt_handler
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .try_recv()
+            {
+                match command {
+                    WorkerCmd::TERM => {
+                        warn!(
+                            "Kafka consumer reading from {} received termination command",
+                            &topic
+                        );
+                        break;
+                    }
+                }
+            }
+        }
         if max_in_queue > 0 && total % 1000 == 0 {
             loop {
                 let nb_in_queue = con.llen::<&str, usize>(queue_name).await.unwrap();
@@ -124,7 +146,6 @@ pub async fn consume_alerts(
                 con.rpush::<&str, Vec<u8>, usize>(queue_name, payload.to_vec())
                     .await
                     .unwrap();
-                info!("Pushed message to redis");
                 total += 1;
                 if total % 1000 == 0 {
                     info!("Pushed {} items since {:?}", total, start.elapsed());
