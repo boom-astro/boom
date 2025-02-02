@@ -16,10 +16,25 @@ async fn test_build_filter() {
         doc! { "$match": {} },
         doc! { "$project": { "cutoutScience": 0, "cutoutDifference": 0, "cutoutTemplate": 0, "publisher": 0, "schemavsn": 0 } },
         doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
-        doc! { "$project": { "objectId": 1, "candid": 1, "candidate": 1, "classifications": 1, "coordinates": 1, "cross_matches": { "$arrayElemAt": ["$aux.cross_matches", 0] }, "prv_candidates": { "$filter": { "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] }, "as": "x", "cond": { "$and": [{ "$in": ["$$x.programid", [1_i64]] }, { "$lt": [{ "$subtract": ["$candidate.jd", "$$x.jd"] }, 365] }] } } } } },
-        doc! { "$project": { "cutoutScience": 0_i64, "cutoutDifference": 0_i64, "cutoutTemplate": 0_i64, "publisher": 0_i64, "schemavsn": 0_i64 } },
-        doc! { "$lookup": { "from": "alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
-        doc! { "$project": { "objectId": 1_i64, "candid": 1_i64, "candidate": 1_i64, "classifications": 1_i64, "coordinates": 1_i64, "prv_candidates": { "$arrayElemAt": ["$aux.prv_candidates", 0_i64] }, "cross_matches": { "$arrayElemAt": ["$aux.cross_matches", 0_i64] } } },
+        doc! {
+            "$project": {
+                "objectId": 1, "candid": 1, "candidate": 1, "classifications": 1, "coordinates": 1,
+                "cross_matches": { "$arrayElemAt": ["$aux.cross_matches", 0] },
+                "prv_candidates": {
+                    "$filter": {
+                        "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] },
+                        "as": "x",
+                        "cond": {
+                            "$and": [
+                                { "$in": ["$$x.programid", [1_i64]] },
+                                { "$lt": [{ "$subtract": ["$candidate.jd", "$$x.jd"] }, 365] },
+                                { "$lte": ["$$x.jd", "$candidate.jd"]}
+                            ]
+                        }
+                    }
+                }
+            }
+        },
         doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
     ];
     assert_eq!(pipeline, filter.pipeline);
