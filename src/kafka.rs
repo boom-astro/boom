@@ -64,7 +64,7 @@ pub async fn consume_alerts(
     topic: &str,
     group_id: Option<String>,
     exit_on_eof: bool,
-    max_in_queue: usize
+    max_in_queue: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let group_id = match group_id {
         Some(id) => id,
@@ -107,7 +107,10 @@ pub async fn consume_alerts(
             loop {
                 let nb_in_queue = con.llen::<&str, usize>(queue_name).await.unwrap();
                 if nb_in_queue >= max_in_queue {
-                    info!("{} (limit: {}) items in queue, sleeping...", nb_in_queue, max_in_queue);
+                    info!(
+                        "{} (limit: {}) items in queue, sleeping...",
+                        nb_in_queue, max_in_queue
+                    );
                     std::thread::sleep(core::time::Duration::from_secs(1));
                     continue;
                 }
