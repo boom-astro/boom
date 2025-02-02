@@ -76,9 +76,9 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 
 Next, you can start the `Kafka` consumer with:
 ```bash
-cargo run --release --bin kafka_consumer <topic> <group_id> <exit_on_eof>
+cargo run --release --bin kafka_consumer <topic> <group_id> <exit_on_eof> <max_in_queue>
 ```
-Where `<topic>` is the name of the `Kafka` topic you want to read from. In our case, it would be `ztf_YYYYMMDD_programid1`. This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
+Where `<topic>` is the name of the `Kafka` topic you want to read from. In our case, it would be `ztf_YYYYMMDD_programid1`. This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. Last but not least `<max_in_queue>` allows you to set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 Instead of starting each worker manually, we provide the `scheduler`. It reads the number of workers for each type from `config.yaml`. Run the scheduler with:
 ```bash

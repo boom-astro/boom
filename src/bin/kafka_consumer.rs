@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        error!("Usage: kafka_consumer <topic> <group_id> <exit_on_eof>");
+        error!("Usage: kafka_consumer <topic> <group_id> <exit_on_eof> <max_in_queue>");
         return Ok(());
     }
 
@@ -28,8 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             exit_on_eof = true;
         }
     }
+    let max_in_queue: usize = match args.get(4) {
+        Some(max_in_queue) => max_in_queue.parse().unwrap(),
+        None => 1000,
+    };
 
-    let _ = consume_alerts(topic, group_id, exit_on_eof).await.unwrap();
+    let _ = consume_alerts(topic, group_id, exit_on_eof, max_in_queue).await.unwrap();
 
     Ok(())
 }

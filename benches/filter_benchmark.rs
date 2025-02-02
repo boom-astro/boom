@@ -15,7 +15,7 @@ pub async fn setup_benchmark(queue_name: &str) -> Result<(), Box<dyn std::error:
     // drop alert and alert_aux collections in database
     drop_alert_collections("ZTF_alerts", "ZTF_alerts_aux").await?;
     produce_from_archive("20240617", 0).await.unwrap();
-    consume_alerts("ztf_20240617_programid1", None, true)
+    consume_alerts("ztf_20240617_programid1", None, true, 0)
         .await
         .unwrap();
     info!("processing alerts...");

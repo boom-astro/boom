@@ -141,7 +141,7 @@ pub async fn alert_worker(
             }
             None => {
                 info!("ALERT WORKER {}: Queue is empty", id);
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 alert_counter = 0;
                 // check for command from threadpool
                 if let Ok(command) = receiver.lock().unwrap().try_recv() {
