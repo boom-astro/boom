@@ -1351,10 +1351,34 @@ impl PrvCandidate {
         // sanitize it by removing fields with None values
         let mut cleaned_doc = mongodb::bson::Document::new();
         for (key, value) in to_document(&self).unwrap() {
-            if value != mongodb::bson::Bson::Null {
-                cleaned_doc.insert(key, value);
+            if value == mongodb::bson::Bson::Null {
+                continue;
+            } else if key == "pdiffimfilename"
+                || key == "programpi"
+                || key == "rbversion"
+                || key == "drbversion"
+            {
+                continue;
+            } else if let Some(s) = value.as_str() {
+                if s == "null" || s == "" {
+                    continue;
+                }
+            } else if let Some(f) = value.as_f64() {
+                if f == -999.0 {
+                    continue;
+                }
             }
+            cleaned_doc.insert(key, value);
         }
+
+        let isdiffpos = match self.isdiffpos {
+            Some(s) => match s.as_str() {
+                "T" | "t" | "true" | "True" | "1" => true,
+                _ => false,
+            },
+            None => false,
+        };
+        cleaned_doc.insert("isdiffpos", isdiffpos);
         cleaned_doc
     }
 }
@@ -1365,9 +1389,49 @@ impl FpHist {
         // sanitize it by removing fields with None values
         let mut cleaned_doc = mongodb::bson::Document::new();
         for (key, value) in to_document(&self).unwrap() {
-            if value != mongodb::bson::Bson::Null {
-                cleaned_doc.insert(key, value);
+            if value == mongodb::bson::Bson::Null {
+                continue;
+            } else if let Some(s) = value.as_str() {
+                if s == "null" || s == "" {
+                    continue;
+                }
+            } else if let Some(f) = value.as_f64() {
+                if f == -99999.0 {
+                    continue;
+                }
             }
+            cleaned_doc.insert(key, value);
+        }
+
+        // make procstatus an integer
+        // right now it is a number, but it is stored as a string
+        match self.procstatus {
+            Some(ref s) => {
+                if let Ok(i) = s.parse::<i32>() {
+                    cleaned_doc.insert("procstatus", i);
+                    //  if the procstatus is 0, we can use the forcediffimflux and forcediffimfluxunc
+                    //  to compute an SNR
+                    if i == 0 {
+                        if let (Some(forcediffimflux), Some(forcediffimfluxunc), Some(magzpsci)) =
+                            (self.forcediffimflux, self.forcediffimfluxunc, self.magzpsci)
+                        {
+                            let snr = forcediffimflux / forcediffimfluxunc;
+                            cleaned_doc.insert("snr", snr);
+                            if snr > 3.0 {
+                                // we compute the mag and magerr
+                                let (mag, magerr) = flare::phot::flux_to_mag(
+                                    forcediffimflux.abs() as f64,
+                                    forcediffimfluxunc as f64,
+                                    magzpsci as f64,
+                                );
+                                cleaned_doc.insert("magpsf", mag);
+                                cleaned_doc.insert("sigmapsf", magerr);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
         }
         cleaned_doc
     }
