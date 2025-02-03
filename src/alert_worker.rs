@@ -5,7 +5,7 @@ use crate::{
 };
 use redis::AsyncCommands;
 use std::sync::{mpsc, Arc, Mutex};
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 
 // alert worker as a standalone function which is run by the scheduler
 #[tokio::main]
@@ -97,7 +97,7 @@ pub async fn alert_worker(
                 alert_counter += 1;
                 match candid {
                     Ok(Some(candid)) => {
-                        info!(
+                        trace!(
                             "Processed alert with candid: {}, queueing for classification",
                             candid
                         );
@@ -141,7 +141,7 @@ pub async fn alert_worker(
             }
             None => {
                 info!("ALERT WORKER {}: Queue is empty", id);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 alert_counter = 0;
                 // check for command from threadpool
                 if let Ok(command) = receiver.lock().unwrap().try_recv() {

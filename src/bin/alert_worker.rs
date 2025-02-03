@@ -2,7 +2,7 @@ use boom::{alert, conf, types::ztf_alert_schema, worker_util};
 use redis::AsyncCommands;
 use std::env;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
@@ -102,7 +102,7 @@ async fn main() {
                 .await;
                 match candid {
                     Ok(Some(candid)) => {
-                        info!(
+                        trace!(
                             "Processed alert with candid: {}, queueing for classification",
                             candid
                         );
@@ -146,7 +146,7 @@ async fn main() {
             }
             None => {
                 info!("Queue is empty");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         }
     }

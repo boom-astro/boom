@@ -183,7 +183,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         if empty_stream_counter == filter_ids.len() {
             info!("All streams empty");
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
         empty_stream_counter = 0;
     }
