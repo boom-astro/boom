@@ -38,7 +38,9 @@ async fn test_run_filter() {
 
     let test_col_name = "ZTF_alerts";
     let test_aux_col_name = "ZTF_alerts_aux";
-    let _ = tu::drop_alert_collections(&test_col_name, &test_aux_col_name).await;
+    let test_cutouts_col_name = "ZTF_alerts_cutouts";
+    let _ = tu::drop_alert_collections(&test_col_name, &test_aux_col_name, &test_cutouts_col_name)
+        .await;
     let result = kafka::produce_from_archive("20240617", 0).await;
     assert!(result.is_ok());
     let result = kafka::consume_alerts("ztf_20240617_programid1", None, true, 0, None).await;
@@ -49,6 +51,7 @@ async fn test_run_filter() {
         "worker_output_queue",
         &test_col_name,
         &test_aux_col_name,
+        &test_cutouts_col_name,
     )
     .await;
 

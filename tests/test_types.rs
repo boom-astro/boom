@@ -124,12 +124,7 @@ fn test_alert() {
     assert_eq!(fp_hist.clone().unwrap().len(), 10);
 
     // validate the conversion to bson
-    let alert_doc = alert_no_history.mongify();
-    assert_eq!(alert_doc.get_str("schemavsn").unwrap(), "4.02");
-    assert_eq!(
-        alert_doc.get_str("publisher").unwrap(),
-        "ZTF (www.ztf.caltech.edu)"
-    );
+    let (alert_doc, alert_cutouts) = alert_no_history.mongify();
     assert_eq!(alert_doc.get_str("objectId").unwrap(), "ZTF18abudxnw");
     assert_eq!(alert_doc.get_i64("candid").unwrap(), 2695378462115010012);
     assert_eq!(
@@ -148,6 +143,9 @@ fn test_alert() {
             .unwrap(),
         -10.3958989
     );
+
+    assert_eq!(alert_cutouts.get_i64("_id").unwrap(), 2695378462115010012);
+    assert_eq!(alert_cutouts.get_str("objectId").unwrap(), "ZTF18abudxnw");
 
     // validate the conversion to bson for prv_candidates
     let prv_candidates_doc = prv_candidates

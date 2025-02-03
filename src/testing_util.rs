@@ -10,6 +10,7 @@ use tracing::{error, info};
 pub async fn drop_alert_collections(
     alert_collection_name: &str,
     alert_aux_collection_name: &str,
+    alert_cutouts_collection_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
@@ -17,6 +18,9 @@ pub async fn drop_alert_collections(
         .drop()
         .await?;
     db.collection::<mongodb::bson::Document>(alert_aux_collection_name)
+        .drop()
+        .await?;
+    db.collection::<mongodb::bson::Document>(alert_cutouts_collection_name)
         .drop()
         .await?;
     Ok(())
