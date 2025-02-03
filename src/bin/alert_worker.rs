@@ -2,7 +2,7 @@ use boom::{alert, conf, types::ztf_alert_schema, worker_util};
 use redis::AsyncCommands;
 use std::env;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
@@ -47,6 +47,7 @@ async fn main() {
 
     let alert_collection = db.collection(&format!("{}_alerts", stream_name));
     let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
+    let alert_cutouts_collection = db.collection(&format!("{}_alerts_cutouts", stream_name));
 
     // create index for alert collection
     let alert_candid_index = mongodb::IndexModel::builder()
@@ -97,12 +98,13 @@ async fn main() {
                     &db,
                     &alert_collection,
                     &alert_aux_collection,
+                    &alert_cutouts_collection,
                     &schema,
                 )
                 .await;
                 match candid {
                     Ok(Some(candid)) => {
-                        info!(
+                        trace!(
                             "Processed alert with candid: {}, queueing for classification",
                             candid
                         );
@@ -146,7 +148,7 @@ async fn main() {
             }
             None => {
                 info!("Queue is empty");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         }
     }

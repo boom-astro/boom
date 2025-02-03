@@ -3,7 +3,7 @@ use std::io::Read;
 use apache_avro::from_value;
 use apache_avro::{from_avro_datum, Reader, Schema};
 use config::Value;
-use flare::spatial::{deg2dms, deg2hms, radec2lb};
+use flare::spatial::radec2lb;
 use mongodb::bson::doc;
 use mongodb::bson::to_document;
 use tracing::error;
@@ -1117,6 +1117,46 @@ fn default_candidate_drb() -> Option<f32> {
     None
 }
 
+impl Candidate {
+    fn mongify(&self) -> mongodb::bson::Document {
+        let mut candidate_doc = to_document(self).unwrap();
+        let mut keys_to_keep = vec![];
+        for (key, value) in &candidate_doc {
+            if value == &mongodb::bson::Bson::Null {
+                continue;
+            } else if key == "pdiffimfilename"
+                || key == "programpi"
+                || key == "rbversion"
+                || key == "drbversion"
+            {
+                continue;
+            } else if let Some(s) = value.as_str() {
+                if s == "null" || s == "" {
+                    continue;
+                }
+            } else if let Some(f) = value.as_f64() {
+                if f == -999.0 {
+                    continue;
+                }
+            }
+            keys_to_keep.push(key.clone());
+        }
+        let mut new_doc = mongodb::bson::Document::new();
+        for key in keys_to_keep.iter() {
+            new_doc.insert(key, candidate_doc.remove(&key).unwrap());
+        }
+        let isdiffpos = match new_doc.get_str("isdiffpos") {
+            Ok(s) => match s {
+                "T" | "t" | "true" | "True" | "1" => true,
+                _ => false,
+            },
+            Err(_) => false,
+        };
+        new_doc.insert("isdiffpos", isdiffpos);
+        new_doc
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Alert {
     pub schemavsn: String,
@@ -1266,20 +1306,43 @@ impl Alert {
 
 impl AlertNoHistory {
     // add a function to convert the AlertNoHistory to a mongodb document
-    pub fn mongify(self) -> mongodb::bson::Document {
-        let mut doc = to_document(&self).unwrap();
+    pub fn mongify(self) -> (mongodb::bson::Document, mongodb::bson::Document) {
+        to_document(&self).unwrap();
         let (l, b) = radec2lb(self.candidate.ra, self.candidate.dec);
-        let coordinates = doc! {
-            "radec_geojson": {
-                "type": "Point",
-                "coordinates": [self.candidate.ra - 180.0, self.candidate.dec]
-            },
-            "radec_str": [deg2hms(self.candidate.ra), deg2dms(self.candidate.dec)],
-            "l": l,
-            "b": b
+        let doc = doc! {
+            "candid": self.candid,
+            "objectId": self.object_id.clone(),
+            "candidate": self.candidate.mongify(),
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [self.candidate.ra - 180.0, self.candidate.dec]
+                },
+                // "radec_str": [deg2hms(self.candidate.ra), deg2dms(self.candidate.dec)],
+                "l": l,
+                "b": b
+            }
         };
-        doc.insert("coordinates", coordinates);
-        doc
+
+        let mut cutouts = doc! {
+            "_id": self.candid,
+            "objectId": self.object_id,
+        };
+
+        if let Some(cutout_science) = self.cutout_science {
+            let cutout_doc = to_document(&cutout_science).unwrap();
+            cutouts.insert("cutoutScience", cutout_doc.get("stampData").unwrap());
+        }
+        if let Some(cutout_template) = self.cutout_template {
+            let cutout_doc = to_document(&cutout_template).unwrap();
+            cutouts.insert("cutoutTemplate", cutout_doc.get("stampData").unwrap());
+        }
+        if let Some(cutout_difference) = self.cutout_difference {
+            let cutout_doc = to_document(&cutout_difference).unwrap();
+            cutouts.insert("cutoutDifference", cutout_doc.get("stampData").unwrap());
+        }
+
+        (doc, cutouts)
     }
 }
 
@@ -1288,10 +1351,34 @@ impl PrvCandidate {
         // sanitize it by removing fields with None values
         let mut cleaned_doc = mongodb::bson::Document::new();
         for (key, value) in to_document(&self).unwrap() {
-            if value != mongodb::bson::Bson::Null {
-                cleaned_doc.insert(key, value);
+            if value == mongodb::bson::Bson::Null {
+                continue;
+            } else if key == "pdiffimfilename"
+                || key == "programpi"
+                || key == "rbversion"
+                || key == "drbversion"
+            {
+                continue;
+            } else if let Some(s) = value.as_str() {
+                if s == "null" || s == "" {
+                    continue;
+                }
+            } else if let Some(f) = value.as_f64() {
+                if f == -999.0 {
+                    continue;
+                }
             }
+            cleaned_doc.insert(key, value);
         }
+
+        let isdiffpos = match self.isdiffpos {
+            Some(s) => match s.as_str() {
+                "T" | "t" | "true" | "True" | "1" => true,
+                _ => false,
+            },
+            None => false,
+        };
+        cleaned_doc.insert("isdiffpos", isdiffpos);
         cleaned_doc
     }
 }
@@ -1302,9 +1389,49 @@ impl FpHist {
         // sanitize it by removing fields with None values
         let mut cleaned_doc = mongodb::bson::Document::new();
         for (key, value) in to_document(&self).unwrap() {
-            if value != mongodb::bson::Bson::Null {
-                cleaned_doc.insert(key, value);
+            if value == mongodb::bson::Bson::Null {
+                continue;
+            } else if let Some(s) = value.as_str() {
+                if s == "null" || s == "" {
+                    continue;
+                }
+            } else if let Some(f) = value.as_f64() {
+                if f == -99999.0 {
+                    continue;
+                }
             }
+            cleaned_doc.insert(key, value);
+        }
+
+        // make procstatus an integer
+        // right now it is a number, but it is stored as a string
+        match self.procstatus {
+            Some(ref s) => {
+                if let Ok(i) = s.parse::<i32>() {
+                    cleaned_doc.insert("procstatus", i);
+                    //  if the procstatus is 0, we can use the forcediffimflux and forcediffimfluxunc
+                    //  to compute an SNR
+                    if i == 0 {
+                        if let (Some(forcediffimflux), Some(forcediffimfluxunc), Some(magzpsci)) =
+                            (self.forcediffimflux, self.forcediffimfluxunc, self.magzpsci)
+                        {
+                            let snr = forcediffimflux / forcediffimfluxunc;
+                            cleaned_doc.insert("snr", snr);
+                            if snr > 3.0 {
+                                // we compute the mag and magerr
+                                let (mag, magerr) = flare::phot::flux_to_mag(
+                                    forcediffimflux.abs() as f64,
+                                    forcediffimfluxunc as f64,
+                                    magzpsci as f64,
+                                );
+                                cleaned_doc.insert("magpsf", mag);
+                                cleaned_doc.insert("sigmapsf", magerr);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
         }
         cleaned_doc
     }

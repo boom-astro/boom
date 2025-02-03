@@ -30,6 +30,7 @@ pub async fn alert_worker(
     // create alert and alert-auxillary collections
     let alert_collection = db.collection(&format!("{}_alerts", stream_name));
     let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
+    let alert_cutouts_collection = db.collection(&format!("{}_alerts_cutouts", stream_name));
 
     // create index for alert collection
     let alert_candid_index = mongodb::IndexModel::builder()
@@ -91,16 +92,17 @@ pub async fn alert_worker(
                     &db,
                     &alert_collection,
                     &alert_aux_collection,
+                    &alert_cutouts_collection,
                     &schema,
                 )
                 .await;
                 alert_counter += 1;
                 match candid {
                     Ok(Some(candid)) => {
-                        info!(
-                            "Processed alert with candid: {}, queueing for classification",
-                            candid
-                        );
+                        // trace!(
+                        //     "Processed alert with candid: {}, queueing for classification",
+                        //     candid
+                        // );
                         // queue the candid for processing by the classifier
                         con.lpush::<&str, i64, isize>(&classifer_queue_name, candid)
                             .await
@@ -110,7 +112,7 @@ pub async fn alert_worker(
                             .unwrap();
                     }
                     Ok(None) => {
-                        info!("Alert already exists");
+                        // info!("Alert already exists");
                         // remove the alert from the queue
                         con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
                             .await
@@ -141,7 +143,7 @@ pub async fn alert_worker(
             }
             None => {
                 info!("ALERT WORKER {}: Queue is empty", id);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 alert_counter = 0;
                 // check for command from threadpool
                 if let Ok(command) = receiver.lock().unwrap().try_recv() {
