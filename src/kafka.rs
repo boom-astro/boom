@@ -105,28 +105,30 @@ pub async fn consume_alerts(
     // start timer
     let start = std::time::Instant::now();
     // poll one message at a time
+    let mut exit = false;
     loop {
-        if !interrupt_handler.is_none() {
-            if let Ok(command) = interrupt_handler
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .try_recv()
-            {
-                match command {
-                    WorkerCmd::TERM => {
-                        warn!(
-                            "Kafka consumer reading from {} received termination command",
-                            &topic
-                        );
-                        break;
+        if (max_in_queue > 0 && total % 1000 == 0) || !interrupt_handler.is_none() {
+            loop {
+                if !interrupt_handler.is_none() {
+                    if let Ok(command) = interrupt_handler
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .try_recv()
+                    {
+                        match command {
+                            WorkerCmd::TERM => {
+                                warn!(
+                                    "Kafka consumer reading from {} received termination command",
+                                    &topic
+                                );
+                                exit = true;
+                                break;
+                            }
+                        }
                     }
                 }
-            }
-        }
-        if max_in_queue > 0 && total % 1000 == 0 {
-            loop {
                 let nb_in_queue = con.llen::<&str, usize>(queue_name).await.unwrap();
                 if nb_in_queue >= max_in_queue {
                     info!(
@@ -134,10 +136,14 @@ pub async fn consume_alerts(
                         nb_in_queue, max_in_queue
                     );
                     std::thread::sleep(core::time::Duration::from_secs(1));
-                    continue;
+                } else {
+                    exit = false;
+                    break;
                 }
-                break;
             }
+        }
+        if exit {
+            break;
         }
         let message = consumer.poll(tokio::time::Duration::from_secs(5));
         match message {

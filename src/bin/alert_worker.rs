@@ -47,6 +47,7 @@ async fn main() {
 
     let alert_collection = db.collection(&format!("{}_alerts", stream_name));
     let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
+    let alert_cutouts_collection = db.collection(&format!("{}_alerts_cutouts", stream_name));
 
     // create index for alert collection
     let alert_candid_index = mongodb::IndexModel::builder()
@@ -97,6 +98,7 @@ async fn main() {
                     &db,
                     &alert_collection,
                     &alert_aux_collection,
+                    &alert_cutouts_collection,
                     &schema,
                 )
                 .await;

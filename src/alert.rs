@@ -2,7 +2,7 @@ use crate::spatial;
 use crate::types;
 use flare::time::Time;
 use mongodb::bson::doc;
-use tracing::{error, info};
+use tracing::error;
 
 pub async fn process_alert(
     avro_bytes: Vec<u8>,
@@ -10,6 +10,7 @@ pub async fn process_alert(
     db: &mongodb::Database,
     alert_collection: &mongodb::Collection<mongodb::bson::Document>,
     alert_aux_collection: &mongodb::Collection<mongodb::bson::Document>,
+    alert_cutouts_collection: &mongodb::Collection<mongodb::bson::Document>,
     schema: &apache_avro::Schema,
 ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
     // decode the alert
@@ -29,7 +30,7 @@ pub async fn process_alert(
         .is_none()
     {
         // we return early if there is already an alert with the same candid
-        info!("alert with candid {} already exists", &alert.candid);
+        // info!("alert with candid {} already exists", &alert.candid);
         return Ok(None);
     }
 
@@ -43,9 +44,13 @@ pub async fn process_alert(
     let (alert_no_history, prv_candidates, fp_hist) = alert.pop_history();
 
     // insert the alert into the alerts collection (with a created_at timestamp)
-    let mut alert_doc = alert_no_history.mongify();
+    let (mut alert_doc, cutouts_doc) = alert_no_history.mongify();
     alert_doc.insert("created_at", Time::now().to_jd());
     alert_collection.insert_one(alert_doc).await.unwrap();
+    alert_cutouts_collection
+        .insert_one(cutouts_doc)
+        .await
+        .unwrap();
 
     // - new objects - new entry with prv_candidates, fp_hists, xmatches
     // - existing objects - update prv_candidates, fp_hists

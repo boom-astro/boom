@@ -28,6 +28,7 @@ pub async fn alert_worker(
     output_packet_queue: &str,
     alert_collection_name: &str,
     alert_aux_collection_name: &str,
+    alert_cutouts_collection_name: &str,
 ) {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let stream_name = "ZTF";
@@ -40,6 +41,7 @@ pub async fn alert_worker(
     }
     let alert_collection = db.collection(alert_collection_name);
     let alert_aux_collection = db.collection(alert_aux_collection_name);
+    let alert_cutouts_collection = db.collection(alert_cutouts_collection_name);
 
     let input_packet_queue_temp = format!("{}_temp", input_packet_queue);
     let schema = types::ztf_alert_schema().unwrap();
@@ -63,6 +65,7 @@ pub async fn alert_worker(
                     &db,
                     &alert_collection,
                     &alert_aux_collection,
+                    &alert_cutouts_collection,
                     &schema,
                 )
                 .await;

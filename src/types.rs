@@ -3,7 +3,7 @@ use std::io::Read;
 use apache_avro::from_value;
 use apache_avro::{from_avro_datum, Reader, Schema};
 use config::Value;
-use flare::spatial::{deg2dms, deg2hms, radec2lb};
+use flare::spatial::radec2lb;
 use mongodb::bson::doc;
 use mongodb::bson::to_document;
 use tracing::error;
@@ -1117,6 +1117,46 @@ fn default_candidate_drb() -> Option<f32> {
     None
 }
 
+impl Candidate {
+    fn mongify(&self) -> mongodb::bson::Document {
+        let mut candidate_doc = to_document(self).unwrap();
+        let mut keys_to_keep = vec![];
+        for (key, value) in &candidate_doc {
+            if value == &mongodb::bson::Bson::Null {
+                continue;
+            } else if key == "pdiffimfilename"
+                || key == "programpi"
+                || key == "rbversion"
+                || key == "drbversion"
+            {
+                continue;
+            } else if let Some(s) = value.as_str() {
+                if s == "null" || s == "" {
+                    continue;
+                }
+            } else if let Some(f) = value.as_f64() {
+                if f == -999.0 {
+                    continue;
+                }
+            }
+            keys_to_keep.push(key.clone());
+        }
+        let mut new_doc = mongodb::bson::Document::new();
+        for key in keys_to_keep.iter() {
+            new_doc.insert(key, candidate_doc.remove(&key).unwrap());
+        }
+        let isdiffpos = match new_doc.get_str("isdiffpos") {
+            Ok(s) => match s {
+                "T" | "t" | "true" | "True" | "1" => true,
+                _ => false,
+            },
+            Err(_) => false,
+        };
+        new_doc.insert("isdiffpos", isdiffpos);
+        new_doc
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Alert {
     pub schemavsn: String,
@@ -1266,20 +1306,43 @@ impl Alert {
 
 impl AlertNoHistory {
     // add a function to convert the AlertNoHistory to a mongodb document
-    pub fn mongify(self) -> mongodb::bson::Document {
-        let mut doc = to_document(&self).unwrap();
+    pub fn mongify(self) -> (mongodb::bson::Document, mongodb::bson::Document) {
+        to_document(&self).unwrap();
         let (l, b) = radec2lb(self.candidate.ra, self.candidate.dec);
-        let coordinates = doc! {
-            "radec_geojson": {
-                "type": "Point",
-                "coordinates": [self.candidate.ra - 180.0, self.candidate.dec]
-            },
-            "radec_str": [deg2hms(self.candidate.ra), deg2dms(self.candidate.dec)],
-            "l": l,
-            "b": b
+        let doc = doc! {
+            "candid": self.candid,
+            "objectId": self.object_id.clone(),
+            "candidate": self.candidate.mongify(),
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [self.candidate.ra - 180.0, self.candidate.dec]
+                },
+                // "radec_str": [deg2hms(self.candidate.ra), deg2dms(self.candidate.dec)],
+                "l": l,
+                "b": b
+            }
         };
-        doc.insert("coordinates", coordinates);
-        doc
+
+        let mut cutouts = doc! {
+            "_id": self.candid,
+            "objectId": self.object_id,
+        };
+
+        if let Some(cutout_science) = self.cutout_science {
+            let cutout_doc = to_document(&cutout_science).unwrap();
+            cutouts.insert("cutoutScience", cutout_doc.get("stampData").unwrap());
+        }
+        if let Some(cutout_template) = self.cutout_template {
+            let cutout_doc = to_document(&cutout_template).unwrap();
+            cutouts.insert("cutoutTemplate", cutout_doc.get("stampData").unwrap());
+        }
+        if let Some(cutout_difference) = self.cutout_difference {
+            let cutout_doc = to_document(&cutout_difference).unwrap();
+            cutouts.insert("cutoutDifference", cutout_doc.get("stampData").unwrap());
+        }
+
+        (doc, cutouts)
     }
 }
 

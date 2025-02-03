@@ -5,7 +5,7 @@ use crate::{
 };
 use redis::AsyncCommands;
 use std::sync::{mpsc, Arc, Mutex};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, warn};
 
 // alert worker as a standalone function which is run by the scheduler
 #[tokio::main]
@@ -30,6 +30,7 @@ pub async fn alert_worker(
     // create alert and alert-auxillary collections
     let alert_collection = db.collection(&format!("{}_alerts", stream_name));
     let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
+    let alert_cutouts_collection = db.collection(&format!("{}_alerts_cutouts", stream_name));
 
     // create index for alert collection
     let alert_candid_index = mongodb::IndexModel::builder()
@@ -91,16 +92,17 @@ pub async fn alert_worker(
                     &db,
                     &alert_collection,
                     &alert_aux_collection,
+                    &alert_cutouts_collection,
                     &schema,
                 )
                 .await;
                 alert_counter += 1;
                 match candid {
                     Ok(Some(candid)) => {
-                        trace!(
-                            "Processed alert with candid: {}, queueing for classification",
-                            candid
-                        );
+                        // trace!(
+                        //     "Processed alert with candid: {}, queueing for classification",
+                        //     candid
+                        // );
                         // queue the candid for processing by the classifier
                         con.lpush::<&str, i64, isize>(&classifer_queue_name, candid)
                             .await
@@ -110,7 +112,7 @@ pub async fn alert_worker(
                             .unwrap();
                     }
                     Ok(None) => {
-                        info!("Alert already exists");
+                        // info!("Alert already exists");
                         // remove the alert from the queue
                         con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
                             .await
