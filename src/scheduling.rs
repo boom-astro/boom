@@ -87,8 +87,8 @@ impl ThreadPool {
         }
     }
 
-    // add a new worker to the thread pool
-    pub fn add_worker(&mut self) {
+    // add a new worker to the thread pool, return its id
+    pub fn add_worker(&mut self) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = mpsc::channel();
         let receiver = Arc::new(Mutex::new(receiver));
@@ -104,6 +104,7 @@ impl ThreadPool {
         );
         self.senders.insert(id.clone(), Some(sender));
         info!("Added worker with id: {}", &id);
+        id
     }
 }
 

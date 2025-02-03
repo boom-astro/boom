@@ -5,6 +5,9 @@ use std::{
     fmt,
     sync::{Arc, Mutex},
 };
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tracing::warn;
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
@@ -14,6 +17,65 @@ pub async fn sig_int_handler(flag: Arc<Mutex<bool>>) {
         warn!("Received interrupt signal. Finishing up...");
         let mut flag = flag.try_lock().unwrap();
         *flag = true;
+    });
+}
+
+// spawns a thread that creates a TcpListener server and that waits for a command to be sent to it,
+pub async fn sig_cmd_handler(command: Arc<Mutex<String>>, response: Arc<Mutex<String>>) {
+    tokio::spawn(async move {
+        let addr = "localhost:8080";
+        let listener = TcpListener::bind(addr).await.unwrap();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let n = socket.read(&mut buf).await.unwrap();
+
+            let mut cmd = std::str::from_utf8(&buf[..n]).unwrap();
+            cmd = cmd.trim_end_matches(|c: char| !c.is_alphanumeric());
+            let formatted_cmd = format!("{} ", cmd);
+            cmd = formatted_cmd.as_str();
+
+            loop {
+                let command = command.try_lock();
+                match command {
+                    Ok(mut command) => {
+                        *command = cmd.to_string();
+
+                        drop(command);
+                        break;
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
+
+            let response_content;
+
+            // wait for the response to be set
+            loop {
+                let response = response.try_lock();
+                match response {
+                    Ok(mut response) => {
+                        if response.len() > 0 {
+                            println!("response from scheduler: {}", response);
+                            response_content = response.clone();
+                            *response = "".to_string();
+                            break;
+                        }
+                        drop(response);
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
+
+            socket
+                .write_all(format!("{}\n", response_content).as_bytes())
+                .await
+                .unwrap();
+        }
     });
 }
 
@@ -40,6 +102,20 @@ pub fn check_flag(flag: Arc<Mutex<bool>>) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+// check returns value of cmd, or None if it is not available
+pub fn check_cmd(command: Arc<Mutex<String>>) -> Option<String> {
+    match command.try_lock() {
+        Ok(x) => {
+            if x.len() > 0 {
+                Some(x.clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
