@@ -1,10 +1,18 @@
 use config::Config;
 use config::ConfigError;
 use config::File;
+use std::path::Path;
+use tracing::error;
 
 use crate::types;
 
 pub fn load_config(filepath: &str) -> Result<Config, ConfigError> {
+    let path = Path::new(filepath);
+
+    if !path.exists() {
+        error!("Config file {} does not exist.", path.display())
+    }
+
     let conf = Config::builder()
         .add_source(File::with_name(filepath))
         .build()
