@@ -24,17 +24,20 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let interrupt_flag = Arc::new(Mutex::new(false));
-    worker_util::sig_int_handler(Arc::clone(&interrupt_flag)).await;
-
     let stream_name = &args.stream.unwrap();
 
-    let config_file = if args.config.is_some() {
-        conf::load_config(&args.config.unwrap()).unwrap()
-    } else {
+    if !args.config.is_some() {
         warn!("No config file provided, using config.yaml");
-        conf::load_config("./config.yaml").unwrap()
+    }
+    let config_path = if args.config.is_some() {
+        args.config.unwrap()
+    } else {
+        String::from("./config.yaml")
     };
+    let config_file = conf::load_config(&config_path).unwrap();
+
+    let interrupt_flag = Arc::new(Mutex::new(false));
+    worker_util::sig_int_handler(Arc::clone(&interrupt_flag)).await;
 
     // XMATCH CONFIGS
     let xmatch_configs = conf::build_xmatch_configs(&config_file, stream_name);
