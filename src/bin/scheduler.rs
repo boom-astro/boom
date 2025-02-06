@@ -1,12 +1,21 @@
 use boom::{conf, scheduling::ThreadPool, worker_util, worker_util::WorkerType};
+use clap::Parser;
 use config::Config;
 use std::{
-    env,
     sync::{Arc, Mutex},
     thread,
 };
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+#[derive(Parser)]
+struct Cli {
+    #[arg(required = true, help = "Name of stream to ingest")]
+    stream: Option<String>,
+
+    #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
+    config: Option<String>,
+}
 
 fn get_num_workers(conf: Config, stream_name: &str, worker_type: &str) -> i64 {
     let table = conf
@@ -44,35 +53,30 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    // get env::args for stream_name and config_path
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        print!("usage: scheduler <stream_name> <config_path>, where `config_path` is optional");
-        return;
-    }
+    let args = Cli::parse();
 
-    let stream_name = args[1].to_string();
-    let config_path = if args.len() > 2 {
-        &args[2]
+    let stream_name = args.stream.unwrap();
+
+    if !args.config.is_some() {
+        warn!("No config file provided, using config.yaml");
+    }
+    let config_path = if args.config.is_some() {
+        args.config.unwrap()
     } else {
-        warn!("No config file provided, using `config.yaml`");
-        "./config.yaml"
-    }
-    .to_string();
+        String::from("./config.yaml")
+    };
+    let config_file = conf::load_config(&config_path).unwrap();
 
-    let config_file = conf::load_config(config_path.as_str()).unwrap();
     // get num workers from config file
-
-    let n_alert = get_num_workers(config_file.to_owned(), stream_name.as_str(), "alert");
-    let n_ml = get_num_workers(config_file.to_owned(), stream_name.as_str(), "ml");
-    let n_filter = get_num_workers(config_file.to_owned(), stream_name.as_str(), "filter");
+    let n_alert = get_num_workers(config_file.to_owned(), &stream_name, "alert");
+    let n_ml = get_num_workers(config_file.to_owned(), &stream_name, "ml");
+    let n_filter = get_num_workers(config_file.to_owned(), &stream_name, "filter");
 
     // setup signal handler thread
     let interrupt = Arc::new(Mutex::new(false));
     worker_util::sig_int_handler(Arc::clone(&interrupt)).await;
 
     info!("creating alert, ml, and filter workers...");
-    // note: maybe use &str instead of String for stream_name and config_path to reduce clone calls
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
