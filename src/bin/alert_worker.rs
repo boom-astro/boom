@@ -1,9 +1,18 @@
 use boom::{alert, conf, types::ztf_alert_schema, worker_util};
+use clap::Parser;
 use redis::AsyncCommands;
-use std::env;
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+#[derive(Parser)]
+struct Cli {
+    #[arg(required = true, help = "Name of stream to ingest")]
+    stream: Option<String>,
+
+    #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
+    config: Option<String>,
+}
 
 #[tokio::main]
 async fn main() {
@@ -13,27 +22,22 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let args: Vec<String> = env::args().collect();
-    // user can pass the path to a config file, but it is optional.
-    // if not provided, we use the default config.default.yaml
-    // the user also needs to pass the name of the alert stream to process
-    // stream name comes first, optional config file comes second
-    if args.len() < 2 {
-        error!("Usage: alert_worker <stream_name> <config_file>, where config_file is optional");
-        return;
+    let args = Cli::parse();
+
+    let stream_name = &args.stream.unwrap();
+
+    if !args.config.is_some() {
+        warn!("No config file provided, using config.yaml");
     }
+    let config_path = if args.config.is_some() {
+        args.config.unwrap()
+    } else {
+        String::from("./config.yaml")
+    };
+    let config_file = conf::load_config(&config_path).unwrap();
 
     let interrupt_flag = Arc::new(Mutex::new(false));
     worker_util::sig_int_handler(Arc::clone(&interrupt_flag)).await;
-
-    let stream_name = &args[1];
-
-    let config_file = if args.len() > 2 {
-        conf::load_config(&args[2]).unwrap()
-    } else {
-        warn!("No config file provided, using config.yaml");
-        conf::load_config("./config.yaml").unwrap()
-    };
 
     // XMATCH CONFIGS
     let xmatch_configs = conf::build_xmatch_configs(&config_file, stream_name);
