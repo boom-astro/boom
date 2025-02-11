@@ -90,6 +90,8 @@ pub async fn fake_ml_worker(
         } else {
             info!("ML WORKER {}: received alerts len: {}", id, alerts.len());
             alert_counter += alerts.len() as i64;
+            // sleep for 100ms
+            thread::sleep(time::Duration::from_millis(100));
         }
 
         let mut candids_grouped: HashMap<i32, Vec<i64>> = HashMap::new();

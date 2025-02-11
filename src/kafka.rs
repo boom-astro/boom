@@ -125,7 +125,7 @@ pub async fn consume_alerts(
                 }
             }
         }
-        if max_in_queue > 0 && total % 1000 == 0 {
+        if max_in_queue > 0 && total % 5000 == 0 {
             loop {
                 let nb_in_queue = con.llen::<&str, usize>(queue_name).await.unwrap();
                 if nb_in_queue >= max_in_queue {
