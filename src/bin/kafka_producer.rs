@@ -1,6 +1,6 @@
 use boom::kafka::produce_from_archive;
 use std::env;
-use tracing::{error, info, Level};
+use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
@@ -17,7 +17,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() > 1 {
         let arg = &args[1];
         if arg.len() == 8 {
-            info!("Using date from argument: {}", arg);
             date = arg.to_string();
         } else {
             error!("Invalid date format: {}", arg);
