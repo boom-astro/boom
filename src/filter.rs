@@ -92,7 +92,7 @@ impl Filter {
 
         // check if catalog is allowed
         if !ALLOWED_CATALOGS.contains(&catalog) {
-            panic!("Catalog not allowed");
+            panic!("Catalog {} not allowed", catalog);
         }
 
         // get permissions
