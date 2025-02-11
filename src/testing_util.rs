@@ -164,7 +164,7 @@ pub async fn insert_test_filter() {
       "fv": [
         {
           "fid": "v2e0fs",
-          "pipeline": "[{\"$project\": {\"cutoutScience\": 0, \"cutoutDifference\": 0, \"cutoutTemplate\": 0, \"publisher\": 0, \"schemavsn\": 0}}, {\"$lookup\": {\"from\": \"alerts_aux\", \"localField\": \"objectId\", \"foreignField\": \"_id\", \"as\": \"aux\"}}, {\"$project\": {\"objectId\": 1, \"candid\": 1, \"candidate\": 1, \"classifications\": 1, \"coordinates\": 1, \"prv_candidates\": {\"$arrayElemAt\": [\"$aux.prv_candidates\", 0]}, \"cross_matches\": {\"$arrayElemAt\": [\"$aux.cross_matches\", 0]}}}, {\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}]",
+          "pipeline": "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}]",
           "created_at": {
             "$date": "2020-10-21T08:39:43.693Z"
           }
