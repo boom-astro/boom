@@ -42,25 +42,28 @@ pub async fn process_alert(
     // separate the alert and its history components
     let (alert_no_history, prv_candidates, fp_hist) = alert.pop_history();
 
-    // insert the alert into the alerts collection (with a created_at timestamp)
     let mut alert_doc = alert_no_history.mongify();
+
+    let mut prv_candidates_doc = prv_candidates
+        .unwrap_or(vec![])
+        .into_iter()
+        .map(|x| x.mongify())
+        .collect::<Vec<_>>();
+    prv_candidates_doc.push(alert_doc.clone());
+
+    let fp_hist_doc = fp_hist
+        .unwrap_or(vec![])
+        .into_iter()
+        .map(|x| x.mongify())
+        .collect::<Vec<_>>();
+
+    // insert the alert into the alerts collection (with a created_at timestamp)
     alert_doc.insert("created_at", Time::now().to_jd());
     alert_collection.insert_one(alert_doc).await.unwrap();
 
     // - new objects - new entry with prv_candidates, fp_hists, xmatches
     // - existing objects - update prv_candidates, fp_hists
     // (with created_at and updated_at timestamps)
-
-    let prv_candidates_doc = prv_candidates
-        .unwrap_or(vec![])
-        .into_iter()
-        .map(|x| x.mongify())
-        .collect::<Vec<_>>();
-    let fp_hist_doc = fp_hist
-        .unwrap_or(vec![])
-        .into_iter()
-        .map(|x| x.mongify())
-        .collect::<Vec<_>>();
 
     if alert_aux_collection
         .find_one(doc! { "_id": &object_id })
