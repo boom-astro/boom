@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 
-fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::Error>> {
+pub fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::Error>> {
     if date.len() != 8 {
         return Err("Invalid date format".into());
     }
@@ -65,10 +65,16 @@ pub async fn consume_alerts(
     group_id: Option<String>,
     exit_on_eof: bool,
     max_in_queue: usize,
+    queue_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let group_id = match group_id {
         Some(id) => id,
         None => uuid::Uuid::new_v4().to_string(),
+    };
+
+    let queue_name = match queue_name {
+        Some(q) => q,
+        None => "ZTF_alerts_packets_queue".to_string(),
     };
 
     let consumer: BaseConsumer = ClientConfig::new()
@@ -94,7 +100,6 @@ pub async fn consume_alerts(
 
     let client = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
-    let queue_name = "ZTF_alerts_packets_queue";
 
     let mut total = 0;
 
@@ -105,7 +110,7 @@ pub async fn consume_alerts(
     loop {
         if max_in_queue > 0 && total % 1000 == 0 {
             loop {
-                let nb_in_queue = con.llen::<&str, usize>(queue_name).await.unwrap();
+                let nb_in_queue = con.llen::<&str, usize>(&queue_name).await.unwrap();
                 if nb_in_queue >= max_in_queue {
                     info!(
                         "{} (limit: {}) items in queue, sleeping...",
@@ -121,7 +126,7 @@ pub async fn consume_alerts(
         match message {
             Some(Ok(msg)) => {
                 let payload = msg.payload().unwrap();
-                con.rpush::<&str, Vec<u8>, usize>(queue_name, payload.to_vec())
+                con.rpush::<&str, Vec<u8>, usize>(&queue_name, payload.to_vec())
                     .await
                     .unwrap();
                 info!("Pushed message to redis");
@@ -159,16 +164,20 @@ pub async fn consume_alerts(
 pub async fn produce_from_archive(
     date: &str,
     limit: i64,
+    topic: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match download_alerts_from_archive(&date) {
         Ok(count) => count,
         Err(e) => {
             error!("Error downloading alerts: {}", e);
-            return Ok(());
+            return Err(e);
         }
     };
 
-    let topic_name = format!("ztf_{}_programid1", &date);
+    let topic_name = match topic {
+        Some(t) => t,
+        None => format!("ztf_{}_programid1", &date),
+    };
 
     info!("Initializing producer for topic {}", topic_name);
     let producer: FutureProducer = ClientConfig::new()
