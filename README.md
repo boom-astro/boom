@@ -124,16 +124,23 @@ We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) (TB
 
 ### Dealing with Avro & Rust structs:
 
-It can get pretty painful in Rust to work with Avro schemas, and more specifically to have to write Rust structs that match them. To make this easier, we use the super useful `rsgen-avro` crate, which allows us to generate Rust structs from Avro schemas. First, install it as a binary with:
-```bash
-cargo install rsgen-avro --features="build-cli"
-```
-Then, you can generate the Rust structs from the Avro schema with:
-```bash
-rsgen-avro "schema/ztf/*.avsc" -
-```
-This will output the Rust structs to the standard output, which you can then copy-paste in a lib file in the `src` directory, so you can use them in your code.
-We already ran it for the ZTF Avro schema (so no need to do it again), and the corresponding Rust structs are in the `src/types.rs` file. We only slightly modified the `Alert` struct to add methods to create an alert from the bytes of an Avro record (`from_avro_bytes`).
+It can get pretty painful in Rust to work with Avro schemas, and more specifically to have to write Rust structs that match them. To make this easier, we can use the super useful `rsgen-avro` crate to generate Rust structs from the Avro schemas. Consider this a one-time process that provides a starting point for a given set of schemas. The generated structs can then be modified over time as needed:
+
+1. First, install `rsgen-avro` as a binary with:
+
+    ```bash
+    cargo install rsgen-avro --features="build-cli"
+    ```
+
+2. Then, generate the Rust structs from the Avro schema with:
+
+    ```bash
+    rsgen-avro "schema/ztf/*.avsc" -
+    ```
+
+    This will output the Rust structs to the standard output, which you can then copy-paste in a lib file in the `src` directory, so you can use them in your code.
+
+We already went through this process for the ZTF Avro schema (so no need to do it again), and the corresponding Rust structs are in the `src/types.rs` file. We only slightly modified the `Alert` struct to add methods to create an alert from the bytes of an Avro record (`from_avro_bytes`).
 
 ### Dealing with Rust structs and MongoDB BSON documents:
 
