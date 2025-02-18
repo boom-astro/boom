@@ -79,30 +79,9 @@ fn test_alert() {
     assert_eq!(fp_positive_flux.procstatus.as_ref().unwrap(), "0");
 
     // validate the cutouts
-    assert_eq!(
-        alert.cutout_science.clone().unwrap().file_name,
-        "candid2695378462115010012_pid2695378462115_targ_sci.fits.gz"
-    );
-    assert_eq!(
-        alert.cutout_template.clone().unwrap().file_name,
-        "candid2695378462115010012_ref.fits.gz"
-    );
-    assert_eq!(
-        alert.cutout_difference.clone().unwrap().file_name,
-        "candid2695378462115010012_pid2695378462115_targ_refmsci.fits.gz"
-    );
-    assert_eq!(
-        alert.cutout_science.clone().unwrap().stamp_data.len(),
-        13107
-    );
-    assert_eq!(
-        alert.cutout_template.clone().unwrap().stamp_data.len(),
-        12410
-    );
-    assert_eq!(
-        alert.cutout_difference.clone().unwrap().stamp_data.len(),
-        14878
-    );
+    assert_eq!(alert.cutout_science.clone().unwrap().len(), 13107);
+    assert_eq!(alert.cutout_template.clone().unwrap().len(), 12410);
+    assert_eq!(alert.cutout_difference.clone().unwrap().len(), 14878);
 
     // split alert from its history
     let (alert_no_history, prv_candidates, fp_hist) = alert.pop_history();
