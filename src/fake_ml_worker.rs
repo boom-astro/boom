@@ -165,8 +165,16 @@ pub async fn fake_ml_worker(
         // Ideally, we want to prepare the data for the whole batch of alerts at once, so we can
         // run the models on batches of alerts instead of one by one
         for alert in &alerts {
-            let (_cutout_science, _cutout_template, _cutout_difference) =
-                prepare_triplet(&alert).unwrap();
+            let obj_id = alert.get_str("objectId").unwrap();
+            let result = prepare_triplet(&alert);
+            if result.is_err() {
+                warn!(
+                    "ML WORKER {}: error preparing triplet for alert {}",
+                    id, obj_id
+                );
+                continue;
+            }
+            let (_cutout_science, _cutout_template, _cutout_difference) = result.unwrap();
         }
 
         let mut candids_grouped: HashMap<i32, Vec<i64>> = HashMap::new();
