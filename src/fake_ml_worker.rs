@@ -1,5 +1,6 @@
 use crate::{
     conf,
+    fits::prepare_triplet,
     worker_util::{self, WorkerCmd},
 };
 use core::time;
@@ -59,7 +60,73 @@ pub async fn fake_ml_worker(
 
         let mut alert_cursor = db
             .collection::<Document>(format!("{}_alerts", catalog).as_str())
-            .find(doc! {"candid": {"$in": candids}})
+            .aggregate(vec![
+                doc! {
+                    "$match": {
+                        "candid": {"$in": candids}
+                    }
+                },
+                doc! {
+                    "$project": {
+                        "objectId": 1,
+                        "candid": 1,
+                        "candidate": 1,
+                    }
+                },
+                doc! {
+                    "$lookup": {
+                        "from": format!("{}_alerts_aux", catalog),
+                        "localField": "objectId",
+                        "foreignField": "_id",
+                        "as": "aux"
+                    }
+                },
+                doc! {
+                    "$project": doc! {
+                        "objectId": 1,
+                        "candid": 1,
+                        "candidate": 1,
+                        "prv_candidates": doc! {
+                            "$filter": doc! {
+                                "input": doc! {
+                                    "$arrayElemAt": [
+                                        "$aux.prv_candidates",
+                                        0
+                                    ]
+                                },
+                                "as": "x",
+                                "cond": doc! {
+                                    "$and": [
+                                        {
+                                            "$lt": [
+                                                {
+                                                    "$subtract": [
+                                                        "$candidate.jd",
+                                                        "$$x.jd"
+                                                    ]
+                                                },
+                                                365
+                                            ]
+                                        },
+                                        {
+                                            "$gte": [
+                                                {
+                                                    "$subtract": [
+                                                        "$candidate.jd",
+                                                        "$$x.jd"
+                                                    ]
+                                                },
+                                                0
+                                            ]
+                                        },
+
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                },
+            ])
             .await
             .unwrap();
 
@@ -93,11 +160,20 @@ pub async fn fake_ml_worker(
             alert_counter += alerts.len() as i64;
         }
 
+        // TODO: run ML models and add the results to the alerts
+        // For now, we just just perform some of the preprocessing operations, like reading the images
+        // Ideally, we want to prepare the data for the whole batch of alerts at once, so we can
+        // run the models on batches of alerts instead of one by one
+        for alert in &alerts {
+            let (_cutout_science, _cutout_template, _cutout_difference) =
+                prepare_triplet(&alert).unwrap();
+        }
+
         let mut candids_grouped: HashMap<i32, Vec<i64>> = HashMap::new();
 
         for alert in alerts {
-            let candidate = alert.get("candidate").unwrap();
-            let programid = mongodb::bson::to_document(candidate)
+            let programid = alert
+                .get_document("candidate")
                 .unwrap()
                 .get("programid")
                 .unwrap()
