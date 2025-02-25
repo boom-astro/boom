@@ -169,25 +169,19 @@ pub fn prepare_triplet(
     alert_doc: &mongodb::bson::Document,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), Box<dyn std::error::Error>> {
     let cutout_science = alert_doc
-        .get_document("cutoutScience")
-        .unwrap()
-        .get_binary_generic("stampData")
+        .get_binary_generic("cutoutScience")
         .unwrap()
         .to_vec();
     let cutout_science = prepare_cutout(cutout_science).unwrap();
 
     let cutout_template = alert_doc
-        .get_document("cutoutTemplate")
-        .unwrap()
-        .get_binary_generic("stampData")
+        .get_binary_generic("cutoutTemplate")
         .unwrap()
         .to_vec();
     let cutout_template = prepare_cutout(cutout_template).unwrap();
 
     let cutout_difference = alert_doc
-        .get_document("cutoutDifference")
-        .unwrap()
-        .get_binary_generic("stampData")
+        .get_binary_generic("cutoutDifference")
         .unwrap()
         .to_vec();
     let cutout_difference = prepare_cutout(cutout_difference).unwrap();
