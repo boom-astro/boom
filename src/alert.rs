@@ -75,6 +75,12 @@ pub async fn process_alert(
             "fp_hists": fp_hist_doc,
             "created_at": jd_timestamp,
             "updated_at": jd_timestamp,
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [ra - 180.0, dec],
+                },
+            },
         };
         doc.insert(
             "cross_matches",

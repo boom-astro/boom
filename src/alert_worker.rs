@@ -1,5 +1,6 @@
 use crate::{
     alert, conf,
+    db::create_index,
     types::ztf_alert_schema,
     worker_util::{self, WorkerCmd},
 };
@@ -31,25 +32,29 @@ pub async fn alert_worker(
     let alert_collection = db.collection(&format!("{}_alerts", stream_name));
     let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
 
-    // create index for alert collection
-    let alert_candid_index = mongodb::IndexModel::builder()
-        .keys(mongodb::bson::doc! { "candid": -1 })
-        .options(
-            mongodb::options::IndexOptions::builder()
-                .unique(true)
-                .build(),
-        )
-        .build();
-    match alert_collection.create_index(alert_candid_index).await {
-        Err(e) => {
-            error!(
-                "Error when creating index for candidate.candid in collection {}: {}",
-                format!("{}_alerts", stream_name),
-                e
-            );
-        }
-        Ok(_x) => {}
-    }
+    // create indexes for the alert and alert-aux collections
+    let alert_candid_index = mongodb::bson::doc! { "candid": -1 };
+    let alert_object_id_index = mongodb::bson::doc! { "objectId": -1 };
+    let alert_radec_geojson_index = mongodb::bson::doc! { "coordinates.radec_geojson": "2dsphere" };
+    create_index(&alert_collection, alert_candid_index, true)
+        .await
+        .unwrap();
+    create_index(&alert_collection, alert_object_id_index, false)
+        .await
+        .unwrap();
+    create_index(&alert_collection, alert_radec_geojson_index, false)
+        .await
+        .unwrap();
+
+    let alert_aux_id_index = mongodb::bson::doc! { "_id": -1 };
+    let alert_aux_radec_geojson_index =
+        mongodb::bson::doc! { "coordinates.radec_geojson": "2dsphere" };
+    create_index(&alert_aux_collection, alert_aux_id_index, true)
+        .await
+        .unwrap();
+    create_index(&alert_aux_collection, alert_aux_radec_geojson_index, false)
+        .await
+        .unwrap();
 
     // REDIS
     let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
