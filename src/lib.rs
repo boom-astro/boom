@@ -5,6 +5,7 @@ pub mod fake_ml_worker;
 pub mod filter;
 pub mod filter_worker;
 pub mod kafka;
+pub mod lsst_types;
 pub mod scheduling;
 pub mod spatial;
 pub mod testing_util;
