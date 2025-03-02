@@ -1,7 +1,7 @@
 pub use crate::conf;
 use crate::{
     alert,
-    db::create_index,
+    db::{create_index, CreateIndexError},
     types::ztf_alert_schema,
     worker_util::{self, WorkerCmd},
 };
@@ -14,7 +14,7 @@ pub enum AlertWorkerError {
     #[error("failed to load config")]
     LoadConfigError(#[from] conf::ConfigError),
     #[error("failed to create index")]
-    CreateIndexError(#[from] mongodb::error::Error),
+    CreateIndexError(#[from] CreateIndexError),
     #[error("failed to connect to redis")]
     ConnectRedisError(#[source] redis::RedisError),
     #[error("failed to get alert schema")]
