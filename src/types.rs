@@ -6,6 +6,7 @@ use config::Value;
 use flare::spatial::{deg2dms, deg2hms, radec2lb};
 use mongodb::bson::doc;
 use mongodb::bson::to_document;
+use serde::{Deserialize, Deserializer};
 use tracing::error;
 
 pub fn ztf_alert_schema() -> Option<Schema> {
@@ -1129,15 +1130,32 @@ pub struct Alert {
     pub prv_candidates: Option<Vec<PrvCandidate>>,
     #[serde(default = "default_alert_fp_hists")]
     pub fp_hists: Option<Vec<FpHist>>,
-    #[serde(default = "default_alert_cutout_science", rename = "cutoutScience")]
-    pub cutout_science: Option<Cutout>,
-    #[serde(default = "default_alert_cutout_template", rename = "cutoutTemplate")]
-    pub cutout_template: Option<Cutout>,
+    #[serde(
+        default = "default_alert_cutout_science",
+        rename = "cutoutScience",
+        deserialize_with = "deserialize_cutout_as_bytes"
+    )]
+    pub cutout_science: Option<Vec<u8>>,
+    #[serde(
+        default = "default_alert_cutout_template",
+        rename = "cutoutTemplate",
+        deserialize_with = "deserialize_cutout_as_bytes"
+    )]
+    pub cutout_template: Option<Vec<u8>>,
     #[serde(
         default = "default_alert_cutout_difference",
-        rename = "cutoutDifference"
+        rename = "cutoutDifference",
+        deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_difference: Option<Cutout>,
+    pub cutout_difference: Option<Vec<u8>>,
+}
+
+fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cutout: Option<Cutout> = Option::deserialize(deserializer)?;
+    Ok(cutout.map(|cutout| cutout.stamp_data))
 }
 
 #[inline(always)]
@@ -1151,17 +1169,17 @@ fn default_alert_fp_hists() -> Option<Vec<FpHist>> {
 }
 
 #[inline(always)]
-fn default_alert_cutout_science() -> Option<Cutout> {
+fn default_alert_cutout_science() -> Option<Vec<u8>> {
     None
 }
 
 #[inline(always)]
-fn default_alert_cutout_template() -> Option<Cutout> {
+fn default_alert_cutout_template() -> Option<Vec<u8>> {
     None
 }
 
 #[inline(always)]
-fn default_alert_cutout_difference() -> Option<Cutout> {
+fn default_alert_cutout_difference() -> Option<Vec<u8>> {
     None
 }
 
@@ -1173,15 +1191,24 @@ pub struct AlertNoHistory {
     pub object_id: String,
     pub candid: i64,
     pub candidate: Candidate,
-    #[serde(default = "default_alert_cutout_science", rename = "cutoutScience")]
-    pub cutout_science: Option<Cutout>,
-    #[serde(default = "default_alert_cutout_template", rename = "cutoutTemplate")]
-    pub cutout_template: Option<Cutout>,
+    #[serde(
+        default = "default_alert_cutout_science",
+        rename = "cutoutScience",
+        deserialize_with = "deserialize_cutout_as_bytes"
+    )]
+    pub cutout_science: Option<Vec<u8>>,
+    #[serde(
+        default = "default_alert_cutout_template",
+        rename = "cutoutTemplate",
+        deserialize_with = "deserialize_cutout_as_bytes"
+    )]
+    pub cutout_template: Option<Vec<u8>>,
     #[serde(
         default = "default_alert_cutout_difference",
-        rename = "cutoutDifference"
+        rename = "cutoutDifference",
+        deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_difference: Option<Cutout>,
+    pub cutout_difference: Option<Vec<u8>>,
 }
 
 // make a function for the Alert type, that creates a AlertNoHistory type
@@ -1224,10 +1251,15 @@ impl Alert {
         Ok(alert)
     }
 
+    // TODO:
+    // * Why is this "unsafe"? We currently panic if the value can't be
+    //   deserialized into in Alert, but we could easily make that an error.
+    // * Why aren't we just using Reader::with_schema?
     pub fn from_avro_bytes_unsafe(
-        avro_bytes: Vec<u8>,
+        avro_bytes: &[u8],
         schema: &apache_avro::Schema,
     ) -> Result<Alert, Box<dyn std::error::Error>> {
+        // TODO: need a concrete error type here
         let mut cursor = std::io::Cursor::new(avro_bytes);
 
         let mut buf = [0; 4];
@@ -1253,7 +1285,7 @@ impl Alert {
         let value = from_avro_datum(&schema, &mut cursor, None);
         match value {
             Ok(value) => {
-                let alert: Alert = from_value::<Alert>(&value).unwrap();
+                let alert: Alert = from_value::<Alert>(&value).unwrap(); // TODO: handle error
                 Ok(alert)
             }
             Err(e) => {

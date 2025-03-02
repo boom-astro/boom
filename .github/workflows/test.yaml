@@ -12,6 +12,7 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    permissions: write-all
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -31,20 +32,8 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
-    - name: Start MongoDB
-      uses: supercharge/mongodb-github-action@1.11.0
-      with:
-        mongodb-version: 7.0.0
-    - uses: shogo82148/actions-setup-redis@v1
-      with:
-        redis-version: "7.x"
-    - run: redis-cli ping
-    - name: Edit test config
-      run: |
-        sed -i 's/username: mongoadmin/username:/g' tests/config.test.yaml
-        sed -i 's/password: mongoadminsecret/password:/g' tests/config.test.yaml
-    - name: Build
-      run: cargo build --release
+    - name: Start services
+      run: docker compose up --build -d
     - name: Tests
       if: ${{ matrix.test_subset == 'unit_tests' }}
       run: cargo test --release

@@ -22,42 +22,6 @@ pub async fn drop_alert_collections(
     Ok(())
 }
 
-// download alerts from date <alert_date> and place alerts into redis queue <output_packet_queue>
-pub async fn fake_kafka_consumer(
-    output_packet_queue: &str,
-    alert_date: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let date = alert_date;
-    let total_nb_alerts = download_alerts_from_archive(date)?;
-
-    let client = redis::Client::open("redis://localhost:6379".to_string())?;
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-
-    // empty the queue
-    con.del::<&str, usize>(output_packet_queue).await.unwrap();
-
-    let mut total = 0;
-
-    info!("Pushing {} alerts to the queue", total_nb_alerts);
-    // start timer
-    let start = std::time::Instant::now();
-    // poll one message at a time
-    for entry in std::fs::read_dir(format!("data/alerts/ztf/{}", date))? {
-        let entry = entry?;
-        let path = entry.path();
-        let payload = std::fs::read(path)?;
-
-        con.rpush::<&str, Vec<u8>, usize>(output_packet_queue, payload.to_vec())
-            .await
-            .unwrap();
-        total += 1;
-        if total % 1000 == 0 {
-            info!("Pushed {} items since {:?}", total, start.elapsed());
-        }
-    }
-    Ok(())
-}
-
 // run alert worker on input_queue_name
 pub async fn alert_worker(
     input_packet_queue: &str,
@@ -94,7 +58,7 @@ pub async fn alert_worker(
         match result {
             Some(value) => {
                 let candid = alert::process_alert(
-                    value[0].clone(),
+                    &value[0],
                     &xmatch_configs,
                     &db,
                     &alert_collection,
@@ -202,68 +166,6 @@ pub async fn remove_test_filter() {
         .collection::<mongodb::bson::Document>("filters")
         .delete_one(doc! {"filter_id": -1})
         .await;
-}
-
-fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    // given a date in the format YYYYMMDD, download public ZTF alerts from the archive
-    // in this method we just validate the date format,
-    // then use wget to download the alerts from the archive
-    // and finally we extract the alerts to a folder
-
-    // validate the date format
-    if date.len() != 8 {
-        return Err("Invalid date format".into());
-    }
-
-    // create the data folder if it doesn't exist, in data/alerts/ztf/<date>
-    let data_folder = format!("data/alerts/ztf/{}", date);
-
-    // if it already exists and has the alerts, we don't need to download them again
-    if std::path::Path::new(&data_folder).exists() && std::fs::read_dir(&data_folder)?.count() > 0 {
-        info!("Alerts already downloaded to {}", data_folder);
-        let count = std::fs::read_dir(&data_folder)?.count();
-        return Ok(count as i64);
-    }
-
-    std::fs::create_dir_all(&data_folder)?;
-
-    info!("Downloading alerts for date {}", date);
-    // download the alerts to data folder
-    let url = format!(
-        "https://ztf.uw.edu/alerts/public/ztf_public_{}.tar.gz",
-        date
-    );
-    let output = std::process::Command::new("wget")
-        .arg(&url)
-        .arg("-P")
-        .arg(&data_folder)
-        .output()?;
-    if !output.status.success() {
-        return Err("Failed to download alerts".into());
-    } else {
-        info!("Downloaded alerts to {}", data_folder);
-    }
-
-    // extract the alerts
-    let output = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(format!("{}/ztf_public_{}.tar.gz", data_folder, date))
-        .arg("-C")
-        .arg(&data_folder)
-        .output()?;
-    if !output.status.success() {
-        return Err("Failed to extract alerts".into());
-    } else {
-        info!("Extracted alerts to {}", data_folder);
-    }
-
-    // remove the tar.gz file
-    std::fs::remove_file(format!("{}/ztf_public_{}.tar.gz", data_folder, date))?;
-
-    // count the number of alerts
-    let count = std::fs::read_dir(&data_folder)?.count();
-
-    Ok(count as i64)
 }
 
 pub async fn empty_processed_alerts_queue(

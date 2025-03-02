@@ -3,15 +3,17 @@ use redis::AsyncCommands;
 use std::num::NonZero;
 use tracing::{error, info};
 
-use boom::{conf, filter, testing_util as tu};
+use boom::{conf, filter, kafka, testing_util as tu};
 
 #[tokio::test]
 async fn test_build_filter() {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
     tu::insert_test_filter().await;
-    let filter = filter::Filter::build(-1, &db).await.unwrap();
+    let filter_result = filter::Filter::build(-1, &db).await;
     tu::remove_test_filter().await;
+    assert!(filter_result.is_ok());
+    let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
         doc! { "$match": {} },
         doc! { "$project": { "cutoutScience": 0, "cutoutDifference": 0, "cutoutTemplate": 0, "publisher": 0, "schemavsn": 0 } },
@@ -48,20 +50,23 @@ async fn test_run_filter() {
     tu::insert_test_filter().await;
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
-    let mut thisfilter = filter::Filter::build(-1, &db).await.unwrap();
-    let _ = tu::remove_test_filter().await;
+    let filter_result = filter::Filter::build(-1, &db).await;
+    tu::remove_test_filter().await;
+    assert!(filter_result.is_ok());
+    let mut filter = filter_result.unwrap();
 
+    let topic = uuid::Uuid::new_v4().to_string();
+    let queue = uuid::Uuid::new_v4().to_string();
+    let output_queue = uuid::Uuid::new_v4().to_string();
     let test_col_name = "ZTF_alerts";
     let test_aux_col_name = "ZTF_alerts_aux";
     let _ = tu::drop_alert_collections(&test_col_name, &test_aux_col_name).await;
-    let _ = tu::fake_kafka_consumer("alert_packet_queue", "20240617").await;
-    let _ = tu::alert_worker(
-        "alert_packet_queue",
-        "worker_output_queue",
-        &test_col_name,
-        &test_aux_col_name,
-    )
-    .await;
+    let result = kafka::produce_from_archive("20240617", 0, Some(topic.clone())).await;
+    assert!(result.is_ok());
+    let result = kafka::consume_alerts(&topic, None, true, 0, Some(queue.clone())).await;
+    assert!(result.is_ok());
+
+    let _ = tu::alert_worker(&queue, &output_queue, &test_col_name, &test_aux_col_name).await;
 
     let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
     let mut con: redis::aio::MultiplexedConnection = client_redis
@@ -70,7 +75,7 @@ async fn test_run_filter() {
         .unwrap();
 
     let res: Result<Vec<i64>, redis::RedisError> = con
-        .rpop::<&str, Vec<i64>>("worker_output_queue", NonZero::new(1000))
+        .rpop::<&str, Vec<i64>>(&output_queue, NonZero::new(1000))
         .await;
 
     match res {
@@ -79,7 +84,7 @@ async fn test_run_filter() {
                 panic!("test_run_filter failed: no candids in queue");
             }
             info!("received {} candids from redis", candids.len());
-            let out_candids = thisfilter.run(candids.clone(), &db).await;
+            let out_candids = filter.run(candids.clone(), &db).await;
             match out_candids {
                 Ok(out) => {
                     assert_eq!(out.len(), 194);
@@ -101,8 +106,10 @@ async fn test_filter_no_alerts() {
     tu::insert_test_filter().await;
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
-    let mut thisfilter = filter::Filter::build(-1, &db).await.unwrap();
-    let _ = tu::remove_test_filter().await;
+    let filter_result = filter::Filter::build(-1, &db).await;
+    tu::remove_test_filter().await;
+    assert!(filter_result.is_ok());
+    let mut filter = filter_result.unwrap();
 
     let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
     let mut con: redis::aio::MultiplexedConnection = client_redis
@@ -116,7 +123,7 @@ async fn test_filter_no_alerts() {
 
     match res {
         Ok(candids) => {
-            let out_candids = thisfilter.run(candids.clone(), &db).await;
+            let out_candids = filter.run(candids.clone(), &db).await;
             match out_candids {
                 Err(e) => {
                     error!("Error running filter: {}", e);
@@ -134,8 +141,8 @@ async fn test_filter_no_alerts() {
 async fn test_no_filter_found() {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
-    let thisfilter = filter::Filter::build(-2, &db).await;
-    match thisfilter {
+    let filter = filter::Filter::build(-2, &db).await;
+    match filter {
         Err(e) => {
             assert!(e.is::<filter::FilterError>());
             error!("error: {}", e);
@@ -151,9 +158,9 @@ async fn test_filter_found() {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await;
     tu::insert_test_filter().await;
-    let thisfilter = filter::Filter::build(-1, &db).await;
+    let filter = filter::Filter::build(-1, &db).await;
     tu::remove_test_filter().await;
-    match thisfilter {
+    match filter {
         Ok(_) => {
             info!("successfully got filter from db");
         }
