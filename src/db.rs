@@ -1,5 +1,6 @@
-use tracing::error;
+use tracing::instrument;
 
+#[instrument(skip(collection, index), err, fields(collection = collection.name()))]
 pub async fn create_index(
     collection: &mongodb::Collection<mongodb::bson::Document>,
     index: mongodb::bson::Document,
@@ -13,15 +14,6 @@ pub async fn create_index(
                 .build(),
         )
         .build();
-    match collection.create_index(index_model).await {
-        Err(e) => {
-            error!(
-                "Error when creating index for collection {}: {}",
-                collection.name(),
-                e
-            );
-        }
-        Ok(_x) => {}
-    }
+    collection.create_index(index_model).await?;
     Ok(())
 }
