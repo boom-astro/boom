@@ -1,18 +1,14 @@
 use crate::{conf, filter, worker_util, worker_util::WorkerCmd};
 use redis::streams::StreamReadOptions;
 use redis::AsyncCommands;
-use std::{
-    collections::HashMap,
-    error::Error,
-    sync::{mpsc, Arc, Mutex},
-};
+use std::{collections::HashMap, error::Error, sync::mpsc};
 use tracing::{error, info, warn};
 
 // filter worker as a standalone function run by the scheduler
 #[tokio::main]
 pub async fn filter_worker(
     id: String,
-    receiver: Arc<Mutex<mpsc::Receiver<WorkerCmd>>>,
+    receiver: mpsc::Receiver<WorkerCmd>,
     stream_name: String,
     config_path: String,
 ) -> Result<(), Box<dyn Error>> {
@@ -121,7 +117,7 @@ pub async fn filter_worker(
         // check for command from threadpool
         if alert_counter - command_interval > 0 {
             alert_counter = 0;
-            if let Ok(command) = receiver.lock().unwrap().try_recv() {
+            if let Ok(command) = receiver.try_recv() {
                 match command {
                     WorkerCmd::TERM => {
                         warn!("alert worker {} received termination command", id);
@@ -186,7 +182,7 @@ pub async fn filter_worker(
             info!("FILTER WORKER {}: All streams empty", id);
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             alert_counter = 0;
-            if let Ok(command) = receiver.lock().unwrap().try_recv() {
+            if let Ok(command) = receiver.try_recv() {
                 match command {
                     WorkerCmd::TERM => {
                         warn!("alert worker {} received termination command", id);

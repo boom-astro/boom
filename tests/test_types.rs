@@ -14,7 +14,7 @@ fn test_avro_to_alert_unsafe() {
     let schema = types::ztf_alert_schema().unwrap();
     let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
     let bytes_content = std::fs::read(file_name).unwrap();
-    let alert = types::Alert::from_avro_bytes_unsafe(bytes_content, &schema);
+    let alert = types::Alert::from_avro_bytes_unsafe(&bytes_content, &schema);
     assert!(alert.is_ok());
 }
 

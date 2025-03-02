@@ -1,5 +1,7 @@
 use config::Config;
-use config::ConfigError;
+// TODO: we do not want to get in the habit of making 3rd party types part of
+// our public API. It's almost always asking for trouble.
+pub use config::ConfigError;
 use config::File;
 use std::path::Path;
 use tracing::error;
@@ -15,8 +17,7 @@ pub fn load_config(filepath: &str) -> Result<Config, ConfigError> {
 
     let conf = Config::builder()
         .add_source(File::with_name(filepath))
-        .build()
-        .unwrap();
+        .build()?;
     Ok(conf)
 }
 

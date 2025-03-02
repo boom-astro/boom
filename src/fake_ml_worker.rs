@@ -6,12 +6,7 @@ use core::time;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use redis::AsyncCommands;
-use std::{
-    collections::HashMap,
-    num::NonZero,
-    sync::{mpsc, Arc, Mutex},
-    thread,
-};
+use std::{collections::HashMap, num::NonZero, sync::mpsc, thread};
 use tracing::{info, warn};
 
 // fake ml worker which, like the ML worker, receives alerts from the alert worker and sends them
@@ -19,7 +14,7 @@ use tracing::{info, warn};
 #[tokio::main]
 pub async fn fake_ml_worker(
     id: String,
-    receiver: Arc<Mutex<mpsc::Receiver<WorkerCmd>>>,
+    receiver: mpsc::Receiver<WorkerCmd>,
     stream_name: String,
     config_path: String,
 ) {
@@ -42,7 +37,7 @@ pub async fn fake_ml_worker(
         // check for interrupt from thread pool
         if alert_counter - command_interval > 0 {
             alert_counter = 0;
-            if let Ok(command) = receiver.lock().unwrap().try_recv() {
+            if let Ok(command) = receiver.try_recv() {
                 match command {
                     WorkerCmd::TERM => {
                         warn!("alert worker {} received termination command", id);
@@ -79,7 +74,7 @@ pub async fn fake_ml_worker(
             info!("ML WORKER {}: queue empty", id);
             thread::sleep(time::Duration::from_secs(5));
             alert_counter = 0;
-            if let Ok(command) = receiver.lock().unwrap().try_recv() {
+            if let Ok(command) = receiver.try_recv() {
                 match command {
                     WorkerCmd::TERM => {
                         warn!("alert worker {} received termination command", id);
