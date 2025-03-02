@@ -62,17 +62,29 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Running BOOM:
 
-BOOM is meant to be run in production, reading from a real-time stream of astronomical alerts. **That said, we can use ZTF archival alerts to test the pipeline.** To do so, you can start the **fake** `Kafka` consumer (that reads alerts from a file instead of `Kafka` topics) with:
-    ```bash
-    cargo run --release --bin fake_kafka_consumer <date_in_YYYMMDD_format>
-    ```
-Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them to `data/alerts/ztf/YYYYMMDD/*.avro`, and then will start pushing them to the associated `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
+BOOM is meant to be run in production, reading from a real-time stream of astronomical alerts. **That said, we can create our own Kafka stream using the[ZTF alerts public archive](https://ztf.uw.edu/alerts/public/) to test BOOM.** To do so, you can start the `Kafka` producer with:
+```bash
+cargo run --release --bin kafka_producer <date_in_YYYMMDD_format> <limit>
+```
+Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them on disk for the `Kafka` producer to read, and then will start producing them to the associated `Kafka` topic. You can leave that running in the background, and start the rest of the pipeline in another terminal. The <limit> argument is optional, and will limit the number of alerts pushed to the `Kafka` topic.
+
+*If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
+```bash
+docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
+```
+
+
+Next, you can start the `Kafka` consumer with:
+```bash
+cargo run --release --bin kafka_consumer <topic> <group_id> <exit_on_eof> <max_in_queue>
+```
+Where `<topic>` is the name of the `Kafka` topic you want to read from. In our case, it would be `ztf_YYYYMMDD_programid1`. This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. Last but not least `<max_in_queue>` allows you to set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 Instead of starting each worker manually, we provide the `scheduler`. It reads the number of workers for each type from `config.yaml`. Run the scheduler with:
-    ```bash
-    cargo run --release --bin scheduler <stream_name> <config_path>
-    ```
-    Where `<stream_name>` is the name of the stream you want to process. In our case, it would be `ZTF`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
+```bash
+cargo run --release --bin scheduler <stream_name> <config_path>
+```
+Where `<stream_name>` is the name of the stream you want to process. In our case, it would be `ZTF`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
 
 *Before running the scheduler, make sure that you are in your Python virtual environment. This is required for the ML worker, that will run Python-based ML models. If you created it with `uv` as instructed earlier, you can enter the virtual environment with `source .venv/bin/activate`.*
 
@@ -100,6 +112,8 @@ We are currently working on adding tests to the codebase. You can run the tests 
 cargo test
 ```
 
+Tests currently require the kafka, valkey, and mongo Docker containers to be running as described above.
+
 *When running the tests, the config file found in `tests/config.test.yaml` will be used.*
 
 The test suite also runs automagically on every push to the repository, and on every pull request. You can check the status of the tests in the "Actions" tab of the GitHub repository.
@@ -112,16 +126,23 @@ We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) (TB
 
 ### Dealing with Avro & Rust structs:
 
-It can get pretty painful in Rust to work with Avro schemas, and more specifically to have to write Rust structs that match them. To make this easier, we use the super useful `rsgen-avro` crate, which allows us to generate Rust structs from Avro schemas. First, install it as a binary with:
-```bash
-cargo install rsgen-avro --features="build-cli"
-```
-Then, you can generate the Rust structs from the Avro schema with:
-```bash
-rsgen-avro "schema/ztf/*.avsc" -
-```
-This will output the Rust structs to the standard output, which you can then copy-paste in a lib file in the `src` directory, so you can use them in your code.
-We already ran it for the ZTF Avro schema (so no need to do it again), and the corresponding Rust structs are in the `src/types.rs` file. We only slightly modified the `Alert` struct to add methods to create an alert from the bytes of an Avro record (`from_avro_bytes`).
+It can get pretty painful in Rust to work with Avro schemas, and more specifically to have to write Rust structs that match them. To make this easier, we can use the super useful `rsgen-avro` crate to generate Rust structs from the Avro schemas. Consider this a one-time process that provides a starting point for a given set of schemas. The generated structs can then be modified over time as needed:
+
+1. First, install `rsgen-avro` as a binary with:
+
+    ```bash
+    cargo install rsgen-avro --features="build-cli"
+    ```
+
+2. Then, generate the Rust structs from the Avro schema with:
+
+    ```bash
+    rsgen-avro "schema/ztf/*.avsc" -
+    ```
+
+    This will output the Rust structs to the standard output, which you can then copy-paste in a lib file in the `src` directory, so you can use them in your code.
+
+We already went through this process for the ZTF Avro schema (so no need to do it again), and the corresponding Rust structs are in the `src/types.rs` file. We only slightly modified the `Alert` struct to add methods to create an alert from the bytes of an Avro record (`from_avro_bytes`).
 
 ### Dealing with Rust structs and MongoDB BSON documents:
 
