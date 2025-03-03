@@ -1,9 +1,10 @@
 pub mod alert;
-pub mod alert_worker;
+mod alert_worker;
 pub mod conf;
-pub mod fake_ml_worker;
+pub mod db;
+mod fake_ml_worker;
 pub mod filter;
-pub mod filter_worker;
+mod filter_worker;
 pub mod fits;
 pub mod kafka;
 pub mod scheduling;

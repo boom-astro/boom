@@ -159,7 +159,7 @@ impl Filter {
                                             &permissions
                                         ]
                                     },
-                                    {
+                                    { // maximum 1 year of past data
                                         "$lt": [
                                             {
                                                 "$subtract": [
@@ -169,7 +169,14 @@ impl Filter {
                                             },
                                             365
                                         ]
+                                    },
+                                    { // only datapoints up to (and including) current alert
+                                        "$lte": [
+                                            "$$x.jd",
+                                            "$candidate.jd"
+                                        ]
                                     }
+
                                 ]
                             }
                         }

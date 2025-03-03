@@ -58,7 +58,7 @@ pub async fn alert_worker(
         match result {
             Some(value) => {
                 let candid = alert::process_alert(
-                    value[0].clone(),
+                    &value[0],
                     &xmatch_configs,
                     &db,
                     &alert_collection,

@@ -2,22 +2,17 @@ use crate::{
     alert_worker, fake_ml_worker, filter_worker,
     worker_util::{WorkerCmd, WorkerType},
 };
-use std::{
-    collections::HashMap,
-    sync::{mpsc, Arc, Mutex},
-    thread,
-};
-use tracing::{info, warn};
+use std::{sync::mpsc, thread};
+use tracing::{error, info, warn};
 
 // Thread pool
 // allows spawning, killing, and managing of various worker threads through
 // the use of a messages
 pub struct ThreadPool {
-    pub worker_type: WorkerType,
-    pub stream_name: String,
-    pub config_path: String,
-    pub workers: HashMap<String, Worker>,
-    pub senders: HashMap<String, Option<mpsc::Sender<WorkerCmd>>>,
+    worker_type: WorkerType,
+    stream_name: String,
+    config_path: String,
+    workers: Vec<Worker>,
 }
 
 /// Threadpool
@@ -35,99 +30,65 @@ impl ThreadPool {
         size: usize,
         stream_name: String,
         config_path: String,
-    ) -> ThreadPool {
-        let mut workers = HashMap::new();
-        let mut senders = HashMap::new();
-
-        for _ in 0..size {
-            let id = uuid::Uuid::new_v4().to_string();
-            let (sender, receiver) = mpsc::channel();
-            let receiver = Arc::new(Mutex::new(receiver));
-            workers.insert(
-                id.clone(),
-                Worker::new(
-                    worker_type,
-                    id.clone(),
-                    Arc::clone(&receiver),
-                    stream_name.clone(),
-                    config_path.clone(),
-                ),
-            );
-            senders.insert(id.clone(), Some(sender));
-        }
-
-        ThreadPool {
+    ) -> Self {
+        let mut thread_pool = ThreadPool {
             worker_type,
             stream_name,
             config_path,
-            workers,
-            senders,
+            workers: Vec::new(),
+        };
+        for _ in 0..size {
+            thread_pool.add_worker();
+        }
+        thread_pool
+    }
+
+    /// Send a termination signal to each worker thread.
+    fn terminate(&self) {
+        for worker in &self.workers {
+            info!("sending termination signal to worker {}", &worker.id);
+            if let Err(error) = worker.terminate() {
+                warn!(
+                    error = %error,
+                    "failed to send termination signal to worker {}",
+                    &worker.id
+                );
+            }
         }
     }
 
-    /// remove a worker from the thread pool by id
-    ///
-    /// id: string identifier for the worker to be removed
-    pub fn remove_worker(&mut self, id: String) {
-        if let Some(sender) = &self.senders[&id] {
-            match sender.send(WorkerCmd::TERM) {
-                Ok(_) => {
-                    warn!("Sent terminate message to worker {}", &id);
-                }
-                Err(e) => {
-                    warn!("Failed to send terminate message to worker {}: {}", &id, e);
+    /// Join all worker threads in the pool.
+    fn join(&mut self) {
+        for worker in &mut self.workers {
+            if let Some(thread) = worker.thread.take() {
+                match thread.join() {
+                    Ok(_) => info!("successfully shut down worker {}", &worker.id),
+                    Err(error) => {
+                        error!(error = ?error, "failed to shut down worker {}", &worker.id)
+                    }
                 }
             }
-            self.senders.remove(&id);
-
-            // if let Some(worker) = self.workers.get_mut(&id) {
-            //     if let Some(thread) = worker.thread.take() {
-            //     thread.join().unwrap();
-            // }
         }
     }
 
-    // add a new worker to the thread pool
-    pub fn add_worker(&mut self) {
+    /// Add a new worker to the thread pool
+    fn add_worker(&mut self) {
         let id = uuid::Uuid::new_v4().to_string();
-        let (sender, receiver) = mpsc::channel();
-        let receiver = Arc::new(Mutex::new(receiver));
-        self.workers.insert(
+        info!("adding worker with id {}", id);
+        self.workers.push(Worker::new(
+            self.worker_type,
             id.clone(),
-            Worker::new(
-                self.worker_type,
-                id.clone(),
-                Arc::clone(&receiver),
-                self.stream_name.clone(),
-                self.config_path.clone(),
-            ),
-        );
-        self.senders.insert(id.clone(), Some(sender));
-        info!("Added worker with id: {}", &id);
+            self.stream_name.clone(),
+            self.config_path.clone(),
+        ));
     }
 }
 
-// shut down all workers from the thread pool and drop the threadpool
+// Shut down all workers from the thread pool and drop the threadpool
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        warn!("Sending terminate message to all workers.");
-
-        // get the ids of all workers
-        let ids: Vec<String> = self.senders.keys().cloned().collect();
-
-        for id in ids {
-            self.remove_worker(id);
-        }
-
-        warn!("Shutting down all workers.");
-
-        for (id, worker) in &mut self.workers {
-            warn!("Shutting down worker {}", &id);
-
-            if let Some(thread) = worker.thread.take() {
-                thread.join().unwrap();
-            }
-        }
+        self.terminate();
+        self.join();
     }
 }
 
@@ -137,8 +98,9 @@ impl Drop for ThreadPool {
 /// controlled completely by a threadpool and has a listening channel through
 /// which it listens for commands from it.
 pub struct Worker {
-    pub id: String,
-    pub thread: Option<thread::JoinHandle<()>>,
+    id: String,
+    thread: Option<thread::JoinHandle<()>>,
+    sender: mpsc::Sender<WorkerCmd>,
 }
 
 impl Worker {
@@ -152,14 +114,19 @@ impl Worker {
     fn new(
         worker_type: WorkerType,
         id: String,
-        receiver: Arc<Mutex<mpsc::Receiver<WorkerCmd>>>,
         stream_name: String,
         config_path: String,
     ) -> Worker {
         let id_copy = id.clone();
+        let (sender, receiver) = mpsc::channel();
         let thread = match worker_type {
-            WorkerType::Alert => thread::spawn(|| {
-                alert_worker::alert_worker(id, receiver, stream_name, config_path);
+            // TODO: Spawn a new worker thread when one dies? (A supervisor or something like that?)
+            WorkerType::Alert => thread::spawn(move || {
+                if let Err(e) =
+                    alert_worker::alert_worker(&id, stream_name.clone(), &config_path, receiver)
+                {
+                    error!(id, stream_name, config_path, error = %e, "alert worker failed")
+                }
             }),
             WorkerType::Filter => thread::spawn(|| {
                 let _ = filter_worker::filter_worker(id, receiver, stream_name, config_path);
@@ -172,6 +139,12 @@ impl Worker {
         Worker {
             id: id_copy,
             thread: Some(thread),
+            sender,
         }
+    }
+
+    /// Send a termination signal to the worker's thread.
+    fn terminate(&self) -> Result<(), mpsc::SendError<WorkerCmd>> {
+        self.sender.send(WorkerCmd::TERM)
     }
 }

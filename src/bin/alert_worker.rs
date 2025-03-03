@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Context};
 use boom::{alert, conf, types::ztf_alert_schema, worker_util};
 use clap::Parser;
 use redis::AsyncCommands;
@@ -8,34 +9,31 @@ use tracing_subscriber::FmtSubscriber;
 #[derive(Parser)]
 struct Cli {
     #[arg(required = true, help = "Name of stream to ingest")]
-    stream: Option<String>,
+    stream: String,
 
     #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
     config: Option<String>,
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::TRACE)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber)?;
 
     let args = Cli::parse();
 
-    let stream_name = &args.stream.unwrap();
+    let stream_name = &args.stream;
 
-    if !args.config.is_some() {
-        warn!("No config file provided, using config.yaml");
-    }
-    let config_path = if args.config.is_some() {
-        args.config.unwrap()
-    } else {
+    let config_path = args.config.unwrap_or_else(|| {
+        info!("No config file provided, using config.yaml");
         String::from("./config.yaml")
-    };
-    let config_file = conf::load_config(&config_path).unwrap();
+    });
+    let config_file = conf::load_config(&config_path).context("failed to load config")?;
 
+    // TODO: There may be a better way to accomplish termination with ctrl-c
     let interrupt_flag = Arc::new(Mutex::new(false));
     worker_util::sig_int_handler(Arc::clone(&interrupt_flag)).await;
 
@@ -44,12 +42,10 @@ async fn main() {
 
     // DATABASE
     let db: mongodb::Database = conf::build_db(&config_file).await;
-    if let Err(e) = db.list_collection_names().await {
-        error!("Error connecting to the database: {}", e);
-        return;
-    }
+    db.list_collection_names().await?;
 
-    let alert_collection = db.collection(&format!("{}_alerts", stream_name));
+    let alert_collection_name = format!("{}_alerts", stream_name);
+    let alert_collection = db.collection(&alert_collection_name);
     let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
 
     // create index for alert collection
@@ -61,29 +57,23 @@ async fn main() {
                 .build(),
         )
         .build();
-    match alert_collection.create_index(alert_candid_index).await {
-        Err(e) => {
-            error!(
-                "Error when creating index for candidate.candid in collection {}: {}",
-                format!("{}_alerts", stream_name),
-                e
-            );
-        }
-        Ok(_x) => {}
+    if let Err(error) = alert_collection.create_index(alert_candid_index).await {
+        warn!(
+            error = %error,
+            "Error when creating index for candidate.candid in collection {}",
+            alert_collection_name,
+        );
     }
 
     // REDIS
-    let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
-    let mut con = client_redis
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
+    let client_redis = redis::Client::open("redis://localhost:6379".to_string())?;
+    let mut con = client_redis.get_multiplexed_async_connection().await?;
     let queue_name = format!("{}_alerts_packets_queue", stream_name);
     let queue_temp_name = format!("{}_alerts_packets_queuetemp", stream_name);
     let classifer_queue_name = format!("{}_alerts_classifier_queue", stream_name);
 
     // ALERT SCHEMA (for fast avro decoding)
-    let schema = ztf_alert_schema().unwrap();
+    let schema = ztf_alert_schema().ok_or_else(|| anyhow!("failed to get alert schema"))?;
 
     let mut count = 0;
     let start = std::time::Instant::now();
@@ -91,67 +81,59 @@ async fn main() {
         // check for interruption signal
         worker_util::check_exit(Arc::clone(&interrupt_flag));
         // retrieve candids from redis
-        let result: Option<Vec<Vec<u8>>> =
-            con.rpoplpush(&queue_name, &queue_temp_name).await.unwrap();
-        match result {
-            Some(value) => {
-                let candid = alert::process_alert(
-                    value[0].clone(),
-                    &xmatch_configs,
-                    &db,
-                    &alert_collection,
-                    &alert_aux_collection,
-                    &schema,
-                )
-                .await;
-                match candid {
-                    Ok(Some(candid)) => {
-                        info!(
-                            "Processed alert with candid: {}, queueing for classification",
-                            candid
-                        );
-                        // queue the candid for processing by the classifier
-                        con.lpush::<&str, i64, isize>(&classifer_queue_name, candid)
-                            .await
-                            .unwrap();
-                        con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
-                            .await
-                            .unwrap();
-                    }
-                    Ok(None) => {
-                        info!("Alert already exists");
-                        // remove the alert from the queue
-                        con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
-                            .await
-                            .unwrap();
-                    }
-                    Err(e) => {
-                        error!("Error processing alert: {}, requeueing", e);
-                        // put it back in the ZTF_alerts_packets_queue, to the left (pop from the right, push to the left)
-                        con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
-                            .await
-                            .unwrap();
-                        con.lpush::<&str, Vec<u8>, isize>(&queue_name, value[0].clone())
-                            .await
-                            .unwrap();
-                    }
-                }
-                if count > 1 && count % 100 == 0 {
-                    let elapsed = start.elapsed().as_secs();
-                    info!(
-                        "\nProcessed {} {} alerts in {} seconds, avg: {:.4} alerts/s\n",
-                        count,
-                        stream_name,
-                        elapsed,
-                        count as f64 / elapsed as f64
-                    );
-                }
-                count += 1;
+        let Some(value): Option<Vec<Vec<u8>>> =
+            con.rpoplpush(&queue_name, &queue_temp_name).await?
+        else {
+            info!("Queue is empty");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            continue;
+        };
+        match alert::process_alert(
+            &value[0],
+            &xmatch_configs,
+            &db,
+            &alert_collection,
+            &alert_aux_collection,
+            &schema,
+        )
+        .await
+        {
+            Ok(Some(candid)) => {
+                info!(
+                    "Processed alert with candid: {}, queueing for classification",
+                    candid
+                );
+                // queue the candid for processing by the classifier
+                con.lpush::<&str, i64, isize>(&classifer_queue_name, candid)
+                    .await?;
+                con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
+                    .await?;
             }
-            None => {
-                info!("Queue is empty");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            Ok(None) => {
+                info!("Alert already exists");
+                // remove the alert from the queue
+                con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
+                    .await?;
+            }
+            Err(error) => {
+                error!(error = %error, "Error processing alert, requeueing");
+                // put it back in the ZTF_alerts_packets_queue, to the left (pop from the right, push to the left)
+                con.lrem::<&str, Vec<u8>, isize>(&queue_temp_name, 1, value[0].clone())
+                    .await?;
+                con.lpush::<&str, Vec<u8>, isize>(&queue_name, value[0].clone())
+                    .await?;
             }
         }
+        if count > 1 && count % 100 == 0 {
+            let elapsed = start.elapsed().as_secs();
+            info!(
+                "\nProcessed {} {} alerts in {} seconds, avg: {:.4} alerts/s\n",
+                count,
+                stream_name,
+                elapsed,
+                count as f64 / elapsed as f64
+            );
+        }
+        count += 1;
     }
 }

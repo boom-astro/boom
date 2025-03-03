@@ -1251,10 +1251,15 @@ impl Alert {
         Ok(alert)
     }
 
+    // TODO:
+    // * Why is this "unsafe"? We currently panic if the value can't be
+    //   deserialized into in Alert, but we could easily make that an error.
+    // * Why aren't we just using Reader::with_schema?
     pub fn from_avro_bytes_unsafe(
-        avro_bytes: Vec<u8>,
+        avro_bytes: &[u8],
         schema: &apache_avro::Schema,
     ) -> Result<Alert, Box<dyn std::error::Error>> {
+        // TODO: need a concrete error type here
         let mut cursor = std::io::Cursor::new(avro_bytes);
 
         let mut buf = [0; 4];
@@ -1280,7 +1285,7 @@ impl Alert {
         let value = from_avro_datum(&schema, &mut cursor, None);
         match value {
             Ok(value) => {
-                let alert: Alert = from_value::<Alert>(&value).unwrap();
+                let alert: Alert = from_value::<Alert>(&value).unwrap(); // TODO: handle error
                 Ok(alert)
             }
             Err(e) => {
