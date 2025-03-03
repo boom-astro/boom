@@ -78,8 +78,9 @@ pub fn buffer_to_image(buffer: Vec<u8>) -> Result<Vec<f32>, Box<dyn std::error::
         .parse::<usize>()
         .unwrap();
 
-    let mut image_data =
-        u8_to_f32_vec(&decompressed_data[FITS_HEADER_LEN..(FITS_HEADER_LEN + (naxis1 * naxis2 * 4) as usize)]); // 32 BITPIX / 8 bits per byte = 4
+    let mut image_data = u8_to_f32_vec(
+        &decompressed_data[FITS_HEADER_LEN..(FITS_HEADER_LEN + (naxis1 * naxis2 * 4) as usize)],
+    ); // 32 BITPIX / 8 bits per byte = 4
 
     // if NAXIS1 and NAXIS2 are not NAXIS_STANDARD, we need to pad the image with zeros
     // we can't just add zeros to the end of the image_data vector, because it's a 2D array we flattened into a 1D vector
@@ -107,15 +108,15 @@ pub fn buffer_to_image(buffer: Vec<u8>) -> Result<Vec<f32>, Box<dyn std::error::
 pub fn normalize_image(image: Vec<f32>) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // replace all NaNs with 0s and clamp all values to the range [f32::MIN, f32::MAX]
     let mut normalized: Vec<f32> = image
-    .into_iter()
-    .map(|pixel| {
-        if pixel.is_nan() {
-            0.0
-        } else {
-            pixel.clamp(f32::MIN, f32::MAX)
-        }
-    })
-    .collect();
+        .into_iter()
+        .map(|pixel| {
+            if pixel.is_nan() {
+                0.0
+            } else {
+                pixel.clamp(f32::MIN, f32::MAX)
+            }
+        })
+        .collect();
 
     // then, compute the norm of the vector, which is the Frobenius norm of this array
     // so a 2-norm of a vector is the square root of the sum of the squares of the elements (in absolute value)
