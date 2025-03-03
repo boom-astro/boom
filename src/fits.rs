@@ -1,5 +1,5 @@
 use flate2::read::GzDecoder;
-use std::io::{Cursor, Read};
+use std::io::Read;
 
 const NAXIS1_BYTES: &[u8] = "NAXIS1  =".as_bytes();
 const NAXIS2_BYTES: &[u8] = "NAXIS2  =".as_bytes();
@@ -18,10 +18,8 @@ fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
 }
 
 /// Converts a buffer of bytes from a gzipped FITS file to a vector of flattened 2D image data
-pub fn buffer_to_image(buffer: Vec<u8>) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let cursor = Cursor::new(buffer);
-
-    let mut decoder = GzDecoder::new(cursor);
+pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut decoder = GzDecoder::new(buffer);
 
     let mut decompressed_data = Vec::new();
     let _ = decoder.read_to_end(&mut decompressed_data);
@@ -129,7 +127,7 @@ pub fn normalize_image(image: Vec<f32>) -> Result<Vec<f32>, Box<dyn std::error::
 /// Prepares a cutout image for ML models
 /// It reads the image from the alert document
 /// decompresses it, normalizes it and returns it as a flattened 2D array of floats
-fn prepare_cutout(cutout: Vec<u8>) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn prepare_cutout(cutout: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let cutout = buffer_to_image(cutout).unwrap();
     let cutout = normalize_image(cutout).unwrap();
     Ok(cutout)
@@ -143,19 +141,19 @@ pub fn prepare_triplet(
         .get_binary_generic("cutoutScience")
         .unwrap()
         .to_vec();
-    let cutout_science = prepare_cutout(cutout_science).unwrap();
+    let cutout_science = prepare_cutout(&cutout_science).unwrap();
 
     let cutout_template = alert_doc
         .get_binary_generic("cutoutTemplate")
         .unwrap()
         .to_vec();
-    let cutout_template = prepare_cutout(cutout_template).unwrap();
+    let cutout_template = prepare_cutout(&cutout_template).unwrap();
 
     let cutout_difference = alert_doc
         .get_binary_generic("cutoutDifference")
         .unwrap()
         .to_vec();
-    let cutout_difference = prepare_cutout(cutout_difference).unwrap();
+    let cutout_difference = prepare_cutout(&cutout_difference).unwrap();
 
     Ok((cutout_science, cutout_template, cutout_difference))
 }
