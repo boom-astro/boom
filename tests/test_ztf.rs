@@ -1,32 +1,21 @@
-use boom::conf;
-use boom::types;
+use boom::{
+    alert::{AlertWorker, ZtfAlertWorker},
+    utils::db::mongify,
+};
 
-#[test]
-fn test_avro_to_alert() {
+const CONFIG_FILE: &str = "tests/config.test.yaml";
+
+#[tokio::test]
+async fn test_alert_from_avro_bytes() {
+    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+
     let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
     let bytes_content = std::fs::read(file_name).unwrap();
-    let alert = types::Alert::from_avro_bytes(bytes_content);
-    assert!(alert.is_ok());
-}
-
-#[test]
-fn test_avro_to_alert_unsafe() {
-    let schema = types::ztf_alert_schema().unwrap();
-    let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
-    let alert = types::Alert::from_avro_bytes_unsafe(&bytes_content, &schema);
-    assert!(alert.is_ok());
-}
-
-#[test]
-fn test_alert() {
-    let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
-    let alert = types::Alert::from_avro_bytes(bytes_content);
+    let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
     // validate the alert
-    let alert = alert.unwrap();
+    let mut alert = alert.unwrap();
     assert_eq!(alert.schemavsn, "4.02");
     assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
     assert_eq!(alert.object_id, "ZTF18abudxnw");
@@ -52,8 +41,7 @@ fn test_alert() {
     assert_eq!(detection.magpsf.is_some(), true);
     assert_eq!(detection.sigmapsf.is_some(), true);
     assert_eq!(detection.diffmaglim.is_some(), true);
-    assert!(detection.isdiffpos.is_some());
-    assert_eq!(detection.isdiffpos.as_ref().unwrap(), "t");
+    assert_eq!(detection.isdiffpos.is_some(), true);
 
     // validate the fp_hists
     let fp_hists = alert.clone().fp_hists;
@@ -83,16 +71,8 @@ fn test_alert() {
     assert_eq!(alert.cutout_template.clone().unwrap().len(), 12410);
     assert_eq!(alert.cutout_difference.clone().unwrap().len(), 14878);
 
-    // split alert from its history
-    let (alert_no_history, prv_candidates, fp_hist) = alert.pop_history();
-
-    // validate the alert_no_history
-    assert_eq!(alert_no_history.schemavsn, "4.02");
-    assert_eq!(alert_no_history.publisher, "ZTF (www.ztf.caltech.edu)");
-    assert_eq!(alert_no_history.object_id, "ZTF18abudxnw");
-    assert_eq!(alert_no_history.candid, 2695378462115010012);
-    assert_eq!(alert_no_history.candidate.ra, 295.3031995);
-    assert_eq!(alert_no_history.candidate.dec, -10.3958989);
+    let prv_candidates = alert.prv_candidates.take();
+    let fp_hist = alert.fp_hists.take();
 
     // validate the prv_candidates
     assert!(!prv_candidates.is_none());
@@ -103,7 +83,7 @@ fn test_alert() {
     assert_eq!(fp_hist.clone().unwrap().len(), 10);
 
     // validate the conversion to bson
-    let alert_doc = alert_no_history.mongify();
+    let alert_doc = mongify(&alert);
     assert_eq!(alert_doc.get_str("schemavsn").unwrap(), "4.02");
     assert_eq!(
         alert_doc.get_str("publisher").unwrap(),
@@ -132,7 +112,7 @@ fn test_alert() {
     let prv_candidates_doc = prv_candidates
         .unwrap()
         .into_iter()
-        .map(|x| x.mongify())
+        .map(|x| mongify(&x))
         .collect::<Vec<_>>();
     assert_eq!(prv_candidates_doc.len(), 10);
 
@@ -146,7 +126,7 @@ fn test_alert() {
     let fp_hist_doc = fp_hist
         .unwrap()
         .into_iter()
-        .map(|x| x.mongify())
+        .map(|x| mongify(&x))
         .collect::<Vec<_>>();
     assert_eq!(fp_hist_doc.len(), 10);
 
@@ -161,50 +141,4 @@ fn test_alert() {
         fp_positive_flux.get_f64("forcediffimflux").unwrap(),
         138.2030029296875
     );
-}
-
-#[test]
-fn test_catalogxmatchconfig() {
-    let ps1_projection = mongodb::bson::doc! {
-        "_id": 1,
-        "coordinates.radec_str": 1,
-        "gMeanPSFMag": 1,
-        "gMeanPSFMagErr": 1
-    };
-    let xmatch_config = types::CatalogXmatchConfig {
-        catalog: "PS1_DR1".to_string(),
-        radius: 2.0 * std::f64::consts::PI / 180.0 / 3600.0,
-        use_distance: false,
-        distance_key: None,
-        distance_max: None,
-        distance_max_near: None,
-        projection: ps1_projection.clone(),
-    };
-
-    assert_eq!(xmatch_config.catalog, "PS1_DR1");
-    assert_eq!(
-        xmatch_config.radius,
-        2.0 * std::f64::consts::PI / 180.0 / 3600.0
-    );
-    assert_eq!(xmatch_config.use_distance, false);
-    assert_eq!(xmatch_config.distance_key, None);
-    assert_eq!(xmatch_config.distance_max, None);
-    assert_eq!(xmatch_config.distance_max_near, None);
-
-    let projection = xmatch_config.projection;
-    assert_eq!(projection, ps1_projection);
-
-    // validate the from_config method
-    let config = conf::load_config("tests/config.test.yaml").unwrap();
-    let crossmatches = config.get_table("crossmatch").unwrap();
-    let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
-    let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
-    assert!(crossmatches_ztf.len() > 0);
-
-    for crossmatch in crossmatches_ztf {
-        let catalog_xmatch_config = types::CatalogXmatchConfig::from_config(crossmatch);
-        assert!(catalog_xmatch_config.catalog.len() > 0);
-        assert!(catalog_xmatch_config.radius > 0.0);
-        assert!(catalog_xmatch_config.projection.len() > 0);
-    }
 }

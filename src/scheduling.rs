@@ -1,8 +1,12 @@
 use crate::{
-    alert_worker, fake_ml_worker, filter_worker,
-    worker_util::{WorkerCmd, WorkerType},
+    alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
+    filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
+    ml::run_ml_worker,
+    utils::worker::{WorkerCmd, WorkerType},
 };
-use std::{sync::mpsc, thread};
+use std::thread;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::SendError;
 use tracing::{error, info, warn};
 
 // Thread pool
@@ -44,10 +48,13 @@ impl ThreadPool {
     }
 
     /// Send a termination signal to each worker thread.
-    fn terminate(&self) {
+    async fn terminate(&self) {
         for worker in &self.workers {
-            info!("sending termination signal to worker {}", &worker.id);
-            if let Err(error) = worker.terminate() {
+            info!(
+                "sending termination signal to worker {} (type: {})",
+                &worker.id, &self.worker_type
+            );
+            if let Err(error) = worker.terminate().await {
                 warn!(
                     error = %error,
                     "failed to send termination signal to worker {}",
@@ -87,7 +94,7 @@ impl ThreadPool {
 // Shut down all workers from the thread pool and drop the threadpool
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        self.terminate();
+        futures::executor::block_on(self.terminate());
         self.join();
     }
 }
@@ -118,21 +125,29 @@ impl Worker {
         config_path: String,
     ) -> Worker {
         let id_copy = id.clone();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel(1);
         let thread = match worker_type {
             // TODO: Spawn a new worker thread when one dies? (A supervisor or something like that?)
             WorkerType::Alert => thread::spawn(move || {
-                if let Err(e) =
-                    alert_worker::alert_worker(&id, stream_name.clone(), &config_path, receiver)
-                {
-                    error!(id, stream_name, config_path, error = %e, "alert worker failed")
+                if stream_name == "ZTF" {
+                    let _ = run_alert_worker::<ZtfAlertWorker>(id, receiver, &config_path);
+                } else if stream_name == "LSST" {
+                    let _ = run_alert_worker::<LsstAlertWorker>(id, receiver, &config_path);
+                } else {
+                    panic!("Unknown stream name: {}", stream_name);
                 }
             }),
-            WorkerType::Filter => thread::spawn(|| {
-                let _ = filter_worker::filter_worker(id, receiver, stream_name, config_path);
+            WorkerType::Filter => thread::spawn(move || {
+                if stream_name == "ZTF" {
+                    let _ = run_filter_worker::<ZtfFilterWorker>(id, receiver, &config_path);
+                } else if stream_name == "LSST" {
+                    let _ = run_filter_worker::<LsstFilterWorker>(id, receiver, &config_path);
+                } else {
+                    panic!("Unknown stream name: {}", stream_name);
+                }
             }),
-            WorkerType::ML => thread::spawn(|| {
-                fake_ml_worker::fake_ml_worker(id, receiver, stream_name, config_path);
+            WorkerType::ML => thread::spawn(move || {
+                run_ml_worker(id, receiver, stream_name, config_path);
             }),
         };
 
@@ -144,7 +159,7 @@ impl Worker {
     }
 
     /// Send a termination signal to the worker's thread.
-    fn terminate(&self) -> Result<(), mpsc::SendError<WorkerCmd>> {
-        self.sender.send(WorkerCmd::TERM)
+    async fn terminate(&self) -> Result<(), SendError<WorkerCmd>> {
+        self.sender.send(WorkerCmd::TERM).await
     }
 }

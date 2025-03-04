@@ -1,4 +1,8 @@
-use boom::{conf, scheduling::ThreadPool, worker_util, worker_util::WorkerType};
+use boom::{
+    conf,
+    scheduling::ThreadPool,
+    utils::worker::{check_flag, sig_int_handler, WorkerType},
+};
 use clap::Parser;
 use config::Config;
 use std::{
@@ -48,7 +52,7 @@ fn get_num_workers(conf: Config, stream_name: &str, worker_type: &str) -> i64 {
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::INFO)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -56,6 +60,7 @@ async fn main() {
     let args = Cli::parse();
 
     let stream_name = args.stream.unwrap();
+    info!("Starting scheduler for {} alert processing", stream_name);
 
     if !args.config.is_some() {
         warn!("No config file provided, using config.yaml");
@@ -74,7 +79,7 @@ async fn main() {
 
     // setup signal handler thread
     let interrupt = Arc::new(Mutex::new(false));
-    worker_util::sig_int_handler(Arc::clone(&interrupt)).await;
+    sig_int_handler(Arc::clone(&interrupt)).await;
 
     info!("creating alert, ml, and filter workers...");
     let alert_pool = ThreadPool::new(
@@ -99,7 +104,7 @@ async fn main() {
 
     loop {
         info!("heart beat (MAIN)");
-        let exit = worker_util::check_flag(Arc::clone(&interrupt));
+        let exit = check_flag(Arc::clone(&interrupt));
         if exit {
             warn!("killed thread(s)");
             drop(alert_pool);

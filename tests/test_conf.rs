@@ -74,3 +74,49 @@ async fn test_build_db() {
     // try a simple query to just validate that the connection works
     let _collections = db.list_collection_names().await.unwrap();
 }
+
+#[test]
+fn test_catalogxmatchconfig() {
+    let ps1_projection = mongodb::bson::doc! {
+        "_id": 1,
+        "coordinates.radec_str": 1,
+        "gMeanPSFMag": 1,
+        "gMeanPSFMagErr": 1
+    };
+    let xmatch_config = conf::CatalogXmatchConfig {
+        catalog: "PS1_DR1".to_string(),
+        radius: 2.0 * std::f64::consts::PI / 180.0 / 3600.0,
+        use_distance: false,
+        distance_key: None,
+        distance_max: None,
+        distance_max_near: None,
+        projection: ps1_projection.clone(),
+    };
+
+    assert_eq!(xmatch_config.catalog, "PS1_DR1");
+    assert_eq!(
+        xmatch_config.radius,
+        2.0 * std::f64::consts::PI / 180.0 / 3600.0
+    );
+    assert_eq!(xmatch_config.use_distance, false);
+    assert_eq!(xmatch_config.distance_key, None);
+    assert_eq!(xmatch_config.distance_max, None);
+    assert_eq!(xmatch_config.distance_max_near, None);
+
+    let projection = xmatch_config.projection;
+    assert_eq!(projection, ps1_projection);
+
+    // validate the from_config method
+    let config = conf::load_config("tests/config.test.yaml").unwrap();
+    let crossmatches = config.get_table("crossmatch").unwrap();
+    let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
+    let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
+    assert!(crossmatches_ztf.len() > 0);
+
+    for crossmatch in crossmatches_ztf {
+        let catalog_xmatch_config = conf::CatalogXmatchConfig::from_config(crossmatch);
+        assert!(catalog_xmatch_config.catalog.len() > 0);
+        assert!(catalog_xmatch_config.radius > 0.0);
+        assert!(catalog_xmatch_config.projection.len() > 0);
+    }
+}

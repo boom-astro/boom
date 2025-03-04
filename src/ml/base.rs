@@ -1,26 +1,25 @@
 use crate::{
     conf,
-    fits::prepare_triplet,
-    worker_util::{self, WorkerCmd},
+    utils::fits::prepare_triplet,
+    utils::worker::{get_check_command_interval, WorkerCmd},
 };
 use core::time;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use redis::AsyncCommands;
-use std::{collections::HashMap, num::NonZero, sync::mpsc, thread};
+use std::{collections::HashMap, num::NonZero, thread};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-// fake ml worker which, like the ML worker, receives alerts from the alert worker and sends them
-//      to streams
+// fake ml worker which for now does not run any models
 #[tokio::main]
-pub async fn fake_ml_worker(
+pub async fn run_ml_worker(
     id: String,
-    receiver: mpsc::Receiver<WorkerCmd>,
+    mut receiver: mpsc::Receiver<WorkerCmd>,
     stream_name: String,
     config_path: String,
 ) {
-    let ztf_allowed_permissions = vec![1, 2, 3];
-    let catalog = stream_name.clone();
+    let catalog: String = stream_name.clone();
     let queue = format!("{}_alerts_classifier_queue", catalog);
 
     let config_file = conf::load_config(&config_path).unwrap();
@@ -32,7 +31,7 @@ pub async fn fake_ml_worker(
         .unwrap();
 
     let mut alert_counter = 0;
-    let command_interval = worker_util::get_check_command_interval(config_file, &stream_name);
+    let command_interval = get_check_command_interval(config_file, &stream_name);
 
     loop {
         // check for interrupt from thread pool
@@ -58,13 +57,12 @@ pub async fn fake_ml_worker(
             .aggregate(vec![
                 doc! {
                     "$match": {
-                        "candid": {"$in": candids}
+                        "_id": {"$in": candids}
                     }
                 },
                 doc! {
                     "$project": {
                         "objectId": 1,
-                        "candid": 1,
                         "candidate": 1,
                     }
                 },
@@ -79,7 +77,6 @@ pub async fn fake_ml_worker(
                 doc! {
                     "$project": doc! {
                         "objectId": 1,
-                        "candid": 1,
                         "candidate": 1,
                         "prv_candidates": doc! {
                             "$filter": doc! {
@@ -193,23 +190,17 @@ pub async fn fake_ml_worker(
         }
 
         for (programid, candids) in candids_grouped {
-            for candid in candids {
-                for permission in &ztf_allowed_permissions {
-                    if programid <= *permission {
-                        let _ = con
-                            .xadd::<&str, &str, &str, i64, ()>(
-                                format!(
-                                    "{}_alerts_programid_{}_filter_stream",
-                                    &catalog, permission
-                                )
-                                .as_str(),
-                                "*",
-                                &[("candid", candid)],
-                            )
-                            .await;
-                    }
-                }
-            }
+            let filter_queue =
+                format!("{}_alerts_programid{}_filter_queue", stream_name, programid);
+            let nb_candids = &candids.len();
+            let _: usize = con
+                .lpush::<&str, Vec<i64>, usize>(filter_queue.as_str(), candids)
+                .await
+                .unwrap();
+            info!(
+                "ML WORKER {}: pushed {} candids to {}",
+                id, nb_candids, filter_queue
+            );
         }
     }
 }

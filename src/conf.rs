@@ -1,12 +1,11 @@
-use config::Config;
+use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
-pub use config::ConfigError;
 use config::File;
 use std::path::Path;
 use tracing::error;
 
-use crate::types;
+pub use config::ConfigError;
 
 pub fn load_config(filepath: &str) -> Result<Config, ConfigError> {
     let path = Path::new(filepath);
@@ -21,7 +20,7 @@ pub fn load_config(filepath: &str) -> Result<Config, ConfigError> {
     Ok(conf)
 }
 
-pub fn build_xmatch_configs(conf: &Config, stream_name: &str) -> Vec<types::CatalogXmatchConfig> {
+pub fn build_xmatch_configs(conf: &Config, stream_name: &str) -> Vec<CatalogXmatchConfig> {
     let crossmatches = conf
         .get_table("crossmatch")
         .expect("crossmatches key not found");
@@ -32,7 +31,7 @@ pub fn build_xmatch_configs(conf: &Config, stream_name: &str) -> Vec<types::Cata
     let mut catalog_xmatch_configs = Vec::new();
 
     for crossmatch in crossmatches_stream.unwrap().clone().into_array().unwrap() {
-        let catalog_xmatch_config = types::CatalogXmatchConfig::from_config(crossmatch);
+        let catalog_xmatch_config = CatalogXmatchConfig::from_config(crossmatch);
         catalog_xmatch_configs.push(catalog_xmatch_config);
     }
 
@@ -169,4 +168,132 @@ pub async fn build_db(conf: &Config) -> mongodb::Database {
     let db = client_mongo.database(&name);
 
     db
+}
+
+#[derive(Debug)]
+pub struct CatalogXmatchConfig {
+    pub catalog: String,                     // name of the collection in the database
+    pub radius: f64,                         // radius in radians
+    pub projection: mongodb::bson::Document, // projection to apply to the catalog
+    pub use_distance: bool,                  // whether to use the distance field in the crossmatch
+    pub distance_key: Option<String>,        // name of the field to use for distance
+    pub distance_max: Option<f64>,           // maximum distance in kpc
+    pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
+}
+
+impl CatalogXmatchConfig {
+    pub fn new(
+        catalog: &str,
+        radius: f64,
+        projection: mongodb::bson::Document,
+        use_distance: bool,
+        distance_key: Option<String>,
+        distance_max: Option<f64>,
+        distance_max_near: Option<f64>,
+    ) -> CatalogXmatchConfig {
+        CatalogXmatchConfig {
+            catalog: catalog.to_string(),
+            radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
+            projection,
+            use_distance,
+            distance_key,
+            distance_max,
+            distance_max_near,
+        }
+    }
+
+    // based on the code in the main function, create a from_config function
+    pub fn from_config(config_value: Value) -> CatalogXmatchConfig {
+        let hashmap_xmatch = config_value.into_table().unwrap();
+
+        // any of the fields can be missing, so we need to carefully handle the Option type
+        let catalog = {
+            if let Some(catalog) = hashmap_xmatch.get("catalog") {
+                catalog.clone().into_string().unwrap()
+            } else {
+                // raise an error
+                panic!("catalog field is missing");
+            }
+        };
+
+        let radius = {
+            if let Some(radius) = hashmap_xmatch.get("radius") {
+                radius.clone().into_float().unwrap()
+            } else {
+                panic!("radius field is missing");
+            }
+        };
+
+        let projection = {
+            if let Some(projection) = hashmap_xmatch.get("projection") {
+                projection.clone().into_table().unwrap()
+            } else {
+                panic!("projection field is missing");
+            }
+        };
+
+        let use_distance = {
+            if let Some(use_distance) = hashmap_xmatch.get("use_distance") {
+                use_distance.clone().into_bool().unwrap()
+            } else {
+                false
+            }
+        };
+
+        let distance_key = {
+            if let Some(distance_key) = hashmap_xmatch.get("distance_key") {
+                Some(distance_key.clone().into_string().unwrap())
+            } else {
+                None
+            }
+        };
+
+        let distance_max = {
+            if let Some(distance_max) = hashmap_xmatch.get("distance_max") {
+                Some(distance_max.clone().into_float().unwrap())
+            } else {
+                None
+            }
+        };
+
+        let distance_max_near = {
+            if let Some(distance_max_near) = hashmap_xmatch.get("distance_max_near") {
+                Some(distance_max_near.clone().into_float().unwrap())
+            } else {
+                None
+            }
+        };
+
+        // projection is a hashmap, we need to convert it to a Document
+        let mut projection_doc = mongodb::bson::Document::new();
+        for (key, value) in projection.iter() {
+            let key = key.as_str();
+            let value = value.clone().into_int().unwrap();
+            projection_doc.insert(key, value);
+        }
+
+        if use_distance {
+            if distance_key.is_none() {
+                panic!("must provide a distance_key if use_distance is true");
+            }
+
+            if distance_max.is_none() {
+                panic!("must provide a distance_max if use_distance is true");
+            }
+
+            if distance_max_near.is_none() {
+                panic!("must provide a distance_max_near if use_distance is true");
+            }
+        }
+
+        CatalogXmatchConfig::new(
+            &catalog,
+            radius,
+            projection_doc,
+            use_distance,
+            distance_key,
+            distance_max,
+            distance_max_near,
+        )
+    }
 }

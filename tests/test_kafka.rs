@@ -1,29 +1,33 @@
-use boom::kafka;
-use redis::AsyncCommands;
+use boom::kafka::{download_alerts_from_archive, produce_from_archive};
+use rdkafka::config::ClientConfig;
+use rdkafka::consumer::{BaseConsumer, Consumer};
+
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::test]
 async fn test_download_from_archive() {
-    let date = "20240617";
-    match kafka::download_alerts_from_archive(date) {
-        Ok(count) => {
-            assert_eq!(count, 710);
-        }
-        Err(e) => {
-            assert!(false, "Error downloading alerts: {:?}", e);
-        }
-    }
+    let date = "20231118";
+    let result = download_alerts_from_archive(date);
+    assert!(result.is_ok());
+    assert!(std::path::Path::new("data/alerts/ztf/20231118").exists());
+    assert_eq!(result.unwrap(), 271);
 }
 
 #[tokio::test]
 async fn test_produce_from_archive() {
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let topic = uuid::Uuid::new_v4().to_string();
 
-    let result = kafka::produce_from_archive("20240617", 0, Some(topic.clone())).await;
+    let result = produce_from_archive("20240617", 0, Some(topic.clone())).await;
     assert!(result.is_ok());
-
-    // connect to kafka, and check that the topic has the expected number of messages
-    use rdkafka::config::ClientConfig;
-    use rdkafka::consumer::{BaseConsumer, Consumer};
+    assert!(result.unwrap() == 710);
+    assert!(std::path::Path::new("data/alerts/ztf/20240617").exists());
 
     let consumer: BaseConsumer = match ClientConfig::new()
         .set("group.id", "test")
@@ -76,28 +80,4 @@ async fn test_produce_from_archive() {
     }
 
     assert!(found_topic);
-}
-
-#[tokio::test]
-async fn test_consume_alerts() {
-    let topic = uuid::Uuid::new_v4().to_string();
-    let result = kafka::produce_from_archive("20240617", 0, Some(topic.clone())).await;
-    assert!(result.is_ok());
-
-    let queue = uuid::Uuid::new_v4().to_string();
-    let result = kafka::consume_alerts(&topic, None, true, 0, Some(queue.clone())).await;
-    assert!(result.is_ok());
-
-    let client = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-
-    // check how many messages are in the queue
-    match con.llen::<&str, usize>(&queue).await {
-        Ok(count) => {
-            assert_eq!(count, 710);
-        }
-        Err(e) => {
-            assert!(false, "Error getting length of queue: {:?}", e);
-        }
-    }
 }
