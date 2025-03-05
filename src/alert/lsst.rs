@@ -1,5 +1,5 @@
 use apache_avro::{from_avro_datum, from_value, Schema};
-use flare::Time;
+use flare::{phot::flux_to_mag, Time};
 use mongodb::bson::doc;
 use std::collections::HashMap;
 use std::io::Read;
@@ -226,6 +226,30 @@ pub struct DiaSource {
     /// Template injection in the 3x3 region around the centroid.
     #[serde(rename = "pixelFlags_injected_templateCenter")]
     pub pixel_flags_injected_template_center: Option<bool>,
+
+    /// magpsf and sigmagpsf are added by the worker
+    /// based on the science and psf fluxes
+    /// (science flux is missing from the schema at the moment)
+    pub magpsf: Option<f32>,
+    pub sigmapsf: Option<f32>,
+    #[serde(rename = "scienceFlux")]
+    pub science_flux: Option<f32>,
+}
+
+impl DiaSource {
+    fn add_mag_data(&mut self) {
+        // let science_flux = self.science_flux.unwrap();
+        let science_flux = 1000.0;
+        let psf_flux = self.psf_flux.unwrap();
+        let psf_flux_err = self.psf_flux_err.unwrap();
+        let (magpsf, sigmapsf) = flux_to_mag(
+            ((science_flux + psf_flux) * 1e-6) as f64,
+            (psf_flux_err * 1e-6) as f64,
+            8.9,
+        );
+        self.magpsf = Some(magpsf as f32);
+        self.sigmapsf = Some(sigmapsf as f32);
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
@@ -435,6 +459,29 @@ pub struct DiaForcedSource {
     pub mjd: f64,
     /// Filter band this source was observed with.
     pub band: Option<String>,
+    /// magpsf and sigmapsf are added by the worker
+    /// based on the science and psf fluxes
+    /// (science flux is missing from the schema at the moment)
+    pub magpsf: Option<f32>,
+    pub sigmapsf: Option<f32>,
+    #[serde(rename = "scienceFlux")]
+    pub science_flux: Option<f32>,
+}
+
+impl DiaForcedSource {
+    fn add_mag_data(&mut self) {
+        // let science_flux = self.science_flux.unwrap();
+        let science_flux = 1000.0;
+        let psf_flux = self.psf_flux.unwrap();
+        let psf_flux_err = self.psf_flux_err.unwrap();
+        let (magpsf, sigmapsf) = flux_to_mag(
+            ((science_flux + psf_flux) * 1e-6) as f64,
+            (psf_flux_err * 1e-6) as f64,
+            8.9,
+        );
+        self.magpsf = Some(magpsf as f32);
+        self.sigmapsf = Some(sigmapsf as f32);
+    }
 }
 
 /// Rubin Avro alert schema v7.3
@@ -663,6 +710,8 @@ impl AlertWorker for LsstAlertWorker {
         let ra = alert.candidate.ra;
         let dec = alert.candidate.dec;
 
+        alert.candidate.add_mag_data();
+
         let candidate_doc = mongify(&alert.candidate);
 
         let alert_doc = doc! {
@@ -726,14 +775,20 @@ impl AlertWorker for LsstAlertWorker {
         let mut prv_candidates_doc = prv_candidates
             .unwrap_or(vec![])
             .into_iter()
-            .map(|x| mongify(&x))
+            .map(|mut x| {
+                x.add_mag_data();
+                mongify(&x)
+            })
             .collect::<Vec<_>>();
         prv_candidates_doc.push(candidate_doc);
 
         let fp_hist_doc = fp_hist
             .unwrap_or(vec![])
             .into_iter()
-            .map(|x| mongify(&x))
+            .map(|mut x| {
+                x.add_mag_data();
+                mongify(&x)
+            })
             .collect::<Vec<_>>();
 
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
