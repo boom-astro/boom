@@ -1,13 +1,13 @@
-use boom::kafka::produce_from_archive;
 use clap::Parser;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
+
+use boom::kafka::produce_from_archive;
 
 #[derive(Parser)]
 struct Cli {
     #[arg(help = "Date of archival alerts to produce, with format YYYYMMDD. Defaults to today.")]
     date: Option<String>,
-
     #[arg(
         long,
         value_name = "LIMIT",

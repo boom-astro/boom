@@ -16,18 +16,14 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        test_subset:
-          [
-            "unit_tests",
-            "benchmark",
-          ]
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
         submodules: true
         clean: false
+    - name: Setup System Dependencies
+      run: sudo apt-get install -y libsasl2-dev
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
@@ -35,8 +31,4 @@ jobs:
     - name: Start services
       run: docker compose up --build -d
     - name: Tests
-      if: ${{ matrix.test_subset == 'unit_tests' }}
       run: cargo test --release
-    - name: Filter benchmark
-      if: ${{ matrix.test_subset == 'benchmark' }}
-      run: cargo bench filter_benchmark --

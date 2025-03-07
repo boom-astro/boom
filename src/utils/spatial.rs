@@ -3,14 +3,17 @@ use futures::stream::StreamExt;
 use mongodb::bson::doc;
 use tracing::warn;
 
-use crate::types;
+use crate::conf;
 
 pub async fn xmatch(
     ra: f64,
     dec: f64,
-    xmatch_configs: &Vec<types::CatalogXmatchConfig>,
+    xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
     db: &mongodb::Database,
 ) -> mongodb::bson::Document {
+    if xmatch_configs.len() == 0 {
+        return doc! {};
+    }
     let ra_geojson = ra - 180.0;
     let dec_geojson = dec;
 

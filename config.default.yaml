@@ -16,7 +16,16 @@ workers:
       n_workers: 1
     filter:
       n_workers: 1
+  LSST:
+    command_interval: 500
+    alert:
+      n_workers: 5
+    ml:
+      n_workers: 0
+    filter:
+      n_workers: 1
 crossmatch:
+  LSST: []
   ZTF:
     - catalog: PS1_DR1
       radius: 2.0 # 2 arcseconds
