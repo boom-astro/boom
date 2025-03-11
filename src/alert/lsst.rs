@@ -225,6 +225,14 @@ pub struct DiaSource {
     /// Template injection in the 3x3 region around the centroid.
     #[serde(rename = "pixelFlags_injected_templateCenter")]
     pub pixel_flags_injected_template_center: Option<bool>,
+
+    // these fields are computed later, from the psf_flux and science_flux (the latter is missing in the current LSST schema)
+    pub magpsf: Option<f32>,
+    pub sigmapsf: Option<f32>,
+    pub diffmaglim: Option<f32>,
+    pub isdiffpos: Option<bool>,
+    // pub magdc: Option<f32>,
+    // pub sigmadc: Option<f32>,
 }
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
@@ -405,6 +413,9 @@ pub struct DiaNondetectionLimit {
     pub band: String,
     #[serde(rename = "diaNoise")]
     pub dia_noise: f32,
+
+    // these fields are computed later, from the dia_noise
+    pub diffmaglim: Option<f32>,
 }
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
@@ -434,6 +445,13 @@ pub struct DiaForcedSource {
     pub mjd: f64,
     /// Filter band this source was observed with.
     pub band: Option<String>,
+
+    // these fields are computed later, from the psf_flux
+    pub magpsf: Option<f32>,
+    pub sigmapsf: Option<f32>,
+    pub diffmaglim: Option<f32>,
+    pub isdiffpos: Option<bool>,
+    pub snr: Option<f32>,
 }
 
 /// Rubin Avro alert schema v7.3
@@ -460,6 +478,64 @@ pub struct LsstAlert {
     #[serde(rename = "cutoutTemplate")]
     #[serde(with = "apache_avro::serde_avro_bytes_opt")]
     pub cutout_template: Option<Vec<u8>>,
+}
+
+fn flux2mag(flux: f32, flux_err: f32) -> (f32, f32, f32) {
+    // convert from nJy to Jy
+    let flux = flux.abs() * 1e-9;
+    let flux_err = flux_err * 1e-9;
+
+    // convert from Jy to AB mag
+    let mag = -2.5 * (flux).log10() + 8.9;
+    let sigma = 1.0857362047581294 * (flux_err / flux);
+    let diffmaglim = -2.5 * (5.0 * flux_err).log10() + 8.9;
+
+    (mag, sigma, diffmaglim)
+}
+
+fn fluxerr2diffmaglim(flux_err: f32) -> f32 {
+    // convert from nJy to Jy
+    let flux_err = flux_err * 1e-9;
+
+    // convert from Jy to AB mag
+    -2.5 * (5.0 * flux_err).log10() + 8.9
+}
+
+impl DiaSource {
+    pub fn add_mag_data(&mut self) -> Result<(), AlertError> {
+        let (magpsf, sigmapsf, diffmaglim) = flux2mag(
+            self.psf_flux.ok_or(AlertError::MissingFluxPSF)?.abs(),
+            self.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?,
+        );
+        self.magpsf = Some(magpsf);
+        self.sigmapsf = Some(sigmapsf);
+        self.diffmaglim = Some(diffmaglim);
+        self.isdiffpos = Some(self.psf_flux.unwrap() > 0.0);
+        self.snr = Some(self.psf_flux.unwrap() / self.psf_flux_err.unwrap());
+        Ok(())
+    }
+}
+
+impl DiaForcedSource {
+    pub fn add_mag_data(&mut self) -> Result<(), AlertError> {
+        let (magpsf, sigmapsf, diffmaglim) = flux2mag(
+            self.psf_flux.ok_or(AlertError::MissingFluxPSF)?.abs(),
+            self.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?,
+        );
+        self.magpsf = Some(magpsf);
+        self.sigmapsf = Some(sigmapsf);
+        self.diffmaglim = Some(diffmaglim);
+        self.isdiffpos = Some(self.psf_flux.unwrap() > 0.0);
+        self.snr = Some(self.psf_flux.unwrap() / self.psf_flux_err.unwrap());
+        Ok(())
+    }
+}
+
+impl DiaNondetectionLimit {
+    pub fn add_mag_data(&mut self) -> Result<(), AlertError> {
+        self.diffmaglim = Some(fluxerr2diffmaglim(self.dia_noise));
+        Ok(())
+    }
 }
 
 pub struct LsstAlertWorker {
@@ -561,7 +637,7 @@ impl LsstAlertWorker {
         Ok(self.cache.get(&key).unwrap())
     }
 
-    async fn alert_from_avro_bytes(
+    pub async fn alert_from_avro_bytes(
         self: &mut Self,
         avro_bytes: &[u8],
     ) -> Result<LsstAlert, AlertError> {
@@ -631,6 +707,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
+        let prv_nondetections = alert.prv_nondetections.take();
 
         let candid = alert.candid;
         let object_id = alert
@@ -639,6 +716,8 @@ impl AlertWorker for LsstAlertWorker {
             .ok_or(AlertError::MissingObjectId)?;
         let ra = alert.candidate.ra;
         let dec = alert.candidate.dec;
+
+        alert.candidate.add_mag_data()?;
 
         let candidate_doc = mongify(&alert.candidate);
 
@@ -695,15 +774,36 @@ impl AlertWorker for LsstAlertWorker {
         let mut prv_candidates_doc = prv_candidates
             .unwrap_or(vec![])
             .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
+            .map(|mut x| {
+                if let Err(e) = x.add_mag_data() {
+                    return Err(e);
+                }
+                Ok(mongify(&x))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         prv_candidates_doc.push(candidate_doc);
 
         let fp_hist_doc = fp_hist
             .unwrap_or(vec![])
             .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
+            .map(|mut x| {
+                if let Err(e) = x.add_mag_data() {
+                    return Err(e);
+                }
+                Ok(mongify(&x))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let non_detections_doc = prv_nondetections
+            .unwrap_or(vec![])
+            .into_iter()
+            .map(|mut x| {
+                if let Err(e) = x.add_mag_data() {
+                    return Err(e);
+                }
+                Ok(mongify(&x))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
@@ -712,6 +812,7 @@ impl AlertWorker for LsstAlertWorker {
             let alert_aux_doc = doc! {
                 "_id": &object_id,
                 "prv_candidates": prv_candidates_doc,
+                "prv_nondetections": non_detections_doc,
                 "fp_hists": fp_hist_doc,
                 "cross_matches": xmatch(ra, dec, &self.xmatch_configs, &self.db).await,
                 "created_at": now,
@@ -734,6 +835,7 @@ impl AlertWorker for LsstAlertWorker {
             let update_doc = doc! {
                 "$addToSet": {
                     "prv_candidates": { "$each": prv_candidates_doc },
+                    "prv_nondetections": { "$each": non_detections_doc },
                     "fp_hists": { "$each": fp_hist_doc }
                 },
                 "$set": {

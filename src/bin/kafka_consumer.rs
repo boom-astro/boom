@@ -15,6 +15,8 @@ struct Cli {
     processes: Option<usize>,
     #[arg(help = "Clear the queue of alerts already consumed from Kafka and pushed to Redis")]
     clear: Option<bool>,
+    #[arg(help = "Set a maximum number of alerts to hold in redis, default is 15000")]
+    max_in_queue: Option<usize>,
 }
 
 #[tokio::main]
@@ -30,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let survey = args.survey;
     let processes = args.processes.unwrap_or(1);
     let clear = args.clear.unwrap_or(false);
+    let max_in_queue = args.max_in_queue.unwrap_or(15000);
 
     // TODO: based on the location of the telescope, figure out the exact timestamp
     // for the start of the night
@@ -39,14 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match survey.as_str() {
         "ZTF" => {
-            let consumer = ZtfAlertConsumer::new(processes, None, None, None, None, None);
+            let consumer =
+                ZtfAlertConsumer::new(processes, Some(max_in_queue), None, None, None, None);
             if clear {
                 let _ = consumer.clear_output_queue();
             }
             consumer.consume(timestamp).await?;
         }
         "LSST" => {
-            let consumer = LsstAlertConsumer::new(processes, Some(20000), None, None, None, None);
+            let consumer =
+                LsstAlertConsumer::new(processes, Some(max_in_queue), None, None, None, None);
             if clear {
                 let _ = consumer.clear_output_queue();
             }

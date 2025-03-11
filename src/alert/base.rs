@@ -54,6 +54,10 @@ pub enum AlertError {
     EmptyAlertError,
     #[error("failed to read avro")]
     AvroReadError(#[source] apache_avro::Error),
+    #[error("missing flux psf")]
+    MissingFluxPSF,
+    #[error("missing flux psf error")]
+    MissingFluxPSFError,
 }
 
 #[derive(thiserror::Error, Debug)]
