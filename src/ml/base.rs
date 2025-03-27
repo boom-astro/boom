@@ -7,7 +7,7 @@ use core::time;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use redis::AsyncCommands;
-use std::{collections::HashMap, num::NonZero, thread};
+use std::{num::NonZero, thread};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -31,6 +31,7 @@ pub async fn run_ml_worker(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let catalog: String = stream_name.to_string();
     let queue = format!("{}_alerts_classifier_queue", catalog);
+    let output_queue = format!("{}_alerts_filter_queue", stream_name);
 
     let config_file = conf::load_config(&config_path).unwrap();
     let db = conf::build_db(&config_file).await?;
@@ -85,6 +86,14 @@ pub async fn run_ml_worker(
                     }
                 },
                 doc! {
+                    "$lookup": {
+                        "from": format!("{}_alerts_cutouts", catalog),
+                        "localField": "_id",
+                        "foreignField": "_id",
+                        "as": "object"
+                    }
+                },
+                doc! {
                     "$project": doc! {
                         "objectId": 1,
                         "candidate": 1,
@@ -126,6 +135,24 @@ pub async fn run_ml_worker(
                                 }
                             }
                         },
+                        "cutoutScience": doc! {
+                            "$arrayElemAt": [
+                                "$object.cutoutScience",
+                                0
+                            ]
+                        },
+                        "cutoutTemplate": doc! {
+                            "$arrayElemAt": [
+                                "$object.cutoutTemplate",
+                                0
+                            ]
+                        },
+                        "cutoutDifference": doc! {
+                            "$arrayElemAt": [
+                                "$object.cutoutDifference",
+                                0
+                            ]
+                        }
                     }
                 },
             ])
@@ -146,7 +173,7 @@ pub async fn run_ml_worker(
 
         if alerts.len() == 0 {
             info!("ML WORKER {}: queue empty", id);
-            thread::sleep(time::Duration::from_secs(5));
+            thread::sleep(time::Duration::from_secs(1));
             alert_counter = 0;
             if let Ok(command) = receiver.try_recv() {
                 match command {
@@ -158,7 +185,6 @@ pub async fn run_ml_worker(
             }
             continue;
         } else {
-            info!("ML WORKER {}: received alerts len: {}", id, alerts.len());
             alert_counter += alerts.len() as i64;
         }
 
@@ -166,7 +192,14 @@ pub async fn run_ml_worker(
         // For now, we just just perform some of the preprocessing operations, like reading the images
         // Ideally, we want to prepare the data for the whole batch of alerts at once, so we can
         // run the models on batches of alerts instead of one by one
+        let mut processed_candids = Vec::new();
         for alert in &alerts {
+            let candid = alert.get_i64("_id").unwrap();
+            let programid = alert
+                .get_document("candidate")
+                .unwrap()
+                .get_i32("programid")
+                .unwrap();
             let obj_id = alert.get_str("objectId").unwrap();
             let result = prepare_triplet(&alert);
             if result.is_err() {
@@ -177,39 +210,12 @@ pub async fn run_ml_worker(
                 continue;
             }
             let (_cutout_science, _cutout_template, _cutout_difference) = result.unwrap();
+
+            processed_candids.push((candid, programid));
         }
 
-        let mut candids_grouped: HashMap<i32, Vec<i64>> = HashMap::new();
-
-        for alert in alerts {
-            let programid = alert
-                .get_document("candidate")
-                .unwrap()
-                .get("programid")
-                .unwrap()
-                .as_i32()
-                .unwrap();
-            let candid = alert.get("candid").unwrap().as_i64().unwrap();
-            if !candids_grouped.contains_key(&programid) {
-                candids_grouped.insert(programid, Vec::new());
-            } else {
-                candids_grouped
-                    .entry(programid)
-                    .and_modify(|candids| candids.push(candid));
-            }
-        }
-
-        for (programid, candids) in candids_grouped {
-            let filter_queue =
-                format!("{}_alerts_programid{}_filter_queue", stream_name, programid);
-            let nb_candids = &candids.len();
-            con.lpush::<&str, Vec<i64>, usize>(filter_queue.as_str(), candids)
-                .await
-                .unwrap();
-            info!(
-                "ML WORKER {}: pushed {} candids to {}",
-                id, nb_candids, filter_queue
-            );
-        }
+        con.lpush::<&str, Vec<(i64, i32)>, usize>(output_queue.as_str(), processed_candids)
+            .await
+            .unwrap();
     }
 }

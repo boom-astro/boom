@@ -204,16 +204,18 @@ impl FilterWorker for ZtfFilterWorker {
             }
         }
         // create a list of queues to read from
-        let mut queues: Vec<String> = Vec::new();
-        for i in 0..=max_permission {
-            queues.push(format!("ZTF_alerts_programid_{i}_filter_queue"));
-        }
-        // create a hashmap from queue name to index of the filters that should run on that queue
-        let mut queue_to_filter: HashMap<String, Vec<usize>> = HashMap::new();
+        let input_queue = "ZTF_alerts_filter_queue".to_string();
+
+        // create a hashmap of filters per programid (permissions)
+        // basically we'll have the 4 programid (from 0 to 3) as keys
+        // and the idx of the filters that have that programid in their permissions as values
+        let mut filters_by_permission: HashMap<i32, Vec<usize>> = HashMap::new();
         for (i, filter) in filters.iter().enumerate() {
             for permission in &filter.permissions {
-                let key = format!("ZTF_alerts_programid_{permission}_filter_queue");
-                queue_to_filter.entry(key).or_default().push(i);
+                let entry = filters_by_permission
+                    .entry(*permission)
+                    .or_insert(Vec::new());
+                entry.push(i);
             }
         }
 
@@ -254,22 +256,33 @@ impl FilterWorker for ZtfFilterWorker {
                     }
                 }
             }
-            for queue in &queues {
-                // get candids from redis
-                let candids: Vec<i64> = con
-                    .rpop::<&str, Vec<i64>>(queue.as_str(), NonZero::new(1000))
-                    .await
-                    .map_err(FilterWorkerError::PopCandidError)?;
+            // get candids from redis
+            let alerts: Vec<(i64, i32)> = con
+                .rpop::<&str, Vec<(i64, i32)>>(&input_queue, NonZero::new(1000))
+                .await
+                .map_err(FilterWorkerError::PopCandidError)?;
 
-                let nb_candids = candids.len();
-                if nb_candids == 0 {
-                    continue;
-                }
-                // get the filters that should run on this queue
-                let filter_indices = queue_to_filter
-                    .get(queue)
+            let nb_alerts = alerts.len();
+            if nb_alerts == 0 {
+                // sleep for a bit if no alerts were found
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // retrieve alerts to process and group by programid
+            let mut alerts_by_programid: HashMap<i32, Vec<i64>> = HashMap::new();
+            for (candid, programid) in alerts {
+                let entry = alerts_by_programid.entry(programid).or_insert(Vec::new());
+                entry.push(candid);
+            }
+
+            // for each programid, get the filters that have that programid in their permissions
+            // and run the filters
+            for (programid, candids) in alerts_by_programid {
+                let filter_indices = filters_by_permission
+                    .get(&programid)
                     .ok_or(FilterWorkerError::GetFilterByQueueError)?;
-                // run the filters
+
                 for i in filter_indices {
                     let filter = &filters[*i];
                     let out_documents = process_alerts(
@@ -278,6 +291,11 @@ impl FilterWorker for ZtfFilterWorker {
                         &self.alert_collection,
                     )
                     .await?;
+
+                    // if the array is empty, continue
+                    if out_documents.is_empty() {
+                        continue;
+                    }
                     // convert the documents to json
                     let out_documents: Vec<String> = out_documents
                         .iter()
@@ -292,13 +310,16 @@ impl FilterWorker for ZtfFilterWorker {
                         .get(&filter.id)
                         .ok_or(FilterWorkerError::GetQueueNameError)?;
                     // push them all at once
-                    let _: () = con
-                        .lpush(queue_name, out_documents)
-                        .await
-                        .map_err(FilterWorkerError::PushFilterResultsError)?;
+                    let _: () = match con.lpush(queue_name, out_documents).await {
+                        Ok(x) => x,
+                        Err(e) => {
+                            warn!("error pushing filter results to redis: {}", e);
+                            continue;
+                        }
+                    };
                 }
-                command_check_countdown -= nb_candids as i64;
             }
+            command_check_countdown -= nb_alerts as i64;
         }
 
         Ok(())

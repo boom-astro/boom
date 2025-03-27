@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limit = l;
     }
 
-    let _ = produce_from_archive(&date, limit, None).await.unwrap();
+    produce_from_archive(&date, limit, None).await?;
 
     Ok(())
 }

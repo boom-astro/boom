@@ -861,7 +861,7 @@ impl AlertWorker for LsstAlertWorker {
             .map(|x| Ok(mongify(&x)))
             .collect::<Result<Vec<_>, AlertError>>()?;
 
-        let non_detections_doc = prv_nondetections
+        let prv_nondetections_doc = prv_nondetections
             .unwrap_or(vec![])
             .into_iter()
             .map(|x| Ok(mongify(&x)))
@@ -874,7 +874,7 @@ impl AlertWorker for LsstAlertWorker {
             let alert_aux_doc = doc! {
                 "_id": &object_id,
                 "prv_candidates": prv_candidates_doc,
-                "prv_nondetections": non_detections_doc,
+                "prv_nondetections": prv_nondetections_doc,
                 "fp_hists": fp_hist_doc,
                 "cross_matches": xmatch(ra, dec, &self.xmatch_configs, &self.db).await,
                 "created_at": now,
@@ -897,7 +897,7 @@ impl AlertWorker for LsstAlertWorker {
             let update_doc = doc! {
                 "$addToSet": {
                     "prv_candidates": { "$each": prv_candidates_doc },
-                    "prv_nondetections": { "$each": non_detections_doc },
+                    "prv_nondetections": { "$each": prv_nondetections_doc },
                     "fp_hists": { "$each": fp_hist_doc }
                 },
                 "$set": {

@@ -24,6 +24,54 @@ pub async fn drop_alert_collections(
     Ok(())
 }
 
+pub async fn drop_alert_from_collections(
+    candid: i64,
+    stream_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let db = conf::build_db(&config_file).await?;
+    let alert_collection_name = format!("{}_alerts", stream_name);
+    let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
+    let alert_aux_collection_name = format!("{}_alerts_aux", stream_name);
+
+    let filter = doc! {"_id": candid};
+    let alert = db
+        .collection::<mongodb::bson::Document>(&alert_collection_name)
+        .find_one(filter.clone())
+        .await?;
+
+    if let Some(alert) = alert {
+        // delete the alert from the alerts collection
+        db.collection::<mongodb::bson::Document>(&alert_collection_name)
+            .delete_one(filter.clone())
+            .await?;
+
+        // delete the alert from the cutouts collection
+        db.collection::<mongodb::bson::Document>(&alert_cutout_collection_name)
+            .delete_one(filter.clone())
+            .await?;
+
+        // 1. if the stream name is ZTF we read the object id as a string and drop the aux entry
+        // 2. otherwise we consider it an i64 and drop the aux entry
+        match stream_name {
+            "ZTF" => {
+                let object_id = alert.get_str("objectId")?;
+                db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
+                    .delete_one(doc! {"_id": object_id})
+                    .await?;
+            }
+            _ => {
+                let object_id = alert.get_i64("objectId")?;
+                db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
+                    .delete_one(doc! {"_id": object_id})
+                    .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // insert a test filter with id -1 into the database
 pub async fn insert_test_filter() -> Result<(), Box<dyn std::error::Error>> {
     let filter_obj: mongodb::bson::Document = doc! {

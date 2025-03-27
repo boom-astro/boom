@@ -27,6 +27,8 @@ pub async fn consume_partitions(
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
+    } else {
+        config.set("security.protocol", "PLAINTEXT");
     }
 
     let consumer: BaseConsumer = config.create().unwrap();

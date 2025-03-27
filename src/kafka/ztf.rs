@@ -65,7 +65,7 @@ impl AlertConsumer for ZtfAlertConsumer {
 
         // ZTF uses nightly topics, and no user/pass (IP whitelisting)
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        let topic = format!("ztf_{}", date.format("%Y%m%d"));
+        let topic = format!("ztf_{}_programid1", date.format("%Y%m%d"));
 
         let mut handles = vec![];
         for i in 0..self.n_threads {

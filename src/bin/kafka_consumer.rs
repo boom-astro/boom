@@ -28,15 +28,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args = Cli::parse();
-    let date = args.date.unwrap();
+
+    // TODO: based on the location of the telescope, figure out the exact timestamp
+    // for the start of the night
+    let date = match args.date {
+        Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap(),
+        None => chrono::Utc::now().date_naive().pred_opt().unwrap(),
+    };
     let survey = args.survey;
     let processes = args.processes.unwrap_or(1);
     let clear = args.clear.unwrap_or(false);
     let max_in_queue = args.max_in_queue.unwrap_or(15000);
 
-    // TODO: based on the location of the telescope, figure out the exact timestamp
-    // for the start of the night
-    let date = chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap();
     let date = date.and_hms_opt(0, 0, 0).unwrap();
     let timestamp = chrono::Utc.from_utc_datetime(&date).timestamp();
 

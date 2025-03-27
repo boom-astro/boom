@@ -62,20 +62,27 @@ async fn test_produce_from_archive() {
     for metadata_topic in metadata.topics().iter() {
         if metadata_topic.name() == topic {
             found_topic = true;
-            assert_eq!(metadata_topic.partitions().len(), 1);
-            match consumer.fetch_watermarks(
-                metadata_topic.name(),
-                metadata_topic.partitions()[0].id(),
-                std::time::Duration::from_secs(1),
-            ) {
-                Ok((low, high)) => {
-                    assert_eq!(high - low, 710);
-                }
-                Err(e) => {
-                    assert!(false, "Error fetching watermarks: {:?}", e);
-                    return;
+            assert_eq!(metadata_topic.partitions().len(), 15);
+            let mut total = 0;
+            for partition in metadata_topic.partitions().iter() {
+                match consumer.fetch_watermarks(
+                    metadata_topic.name(),
+                    partition.id(),
+                    std::time::Duration::from_secs(1),
+                ) {
+                    Ok((low, high)) => {
+                        assert!(low >= 0);
+                        assert!(high >= 0);
+                        total += high - low;
+                    }
+                    Err(e) => {
+                        assert!(false, "Error fetching watermarks: {:?}", e);
+                        return;
+                    }
                 }
             }
+
+            assert_eq!(total, 710);
         }
     }
 

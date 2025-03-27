@@ -171,8 +171,8 @@ pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigErro
 
     let using_auth = username.is_some() && password.is_some();
 
-    if let Some(username) = username {
-        uri.push_str(&username);
+    if using_auth {
+        uri.push_str(&username.unwrap());
         uri.push_str(":");
         uri.push_str(&password.unwrap());
         uri.push_str("@");

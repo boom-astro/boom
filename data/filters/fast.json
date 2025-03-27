@@ -1,0 +1,592 @@
+[
+    {
+        "$match": {
+            "candidate.rb": {
+                "$gt": 0.3
+            }, 
+            "candidate.drb": {
+                "$gt": 0.9
+            }, 
+            "candidate.magpsf": {
+                "$lt": 99
+            }, 
+            "candidate.ndethist": {
+                "$lte": 200
+            }, 
+            "candidate.nbad": {
+                "$lt": 5
+            }, 
+            "candidate.fwhm": {
+                "$gt": 0.5, 
+                "$lt": 8
+            }, 
+            "candidate.isdiffpos": true, 
+            "$and": [
+                {
+                    "$expr": {
+                        "$lt": [
+                            {
+                                "$abs": {
+                                    "$subtract": [
+                                        "$candidate.jd", "$candidate.jdstarthist"
+                                    ]
+                                }
+                            }, 3.0
+                        ]
+                    }
+                }, {
+                    "$expr": {
+                        "$gt": [
+                            {
+                                "$abs": {
+                                    "$subtract": [
+                                        "$candidate.jd", "$candidate.jdstarthist"
+                                    ]
+                                }
+                            }, 0
+                        ]
+                    }
+                }, {
+                    "$expr": {
+                        "$lt": [
+                            {
+                                "$abs": {
+                                    "$subtract": [
+                                        "$candidate.magpsf", "$candidate.magap"
+                                    ]
+                                }
+                            }, 0.75
+                        ]
+                    }
+                }, {
+                    "$or": [
+                        {
+                            "candidate.sgscore1": {
+                                "$lte": 0.76
+                            }
+                        }, {
+                            "candidate.distpsnr1": {
+                                "$gte": 2
+                            }
+                        }, {
+                            "candidate.distpsnr1": {
+                                "$lt": 0
+                            }
+                        }
+                    ]
+                }, {
+                    "$or": [
+                        {
+                            "candidate.ssdistnr": {
+                                "$lt": 0
+                            }
+                        }, {
+                            "candidate.ssdistnr": {
+                                "$gte": 12
+                            }
+                        }, {
+                            "candidate.ssmagnr": {
+                                "$lte": 0
+                            }
+                        }, {
+                            "candidate.ssmagnr": {
+                                "$eq": null
+                            }
+                        }, {
+                            "$expr": {
+                                "$gte": [
+                                    {
+                                        "$abs": {
+                                            "$subtract": [
+                                                "$candidate.magpsf", "$candidate.ssmagnr"
+                                            ]
+                                        }
+                                    }, 1
+                                ]
+                            }
+                        }
+                    ]
+                }, {
+                    "$expr": {
+                        "$gt": [
+                            "$candidate.ncovhist", "$candidate.ndethist"
+                        ]
+                    }
+                }
+            ]
+        }
+    }, {
+        "$project": {
+            "objectId": 1, 
+            "t_now": "$candidate.jd", 
+            "m_now": "$candidate.magpsf", 
+            "merr_now": "$candidate.sigmapsf", 
+            "band_now": "$candidate.band", 
+            "prv_candidates.jd": 1, 
+            "prv_candidates.magpsf": 1, 
+            "prv_candidates.sigmapsf": 1, 
+            "prv_candidates.band": 1, 
+            "prv_candidates.isdiffpos": 1, 
+            "cross_matches": 1, 
+            "brightstar": {
+                "$or": [
+                    {
+                        "$and": [
+                            {
+                                "$lt": [
+                                    "$candidate.distpsnr1", 20
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.srmag1", 15
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.srmag1", 0
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.sgscore1", 0.49
+                                ]
+                            }
+                        ]
+                    }, {
+                        "$and": [
+                            {
+                                "$lt": [
+                                    "$candidate.distpsnr2", 20
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.srmag2", 15
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.srmag2", 0
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.sgscore2", 0.49
+                                ]
+                            }
+                        ]
+                    }, {
+                        "$and": [
+                            {
+                                "$lt": [
+                                    "$candidate.distpsnr3", 20
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.srmag3", 15
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.srmag3", 0
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.sgscore3", 0.49
+                                ]
+                            }
+                        ]
+                    }, {
+                        "$and": [
+                            {
+                                "$eq": [
+                                    "$candidate.sgscore1", 0.5
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.distpsnr1", 0.5
+                                ]
+                            }, {
+                                "$or": [
+                                    {
+                                        "$lt": [
+                                            {
+                                                "$abs": "$candidate.sgmag1"
+                                            }, 17
+                                        ]
+                                    }, {
+                                        "$lt": [
+                                            {
+                                                "$abs": "$candidate.srmag1"
+                                            }, 17
+                                        ]
+                                    }, {
+                                        "$lt": [
+                                            {
+                                                "$abs": "$candidate.simag1"
+                                            }, 17
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }, 
+            "agn": {
+                "$and": [
+                    {
+                        "$gt": [
+                            {
+                                "$size": {
+                                    "$ifNull": [
+                                        "$cross_matches.AllWISE", []
+                                    ]
+                                }
+                            }, 0
+                        ]
+                    }, {
+                        "$gt": [
+                            {
+                                "$subtract": [
+                                    {
+                                        "$arrayElemAt": [
+                                            "$cross_matches.AllWISE.w1mpro", 0
+                                        ]
+                                    }, {
+                                        "$arrayElemAt": [
+                                            "$cross_matches.AllWISE.w2mpro", 0
+                                        ]
+                                    }
+                                ]
+                            }, 0.8
+                        ]
+                    }
+                ]
+            }
+        }
+    }, {
+        "$match": {
+            "brightstar": false, 
+            "agn": false
+        }
+    }, {
+        "$project": {
+            "objectId": 1, 
+            "t_now": 1, 
+            "m_now": 1, 
+            "merr_now": 1, 
+            "band_now": 1, 
+            "stationary": {
+                "$anyElementTrue": {
+                    "$map": {
+                        "input": {
+                            "$ifNull": [
+                                "$prv_candidates", []
+                            ]
+                        }, 
+                        "as": "cand", 
+                        "in": {
+                            "$and": [
+                                {
+                                    "$gt": [
+                                        {
+                                            "$abs": {
+                                                "$subtract": [
+                                                    "$t_now", "$$cand.jd"
+                                                ]
+                                            }
+                                        }, 0.015
+                                    ]
+                                }, {
+                                    "$lt": [
+                                        "$$cand.jd", "$t_now"
+                                    ]
+                                }, {
+                                    "$lt": [
+                                        "$$cand.magpsf", 99
+                                    ]
+                                }, {
+                                    "$eq": [
+                                        "$$cand.isdiffpos",
+                                        true
+                                    ]
+
+                                }
+                            ]
+                        }
+                    }
+                }
+            }, 
+            "old": {
+                "$anyElementTrue": {
+                    "$map": {
+                        "input": {
+                            "$ifNull": [
+                                "$prv_candidates", []
+                            ]
+                        }, 
+                        "as": "cand", 
+                        "in": {
+                            "$and": [
+                                {
+                                    "$gt": [
+                                        {
+                                            "$abs": {
+                                                "$subtract": [
+                                                    "$t_now", "$$cand.jd"
+                                                ]
+                                            }
+                                        }, 3.0
+                                    ]
+                                }, {
+                                    "$eq": [
+                                        "$$cand.isdiffpos",
+                                        true
+                                    ]
+
+                                }
+                            ]
+                        }
+                    }
+                }
+            }, 
+            "prv_candidates": {
+                "$filter": {
+                    "input": {
+                        "$ifNull": [
+                            "$prv_candidates", []
+                        ]
+                    }, 
+                    "as": "cand", 
+                    "cond": {
+                        "$and": [
+                            {
+                                "$eq": [
+                                    "$$cand.isdiffpos", true
+                                ]
+                            }, {
+                                "$eq": [
+                                    "$$cand.band", "$band_now"
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }, {
+        "$match": {
+            "stationary": true, 
+            "old": false, 
+            "prv_candidates.1": {
+                "$exists": true
+            }
+        }
+    }, {
+        "$project": {
+            "objectId": 1, 
+            "t_now": 1, 
+            "m_now": 1, 
+            "merr_now": 1, 
+            "fid_now": 1, 
+            "prv_candidates": {
+                "$sortArray": {
+                    "input": "$prv_candidates", 
+                    "sortBy": {
+                        "jd": 1
+                    }
+                }
+            }
+        }
+    }, {
+        "$project": {
+            "objectId": 1, 
+            "t_now": 1, 
+            "m_now": 1, 
+            "merr_now": 1, 
+            "fast_rising": {
+                "$reduce": {
+                    "input": {
+                        "$range": [
+                            1, {
+                                "$size": "$prv_candidates"
+                            }
+                        ]
+                    }, 
+                    "initialValue": [], 
+                    "in": {
+                        "$let": {
+                            "vars": {
+                                "current": {
+                                    "$arrayElemAt": [
+                                        "$prv_candidates", "$$this"
+                                    ]
+                                }, 
+                                "previous": {
+                                    "$arrayElemAt": [
+                                        "$prv_candidates", {
+                                            "$subtract": [
+                                                "$$this", 1
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }, 
+                            "in": {
+                                "$cond": [
+                                    {
+                                        "$and": [
+                                            {
+                                                "$eq": [
+                                                    "$$current.band", "$$previous.band"
+                                                ]
+                                            }, {
+                                                "$gte": [
+                                                    {
+                                                        "$subtract": [
+                                                            "$$current.jd", "$$previous.jd"
+                                                        ]
+                                                    }, 0.02
+                                                ]
+                                            }, {
+                                                "$gte": [
+                                                    {
+                                                        "$divide": [
+                                                            {
+                                                                "$subtract": [
+                                                                    "$$previous.magpsf", "$$current.magpsf"
+                                                                ]
+                                                            }, {
+                                                                "$subtract": [
+                                                                    "$$current.jd", "$$previous.jd"
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }, 0.25
+                                                ]
+                                            }
+                                        ]
+                                    }, {
+                                        "$concatArrays": [
+                                            "$$value", [
+                                                "$$current"
+                                            ]
+                                        ]
+                                    }, "$$value"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }, 
+            "fast_fading": {
+                "$reduce": {
+                    "input": {
+                        "$range": [
+                            1, {
+                                "$size": "$prv_candidates"
+                            }
+                        ]
+                    }, 
+                    "initialValue": [], 
+                    "in": {
+                        "$let": {
+                            "vars": {
+                                "current": {
+                                    "$arrayElemAt": [
+                                        "$prv_candidates", "$$this"
+                                    ]
+                                }, 
+                                "previous": {
+                                    "$arrayElemAt": [
+                                        "$prv_candidates", {
+                                            "$subtract": [
+                                                "$$this", 1
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }, 
+                            "in": {
+                                "$cond": [
+                                    {
+                                        "$and": [
+                                            {
+                                                "$eq": [
+                                                    "$$current.band", "$$previous.band"
+                                                ]
+                                            }, {
+                                                "$gte": [
+                                                    {
+                                                        "$subtract": [
+                                                            "$$current.jd", "$$previous.jd"
+                                                        ]
+                                                    }, 0.02
+                                                ]
+                                            }, {
+                                                "$gte": [
+                                                    {
+                                                        "$divide": [
+                                                            {
+                                                                "$subtract": [
+                                                                    "$$current.magpsf", "$$previous.magpsf"
+                                                                ]
+                                                            }, {
+                                                                "$subtract": [
+                                                                    "$$current.jd", "$$previous.jd"
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }, 0.25
+                                                ]
+                                            }
+                                        ]
+                                    }, {
+                                        "$concatArrays": [
+                                            "$$value", [
+                                                "$$current"
+                                            ]
+                                        ]
+                                    }, "$$value"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, {
+        "$project": {
+            "objectId": 1, 
+            "t_now": 1, 
+            "m_now": 1, 
+            "fast_rising": {
+                "$gt": [
+                    {
+                        "$size": "$fast_rising"
+                    }, 0
+                ]
+            }, 
+            "fast_fading": {
+                "$gt": [
+                    {
+                        "$size": "$fast_fading"
+                    }, 0
+                ]
+            }
+        }
+    }, {
+        "$match": {
+            "$or": [
+                {
+                    "fast_rising": true, 
+                    "fast_fading": false
+                }, {
+                    "fast_rising": false, 
+                    "fast_fading": true
+                }
+            ]
+        }
+    }, {
+        "$project": {
+            "objectId": 1, 
+            "annotations.passed_at": "$t_now", 
+            "annotations.current_magpsf": "$m_now"
+        }
+    }
+]
