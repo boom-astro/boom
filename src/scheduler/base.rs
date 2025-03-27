@@ -9,6 +9,46 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{error, info, warn};
 
+#[derive(thiserror::Error, Debug)]
+pub enum SchedulerError {
+    #[error("could not retrieve number of workers")]
+    NumWorkersError(#[from] config::ConfigError),
+}
+
+// get num worker from config file, by stream name and worker type
+pub fn get_num_workers(
+    conf: config::Config,
+    stream_name: &str,
+    worker_type: &str,
+) -> Result<i64, SchedulerError> {
+    let table = conf.get_table("workers")?;
+    let stream_table = table
+        .get(stream_name)
+        .ok_or(config::ConfigError::NotFound(
+            "stream_name not found in workers table".to_string(),
+        ))?
+        .to_owned()
+        .into_table()?;
+
+    let worker_entry = stream_table
+        .get(worker_type)
+        .ok_or(config::ConfigError::NotFound(
+            "worker_type not found in stream table".to_string(),
+        ))?
+        .clone()
+        .into_table()?;
+
+    let nb_worker = worker_entry
+        .get("n_workers")
+        .ok_or(config::ConfigError::NotFound(
+            "n_workers not found in worker table".to_string(),
+        ))?
+        .clone()
+        .into_int()?;
+
+    Ok(nb_worker)
+}
+
 // Thread pool
 // allows spawning, killing, and managing of various worker threads through
 // the use of a messages

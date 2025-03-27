@@ -1,10 +1,9 @@
 use boom::{
     conf,
-    scheduling::ThreadPool,
+    scheduler::{get_num_workers, ThreadPool},
     utils::worker::{check_flag, sig_int_handler, WorkerType},
 };
 use clap::Parser;
-use config::Config;
 use std::{
     sync::{Arc, Mutex},
     thread,
@@ -21,34 +20,6 @@ struct Cli {
     config: Option<String>,
 }
 
-fn get_num_workers(conf: Config, stream_name: &str, worker_type: &str) -> i64 {
-    let table = conf
-        .get_table("workers")
-        .expect("worker table not found in config");
-    let stream_table = table
-        .get(stream_name)
-        .expect(format!("stream name {} not found in config", stream_name).as_str())
-        .to_owned()
-        .into_table()
-        .unwrap();
-    let worker_entry = stream_table
-        .get(worker_type)
-        .expect(format!("{} not found in config", worker_type).as_str());
-    let worker_entry = worker_entry.to_owned().into_table().unwrap();
-    let n = worker_entry.get("n_workers").expect(
-        format!(
-            "n_workers not found for {} entry in worker table",
-            worker_type
-        )
-        .as_str(),
-    );
-    let n = n
-        .to_owned()
-        .into_int()
-        .expect(format!("n_workers for {} no of type int", worker_type).as_str());
-    return n;
-}
-
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -59,23 +30,52 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let stream_name = args.stream.unwrap();
+    let stream_name = match args.stream {
+        Some(stream) => stream,
+        None => {
+            warn!("No stream name provided");
+            std::process::exit(1);
+        }
+    };
     info!("Starting scheduler for {} alert processing", stream_name);
 
     if !args.config.is_some() {
         warn!("No config file provided, using config.yaml");
     }
-    let config_path = if args.config.is_some() {
-        args.config.unwrap()
-    } else {
-        String::from("./config.yaml")
+    let config_path = match args.config {
+        Some(path) => path,
+        None => "config.yaml".to_string(),
     };
-    let config_file = conf::load_config(&config_path).unwrap();
+    let config_file = match conf::load_config(&config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            warn!("could not load config file: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // get num workers from config file
-    let n_alert = get_num_workers(config_file.to_owned(), &stream_name, "alert");
-    let n_ml = get_num_workers(config_file.to_owned(), &stream_name, "ml");
-    let n_filter = get_num_workers(config_file.to_owned(), &stream_name, "filter");
+    let n_alert = match get_num_workers(config_file.to_owned(), &stream_name, "alert") {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("could not retrieve number of alert workers: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let n_ml = match get_num_workers(config_file.to_owned(), &stream_name, "ml") {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("could not retrieve number of ml workers: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let n_filter = match get_num_workers(config_file.to_owned(), &stream_name, "filter") {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("could not retrieve number of filter workers: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // setup signal handler thread
     let interrupt = Arc::new(Mutex::new(false));
