@@ -19,7 +19,7 @@ workers:
   LSST:
     command_interval: 500
     alert:
-      n_workers: 5
+      n_workers: 1
     ml:
       n_workers: 0
     filter:
@@ -32,7 +32,6 @@ crossmatch:
       use_distance: false
       projection:
         _id: 1
-        coordinates.radec_str: 1
         gMeanPSFMag: 1
         gMeanPSFMagErr: 1
         rMeanPSFMag: 1
@@ -43,77 +42,30 @@ crossmatch:
         zMeanPSFMagErr: 1
         yMeanPSFMag: 1
         yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
-        coordinates.radec_str: 1
         parallax: 1
         parallax_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-    - catalog: SDSS-V_master_20240719
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        SPECOBJID: 1
-        NSPECOBS: 1
-        FIELD: 1
-        MJD: 1
-        CATALOGID: 1
-    - catalog: SDSS_6_0_4
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        SPECOBJID: 1
-        NSPECOBS: 1
-        FIELD: 1
-        MJD: 1
-        CATALOGID: 1
-    - catalog: DESI_zall-ipix-fuji
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        TARGETID: 1
-        ZCAT_NSPEC: 1
-        SV_NSPEC: 1
-    - catalog: LAMOST_DR9_v2_MRS
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        obsid: 1
-        lmjm: 1
-        band: 1
+        ra: 1
+        dec: 1
     - catalog: milliquas_v6
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
-        coordinates.radec_str: 1
         Name: 1
         Descrip: 1
         Qpct: 1
-    - catalog: CLU
-      radius: 300.0 # 300 arcseconds
-      use_distance: true
-      distance_key: "z"
-      distance_max: 30.0
-      distance_max_near: 300.0
-      projection: 
-        _id: 1
-        name: 1
         ra: 1
         dec: 1
-        a: 1
-        b2a: 1
-        pa: 1
-        z: 1
-        sfr_fuv: 1
-        mstar: 1
-        sfr_ha: 1
-        coordinates.radec_str: 1
     - catalog: NED
       radius: 300.0 # 300 arcseconds
       use_distance: true
@@ -121,7 +73,7 @@ crossmatch:
       distance_max: 30.0
       distance_max_near: 300.0
       projection: 
-        coordinates.radec_str: 1
+        _id: 0
         ra: 1
         dec: 1
         objname: 1

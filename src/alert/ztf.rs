@@ -1,5 +1,5 @@
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError},
+    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
@@ -8,13 +8,58 @@ use crate::{
     },
 };
 use apache_avro::from_value;
-use apache_avro::Reader;
+use apache_avro::{from_avro_datum, Reader, Schema};
 use flare::Time;
 use mongodb::bson::doc;
-use serde::{Deserialize, Deserializer};
-use tracing::trace;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_with::{serde_as, skip_serializing_none};
+use std::io::Read;
+use tracing::{error, trace};
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
+    // First, we extract the schema from the avro bytes
+    let cursor = std::io::Cursor::new(avro_bytes);
+    let reader = Reader::new(cursor).map_err(SchemaRegistryError::InvalidSchema)?;
+    let schema = reader.writer_schema();
+
+    // Then, we look for the index of the start of the data
+    let mut cursor = std::io::Cursor::new(avro_bytes);
+
+    let mut buf = [0; 4];
+    cursor
+        .read_exact(&mut buf)
+        .map_err(SchemaRegistryError::CursorError)?;
+    if buf != [b'O', b'b', b'j', 1u8] {
+        return Err(SchemaRegistryError::MagicBytesError);
+    }
+
+    // This let's it skip through the bytes of the schema and other metadata
+    let meta_schema = Schema::map(Schema::Bytes);
+    from_avro_datum(&meta_schema, &mut cursor, None).map_err(SchemaRegistryError::InvalidSchema)?;
+
+    // we skip through the bytes created by the package the ZTF alert
+    // pipeline used to create their avro
+    let mut buf = [0; 16];
+    cursor
+        .read_exact(&mut buf)
+        .map_err(SchemaRegistryError::CursorError)?;
+
+    if buf != *b"gogenavromagic10" {
+        return Err(SchemaRegistryError::MagicBytesError);
+    }
+
+    // we skip the next 4 bytes (contains info about the number of records)
+    cursor
+        .read_exact(&mut [0u8; 4])
+        .map_err(SchemaRegistryError::CursorError)?;
+
+    // we now have the start index of the data
+    let start_idx = cursor.position();
+
+    Ok((schema.to_owned(), start_idx as usize))
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
     #[serde(rename = "fileName")]
     pub file_name: String,
@@ -23,7 +68,9 @@ pub struct Cutout {
     pub stamp_data: Vec<u8>,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct PrvCandidate {
     pub jd: f64,
     #[serde(rename(deserialize = "fid", serialize = "band"))]
@@ -69,45 +116,51 @@ pub struct PrvCandidate {
     pub decnr: Option<f64>,
     pub scorr: Option<f64>,
     pub magzpsci: Option<f32>,
-    pub magzpsciunc: Option<f32>,
-    pub magzpscirms: Option<f32>,
 }
 
 /// avro alert schema
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct FpHist {
     pub field: Option<i32>,
     pub rcid: Option<i32>,
-    pub fid: i32,
+    #[serde(rename(deserialize = "fid", serialize = "band"))]
+    #[serde(deserialize_with = "deserialize_fid")]
+    pub band: String,
     pub pid: i64,
     pub rfid: i64,
-    pub sciinpseeing: Option<f32>,
-    pub scibckgnd: Option<f32>,
-    pub scisigpix: Option<f32>,
     pub magzpsci: Option<f32>,
     pub magzpsciunc: Option<f32>,
     pub magzpscirms: Option<f32>,
-    pub clrcoeff: Option<f32>,
-    pub clrcounc: Option<f32>,
     pub exptime: Option<f32>,
-    pub adpctdif1: Option<f32>,
-    pub adpctdif2: Option<f32>,
     pub diffmaglim: Option<f32>,
     pub programid: i32,
     pub jd: f64,
+    #[serde(deserialize_with = "deserialize_missing_flux")]
     pub forcediffimflux: Option<f32>,
+    #[serde(deserialize_with = "deserialize_missing_flux")]
     pub forcediffimfluxunc: Option<f32>,
     pub procstatus: Option<String>,
     pub distnr: Option<f32>,
-    pub ranr: f64,
-    pub decnr: f64,
     pub magnr: Option<f32>,
     pub sigmagnr: Option<f32>,
     pub chinr: Option<f32>,
     pub sharpnr: Option<f32>,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+// we want a custom deserializer for forcediffimflux, to avoid NaN values and -9999.0
+fn deserialize_missing_flux<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<f32> = Option::deserialize(deserializer)?;
+    Ok(value.filter(|&x| x != -9999.0 && !x.is_nan()))
+}
+
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct ForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
@@ -155,7 +208,9 @@ impl TryFrom<FpHist> for ForcedPhot {
 }
 
 /// avro alert schema
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct Candidate {
     pub jd: f64,
     #[serde(rename(deserialize = "fid", serialize = "band"))]
@@ -236,7 +291,7 @@ fn deserialize_isdiffpos_option<'de, D>(deserializer: D) -> Result<Option<bool>,
 where
     D: Deserializer<'de>,
 {
-    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
     match value {
         serde_json::Value::String(s) => {
             // if s is in t, T, true, True, "1"
@@ -271,7 +326,7 @@ where
     D: Deserializer<'de>,
 {
     // the fid is a mapper: 1 = g, 2 = r, 3 = i
-    let fid: i32 = serde::Deserialize::deserialize(deserializer)?;
+    let fid: i32 = Deserialize::deserialize(deserializer)?;
     match fid {
         1 => Ok("g".to_string()),
         2 => Ok("r".to_string()),
@@ -284,9 +339,9 @@ fn deserialize_prv_forced_sources<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<ForcedPhot>>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
-    let dia_forced_sources = <Vec<FpHist> as serde::Deserialize>::deserialize(deserializer)?;
+    let dia_forced_sources = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?;
     let forced_phots = dia_forced_sources
         .into_iter()
         .map(ForcedPhot::try_from)
@@ -300,11 +355,11 @@ where
     D: Deserializer<'de>,
 {
     // if the value is null, "null", "", return None
-    let value: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    let value: Option<String> = Deserialize::deserialize(deserializer)?;
     Ok(value.filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null")))
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct ZtfAlert {
     pub schemavsn: String,
     pub publisher: String,
@@ -347,6 +402,8 @@ pub struct ZtfAlertWorker {
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_aux_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
+    cached_schema: Option<Schema>,
+    cached_start_idx: Option<usize>,
 }
 
 impl ZtfAlertWorker {
@@ -354,12 +411,42 @@ impl ZtfAlertWorker {
         self: &mut Self,
         avro_bytes: &[u8],
     ) -> Result<ZtfAlert, AlertError> {
-        let reader = Reader::new(&avro_bytes[..]).map_err(AlertError::DecodeError)?;
+        // if the schema is not cached, get it from the avro_bytes
+        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
+            (Some(schema), Some(start_idx)) => (schema, start_idx),
+            _ => {
+                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                (self.cached_schema.as_ref().unwrap(), startidx)
+            }
+        };
 
-        let value = reader
-            .map(|x| x.map_err(AlertError::AvroReadError))
-            .next()
-            .ok_or(AlertError::EmptyAlertError)??;
+        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
+
+        // if value is an error, try recomputing the schema from the avro_bytes
+        // as it could be that the schema has changed
+        let value = match value {
+            Ok(value) => value,
+            Err(e) => {
+                error!("Error deserializing avro message with cached schema: {}", e);
+                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None);
+
+                // if it's not an error this time, cache the new schema
+                // otherwise return the error
+                match value {
+                    Ok(value) => {
+                        self.cached_schema = Some(schema);
+                        self.cached_start_idx = Some(startidx);
+                        value
+                    }
+                    Err(e) => {
+                        return Err(AlertError::DecodeError(e));
+                    }
+                }
+            }
+        };
 
         let alert: ZtfAlert = from_value::<ZtfAlert>(&value).map_err(AlertError::DecodeError)?;
 
@@ -389,6 +476,8 @@ impl AlertWorker for ZtfAlertWorker {
             alert_collection,
             alert_aux_collection,
             alert_cutout_collection,
+            cached_schema: None,
+            cached_start_idx: None,
         };
         Ok(worker)
     }
@@ -408,7 +497,11 @@ impl AlertWorker for ZtfAlertWorker {
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
         let now = Time::now().to_jd();
 
+        let start = std::time::Instant::now();
+
         let mut alert = self.alert_from_avro_bytes(avro_bytes).await?;
+
+        trace!("Decoding alert: {:?}", start.elapsed());
 
         let start = std::time::Instant::now();
 
@@ -495,12 +588,16 @@ impl AlertWorker for ZtfAlertWorker {
 
         if !alert_aux_exists {
             let start = std::time::Instant::now();
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await;
+            trace!("Xmatch took: {:?}", start.elapsed());
+
+            let start = std::time::Instant::now();
             let alert_aux_doc = doc! {
                 "_id": &object_id,
                 "prv_candidates": prv_candidates_doc,
                 "prv_nondetections": prv_nondetections_doc,
                 "fp_hists": fp_hist_doc,
-                "cross_matches": xmatch(ra, dec, &self.xmatch_configs, &self.db).await,
+                "cross_matches": xmatches,
                 "created_at": now,
                 "updated_at": now,
                 "coordinates": {

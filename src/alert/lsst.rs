@@ -1,6 +1,8 @@
 use apache_avro::{from_avro_datum, from_value, Schema};
 use flare::Time;
 use mongodb::bson::doc;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
 use tracing::trace;
 
@@ -17,7 +19,9 @@ use crate::{
 const _MAGIC_BYTE: u8 = 0;
 const _SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
     #[serde(rename(deserialize = "diaSourceId", serialize = "candid"))]
@@ -168,7 +172,9 @@ pub struct DiaSource {
     pub pixel_flags: Option<bool>,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct Candidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
@@ -211,7 +217,9 @@ impl TryFrom<DiaSource> for Candidate {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
@@ -402,7 +410,9 @@ pub struct DiaObject {
     pub nearby_obj3_lnp: Option<f32>,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DiaNondetectionLimit {
     #[serde(rename = "ccdVisitId")]
     pub ccd_visit_id: i64,
@@ -414,7 +424,9 @@ pub struct DiaNondetectionLimit {
     pub dia_noise: f32,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct NonDetection {
     #[serde(flatten)]
     pub dia_nondetection_limit: DiaNondetectionLimit,
@@ -432,7 +444,9 @@ impl From<DiaNondetectionLimit> for NonDetection {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DiaForcedSource {
     /// Unique id.
     #[serde(rename = "diaForcedSourceId")]
@@ -462,7 +476,9 @@ pub struct DiaForcedSource {
     pub band: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct ForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
@@ -516,7 +532,7 @@ impl TryFrom<DiaForcedSource> for ForcedPhot {
 }
 
 /// Rubin Avro alert schema v7.3
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstAlert {
     #[serde(rename(deserialize = "alertId"))]
     pub candid: i64,
@@ -547,17 +563,17 @@ pub struct LsstAlert {
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
-    let dia_source = <DiaSource as serde::Deserialize>::deserialize(deserializer)?;
+    let dia_source = <DiaSource as Deserialize>::deserialize(deserializer)?;
     Candidate::try_from(dia_source).map_err(serde::de::Error::custom)
 }
 
 fn deserialize_prv_candidates<'de, D>(deserializer: D) -> Result<Option<Vec<Candidate>>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
-    let dia_sources = <Vec<DiaSource> as serde::Deserialize>::deserialize(deserializer)?;
+    let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
         .map(Candidate::try_from)
@@ -570,10 +586,9 @@ fn deserialize_prv_forced_sources<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<ForcedPhot>>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
-    let dia_forced_sources =
-        <Vec<DiaForcedSource> as serde::Deserialize>::deserialize(deserializer)?;
+    let dia_forced_sources = <Vec<DiaForcedSource> as Deserialize>::deserialize(deserializer)?;
     let forced_phots = dia_forced_sources
         .into_iter()
         .map(ForcedPhot::try_from)
@@ -586,10 +601,10 @@ fn deserialize_prv_nondetections<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<NonDetection>>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let dia_nondetection_limits =
-        <Vec<DiaNondetectionLimit> as serde::Deserialize>::deserialize(deserializer)?;
+        <Vec<DiaNondetectionLimit> as Deserialize>::deserialize(deserializer)?;
     let nondetections = dia_nondetection_limits
         .into_iter()
         .map(NonDetection::from)
@@ -599,17 +614,17 @@ where
 
 fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
-    let mjd = <f64 as serde::Deserialize>::deserialize(deserializer)?;
+    let mjd = <f64 as Deserialize>::deserialize(deserializer)?;
     Ok(mjd + 2400000.5)
 }
 
 fn deserialize_mjd_option<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
-    let mjd = <Option<f64> as serde::Deserialize>::deserialize(deserializer)?;
+    let mjd = <Option<f64> as Deserialize>::deserialize(deserializer)?;
     match mjd {
         Some(mjd) => Ok(Some(mjd + 2400000.5)),
         None => Ok(None),

@@ -11,13 +11,13 @@ pub async fn xmatch(
     xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
     db: &mongodb::Database,
 ) -> mongodb::bson::Document {
+    // TODO, make the xmatch config a hashmap for faster access
+    // while looping over the xmatch results of the batched queries
     if xmatch_configs.len() == 0 {
         return doc! {};
     }
     let ra_geojson = ra - 180.0;
     let dec_geojson = dec;
-
-    let mut xmatch_docs = doc! {};
 
     let mut x_matches_pipeline = vec![
         doc! {
@@ -30,7 +30,7 @@ pub async fn xmatch(
             }
         },
         doc! {
-            "$project": xmatch_configs[0].projection.clone()
+            "$project": &xmatch_configs[0].projection
         },
         doc! {
             "$group": {
@@ -43,7 +43,7 @@ pub async fn xmatch(
         doc! {
             "$project": {
                 "_id": 0,
-                xmatch_configs[0].catalog.clone(): "$matches"
+                &xmatch_configs[0].catalog: "$matches"
             }
         },
     ];
@@ -52,7 +52,7 @@ pub async fn xmatch(
     for xmatch_config in xmatch_configs.iter().skip(1) {
         x_matches_pipeline.push(doc! {
             "$unionWith": {
-                "coll": xmatch_config.catalog.clone(),
+                "coll": &xmatch_config.catalog,
                 "pipeline": [
                     doc! {
                         "$match": {
@@ -64,7 +64,7 @@ pub async fn xmatch(
                         }
                     },
                     doc! {
-                        "$project": xmatch_config.projection.clone()
+                        "$project": &xmatch_config.projection
                     },
                     doc! {
                         "$group": {
@@ -77,7 +77,8 @@ pub async fn xmatch(
                     doc! {
                         "$project": {
                             "_id": 0,
-                            xmatch_config.catalog.clone(): "$matches"
+                            "matches": 1,
+                            "catalog": &xmatch_config.catalog
                         }
                     }
                 ]
@@ -86,40 +87,36 @@ pub async fn xmatch(
     }
 
     let collection: mongodb::Collection<mongodb::bson::Document> =
-        db.collection(&xmatch_configs[0].catalog.clone());
+        db.collection(&xmatch_configs[0].catalog);
     let mut cursor = collection.aggregate(x_matches_pipeline).await.unwrap();
+
+    let mut xmatch_docs = doc! {};
+    // pre add the catalogs + empty vec to the xmatch_docs
+    // this allows us to have a consistent output structure
+    for xmatch_config in xmatch_configs.iter() {
+        xmatch_docs.insert(&xmatch_config.catalog, mongodb::bson::Bson::Array(vec![]));
+    }
 
     while let Some(doc) = cursor.next().await {
         let doc = doc.unwrap();
-        for xmatch_config in xmatch_configs.iter() {
-            if doc.contains_key(&xmatch_config.catalog) {
-                xmatch_docs.insert(
-                    xmatch_config.catalog.clone(),
-                    doc.get_array(&xmatch_config.catalog).unwrap(),
-                );
-            }
-        }
-    }
+        let catalog = doc.get_str("catalog").unwrap();
+        let matches = doc.get_array("matches").unwrap();
 
-    for xmatch_config in xmatch_configs {
-        if !xmatch_docs.contains_key(&xmatch_config.catalog) {
-            xmatch_docs.insert::<&str, mongodb::bson::Array>(
-                &xmatch_config.catalog,
-                mongodb::bson::Array::new(),
-            );
-        }
-        // if we are using a distance field, we project the source at ra,dec to the distance of
-        // the crossmatch, then compute the distance between the two points in kpc
+        let xmatch_config = xmatch_configs
+            .iter()
+            .find(|x| x.catalog == catalog)
+            .unwrap();
 
-        if xmatch_config.use_distance {
-            let distance_key = xmatch_config.distance_key.clone().unwrap();
-            let distance_max = xmatch_config.distance_max.clone().unwrap();
-            let distance_max_near = xmatch_config.distance_max_near.clone().unwrap();
+        if !xmatch_config.use_distance {
+            xmatch_docs.insert(catalog, matches);
+        } else {
+            let distance_key = xmatch_config.distance_key.as_ref().unwrap();
+            let distance_max = xmatch_config.distance_max.unwrap();
+            let distance_max_near = xmatch_config.distance_max_near.unwrap();
 
-            let matches = xmatch_docs.get_array_mut(&xmatch_config.catalog).unwrap();
-            let mut matches_filtered: Vec<mongodb::bson::Bson> = vec![];
-            for xmatch_doc in matches.iter_mut() {
-                let xmatch_doc = xmatch_doc.as_document_mut().unwrap();
+            let mut matches_filtered: Vec<mongodb::bson::Document> = vec![];
+            for xmatch_doc in matches.iter() {
+                let xmatch_doc = xmatch_doc.as_document().unwrap();
                 let xmatch_ra = match xmatch_doc.get_f64("ra") {
                     Ok(x) => x,
                     _ => {
@@ -165,13 +162,16 @@ pub async fn xmatch(
                     } else {
                         -1.0
                     };
+
+                    // we make a mutable copy of the xmatch_doc
+                    let mut xmatch_doc = xmatch_doc.clone();
                     // overwrite doc_copy with doc_copy + the angular separation and the distance in kpc
                     xmatch_doc.insert("angular_separation", angular_separation);
                     xmatch_doc.insert("distance_kpc", distance_kpc);
-                    matches_filtered.push(mongodb::bson::Bson::from(xmatch_doc.clone()));
+                    matches_filtered.push(xmatch_doc);
                 }
             }
-            *matches = mongodb::bson::Array::from(matches_filtered);
+            xmatch_docs.insert(&xmatch_config.catalog, matches_filtered);
         }
     }
 

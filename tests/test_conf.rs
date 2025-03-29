@@ -14,7 +14,7 @@ fn test_load_config() {
     assert!(crossmatches_ztf.is_some());
     let crossmatches_ztf = crossmatches_ztf.unwrap().clone().into_array().unwrap();
     // check that the crossmatch for ZTF is an array
-    assert_eq!(crossmatches_ztf.len(), 9);
+    assert_eq!(crossmatches_ztf.len(), 4);
 
     let hello = conf.get_string("hello");
     assert!(hello.is_ok());
@@ -34,7 +34,7 @@ fn test_build_xmatch_configs() {
 
     let catalog_xmatch_configs = conf::build_xmatch_configs(&conf, "ZTF").unwrap();
 
-    assert_eq!(catalog_xmatch_configs.len(), 9);
+    assert_eq!(catalog_xmatch_configs.len(), 4);
 
     let first = &catalog_xmatch_configs[0];
     // verify that its a CatalogXmatchConfig
@@ -48,14 +48,6 @@ fn test_build_xmatch_configs() {
     let projection = &first.projection;
     // test reading a few of the expected fields
     assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(
-        projection
-            .get("coordinates.radec_str")
-            .unwrap()
-            .as_i64()
-            .unwrap(),
-        1
-    );
     assert_eq!(projection.get("gMeanPSFMag").unwrap().as_i64().unwrap(), 1);
     assert_eq!(
         projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(),
@@ -76,7 +68,6 @@ async fn test_build_db() {
 fn test_catalogxmatchconfig() {
     let ps1_projection = mongodb::bson::doc! {
         "_id": 1,
-        "coordinates.radec_str": 1,
         "gMeanPSFMag": 1,
         "gMeanPSFMagErr": 1
     };

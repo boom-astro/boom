@@ -26,21 +26,11 @@ pub async fn create_index(
 }
 
 pub fn mongify<T: Serialize>(value: &T) -> mongodb::bson::Document {
-    // sanitize it by removing fields with None values
-    let mut cleaned_doc = mongodb::bson::Document::new();
-    for (key, value) in to_document(&value).unwrap() {
-        if value == mongodb::bson::Bson::Null {
-            continue;
-        }
-        // if the value is f32 or f64 and is NaN, skip it
-        if let mongodb::bson::Bson::Double(num) = value {
-            if num.is_nan() {
-                continue;
-            }
-        }
-        cleaned_doc.insert(key, value);
-    }
-    cleaned_doc
+    // we removed all the sanitizing logic
+    // in favor of using serde's attributes to clean up the data
+    // ahead of time.
+    // TODO: drop this function entirely and avoid unwrapping
+    to_document(value).unwrap()
 }
 
 pub fn get_coordinates(ra: f64, dec: f64) -> mongodb::bson::Document {

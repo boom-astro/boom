@@ -185,7 +185,7 @@ pub async fn produce_from_archive(
         None => format!("ztf_{}_programid1", &date),
     };
 
-    info!("Initializing producer for topic {}", topic_name);
+    info!("Initializing ZTF alert kafka producer");
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("message.timeout.ms", "5000")
