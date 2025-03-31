@@ -1,6 +1,6 @@
 use crate::{
     conf,
-    utils::fits::prepare_triplet,
+    utils::fits::{prepare_triplet, CutoutError},
     utils::worker::{get_check_command_interval, WorkerCmd},
 };
 use core::time;
@@ -19,6 +19,10 @@ pub enum MLWorkerError {
     ConnectRedisError(#[from] redis::RedisError),
     #[error("failed to read config")]
     ReadConfigError(#[from] conf::BoomConfigError),
+    #[error("could not find document field")]
+    MissingFieldError(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("could not access cutout images")]
+    CutoutAccessError(#[from] CutoutError),
 }
 
 // fake ml worker which for now does not run any models
@@ -194,27 +198,29 @@ pub async fn run_ml_worker(
         // run the models on batches of alerts instead of one by one
         let mut processed_candids = Vec::new();
         for alert in &alerts {
-            let candid = alert.get_i64("_id").unwrap();
-            let programid = alert
-                .get_document("candidate")
-                .unwrap()
-                .get_i32("programid")
-                .unwrap();
-            let obj_id = alert.get_str("objectId").unwrap();
-            let result = prepare_triplet(&alert);
-            if result.is_err() {
-                warn!(
-                    "ML WORKER {}: error preparing triplet for alert {}",
-                    id, obj_id
-                );
-                continue;
-            }
-            let (_cutout_science, _cutout_template, _cutout_difference) = result.unwrap();
+            let candid = alert.get_i64("_id")?;
+            let programid = alert.get_document("candidate")?.get_i32("programid")?;
+            let obj_id = alert.get_str("objectId")?;
 
-            processed_candids.push((candid, programid));
+            // redis needs tuples as strings
+            processed_candids.push(format!("{},{}", programid, candid)); // Store the programid and candid as a string tuple
+
+            let (_cutout_science, _cutout_template, _cutout_difference) =
+                match prepare_triplet(&alert) {
+                    Ok((cutout_science, cutout_template, cutout_difference)) => {
+                        (cutout_science, cutout_template, cutout_difference)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "ML WORKER {}: error preparing triplet for alert {}: {}",
+                            id, obj_id, e
+                        );
+                        continue; // Skip this alert if there was an error
+                    }
+                };
         }
 
-        con.lpush::<&str, Vec<(i64, i32)>, usize>(output_queue.as_str(), processed_candids)
+        con.lpush::<&str, Vec<String>, usize>(output_queue.as_str(), processed_candids)
             .await
             .unwrap();
     }
