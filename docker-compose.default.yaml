@@ -10,9 +10,9 @@ services:
     image: mongo:7.0
     hostname: mongo
     expose:
-      - "27018"
+      - "27017"
     ports:
-      - "27018:27017"
+      - "27017:27017"
     environment:
       - MONGO_INITDB_ROOT_USERNAME=mongoadmin
       - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
