@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 config.yaml
+docker-compose.yaml
 data/alerts/ztf/20**/*.avro
 data/alerts/ztf/20*.avro
 data/alerts/ztf/20*/*.tar.gz

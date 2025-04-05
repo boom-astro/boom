@@ -49,13 +49,17 @@ BOOM runs on macOS and Linux. You'll need:
     ```bash
     cp config.default.yaml config.yaml
     ```
-3. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+3. Same for the `docker-compose.yaml` file:
+    ```bash
+    cp docker-compose.default.yaml docker-compose.yaml
+    ```
+4. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+5. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
