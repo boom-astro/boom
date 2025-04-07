@@ -1,4 +1,5 @@
 import os
+import glob
 
 import numpy as np
 import tensorflow
@@ -6,24 +7,38 @@ import tf2onnx
 import onnx
 from tensorflow import keras
 
-os.makedirs('models_output', exist_ok=True)
+def convert2onnx(model_name):
+    print(f"Converting {model_name}...")
+    model = keras.models.load_model(f'models_input/{model_name}')
+    onnx_model, _ = tf2onnx.convert.from_keras(model)
 
-model_name = "acai_h.d1_dnn_20201130.h5"
-model = keras.models.load_model(f'models_input/{model_name}')
+    output_path = None
 
-metadata_input = np.zeros((1,25))
-triplet_input = np.zeros((1, 63, 63, 3))
+    if os.path.isdir(f'models_input/{model_name}'):
+        output_path = f'models_output/{model_name.rstrip("/")}.onnx'
+    elif model_name.endswith(".h5"):
+        output_path = f'models_output/{model_name.replace(".h5", ".onnx")}'
+    else:
+        raise ValueError(f"Unsupported model format: {model_name}")
+    onnx.save(onnx_model, output_path)
 
-prediction = model([metadata_input, triplet_input])
+def get_model_names():
+    # h5 models end in .h5
+    h5_models = glob.glob('models_input/*.h5')
+    # pb models are directories
+    pb_models = glob.glob('models_input/*/')
+    # remove "models_input/"
+    return [model.replace('models_input/', '') for model in h5_models + pb_models]
 
-print(f"TF score: {prediction}")
+def convert_all_models():
+    model_names = get_model_names()
+    print(f"Converting {len(model_names)} models...")
+    for model_name in model_names:
+        convert2onnx(model_name)
 
-onnx_model, _ = tf2onnx.convert.from_keras(model)
+def main():
+    convert_all_models()
 
-#print(dir(onnx_model))
-#print(onnx_model.opset_import)
-#print(onnx_model.graph)
-
-
-onnx.save(onnx_model, f'models_output/{model_name.replace(".h5", ".onnx")}')
-
+if __name__ == "__main__":
+    os.makedirs('models_output', exist_ok=True)
+    main()
