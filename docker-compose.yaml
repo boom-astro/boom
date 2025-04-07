@@ -32,7 +32,7 @@ services:
       - ALLOW_EMPTY_PASSWORD=yes
       - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
     ports:
-      - '6379:6379'
+      - "6379:6379"
     volumes:
       - valkey:/data
     restart: always
@@ -46,11 +46,22 @@ services:
   broker:
     image: apache/kafka:latest
     hostname: broker
-    container_name: broker
     ports:
       - 9092:9092
     networks:
       - boom
+    restart: always
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/kafka/bin/kafka-topics.sh",
+          "--bootstrap-server",
+          "broker:29092",
+          "--list",
+        ]
+      interval: 10s
+      start_period: 20s
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
