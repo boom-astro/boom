@@ -1,5 +1,5 @@
-use flate2::read::GzDecoder;
-use std::io::Read;
+use zune_inflate::DeflateDecoder;
+use zune_inflate::DeflateOptions;
 
 const NAXIS1_BYTES: &[u8] = "NAXIS1  =".as_bytes();
 const NAXIS2_BYTES: &[u8] = "NAXIS2  =".as_bytes();
@@ -19,10 +19,14 @@ fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
 
 /// Converts a buffer of bytes from a gzipped FITS file to a vector of flattened 2D image data
 pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let mut decoder = GzDecoder::new(buffer);
 
-    let mut decompressed_data = Vec::new();
-    let _ = decoder.read_to_end(&mut decompressed_data);
+    let mut decoder = DeflateDecoder::new_with_options(
+        buffer,
+        DeflateOptions::default()
+            .set_confirm_checksum(false)
+            .set_size_hint(20160)
+    );
+    let decompressed_data = decoder.decode_gzip().unwrap();
 
     let subset = &decompressed_data[0..FITS_HEADER_LEN];
 
@@ -85,8 +89,8 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Er
     // so if NAXIS1 is not NAXIS_STANDARD, we need to add NAXIS_STANDARD - NAXIS1 zeros to the start and end of each row
     // and if NAXIS2 is not NAXIS_STANDARD, we need to add NAXIS_STANDARD - NAXIS2 zeros to the start and end of the vector
 
-    let offset1 = (NAXIS_STANDARD - naxis1) / 2; // Assuming naxis1 and naxis2 are both usize
-    let offset2 = (NAXIS_STANDARD - naxis2) / 2;
+    let offset1 = ((NAXIS_STANDARD - naxis1) as f32 / 2.0).ceil() as usize;
+    let offset2 = ((NAXIS_STANDARD - naxis2) as f32 / 2.0).ceil() as usize;
     if (offset1, offset2) != (0, 0) {
         let mut new_image_data = vec![0.0; NB_PIXELS];
         for i in 0..naxis2 {
