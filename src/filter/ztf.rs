@@ -1,20 +1,13 @@
-use apache_avro::Schema;
 use flare::phot::{limmag_to_fluxerr, mag_to_flux};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
-use rdkafka::producer::FutureProducer;
-use redis::AsyncCommands;
-use std::{collections::HashMap, num::NonZero};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::filter::{
-    create_producer, get_filter_object, load_alert_schema, parse_programid_candid_tuple,
-    process_alerts, send_alert_to_kafka, Alert, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, Origin, Photometry, Survey,
+    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
 };
-use crate::utils::worker::WorkerCmd;
 
 #[derive(Debug)]
 pub struct ZtfFilter {
@@ -153,37 +146,68 @@ impl Filter for ZtfFilter {
 }
 
 pub struct ZtfFilterWorker {
-    id: String,
-    receiver: mpsc::Receiver<WorkerCmd>,
-    filter_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
-    producer: FutureProducer, // Kafka producer for sending messages
-    schema: Schema,           // Avro schema for serialization
+    input_queue: String,
+    output_topic: String,
+    filters: Vec<ZtfFilter>,
+    filters_by_permission: HashMap<i32, Vec<usize>>,
 }
 
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
-    async fn new(
-        id: String,
-        receiver: mpsc::Receiver<WorkerCmd>,
-        config_path: &str,
-    ) -> Result<Self, FilterWorkerError> {
+    async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let alert_collection = db.collection("ZTF_alerts");
         let filter_collection = db.collection("filters");
 
-        let producer = create_producer().await?;
-        let schema = load_alert_schema()?;
+        let input_queue = "ZTF_alerts_filter_queue".to_string();
+        let output_topic = "ZTF_alerts_results".to_string();
+
+        let filter_ids: Vec<i32> = filter_collection
+            .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
+            .await
+            .map_err(FilterWorkerError::GetFiltersError)?
+            .into_iter()
+            .map(|x| x.as_i32().ok_or(FilterError::InvalidFilterId))
+            .filter_map(Result::ok)
+            .collect();
+
+        let mut filters: Vec<ZtfFilter> = Vec::new();
+        for filter_id in filter_ids {
+            filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+        }
+
+        info!("filterworker found {} filters", filters.len());
+
+        // create a hashmap of filters per programid (permissions)
+        // basically we'll have the 4 programid (from 0 to 3) as keys
+        // and the idx of the filters that have that programid in their permissions as values
+        let mut filters_by_permission: HashMap<i32, Vec<usize>> = HashMap::new();
+        for (i, filter) in filters.iter().enumerate() {
+            for permission in &filter.permissions {
+                let entry = filters_by_permission
+                    .entry(*permission)
+                    .or_insert(Vec::new());
+                entry.push(i);
+            }
+        }
 
         Ok(ZtfFilterWorker {
-            id,
-            receiver,
-            filter_collection,
             alert_collection,
-            producer,
-            schema,
+            input_queue,
+            output_topic,
+            filters,
+            filters_by_permission,
         })
+    }
+
+    fn input_queue_name(&self) -> String {
+        self.input_queue.clone()
+    }
+
+    fn output_topic_name(&self) -> String {
+        self.output_topic.clone()
     }
 
     async fn build_alert(
@@ -370,194 +394,78 @@ impl FilterWorker for ZtfFilterWorker {
         Ok(alert)
     }
 
-    async fn run(&mut self) -> Result<(), FilterWorkerError> {
-        // query the DB to find the ids of all the filters for ZTF that are active
-        let filter_ids: Vec<i32> = self
-            .filter_collection
-            .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
-            .await
-            .map_err(FilterWorkerError::GetFiltersError)?
-            .into_iter()
-            .map(|x| x.as_i32().ok_or(FilterError::InvalidFilterId))
-            .filter_map(Result::ok)
-            .collect();
+    async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
+        let mut alerts_output = Vec::new();
 
-        let mut filters: Vec<ZtfFilter> = Vec::new();
-        for filter_id in filter_ids {
-            filters.push(ZtfFilter::build(filter_id, &self.filter_collection).await?);
-        }
-
-        if filters.is_empty() {
-            warn!("no filters found for ZTF");
-            return Ok(());
-        }
-
-        info!("filterworker {} found {} filters", self.id, filters.len());
-
-        // get the highest permissions accross all filters
-        let mut max_permission = 0;
-        for filter in &filters {
-            for permission in &filter.permissions {
-                if *permission > max_permission {
-                    max_permission = *permission;
-                }
-            }
-        }
-        // create a list of queues to read from
-        let input_queue = "ZTF_alerts_filter_queue".to_string();
-        let output_topic = "ZTF_alerts_results".to_string();
-
-        // create a hashmap of filters per programid (permissions)
-        // basically we'll have the 4 programid (from 0 to 3) as keys
-        // and the idx of the filters that have that programid in their permissions as values
-        let mut filters_by_permission: HashMap<i32, Vec<usize>> = HashMap::new();
-        for (i, filter) in filters.iter().enumerate() {
-            for permission in &filter.permissions {
-                let entry = filters_by_permission
-                    .entry(*permission)
-                    .or_insert(Vec::new());
-                entry.push(i);
+        // retrieve alerts to process and group by programid
+        let mut alerts_by_programid: HashMap<i32, Vec<i64>> = HashMap::new();
+        for tuple_str in alerts {
+            if let Some(tuple) = parse_programid_candid_tuple(&tuple_str) {
+                let entry = alerts_by_programid.entry(tuple.0).or_insert(Vec::new());
+                entry.push(tuple.1);
+            } else {
+                warn!("Failed to parse tuple from string: {}", tuple_str);
             }
         }
 
-        // in a never ending loop, loop over the queues
-        let client_redis = redis::Client::open("redis://localhost:6379".to_string())
-            .map_err(FilterWorkerError::ConnectRedisError)?;
-        let mut con = client_redis
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(FilterWorkerError::ConnectRedisError)?;
+        // for each programid, get the filters that have that programid in their permissions
+        // and run the filters
+        for (programid, candids) in alerts_by_programid {
+            let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
 
-        let command_interval: i64 = 500;
-        let mut command_check_countdown = command_interval;
+            let filter_indices = self
+                .filters_by_permission
+                .get(&programid)
+                .ok_or(FilterWorkerError::GetFilterByQueueError)?;
 
-        loop {
-            if command_check_countdown == 0 {
-                match self.receiver.try_recv() {
-                    Ok(WorkerCmd::TERM) => {
-                        info!("filterworker {} received termination command", self.id);
-                        break;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        warn!(
-                            "filter worker {} receiver disconnected, terminating",
-                            self.id
-                        );
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => {
-                        command_check_countdown = command_interval;
-                    }
-                }
-            }
-            // if the queue is empty, wait for a bit and continue the loop
-            let queue_len: i64 = con
-                .llen(&input_queue)
-                .await
-                .map_err(FilterWorkerError::ConnectRedisError)?;
-            if queue_len == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                continue;
-            }
+            for i in filter_indices {
+                let filter = &self.filters[*i];
+                let out_documents = run_filter(
+                    candids.clone(),
+                    filter.pipeline.clone(),
+                    &self.alert_collection,
+                )
+                .await?;
 
-            // get candids from redis
-            let alerts: Vec<String> = con
-                .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
-                .await
-                .map_err(FilterWorkerError::PopCandidError)?;
-
-            let nb_alerts = alerts.len();
-            if nb_alerts == 0 {
-                // sleep for a bit if no alerts were found
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                continue;
-            }
-
-            // retrieve alerts to process and group by programid
-            let mut alerts_by_programid: HashMap<i32, Vec<i64>> = HashMap::new();
-            for tuple_str in alerts {
-                if let Some(tuple) = parse_programid_candid_tuple(&tuple_str) {
-                    let entry = alerts_by_programid.entry(tuple.0).or_insert(Vec::new());
-                    entry.push(tuple.1);
+                // if the array is empty, continue
+                if out_documents.is_empty() {
+                    continue;
                 } else {
-                    warn!("Failed to parse tuple from string: {}", tuple_str);
-                }
-            }
-
-            // for each programid, get the filters that have that programid in their permissions
-            // and run the filters
-            for (programid, candids) in alerts_by_programid {
-                let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
-
-                let filter_indices = filters_by_permission
-                    .get(&programid)
-                    .ok_or(FilterWorkerError::GetFilterByQueueError)?;
-
-                for i in filter_indices {
-                    let filter = &filters[*i];
-                    let out_documents = process_alerts(
-                        candids.clone(),
-                        filter.pipeline.clone(),
-                        &self.alert_collection,
-                    )
-                    .await?;
-
-                    // if the array is empty, continue
-                    if out_documents.is_empty() {
-                        continue;
-                    } else {
-                        // if we have output documents, we need to process them
-                        // and create filter results for each document (which contain annotations)
-                        info!(
-                            "{} alerts passed ztf filter {} with programid {}",
-                            out_documents.len(),
-                            filter.id,
-                            programid,
-                        );
-                    }
-
-                    let now_ts = chrono::Utc::now().timestamp_millis() as f64;
-
-                    for doc in out_documents {
-                        let candid = doc.get_i64("_id")?;
-                        // might want to have the annotations as an optional field instead of empty
-                        let annotations = serde_json::to_string(
-                            doc.get_document("annotations").unwrap_or(&doc! {}),
-                        )
-                        .map_err(FilterWorkerError::SerializeFilterResultError)?;
-                        let filter_result = FilterResults {
-                            filter_id: filter.id,
-                            passed_at: now_ts,
-                            annotations,
-                        };
-                        let entry = results_map.entry(candid).or_insert(Vec::new());
-                        entry.push(filter_result);
-                    }
-                }
-
-                // now we've basically combined the filter results for each candid
-                // we build the alert output and send it to Kafka
-                for (candid, filter_results) in &results_map {
-                    let alert = self.build_alert(*candid, filter_results.clone()).await?;
-
-                    send_alert_to_kafka(
-                        &alert,
-                        &self.schema,
-                        &self.producer,
-                        &output_topic,
-                        &self.id,
-                    )
-                    .await?;
+                    // if we have output documents, we need to process them
+                    // and create filter results for each document (which contain annotations)
                     info!(
-                        "Sent alert with candid {} to Kafka topic {}",
-                        candid, output_topic
+                        "{} alerts passed ztf filter {} with programid {}",
+                        out_documents.len(),
+                        filter.id,
+                        programid,
                     );
                 }
+
+                let now_ts = chrono::Utc::now().timestamp_millis() as f64;
+
+                for doc in out_documents {
+                    let candid = doc.get_i64("_id")?;
+                    // might want to have the annotations as an optional field instead of empty
+                    let annotations =
+                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))
+                            .map_err(FilterWorkerError::SerializeFilterResultError)?;
+                    let filter_result = FilterResults {
+                        filter_id: filter.id,
+                        passed_at: now_ts,
+                        annotations,
+                    };
+                    let entry = results_map.entry(candid).or_insert(Vec::new());
+                    entry.push(filter_result);
+                }
             }
 
-            command_check_countdown -= nb_alerts as i64;
+            // now we've basically combined the filter results for each candid
+            for (candid, filter_results) in &results_map {
+                let alert = self.build_alert(*candid, filter_results.clone()).await?;
+                alerts_output.push(alert);
+            }
         }
 
-        Ok(())
+        Ok(alerts_output)
     }
 }

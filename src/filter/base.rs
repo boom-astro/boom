@@ -1,12 +1,14 @@
-use apache_avro::{serde_avro_bytes, Schema, Writer};
+use apache_avro::Schema;
+use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
-use rdkafka::{
-    config::ClientConfig,
-    producer::{FutureProducer, FutureRecord},
-};
+use rdkafka::producer::FutureProducer;
+use rdkafka::{config::ClientConfig, producer::FutureRecord};
+use redis::AsyncCommands;
+use std::num::NonZero;
 use tokio::sync::mpsc;
-use tracing::{error, warn};
+use tokio::sync::mpsc::error::TryRecvError;
+use tracing::{error, info, warn};
 
 use crate::utils::worker::WorkerCmd;
 
@@ -274,7 +276,7 @@ pub async fn get_filter_object(
     Ok(filter_obj)
 }
 
-pub async fn process_alerts(
+pub async fn run_filter(
     candids: Vec<i64>,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
@@ -361,28 +363,93 @@ pub enum FilterWorkerError {
 
 #[async_trait::async_trait]
 pub trait FilterWorker {
-    async fn new(
-        id: String,
-        receiver: mpsc::Receiver<WorkerCmd>,
-        config_path: &str,
-    ) -> Result<Self, FilterWorkerError>
+    async fn new(config_path: &str) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
-    async fn run(&mut self) -> Result<(), FilterWorkerError>;
+    fn input_queue_name(&self) -> String;
+    fn output_topic_name(&self) -> String;
     async fn build_alert(
         &self,
         candid: i64,
         filter_results: Vec<FilterResults>,
     ) -> Result<Alert, FilterWorkerError>;
+    async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
 #[tokio::main]
 pub async fn run_filter_worker<T: FilterWorker>(
     id: String,
-    receiver: mpsc::Receiver<WorkerCmd>,
+    mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
-    let mut filter_worker = T::new(id, receiver, config_path).await?;
-    filter_worker.run().await?;
+    let mut filter_worker = T::new(config_path).await?;
+
+    // in a never ending loop, loop over the queues
+    let client_redis = redis::Client::open("redis://localhost:6379".to_string())
+        .map_err(FilterWorkerError::ConnectRedisError)?;
+    let mut con = client_redis
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(FilterWorkerError::ConnectRedisError)?;
+
+    let input_queue = filter_worker.input_queue_name();
+    let output_topic = filter_worker.output_topic_name();
+
+    let producer = create_producer().await?;
+    let schema = load_alert_schema()?;
+
+    let command_interval: i64 = 500;
+    let mut command_check_countdown = command_interval;
+
+    loop {
+        if command_check_countdown == 0 {
+            match receiver.try_recv() {
+                Ok(WorkerCmd::TERM) => {
+                    info!("filterworker {} received termination command", &id);
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    warn!("filter worker {} receiver disconnected, terminating", &id);
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    command_check_countdown = command_interval;
+                }
+            }
+        }
+        // if the queue is empty, wait for a bit and continue the loop
+        let queue_len: i64 = con
+            .llen(&input_queue)
+            .await
+            .map_err(FilterWorkerError::ConnectRedisError)?;
+        if queue_len == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        // get candids from redis
+        let alerts: Vec<String> = con
+            .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
+            .await
+            .map_err(FilterWorkerError::PopCandidError)?;
+
+        let nb_alerts = alerts.len();
+        if nb_alerts == 0 {
+            // sleep for a bit if no alerts were found
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            continue;
+        }
+
+        let alerts_output = filter_worker.process_alerts(&alerts).await?;
+        for alert in alerts_output {
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
+            info!(
+                "Sent alert with candid {} to Kafka topic {}",
+                &alert.candid, &output_topic
+            );
+        }
+        command_check_countdown -= nb_alerts as i64;
+    }
+
     Ok(())
 }
