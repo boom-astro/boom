@@ -181,13 +181,13 @@ pub async fn run_alert_worker<T: AlertWorker>(
                         .map_err(AlertWorkerError::RemoveAlertError)?;
                 }
                 _ => {
-                    warn!(error = %error, "Error processing alert, requeueing");
-                    con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
-                        .await
-                        .map_err(AlertWorkerError::PushAlertError)?;
-                    con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                        .await
-                        .map_err(AlertWorkerError::RemoveAlertError)?;
+                    warn!(error = %error, "Error processing alert, skipping");
+                    // con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
+                    //     .await
+                    //     .map_err(AlertWorkerError::PushAlertError)?;
+                    // con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
+                    //     .await
+                    //     .map_err(AlertWorkerError::RemoveAlertError)?;
                 }
             },
         }

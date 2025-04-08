@@ -1,2 +1,7 @@
+mod acai;
 mod base;
-pub use base::load_model;
+mod btsbot;
+
+pub use acai::AcaiModel;
+pub use base::{load_model, Model};
+pub use btsbot::BtsBotModel;

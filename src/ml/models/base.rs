@@ -1,15 +1,13 @@
 use ndarray::{Array, Dim};
 use ort::{
     execution_providers::CUDAExecutionProvider,
-    inputs,
     session::{builder::GraphOptimizationLevel, Session},
 };
 
-use boom::{conf, utils::fits::prepare_triplet};
-use futures::StreamExt;
-use mongodb::bson::{doc, Document};
+use crate::utils::fits::prepare_triplet;
+use mongodb::bson::Document;
 
-fn load_model(path: &str) -> Session {
+pub fn load_model(path: &str) -> Session {
     let builder = Session::builder().unwrap();
 
     builder
@@ -25,7 +23,6 @@ fn load_model(path: &str) -> Session {
 
 pub trait Model {
     fn new(path: &str) -> Self;
-    fn model(&self) -> &Session;
     fn get_metadata(&self, alerts: &[Document]) -> Array<f32, Dim<[usize; 2]>>;
     fn get_triplet(&self, alerts: &[Document]) -> Array<f32, Dim<[usize; 4]>> {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
