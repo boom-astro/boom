@@ -2,7 +2,10 @@ use boom::{
     alert::{AlertWorker, ZtfAlertWorker},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
-    utils::{db::mongify, testing, testing::drop_alert_from_collections},
+    utils::{
+        db::mongify,
+        testing::{drop_alert_from_collections, insert_test_ztf_filter, remove_test_ztf_filter},
+    },
 };
 use mongodb::bson::doc;
 
@@ -151,7 +154,7 @@ async fn test_alert_from_avro_bytes() {
 #[tokio::test]
 async fn test_process_ztf_alert() {
     // drop the alert from the database
-    drop_alert_from_collections(2695378462115010012, "ZTF")
+    drop_alert_from_collections(2695378462115010012, "ZTF18acullba", "ZTF")
         .await
         .unwrap();
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
@@ -224,7 +227,7 @@ async fn test_process_ztf_alert() {
 #[tokio::test]
 async fn test_filter_ztf_alert() {
     // drop the alert from the database
-    drop_alert_from_collections(3005140370015010009, "ZTF")
+    drop_alert_from_collections(3005140370015010009, "ZTF18acullba", "ZTF")
         .await
         .unwrap();
 
@@ -237,8 +240,8 @@ async fn test_filter_ztf_alert() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 3005140370015010009);
 
-    testing::remove_test_filter().await.unwrap();
-    testing::insert_test_filter().await.unwrap();
+    remove_test_ztf_filter().await.unwrap();
+    insert_test_ztf_filter().await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(CONFIG_FILE).await.unwrap();
     let result = filter_worker

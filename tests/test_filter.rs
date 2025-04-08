@@ -12,9 +12,9 @@ async fn test_build_filter() {
     let config_file = conf::load_config(CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
     let filter_collection = db.collection("filters");
-    testing::insert_test_filter().await.unwrap();
+    testing::insert_test_ztf_filter().await.unwrap();
     let filter_result = ZtfFilter::build(-1, &filter_collection).await;
-    testing::remove_test_filter().await.unwrap();
+    testing::remove_test_ztf_filter().await.unwrap();
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
         doc! { "$match": {} },
@@ -49,10 +49,10 @@ async fn test_build_filter() {
 async fn test_filter_found() {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
-    testing::insert_test_filter().await.unwrap();
+    testing::insert_test_ztf_filter().await.unwrap();
     let filter_collection = db.collection("filters");
     let filter_result = ZtfFilter::build(-1, &filter_collection).await;
-    testing::remove_test_filter().await.unwrap();
+    testing::remove_test_ztf_filter().await.unwrap();
     assert!(filter_result.is_ok());
 }
 

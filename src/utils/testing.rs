@@ -26,6 +26,7 @@ pub async fn drop_alert_collections(
 
 pub async fn drop_alert_from_collections(
     candid: i64,
+    object_id: &str,
     stream_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config("tests/config.test.yaml")?;
@@ -49,12 +50,13 @@ pub async fn drop_alert_from_collections(
     match stream_name {
         "ZTF" => {
             db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
-                .delete_one(doc! {"_id": "ZTF18abudxnw"})
+                .delete_one(doc! {"_id": object_id})
                 .await?;
         }
         _ => {
+            // here we need to cast the object id to i64
             db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
-                .delete_one(doc! {"_id": 25401295582003262_i64})
+                .delete_one(doc! {"_id": object_id.parse::<i64>()?})
                 .await?;
         }
     }
@@ -62,8 +64,7 @@ pub async fn drop_alert_from_collections(
     Ok(())
 }
 
-// insert a test filter with id -1 into the database
-pub async fn insert_test_filter() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn insert_test_ztf_filter() -> Result<(), Box<dyn std::error::Error>> {
     let filter_obj: mongodb::bson::Document = doc! {
       "_id": mongodb::bson::oid::ObjectId::new(),
       "group_id": 41,
@@ -109,13 +110,69 @@ pub async fn insert_test_filter() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// remove test filter with id -1 from the database
-pub async fn remove_test_filter() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove_test_ztf_filter() -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config("tests/config.test.yaml")?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": -1})
+        .delete_many(doc! {"filter_id": -1, "catalog": "ZTF_alerts"})
+        .await;
+
+    Ok(())
+}
+
+pub async fn insert_test_lsst_filter() -> Result<(), Box<dyn std::error::Error>> {
+    let filter_obj: mongodb::bson::Document = doc! {
+      "_id": mongodb::bson::oid::ObjectId::new(),
+      "group_id": 41,
+      "filter_id": -1,
+      "catalog": "LSST_alerts",
+      "permissions": [
+        1
+      ],
+      "active": true,
+      "active_fid": "v2e0fs",
+      "fv": [
+        {
+            "fid": "v2e0fs",
+            "pipeline": "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
+            "created_at": {
+            "$date": "2020-10-21T08:39:43.693Z"
+            }
+        }
+      ],
+      "autosave": false,
+      "update_annotations": true,
+      "created_at": {
+        "$date": "2021-02-20T08:18:28.324Z"
+      },
+      "last_modified": {
+        "$date": "2023-05-04T23:39:07.090Z"
+      }
+    };
+
+    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let db = conf::build_db(&config_file).await?;
+    let x = db
+        .collection::<mongodb::bson::Document>("filters")
+        .insert_one(filter_obj)
+        .await;
+    match x {
+        Err(e) => {
+            error!("error inserting filter obj: {}", e);
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+pub async fn remove_test_lsst_filter() -> Result<(), Box<dyn std::error::Error>> {
+    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let db = conf::build_db(&config_file).await?;
+    let _ = db
+        .collection::<mongodb::bson::Document>("filters")
+        .delete_many(doc! {"filter_id": -1, "catalog": "LSST_alerts"})
         .await;
 
     Ok(())

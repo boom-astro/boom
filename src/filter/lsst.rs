@@ -162,6 +162,10 @@ impl FilterWorker for LsstFilterWorker {
         self.output_topic.clone()
     }
 
+    fn has_filters(&self) -> bool {
+        !self.filters.is_empty()
+    }
+
     async fn build_alert(
         &self,
         candid: i64,
@@ -321,7 +325,7 @@ impl FilterWorker for LsstFilterWorker {
 
         let alert = Alert {
             candid,
-            object_id: format!("{:x}", object_id),
+            object_id: format!("{}", object_id),
             jd,
             ra,
             dec,

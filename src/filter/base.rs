@@ -368,6 +368,7 @@ pub trait FilterWorker {
         Self: Sized;
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
+    fn has_filters(&self) -> bool;
     async fn build_alert(
         &self,
         candid: i64,
@@ -383,6 +384,14 @@ pub async fn run_filter_worker<T: FilterWorker>(
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
     let mut filter_worker = T::new(config_path).await?;
+
+    if !filter_worker.has_filters() {
+        info!(
+            "No filters available for filter worker {} to process alerts",
+            &id
+        );
+        return Ok(());
+    }
 
     // in a never ending loop, loop over the queues
     let client_redis = redis::Client::open("redis://localhost:6379".to_string())

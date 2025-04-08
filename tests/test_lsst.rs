@@ -1,7 +1,10 @@
 use boom::{
     alert::{AlertWorker, LsstAlertWorker},
     conf,
-    utils::testing::drop_alert_from_collections,
+    filter::{FilterWorker, LsstFilterWorker},
+    utils::testing::{
+        drop_alert_from_collections, insert_test_lsst_filter, remove_test_lsst_filter,
+    },
 };
 use mongodb::bson::doc;
 
@@ -11,7 +14,7 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_lsst_alert_from_avro_bytes() {
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/lsst/0.avro";
+    let file_name = "tests/data/alerts/lsst/25409136044802067.avro";
     let bytes_content = std::fs::read(file_name).unwrap();
     let alert = alert_worker
         .alert_from_avro_bytes(&bytes_content)
@@ -80,13 +83,13 @@ async fn test_lsst_alert_from_avro_bytes() {
 #[tokio::test]
 async fn test_process_lsst_alert() {
     // first we need to drop the alert from the database
-    drop_alert_from_collections(25409136044802067, "LSST")
+    drop_alert_from_collections(25409136044802067, "25401295582003262", "LSST")
         .await
         .unwrap();
 
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/lsst/0.avro";
+    let file_name = "tests/data/alerts/lsst/25409136044802067.avro";
     let bytes_content = std::fs::read(file_name).unwrap();
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(result, 25409136044802067);
@@ -147,4 +150,37 @@ async fn test_process_lsst_alert() {
 
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 3);
+}
+
+#[tokio::test]
+async fn test_filter_lsst_alert() {
+    drop_alert_from_collections(3527242430321524769, "3527242430321524769", "LSST")
+        .await
+        .unwrap();
+
+    let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
+
+    let file_name = "tests/data/alerts/lsst/3527242430321524769.avro";
+    let bytes_content = std::fs::read(file_name).unwrap();
+    let result = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(result, 3527242430321524769);
+
+    remove_test_lsst_filter().await.unwrap();
+    insert_test_lsst_filter().await.unwrap();
+
+    let mut filter_worker = LsstFilterWorker::new(CONFIG_FILE).await.unwrap();
+    let result = filter_worker
+        .process_alerts(&["3527242430321524769".to_string()])
+        .await;
+
+    assert!(result.is_ok());
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, 3527242430321524769);
+    assert_eq!(alert.object_id, "3527242430321524769");
+    assert_eq!(alert.photometry.len(), 1); // prv_candidates + prv_nondetections
+    let filter_passed = alert.filters.iter().find(|f| f.filter_id == -1).unwrap();
+    assert_eq!(filter_passed.filter_id, -1);
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.47}");
 }

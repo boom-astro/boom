@@ -210,6 +210,10 @@ impl FilterWorker for ZtfFilterWorker {
         self.output_topic.clone()
     }
 
+    fn has_filters(&self) -> bool {
+        !self.filters.is_empty()
+    }
+
     async fn build_alert(
         &self,
         candid: i64,
