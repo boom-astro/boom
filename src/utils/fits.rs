@@ -19,12 +19,11 @@ fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
 
 /// Converts a buffer of bytes from a gzipped FITS file to a vector of flattened 2D image data
 pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-
     let mut decoder = DeflateDecoder::new_with_options(
         buffer,
         DeflateOptions::default()
             .set_confirm_checksum(false)
-            .set_size_hint(20160)
+            .set_size_hint(20160),
     );
     let decompressed_data = decoder.decode_gzip().unwrap();
 
