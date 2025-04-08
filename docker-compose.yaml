@@ -1,7 +1,6 @@
 volumes:
   mongodb:
   valkey:
-  # kafka:
 
 networks:
   boom:
@@ -67,6 +66,3 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
       KAFKA_NUM_PARTITIONS: 15
-    # volumes:
-    #   - ./data/kafka:/tmp/kraft-combined-logs
-    #   - kafka:/tmp/kraft-combined-logs
