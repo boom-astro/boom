@@ -35,37 +35,27 @@ pub async fn drop_alert_from_collections(
     let alert_aux_collection_name = format!("{}_alerts_aux", stream_name);
 
     let filter = doc! {"_id": candid};
-    let alert = db
-        .collection::<mongodb::bson::Document>(&alert_collection_name)
-        .find_one(filter.clone())
+    db.collection::<mongodb::bson::Document>(&alert_collection_name)
+        .delete_one(filter.clone())
         .await?;
 
-    if let Some(alert) = alert {
-        // delete the alert from the alerts collection
-        db.collection::<mongodb::bson::Document>(&alert_collection_name)
-            .delete_one(filter.clone())
-            .await?;
+    // delete the alert from the cutouts collection
+    db.collection::<mongodb::bson::Document>(&alert_cutout_collection_name)
+        .delete_one(filter.clone())
+        .await?;
 
-        // delete the alert from the cutouts collection
-        db.collection::<mongodb::bson::Document>(&alert_cutout_collection_name)
-            .delete_one(filter.clone())
-            .await?;
-
-        // 1. if the stream name is ZTF we read the object id as a string and drop the aux entry
-        // 2. otherwise we consider it an i64 and drop the aux entry
-        match stream_name {
-            "ZTF" => {
-                let object_id = alert.get_str("objectId")?;
-                db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
-                    .delete_one(doc! {"_id": object_id})
-                    .await?;
-            }
-            _ => {
-                let object_id = alert.get_i64("objectId")?;
-                db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
-                    .delete_one(doc! {"_id": object_id})
-                    .await?;
-            }
+    // 1. if the stream name is ZTF we read the object id as a string and drop the aux entry
+    // 2. otherwise we consider it an i64 and drop the aux entry
+    match stream_name {
+        "ZTF" => {
+            db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
+                .delete_one(doc! {"_id": "ZTF18abudxnw"})
+                .await?;
+        }
+        _ => {
+            db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
+                .delete_one(doc! {"_id": 25401295582003262_i64})
+                .await?;
         }
     }
 
@@ -87,7 +77,7 @@ pub async fn insert_test_filter() -> Result<(), Box<dyn std::error::Error>> {
       "fv": [
         {
             "fid": "v2e0fs",
-            "pipeline": "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}]",
+            "pipeline": "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
             "created_at": {
             "$date": "2020-10-21T08:39:43.693Z"
             }
@@ -125,7 +115,7 @@ pub async fn remove_test_filter() -> Result<(), Box<dyn std::error::Error>> {
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_one(doc! {"filter_id": -1})
+        .delete_many(doc! {"filter_id": -1})
         .await;
 
     Ok(())
