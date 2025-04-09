@@ -1,10 +1,9 @@
 /target
 Cargo.lock
 config.yaml
-data/alerts/ztf/20**/*.avro
-data/alerts/ztf/20*.avro
-data/alerts/ztf/20*/*.tar.gz
-data/alerts/ztf/20*.tar.gz
+docker-compose.yaml
+data/alerts/ztf
+data/alerts/lsst
 __pycache__
 /env
 .DS_Store

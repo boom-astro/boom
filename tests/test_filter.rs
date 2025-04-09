@@ -1,12 +1,9 @@
-use mongodb::bson::{doc, Document};
-use tracing::{error, info};
-
 use boom::{
-    alert::{AlertWorker, ZtfAlertWorker},
     conf,
-    filter::{process_alerts, Filter, ZtfFilter},
+    filter::{Filter, ZtfFilter},
     utils::testing,
 };
+use mongodb::bson::{doc, Document};
 
 const CONFIG_FILE: &str = "tests/config.test.yaml";
 
@@ -15,9 +12,11 @@ async fn test_build_filter() {
     let config_file = conf::load_config(CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
     let filter_collection = db.collection("filters");
-    testing::insert_test_filter().await.unwrap();
-    let filter_result = ZtfFilter::build(-1, &filter_collection).await;
-    testing::remove_test_filter().await.unwrap();
+
+    let filter_id = testing::insert_test_ztf_filter().await.unwrap();
+    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
+    testing::remove_test_ztf_filter(filter_id).await.unwrap();
+
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
         doc! { "$match": {} },
@@ -42,6 +41,7 @@ async fn test_build_filter() {
             }
         },
         doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
     ];
     assert_eq!(pipeline, filter.pipeline);
     assert_eq!(vec![1], filter.permissions);
@@ -51,10 +51,10 @@ async fn test_build_filter() {
 async fn test_filter_found() {
     let config_file = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
-    testing::insert_test_filter().await.unwrap();
+    let filter_id = testing::insert_test_ztf_filter().await.unwrap();
     let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build(-1, &filter_collection).await;
-    testing::remove_test_filter().await.unwrap();
+    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
+    testing::remove_test_ztf_filter(filter_id).await.unwrap();
     assert!(filter_result.is_ok());
 }
 
@@ -65,67 +65,4 @@ async fn test_no_filter_found() {
     let filter_collection = db.collection("filters");
     let filter_result = ZtfFilter::build(-2, &filter_collection).await;
     assert!(filter_result.is_err());
-}
-
-// checks result of running filter
-#[tokio::test]
-async fn test_run_filter() {
-    testing::insert_test_filter().await.unwrap();
-    let config_file = conf::load_config(CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
-    let alert_collection = db.collection("ZTF_alerts");
-    let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build(-1, &filter_collection).await;
-    testing::remove_test_filter().await.unwrap();
-    assert!(filter_result.is_ok());
-    let filter = filter_result.unwrap();
-
-    let test_col_name = "ZTF_alerts";
-    let test_cutout_col_name = "ZTF_alerts_cutouts";
-    let test_aux_col_name = "ZTF_alerts_aux";
-    let _ =
-        testing::drop_alert_collections(&test_col_name, &test_cutout_col_name, &test_aux_col_name)
-            .await;
-
-    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
-    let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
-    let result = alert_worker.process_alert(&bytes_content).await;
-    assert!(result.is_ok(), "Error processing alert: {:?}", result);
-
-    let candids = vec![result.unwrap()];
-
-    info!("received {} candids from redis", candids.len());
-    let out_candids = process_alerts(candids, filter.pipeline, &alert_collection).await;
-    match out_candids {
-        Ok(out) => {
-            assert_eq!(out.len(), 1);
-        }
-        Err(e) => {
-            panic!("Got error: {}", e);
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_filter_no_alerts() {
-    testing::insert_test_filter().await.unwrap();
-    let config_file = conf::load_config("tests/config.test.yaml").unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
-    let alert_collection = db.collection("ZTF_alerts");
-    let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build(-1, &filter_collection).await;
-    testing::remove_test_filter().await.unwrap();
-    assert!(filter_result.is_ok());
-    let filter = filter_result.unwrap();
-
-    let candids: Vec<i64> = vec![1];
-
-    let out_candids = process_alerts(candids, filter.pipeline, &alert_collection).await;
-    match out_candids {
-        Err(e) => {
-            error!("Error running filter: {}", e);
-        }
-        _ => {}
-    }
 }

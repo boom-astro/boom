@@ -9,6 +9,18 @@ const FITS_HEADER_LEN: usize = 2880; // FITS headers are in blocks of 2880 bytes
 const NAXIS_STANDARD: usize = 63;
 const NB_PIXELS: usize = NAXIS_STANDARD * NAXIS_STANDARD;
 
+#[derive(thiserror::Error, Debug)]
+pub enum CutoutError {
+    #[error("failed to convert buffer to image")]
+    BufferToImageError,
+    #[error("failed to normalize image")]
+    NormalizeImageError,
+    #[error("failed to prepare cutout")]
+    PrepareCutoutError,
+    #[error("could not parse naxis1 or naxis2 from FITS header")]
+    ParseNAXISError(#[from] std::num::ParseIntError),
+}
+
 fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
     v.chunks_exact(4)
         .map(TryInto::try_into)
@@ -18,7 +30,7 @@ fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
 }
 
 /// Converts a buffer of bytes from a gzipped FITS file to a vector of flattened 2D image data
-pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
     let mut decoder = GzDecoder::new(buffer);
 
     let mut decompressed_data = Vec::new();
@@ -49,7 +61,7 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Er
     }
     let naxis1 = String::from_utf8_lossy(&subset[naxis1_val_start..naxis1_val_end])
         .parse::<usize>()
-        .unwrap();
+        .map_err(CutoutError::ParseNAXISError)?; // Parse the value of NAXIS1 from the FITS header
 
     let mut naxis2_key_start = naxis1_val_end;
     let mut naxis2_val_start = 0;
@@ -74,7 +86,7 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Er
     }
     let naxis2 = String::from_utf8_lossy(&subset[naxis2_val_start..naxis2_val_end])
         .parse::<usize>()
-        .unwrap();
+        .map_err(CutoutError::ParseNAXISError)?; // Parse the value of NAXIS2 from the FITS header
 
     let mut image_data = u8_to_f32_vec(
         &decompressed_data[FITS_HEADER_LEN..(FITS_HEADER_LEN + (naxis1 * naxis2 * 4) as usize)],
@@ -103,7 +115,7 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Er
 }
 
 /// Normalizes a flattened 2D image
-pub fn normalize_image(image: Vec<f32>) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn normalize_image(image: Vec<f32>) -> Result<Vec<f32>, CutoutError> {
     // replace all NaNs with 0s and clamp all values to the range [f32::MIN, f32::MAX]
     let mut normalized: Vec<f32> = image
         .into_iter()
@@ -127,33 +139,33 @@ pub fn normalize_image(image: Vec<f32>) -> Result<Vec<f32>, Box<dyn std::error::
 /// Prepares a cutout image for ML models
 /// It reads the image from the alert document
 /// decompresses it, normalizes it and returns it as a flattened 2D array of floats
-fn prepare_cutout(cutout: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let cutout = buffer_to_image(cutout).unwrap();
-    let cutout = normalize_image(cutout).unwrap();
+fn prepare_cutout(cutout: &[u8]) -> Result<Vec<f32>, CutoutError> {
+    let cutout = buffer_to_image(cutout)?;
+    let cutout = normalize_image(cutout)?;
     Ok(cutout)
 }
 
 /// Prepares a triplet of cutouts for ML models
 pub fn prepare_triplet(
     alert_doc: &mongodb::bson::Document,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), CutoutError> {
     let cutout_science = alert_doc
         .get_binary_generic("cutoutScience")
         .unwrap()
         .to_vec();
-    let cutout_science = prepare_cutout(&cutout_science).unwrap();
+    let cutout_science = prepare_cutout(&cutout_science)?;
 
     let cutout_template = alert_doc
         .get_binary_generic("cutoutTemplate")
         .unwrap()
         .to_vec();
-    let cutout_template = prepare_cutout(&cutout_template).unwrap();
+    let cutout_template = prepare_cutout(&cutout_template)?;
 
     let cutout_difference = alert_doc
         .get_binary_generic("cutoutDifference")
         .unwrap()
         .to_vec();
-    let cutout_difference = prepare_cutout(&cutout_difference).unwrap();
+    let cutout_difference = prepare_cutout(&cutout_difference)?;
 
     Ok((cutout_science, cutout_template, cutout_difference))
 }

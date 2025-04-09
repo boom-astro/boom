@@ -1,7 +1,11 @@
 use boom::{
     alert::{AlertWorker, ZtfAlertWorker},
     conf,
-    utils::{db::mongify, testing::drop_alert_from_collections},
+    filter::{FilterWorker, ZtfFilterWorker},
+    utils::{
+        db::mongify,
+        testing::{drop_alert_from_collections, insert_test_ztf_filter, remove_test_ztf_filter},
+    },
 };
 use mongodb::bson::doc;
 
@@ -150,7 +154,7 @@ async fn test_alert_from_avro_bytes() {
 #[tokio::test]
 async fn test_process_ztf_alert() {
     // drop the alert from the database
-    drop_alert_from_collections(2695378462115010012, "ZTF")
+    drop_alert_from_collections(2695378462115010012, "ZTF18acullba", "ZTF")
         .await
         .unwrap();
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
@@ -158,6 +162,7 @@ async fn test_process_ztf_alert() {
     let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
     let bytes_content = std::fs::read(file_name).unwrap();
     let result = alert_worker.process_alert(&bytes_content).await;
+    println!("{:?}", result);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 2695378462115010012);
 
@@ -217,4 +222,44 @@ async fn test_process_ztf_alert() {
 
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 10);
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert() {
+    // drop the alert from the database
+    drop_alert_from_collections(3005140370015010009, "ZTF18acullba", "ZTF")
+        .await
+        .unwrap();
+
+    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+
+    let file_name = "tests/data/alerts/ztf/3005140370015010009.avro";
+    let bytes_content = std::fs::read(file_name).unwrap();
+    let result = alert_worker.process_alert(&bytes_content).await;
+    println!("{:?}", result);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 3005140370015010009);
+
+    let filter_id = insert_test_ztf_filter().await.unwrap();
+
+    let mut filter_worker = ZtfFilterWorker::new(CONFIG_FILE).await.unwrap();
+    let result = filter_worker
+        .process_alerts(&["1,3005140370015010009".to_string()])
+        .await;
+
+    assert!(result.is_ok());
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, 3005140370015010009);
+    assert_eq!(alert.object_id, "ZTF18acullba");
+    assert_eq!(alert.photometry.len(), 27); // prv_candidates + prv_nondetections
+    let filter_passed = alert
+        .filters
+        .iter()
+        .find(|f| f.filter_id == filter_id)
+        .unwrap();
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":16.75}");
+
+    remove_test_ztf_filter(filter_id).await.unwrap();
 }
