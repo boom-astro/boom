@@ -64,11 +64,13 @@ pub async fn drop_alert_from_collections(
     Ok(())
 }
 
-pub async fn insert_test_ztf_filter() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>> {
+    // we randomize the filter id
+    let filter_id = rand::random::<i32>();
     let filter_obj: mongodb::bson::Document = doc! {
       "_id": mongodb::bson::oid::ObjectId::new(),
       "group_id": 41,
-      "filter_id": -1,
+      "filter_id": filter_id,
       "catalog": "ZTF_alerts",
       "permissions": [
         1
@@ -107,25 +109,27 @@ pub async fn insert_test_ztf_filter() -> Result<(), Box<dyn std::error::Error>> 
         _ => {}
     }
 
-    Ok(())
+    Ok(filter_id)
 }
 
-pub async fn remove_test_ztf_filter() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove_test_ztf_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config("tests/config.test.yaml")?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": -1, "catalog": "ZTF_alerts"})
+        .delete_many(doc! {"filter_id": filter_id, "catalog": "ZTF_alerts"})
         .await;
 
     Ok(())
 }
 
-pub async fn insert_test_lsst_filter() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn insert_test_lsst_filter() -> Result<i32, Box<dyn std::error::Error>> {
+    // we randomize the filter id
+    let filter_id = rand::random::<i32>();
     let filter_obj: mongodb::bson::Document = doc! {
       "_id": mongodb::bson::oid::ObjectId::new(),
       "group_id": 41,
-      "filter_id": -1,
+      "filter_id": filter_id,
       "catalog": "LSST_alerts",
       "permissions": [
         1
@@ -164,15 +168,15 @@ pub async fn insert_test_lsst_filter() -> Result<(), Box<dyn std::error::Error>>
         _ => {}
     }
 
-    Ok(())
+    Ok(filter_id)
 }
 
-pub async fn remove_test_lsst_filter() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove_test_lsst_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config("tests/config.test.yaml")?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": -1, "catalog": "LSST_alerts"})
+        .delete_many(doc! {"filter_id": filter_id, "catalog": "LSST_alerts"})
         .await;
 
     Ok(())

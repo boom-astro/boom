@@ -165,8 +165,7 @@ async fn test_filter_lsst_alert() {
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(result, 3527242430321524769);
 
-    remove_test_lsst_filter().await.unwrap();
-    insert_test_lsst_filter().await.unwrap();
+    let filter_id = insert_test_lsst_filter().await.unwrap();
 
     let mut filter_worker = LsstFilterWorker::new(CONFIG_FILE).await.unwrap();
     let result = filter_worker
@@ -180,7 +179,12 @@ async fn test_filter_lsst_alert() {
     assert_eq!(alert.candid, 3527242430321524769);
     assert_eq!(alert.object_id, "3527242430321524769");
     assert_eq!(alert.photometry.len(), 1); // prv_candidates + prv_nondetections
-    let filter_passed = alert.filters.iter().find(|f| f.filter_id == -1).unwrap();
-    assert_eq!(filter_passed.filter_id, -1);
+    let filter_passed = alert
+        .filters
+        .iter()
+        .find(|f| f.filter_id == filter_id)
+        .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":23.47}");
+
+    remove_test_lsst_filter(filter_id).await.unwrap();
 }

@@ -240,8 +240,7 @@ async fn test_filter_ztf_alert() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 3005140370015010009);
 
-    remove_test_ztf_filter().await.unwrap();
-    insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_ztf_filter().await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(CONFIG_FILE).await.unwrap();
     let result = filter_worker
@@ -255,7 +254,12 @@ async fn test_filter_ztf_alert() {
     assert_eq!(alert.candid, 3005140370015010009);
     assert_eq!(alert.object_id, "ZTF18acullba");
     assert_eq!(alert.photometry.len(), 27); // prv_candidates + prv_nondetections
-    let filter_passed = alert.filters.iter().find(|f| f.filter_id == -1).unwrap();
-    assert_eq!(filter_passed.filter_id, -1);
+    let filter_passed = alert
+        .filters
+        .iter()
+        .find(|f| f.filter_id == filter_id)
+        .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":16.75}");
+
+    remove_test_ztf_filter(filter_id).await.unwrap();
 }
