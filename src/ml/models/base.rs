@@ -1,6 +1,6 @@
 use ndarray::{Array, Dim};
 use ort::{
-    execution_providers::CUDAExecutionProvider,
+    execution_providers::{CUDAExecutionProvider, CoreMLExecutionProvider},
     session::{builder::GraphOptimizationLevel, Session},
 };
 
@@ -10,8 +10,13 @@ use mongodb::bson::Document;
 pub fn load_model(path: &str) -> Session {
     let builder = Session::builder().unwrap();
 
+    // if CUDA or Apple's CoreML aren't available,
+    // it will fall back to CPU execution provider
     builder
-        .with_execution_providers([CUDAExecutionProvider::default().build()])
+        .with_execution_providers([
+            CUDAExecutionProvider::default().build(),
+            CoreMLExecutionProvider::default().build(),
+        ])
         .unwrap()
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .unwrap()
