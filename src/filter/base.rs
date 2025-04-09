@@ -8,7 +8,7 @@ use redis::AsyncCommands;
 use std::num::NonZero;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::utils::worker::WorkerCmd;
 
@@ -452,9 +452,10 @@ pub async fn run_filter_worker<T: FilterWorker>(
         let alerts_output = filter_worker.process_alerts(&alerts).await?;
         for alert in alerts_output {
             send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
-            info!(
+            trace!(
                 "Sent alert with candid {} to Kafka topic {}",
-                &alert.candid, &output_topic
+                &alert.candid,
+                &output_topic
             );
         }
         command_check_countdown -= nb_alerts as i64;
