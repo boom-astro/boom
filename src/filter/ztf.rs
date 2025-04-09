@@ -178,8 +178,6 @@ impl FilterWorker for ZtfFilterWorker {
             filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
         }
 
-        info!("filterworker found {} filters", filters.len());
-
         // create a hashmap of filters per programid (permissions)
         // basically we'll have the 4 programid (from 0 to 3) as keys
         // and the idx of the filters that have that programid in their permissions as values
