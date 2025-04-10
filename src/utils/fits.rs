@@ -1,3 +1,5 @@
+// we use zune_inflate as a replacement for flate2
+// which is a slightly faster alternative
 use zune_inflate::DeflateDecoder;
 use zune_inflate::DeflateOptions;
 
