@@ -1,6 +1,9 @@
 use ndarray::{Array, Dim};
 use ort::{
-    execution_providers::{CUDAExecutionProvider, CoreMLExecutionProvider},
+    execution_providers::{
+        CUDAExecutionProvider,
+        // CoreMLExecutionProvider
+    },
     session::{builder::GraphOptimizationLevel, Session},
 };
 
