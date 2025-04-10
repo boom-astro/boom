@@ -1,3 +1,4 @@
+use crate::ml::models::ModelError;
 use crate::{conf, utils::worker::WorkerCmd};
 use mongodb::bson::Document;
 use redis::AsyncCommands;
@@ -18,6 +19,12 @@ pub enum MLWorkerError {
     PopCandidsError(#[source] redis::RedisError),
     #[error("failed to push candids to the output queue")]
     PushCandidsError(#[source] redis::RedisError),
+    #[error("failed to run model")]
+    RunModelError(#[from] ModelError),
+    #[error("failed to access document field")]
+    MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("error retrieving alerts")]
+    ErrorRetrievingAlerts(#[source] mongodb::error::Error),
 }
 
 #[async_trait::async_trait]

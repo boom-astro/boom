@@ -157,9 +157,22 @@ impl MLWorker for ZtfMLWorker {
                         }
                     }
                 },
+                doc! {
+                    "$project": doc! {
+                        "objectId": 1,
+                        "candidate": 1,
+                        "prv_candidates.jd": 1,
+                        "prv_candidates.magpsf": 1,
+                        "prv_candidates.sigmapsf": 1,
+                        "prv_candidates.band": 1,
+                        "cutoutScience": 1,
+                        "cutoutTemplate": 1,
+                        "cutoutDifference": 1
+                    }
+                },
             ])
             .await
-            .unwrap();
+            .map_err(MLWorkerError::ErrorRetrievingAlerts)?;
 
         let mut alerts: Vec<Document> = Vec::new();
         while let Some(result) = alert_cursor.next().await {
@@ -177,7 +190,7 @@ impl MLWorker for ZtfMLWorker {
     }
 
     async fn process_alerts(&self, candids: &[i64]) -> Result<Vec<String>, MLWorkerError> {
-        let alerts = self.fetch_alerts(&candids).await.unwrap();
+        let alerts = self.fetch_alerts(&candids).await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -192,24 +205,20 @@ impl MLWorker for ZtfMLWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         for i in 0..alerts.len() {
-            let candid = alerts[i].get_i64("_id").unwrap();
-            let programid = alerts[i]
-                .get_document("candidate")
-                .unwrap()
-                .get_i32("programid")
-                .unwrap();
+            let candid = alerts[i].get_i64("_id")?;
+            let programid = alerts[i].get_document("candidate")?.get_i32("programid")?;
 
-            let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1]);
-            let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1]);
+            let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
+            let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1])?;
 
-            let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet);
-            let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet);
-            let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet);
-            let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet);
-            let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet);
+            let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
+            let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
+            let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
+            let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
+            let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
 
-            let metadata_btsbot = self.btsbot_model.get_metadata(&alerts[i..i + 1]);
-            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet);
+            let metadata_btsbot = self.btsbot_model.get_metadata(&alerts[i..i + 1])?;
+            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
             let find_document = doc! {
                 "_id": candid
