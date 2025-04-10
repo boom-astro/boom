@@ -30,14 +30,14 @@ impl MLWorker for ZtfMLWorker {
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
         // we load the ACAI models (same architecture, same input/output)
-        let acai_h_model = AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx");
-        let acai_n_model = AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx");
-        let acai_v_model = AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx");
-        let acai_o_model = AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx");
-        let acai_b_model = AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx");
+        let acai_h_model = AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?;
+        let acai_n_model = AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?;
+        let acai_v_model = AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?;
+        let acai_o_model = AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?;
+        let acai_b_model = AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?;
 
         // we load the btsbot model (different architecture, and input/output then ACAI)
-        let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx");
+        let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
 
         Ok(ZtfMLWorker {
             input_queue,
