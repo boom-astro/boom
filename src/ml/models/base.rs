@@ -33,7 +33,9 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     let model = builder
         .with_execution_providers([
             CUDAExecutionProvider::default().build(),
-            CoreMLExecutionProvider::default().build(),
+            // adding the coreml feature in Cargo.toml is creating some issues
+            // at compile time. Needs to be fixed so we can add this back
+            // CoreMLExecutionProvider::default().build(),
         ])
         .map_err(ModelError::LoadModelError)?
         .with_optimization_level(GraphOptimizationLevel::Level3)
