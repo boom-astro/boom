@@ -21,10 +21,13 @@ impl Model for BtsBotModel {
         for alert in alerts {
             let candidate = alert.get_document("candidate")?;
 
+            // TODO: handle missing sgscore and distpsnr values
+            // to use sensible defaults if missing
             let sgscore1 = candidate.get_f64("sgscore1")? as f32;
             let distpsnr1 = candidate.get_f64("distpsnr1")? as f32;
             let sgscore2 = candidate.get_f64("sgscore2")? as f32;
             let distpsnr2 = candidate.get_f64("distpsnr2")? as f32;
+
             let fwhm = candidate.get_f64("fwhm")? as f32;
             let magpsf = candidate.get_f64("magpsf")?; // we convert to f32 later
             let sigmapsf = candidate.get_f64("sigmapsf")? as f32;

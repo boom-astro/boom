@@ -32,18 +32,24 @@ impl Model for AcaiModel {
             let sky = candidate.get_f64("sky")? as f32;
             let chinr = candidate.get_f64("chinr")? as f32;
             let sharpnr = candidate.get_f64("sharpnr")? as f32;
+
+            // TODO: handle missing sgscore and distpsnr values
+            // to use sensible defaults if missing
             let sgscore1 = candidate.get_f64("sgscore1")? as f32;
             let distpsnr1 = candidate.get_f64("distpsnr1")? as f32;
             let sgscore2 = candidate.get_f64("sgscore2")? as f32;
             let distpsnr2 = candidate.get_f64("distpsnr2")? as f32;
             let sgscore3 = candidate.get_f64("sgscore3")? as f32;
             let distpsnr3 = candidate.get_f64("distpsnr3")? as f32;
+
             let ndethist = candidate.get_i32("ndethist")? as f32;
             let ncovhist = candidate.get_i32("ncovhist")? as f32;
             let scorr = candidate.get_f64("scorr")? as f32;
             let nmtchps = candidate.get_i32("nmtchps")? as f32;
             let clrcoeff = candidate.get_f64("clrcoeff")? as f32;
             let clrcounc = candidate.get_f64("clrcounc")? as f32;
+
+            // TODO: handle missing neargaia and neargaiabright values
             let neargaia = candidate.get_f64("neargaia")? as f32;
             let neargaiabright = candidate.get_f64("neargaiabright")? as f32;
 
