@@ -154,7 +154,9 @@ pub trait AlertRandomizerTrait {
     fn new() -> Self;
     fn objectid(self, object_id: impl Into<Self::ObjectId>) -> Self;
     fn candid(self, candid: i64) -> Self;
-    fn get(self) -> (i64, Self::ObjectId, Vec<u8>);
+    fn ra(self, ra: f64) -> Self;
+    fn dec(self, dec: f64) -> Self;
+    fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>);
     fn zigzag_encode_i64(n: i64) -> u64 {
         ((n << 1) ^ (n >> 63)) as u64
     }
@@ -180,15 +182,24 @@ pub trait AlertRandomizerTrait {
 
         bytes
     }
-
     fn encode_i64(n: i64) -> Vec<u8> {
         let zigzagged = Self::zigzag_encode_i64(n);
         Self::var_encode_u64(zigzagged)
+    }
+    fn encode_f64(n: f64) -> Vec<u8> {
+        let bits = n.to_bits() as i64;
+        bits.to_le_bytes().to_vec()
     }
     fn find_bytes(payload: &[u8], bytes: &[u8]) -> Option<usize> {
         payload
             .windows(bytes.len())
             .position(|window| window == bytes)
+    }
+    fn randomize_ra() -> f64 {
+        rand::rng().random_range(0.0..360.0)
+    }
+    fn randomize_dec() -> f64 {
+        rand::rng().random_range(-90.0..90.0)
     }
     type ObjectId;
 }
@@ -196,9 +207,13 @@ pub trait AlertRandomizerTrait {
 pub struct ZtfAlertRandomizer {
     original_candid: i64,
     original_object_id: String,
+    original_ra: f64,
+    original_dec: f64,
     payload: Vec<u8>,
     candid: Option<i64>,
     object_id: Option<String>,
+    ra: Option<f64>,
+    dec: Option<f64>,
 }
 
 impl AlertRandomizerTrait for ZtfAlertRandomizer {
@@ -206,29 +221,31 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
 
     fn default() -> Self {
         let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-        let original_candid = 2695378462115010012;
-        let original_object_id = "ZTF18abudxnw".to_string();
-        let candid = Self::randomize_candid();
-        let object_id = Self::randomize_object_id();
         Self {
-            original_candid,
-            original_object_id,
+            original_candid: 2695378462115010012,
+            original_object_id: "ZTF18abudxnw".to_string(),
+            original_ra: 295.3031995,
+            original_dec: -10.3958989,
             payload,
-            candid: Some(candid),
-            object_id: Some(object_id),
+            candid: Some(Self::randomize_candid()),
+            object_id: Some(Self::randomize_object_id()),
+            ra: None,
+            dec: None,
         }
     }
 
     fn new() -> Self {
         let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-        let original_candid = 2695378462115010012;
-        let original_object_id = "ZTF18abudxnw".to_string();
         Self {
-            original_candid,
-            original_object_id,
+            original_candid: 2695378462115010012,
+            original_object_id: "ZTF18abudxnw".to_string(),
+            original_ra: 295.3031995,
+            original_dec: -10.3958989,
             payload,
             candid: None,
             object_id: None,
+            ra: None,
+            dec: None,
         }
     }
 
@@ -242,16 +259,31 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
         self
     }
 
-    fn get(self) -> (i64, Self::ObjectId, Vec<u8>) {
+    fn ra(mut self, ra: f64) -> Self {
+        self.ra = Some(ra);
+        self
+    }
+    fn dec(mut self, dec: f64) -> Self {
+        self.dec = Some(dec);
+        self
+    }
+
+    fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
         let original_candid_bytes = Self::encode_i64(self.original_candid);
         let original_object_id_bytes = self.original_object_id.as_bytes();
+        let original_ra_bytes = Self::encode_f64(self.original_ra);
+        let original_dec_bytes = Self::encode_f64(self.original_dec);
         let mut payload = self.payload;
 
         let candid = self.candid.unwrap_or_else(Self::randomize_candid);
         let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
+        let ra = self.ra.unwrap_or_else(Self::randomize_ra);
+        let dec = self.dec.unwrap_or_else(Self::randomize_dec);
 
         let candid_bytes = Self::encode_i64(candid);
         let object_id_bytes = object_id.as_bytes();
+        let ra_bytes = Self::encode_f64(ra);
+        let dec_bytes = Self::encode_f64(dec);
 
         // Replace candid in the payload
         let mut found = false;
@@ -284,7 +316,38 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
             panic!("Object ID not found in payload");
         }
 
-        (candid, object_id, payload)
+        // replace ra in the payload
+        let mut found = false;
+        loop {
+            if let Some(ra_idx) = Self::find_bytes(&payload, &original_ra_bytes) {
+                let left = &payload[..ra_idx];
+                let right = &payload[ra_idx + original_ra_bytes.len()..];
+                payload = [left, &ra_bytes, right].concat();
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("RA not found in payload");
+        }
+        // replace dec in the payload
+        let mut found = false;
+        loop {
+            if let Some(dec_idx) = Self::find_bytes(&payload, &original_dec_bytes) {
+                let left = &payload[..dec_idx];
+                let right = &payload[dec_idx + original_dec_bytes.len()..];
+                payload = [left, &dec_bytes, right].concat();
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("Dec not found in payload");
+        }
+
+        (candid, object_id, ra, dec, payload)
     }
 }
 
@@ -313,9 +376,13 @@ impl ZtfAlertRandomizer {
 pub struct LsstAlertRandomizer {
     original_candid: i64,
     original_object_id: i64,
+    original_ra: f64,
+    original_dec: f64,
     payload: Vec<u8>,
     candid: Option<i64>,
     object_id: Option<i64>,
+    ra: Option<f64>,
+    dec: Option<f64>,
 }
 
 impl AlertRandomizerTrait for LsstAlertRandomizer {
@@ -323,29 +390,31 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
 
     fn default() -> Self {
         let payload = fs::read("tests/data/alerts/lsst/0.avro").unwrap();
-        let original_candid = 25409136044802067;
-        let original_object_id = 25401295582003262;
-        let candid = Self::randomize_candid();
-        let object_id = Self::randomize_object_id();
         Self {
-            original_candid,
-            original_object_id,
+            original_candid: 25409136044802067,
+            original_object_id: 25401295582003262,
+            original_ra: 149.8021056712687,
+            original_dec: 2.2486503003111813,
             payload,
-            candid: Some(candid),
-            object_id: Some(object_id),
+            candid: Some(Self::randomize_candid()),
+            object_id: Some(Self::randomize_object_id()),
+            ra: None,
+            dec: None,
         }
     }
 
     fn new() -> Self {
         let payload = fs::read("tests/data/alerts/lsst/0.avro").unwrap();
-        let original_candid = 25409136044802067;
-        let original_object_id = 25401295582003262;
         Self {
-            original_candid,
-            original_object_id,
+            original_candid: 25409136044802067,
+            original_object_id: 25401295582003262,
+            original_ra: 149.8021056712687,
+            original_dec: 2.2486503003111813,
             payload,
             candid: None,
             object_id: None,
+            ra: None,
+            dec: None,
         }
     }
 
@@ -359,16 +428,31 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         self
     }
 
-    fn get(self) -> (i64, Self::ObjectId, Vec<u8>) {
+    fn ra(mut self, ra: f64) -> Self {
+        self.ra = Some(ra);
+        self
+    }
+    fn dec(mut self, dec: f64) -> Self {
+        self.dec = Some(dec);
+        self
+    }
+
+    fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
         let original_candid_bytes = Self::encode_i64(self.original_candid);
         let original_object_id_bytes = Self::encode_i64(self.original_object_id);
+        let original_ra_bytes = Self::encode_f64(self.original_ra);
+        let original_dec_bytes = Self::encode_f64(self.original_dec);
         let mut payload = self.payload;
 
         let candid = self.candid.unwrap_or_else(Self::randomize_candid);
         let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
+        let ra = self.ra.unwrap_or_else(Self::randomize_ra);
+        let dec = self.dec.unwrap_or_else(Self::randomize_dec);
 
         let candid_bytes = Self::encode_i64(candid);
         let object_id_bytes = Self::encode_i64(object_id);
+        let ra_bytes = Self::encode_f64(ra);
+        let dec_bytes = Self::encode_f64(dec);
 
         // Replace candid in the payload
         let mut found = false;
@@ -402,7 +486,38 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
             panic!("Object ID not found in payload");
         }
 
-        (candid, object_id, payload)
+        // replace ra in the payload
+        let mut found = false;
+        loop {
+            if let Some(ra_idx) = Self::find_bytes(&payload, &original_ra_bytes) {
+                let left = &payload[..ra_idx];
+                let right = &payload[ra_idx + original_ra_bytes.len()..];
+                payload = [left, &ra_bytes, right].concat();
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("RA not found in payload");
+        }
+        // replace dec in the payload
+        let mut found = false;
+        loop {
+            if let Some(dec_idx) = Self::find_bytes(&payload, &original_dec_bytes) {
+                let left = &payload[..dec_idx];
+                let right = &payload[dec_idx + original_dec_bytes.len()..];
+                payload = [left, &dec_bytes, right].concat();
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("Dec not found in payload");
+        }
+
+        (candid, object_id, ra, dec, payload)
     }
 }
 

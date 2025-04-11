@@ -14,7 +14,7 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_alert_from_avro_bytes() {
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, bytes_content) = ZtfAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get();
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
@@ -27,8 +27,8 @@ async fn test_alert_from_avro_bytes() {
 
     // validate the candidate
     let candidate = alert.clone().candidate;
-    assert_eq!(candidate.ra, 295.3031995);
-    assert_eq!(candidate.dec, -10.3958989);
+    assert_eq!(candidate.ra, ra);
+    assert_eq!(candidate.dec, dec);
 
     // validate the prv_candidates
     let prv_candidates = alert.clone().prv_candidates;
@@ -153,7 +153,7 @@ async fn test_alert_from_avro_bytes() {
 async fn test_process_ztf_alert() {
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, bytes_content) = ZtfAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get();
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
@@ -178,6 +178,9 @@ async fn test_process_ztf_alert() {
     let alert = alert.unwrap();
     assert_eq!(alert.get_i64("_id").unwrap(), candid);
     assert_eq!(alert.get_str("objectId").unwrap(), object_id);
+    let candidate = alert.get_document("candidate").unwrap();
+    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
+    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
     let cutout_collection_name = "ZTF_alerts_cutouts";

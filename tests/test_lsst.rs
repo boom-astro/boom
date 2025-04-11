@@ -11,7 +11,7 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_lsst_alert_from_avro_bytes() {
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, bytes_content) = LsstAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get();
     let alert = alert_worker
         .alert_from_avro_bytes(&bytes_content)
         .await
@@ -20,8 +20,8 @@ async fn test_lsst_alert_from_avro_bytes() {
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.candidate.dia_source.object_id.unwrap(), object_id);
 
-    assert!((alert.candidate.dia_source.ra - 149.802106).abs() < 1e-6);
-    assert!((alert.candidate.dia_source.dec - 2.248650).abs() < 1e-6);
+    assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
+    assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
 
     // add mag data to the candidate
 
@@ -77,7 +77,7 @@ async fn test_lsst_alert_from_avro_bytes() {
 async fn test_process_lsst_alert() {
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, bytes_content) = LsstAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get();
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(result, candid);
 
@@ -101,6 +101,9 @@ async fn test_process_lsst_alert() {
     let alert = alert.unwrap();
     assert_eq!(alert.get_i64("_id").unwrap(), candid);
     assert_eq!(alert.get_i64("objectId").unwrap(), object_id);
+    let candidate = alert.get_document("candidate").unwrap();
+    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
+    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
     let cutout_collection_name = "LSST_alerts_cutouts";
