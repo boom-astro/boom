@@ -1,6 +1,8 @@
 use crate::conf;
 use mongodb::bson::doc;
+use rand::Rng;
 use redis::AsyncCommands;
+use std::fs;
 use tracing::error;
 // Utility for unit tests
 
@@ -145,4 +147,292 @@ pub async fn empty_processed_alerts_queue(
     con.del::<&str, usize>(output_queue_name).await.unwrap();
 
     Ok(())
+}
+
+pub trait AlertRandomizerTrait {
+    fn default() -> Self;
+    fn new() -> Self;
+    fn objectid(self, object_id: impl Into<Self::ObjectId>) -> Self;
+    fn candid(self, candid: i64) -> Self;
+    fn get(self) -> (i64, Self::ObjectId, Vec<u8>);
+    fn zigzag_encode_i64(n: i64) -> u64 {
+        ((n << 1) ^ (n >> 63)) as u64
+    }
+
+    fn var_encode_u64(n: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut value = n;
+
+        loop {
+            let mut byte = (value & 0x7F) as u8;
+            value >>= 7;
+
+            if value != 0 {
+                byte |= 0x80;
+            }
+
+            bytes.push(byte);
+
+            if value == 0 {
+                break;
+            }
+        }
+
+        bytes
+    }
+
+    fn encode_i64(n: i64) -> Vec<u8> {
+        let zigzagged = Self::zigzag_encode_i64(n);
+        Self::var_encode_u64(zigzagged)
+    }
+    fn find_bytes(payload: &[u8], bytes: &[u8]) -> Option<usize> {
+        payload
+            .windows(bytes.len())
+            .position(|window| window == bytes)
+    }
+    type ObjectId;
+}
+
+pub struct ZtfAlertRandomizer {
+    original_candid: i64,
+    original_object_id: String,
+    payload: Vec<u8>,
+    candid: Option<i64>,
+    object_id: Option<String>,
+}
+
+impl AlertRandomizerTrait for ZtfAlertRandomizer {
+    type ObjectId = String;
+
+    fn default() -> Self {
+        let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let original_candid = 2695378462115010012;
+        let original_object_id = "ZTF18abudxnw".to_string();
+        let candid = Self::randomize_candid();
+        let object_id = Self::randomize_object_id();
+        Self {
+            original_candid,
+            original_object_id,
+            payload,
+            candid: Some(candid),
+            object_id: Some(object_id),
+        }
+    }
+
+    fn new() -> Self {
+        let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let original_candid = 2695378462115010012;
+        let original_object_id = "ZTF18abudxnw".to_string();
+        Self {
+            original_candid,
+            original_object_id,
+            payload,
+            candid: None,
+            object_id: None,
+        }
+    }
+
+    fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
+        self.object_id = Some(object_id.into());
+        self
+    }
+
+    fn candid(mut self, candid: i64) -> Self {
+        match candid {
+            id if id < 2000000000000000000 || id > 3000000000000000000 => {
+                panic!("Candid must be between 2000000000000000000 and 3000000000000000000");
+            }
+            _ => {
+                self.candid = Some(candid);
+            }
+        }
+        self
+    }
+
+    fn get(self) -> (i64, Self::ObjectId, Vec<u8>) {
+        let original_candid_bytes = Self::encode_i64(self.original_candid);
+        let original_object_id_bytes = self.original_object_id.as_bytes();
+        let mut payload = self.payload;
+
+        let candid = self.candid.unwrap_or_else(Self::randomize_candid);
+        let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
+
+        let candid_bytes = Self::encode_i64(candid);
+        let object_id_bytes = object_id.as_bytes();
+
+        // Replace candid in the payload
+        let mut found = false;
+        loop {
+            if let Some(candid_idx) = Self::find_bytes(&payload, &original_candid_bytes) {
+                payload[candid_idx..candid_idx + original_candid_bytes.len()]
+                    .copy_from_slice(&candid_bytes);
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("Candid not found in payload");
+        }
+
+        // Replace object_id in the payload
+        let mut found = false;
+        loop {
+            if let Some(object_idx) = Self::find_bytes(&payload, original_object_id_bytes) {
+                payload[object_idx..object_idx + original_object_id_bytes.len()]
+                    .copy_from_slice(object_id_bytes);
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("Object ID not found in payload");
+        }
+
+        (candid, object_id, payload)
+    }
+}
+
+impl ZtfAlertRandomizer {
+    fn randomize_object_id() -> String {
+        // format is ZTF + 2 digits + 7 lowercase letters
+        let mut rng = rand::rng();
+        let mut object_id = String::from("ZTF");
+        for _ in 0..2 {
+            object_id.push(rng.random_range('0'..='9'));
+        }
+        for _ in 0..7 {
+            object_id.push(rng.random_range('a'..='z'));
+        }
+        object_id
+    }
+
+    fn randomize_candid() -> i64 {
+        // variable length encoding means that small numbers result in less bytes
+        // so, we picked that range to make sure it creates a 9 byte number
+        // just like the original candid
+        rand::rng().random_range(2000000000000000000..3000000000000000000)
+    }
+}
+
+pub struct LsstAlertRandomizer {
+    original_candid: i64,
+    original_object_id: i64,
+    payload: Vec<u8>,
+    candid: Option<i64>,
+    object_id: Option<i64>,
+}
+
+impl AlertRandomizerTrait for LsstAlertRandomizer {
+    type ObjectId = i64;
+
+    fn default() -> Self {
+        let payload = fs::read("tests/data/alerts/lsst/0.avro").unwrap();
+        let original_candid = 25409136044802067;
+        let original_object_id = 25401295582003262;
+        let candid = Self::randomize_candid();
+        let object_id = Self::randomize_object_id();
+        Self {
+            original_candid,
+            original_object_id,
+            payload,
+            candid: Some(candid),
+            object_id: Some(object_id),
+        }
+    }
+
+    fn new() -> Self {
+        let payload = fs::read("tests/data/alerts/lsst/0.avro").unwrap();
+        let original_candid = 25409136044802067;
+        let original_object_id = 25401295582003262;
+        Self {
+            original_candid,
+            original_object_id,
+            payload,
+            candid: None,
+            object_id: None,
+        }
+    }
+
+    fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
+        let object_id = object_id.into();
+        match object_id {
+            id if id < 20000000000000000 || id > 30000000000000000 => {
+                panic!("Object ID must be between 20000000000000000 and 30000000000000000");
+            }
+            _ => {
+                self.object_id = Some(object_id);
+            }
+        }
+        self
+    }
+
+    fn candid(mut self, candid: i64) -> Self {
+        match candid {
+            id if id < 20000000000000000 || id > 30000000000000000 => {
+                panic!("Candid must be between 20000000000000000 and 30000000000000000");
+            }
+            _ => {
+                self.candid = Some(candid);
+            }
+        }
+        self
+    }
+
+    fn get(self) -> (i64, Self::ObjectId, Vec<u8>) {
+        let original_candid_bytes = Self::encode_i64(self.original_candid);
+        let original_object_id_bytes = Self::encode_i64(self.original_object_id);
+        let mut payload = self.payload;
+
+        let candid = self.candid.unwrap_or_else(Self::randomize_candid);
+        let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
+
+        let candid_bytes = Self::encode_i64(candid);
+        let object_id_bytes = Self::encode_i64(object_id);
+
+        // Replace candid in the payload
+        let mut found = false;
+        loop {
+            if let Some(candid_idx) = Self::find_bytes(&payload, &original_candid_bytes) {
+                payload[candid_idx..candid_idx + original_candid_bytes.len()]
+                    .copy_from_slice(&candid_bytes);
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("Candid not found in payload");
+        }
+
+        // Replace object_id in the payload
+        let mut found = false;
+        loop {
+            if let Some(object_idx) = Self::find_bytes(&payload, &original_object_id_bytes) {
+                payload[object_idx..object_idx + original_object_id_bytes.len()]
+                    .copy_from_slice(&object_id_bytes);
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if !found {
+            panic!("Object ID not found in payload");
+        }
+
+        (candid, object_id, payload)
+    }
+}
+
+impl LsstAlertRandomizer {
+    fn randomize_object_id() -> i64 {
+        // 8 bytes long
+        rand::rng().random_range(20000000000000000..30000000000000000)
+    }
+
+    fn randomize_candid() -> i64 {
+        // 8 bytes long
+        rand::rng().random_range(20000000000000000..30000000000000000)
+    }
 }
