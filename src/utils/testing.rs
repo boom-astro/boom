@@ -238,14 +238,7 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
     }
 
     fn candid(mut self, candid: i64) -> Self {
-        match candid {
-            id if id < 2000000000000000000 || id > 3000000000000000000 => {
-                panic!("Candid must be between 2000000000000000000 and 3000000000000000000");
-            }
-            _ => {
-                self.candid = Some(candid);
-            }
-        }
+        self.candid = Some(candid);
         self
     }
 
@@ -264,8 +257,9 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
         let mut found = false;
         loop {
             if let Some(candid_idx) = Self::find_bytes(&payload, &original_candid_bytes) {
-                payload[candid_idx..candid_idx + original_candid_bytes.len()]
-                    .copy_from_slice(&candid_bytes);
+                let left = &payload[..candid_idx];
+                let right = &payload[candid_idx + original_candid_bytes.len()..];
+                payload = [left, &candid_bytes, right].concat();
                 found = true;
             } else {
                 break;
@@ -356,27 +350,12 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
     }
 
     fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
-        let object_id = object_id.into();
-        match object_id {
-            id if id < 20000000000000000 || id > 30000000000000000 => {
-                panic!("Object ID must be between 20000000000000000 and 30000000000000000");
-            }
-            _ => {
-                self.object_id = Some(object_id);
-            }
-        }
+        self.object_id = Some(object_id.into());
         self
     }
 
     fn candid(mut self, candid: i64) -> Self {
-        match candid {
-            id if id < 20000000000000000 || id > 30000000000000000 => {
-                panic!("Candid must be between 20000000000000000 and 30000000000000000");
-            }
-            _ => {
-                self.candid = Some(candid);
-            }
-        }
+        self.candid = Some(candid);
         self
     }
 
@@ -395,8 +374,9 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         let mut found = false;
         loop {
             if let Some(candid_idx) = Self::find_bytes(&payload, &original_candid_bytes) {
-                payload[candid_idx..candid_idx + original_candid_bytes.len()]
-                    .copy_from_slice(&candid_bytes);
+                let left = &payload[..candid_idx];
+                let right = &payload[candid_idx + original_candid_bytes.len()..];
+                payload = [left, &candid_bytes, right].concat();
                 found = true;
             } else {
                 break;
@@ -410,8 +390,9 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         let mut found = false;
         loop {
             if let Some(object_idx) = Self::find_bytes(&payload, &original_object_id_bytes) {
-                payload[object_idx..object_idx + original_object_id_bytes.len()]
-                    .copy_from_slice(&object_id_bytes);
+                let left = &payload[..object_idx];
+                let right = &payload[object_idx + original_object_id_bytes.len()..];
+                payload = [left, &object_id_bytes, right].concat();
                 found = true;
             } else {
                 break;
