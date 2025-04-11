@@ -8,4 +8,5 @@ data/alerts/ztf/20*.tar.gz
 __pycache__
 /env
 .DS_Store
+/experimental
 *~
