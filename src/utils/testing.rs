@@ -195,6 +195,9 @@ pub trait AlertRandomizerTrait {
             .windows(bytes.len())
             .position(|window| window == bytes)
     }
+    fn randomize_i64() -> i64 {
+        rand::rng().random_range(i64::MIN..i64::MAX)
+    }
     fn randomize_ra() -> f64 {
         rand::rng().random_range(0.0..360.0)
     }
@@ -227,7 +230,7 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
             original_ra: 295.3031995,
             original_dec: -10.3958989,
             payload,
-            candid: Some(Self::randomize_candid()),
+            candid: Some(Self::randomize_i64()),
             object_id: Some(Self::randomize_object_id()),
             ra: None,
             dec: None,
@@ -275,7 +278,7 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
         let original_dec_bytes = Self::encode_f64(self.original_dec);
         let mut payload = self.payload;
 
-        let candid = self.candid.unwrap_or_else(Self::randomize_candid);
+        let candid = self.candid.unwrap_or_else(Self::randomize_i64);
         let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
         let ra = self.ra.unwrap_or_else(Self::randomize_ra);
         let dec = self.dec.unwrap_or_else(Self::randomize_dec);
@@ -364,13 +367,6 @@ impl ZtfAlertRandomizer {
         }
         object_id
     }
-
-    fn randomize_candid() -> i64 {
-        // variable length encoding means that small numbers result in less bytes
-        // so, we picked that range to make sure it creates a 9 byte number
-        // just like the original candid
-        rand::rng().random_range(2000000000000000000..3000000000000000000)
-    }
 }
 
 pub struct LsstAlertRandomizer {
@@ -396,8 +392,8 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
             original_ra: 149.8021056712687,
             original_dec: 2.2486503003111813,
             payload,
-            candid: Some(Self::randomize_candid()),
-            object_id: Some(Self::randomize_object_id()),
+            candid: Some(Self::randomize_i64()),
+            object_id: Some(Self::randomize_i64()),
             ra: None,
             dec: None,
         }
@@ -444,8 +440,8 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         let original_dec_bytes = Self::encode_f64(self.original_dec);
         let mut payload = self.payload;
 
-        let candid = self.candid.unwrap_or_else(Self::randomize_candid);
-        let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
+        let candid = self.candid.unwrap_or_else(Self::randomize_i64);
+        let object_id = self.object_id.unwrap_or_else(Self::randomize_i64);
         let ra = self.ra.unwrap_or_else(Self::randomize_ra);
         let dec = self.dec.unwrap_or_else(Self::randomize_dec);
 
@@ -518,17 +514,5 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         }
 
         (candid, object_id, ra, dec, payload)
-    }
-}
-
-impl LsstAlertRandomizer {
-    fn randomize_object_id() -> i64 {
-        // 8 bytes long
-        rand::rng().random_range(20000000000000000..30000000000000000)
-    }
-
-    fn randomize_candid() -> i64 {
-        // 8 bytes long
-        rand::rng().random_range(20000000000000000..30000000000000000)
     }
 }
