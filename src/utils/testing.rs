@@ -156,6 +156,12 @@ pub trait AlertRandomizerTrait {
     fn candid(self, candid: i64) -> Self;
     fn ra(self, ra: f64) -> Self;
     fn dec(self, dec: f64) -> Self;
+    fn validate_ra(ra: f64) -> bool {
+        ra >= 0.0 && ra <= 360.0
+    }
+    fn validate_dec(dec: f64) -> bool {
+        dec >= -90.0 && dec <= 90.0
+    }
     fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>);
     fn zigzag_encode_i64(n: i64) -> u64 {
         ((n << 1) ^ (n >> 63)) as u64
@@ -263,11 +269,17 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
     }
 
     fn ra(mut self, ra: f64) -> Self {
-        self.ra = Some(ra);
+        match Self::validate_ra(ra) {
+            true => self.ra = Some(ra),
+            false => panic!("RA must be between 0 and 360"),
+        }
         self
     }
     fn dec(mut self, dec: f64) -> Self {
-        self.dec = Some(dec);
+        match Self::validate_dec(dec) {
+            true => self.dec = Some(dec),
+            false => panic!("Dec must be between -90 and 90"),
+        }
         self
     }
 
@@ -425,11 +437,17 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
     }
 
     fn ra(mut self, ra: f64) -> Self {
-        self.ra = Some(ra);
+        match Self::validate_ra(ra) {
+            true => self.ra = Some(ra),
+            false => panic!("RA must be between 0 and 360"),
+        }
         self
     }
     fn dec(mut self, dec: f64) -> Self {
-        self.dec = Some(dec);
+        match Self::validate_dec(dec) {
+            true => self.dec = Some(dec),
+            false => panic!("Dec must be between -90 and 90"),
+        }
         self
     }
 
