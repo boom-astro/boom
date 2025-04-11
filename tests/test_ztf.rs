@@ -103,7 +103,7 @@ async fn test_alert_from_avro_bytes() {
             .unwrap()
             .get_f64("ra")
             .unwrap(),
-        295.3031995
+        ra
     );
     assert_eq!(
         alert_doc
@@ -111,7 +111,7 @@ async fn test_alert_from_avro_bytes() {
             .unwrap()
             .get_f64("dec")
             .unwrap(),
-        -10.3958989
+        dec
     );
 
     // validate the conversion to bson for prv_candidates
