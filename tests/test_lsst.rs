@@ -11,7 +11,7 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_lsst_alert_from_avro_bytes() {
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let alert = alert_worker
         .alert_from_avro_bytes(&bytes_content)
         .await
@@ -77,7 +77,7 @@ async fn test_lsst_alert_from_avro_bytes() {
 async fn test_process_lsst_alert() {
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(result, candid);
 

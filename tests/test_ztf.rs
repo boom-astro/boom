@@ -14,7 +14,7 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_alert_from_avro_bytes() {
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
@@ -153,7 +153,7 @@ async fn test_alert_from_avro_bytes() {
 async fn test_process_ztf_alert() {
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
