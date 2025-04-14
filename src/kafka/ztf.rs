@@ -195,7 +195,6 @@ pub async fn produce_from_archive(
         .set("batch.size", "16384")
         .set("linger.ms", "5")
         .set("acks", "1")
-        .set("queue.buffering.max.kbytes", "67108864")
         .set("max.in.flight.requests.per.connection", "5")
         .set("retries", "3")
         .create()
