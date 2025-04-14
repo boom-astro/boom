@@ -189,6 +189,14 @@ pub async fn produce_from_archive(
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("message.timeout.ms", "5000")
+        // it's best to increase batch.size if the cluster
+        // is running on another machine. Locally, lower means less
+        // latency, since we are not limited by network speed anyways
+        .set("batch.size", "16384")
+        .set("linger.ms", "5")
+        .set("acks", "1")
+        .set("max.in.flight.requests.per.connection", "5")
+        .set("retries", "3")
         .create()
         .expect("Producer creation error");
 

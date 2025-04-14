@@ -1,5 +1,4 @@
-use crate::ml::models::ModelError;
-use crate::{conf, utils::worker::WorkerCmd};
+use crate::{conf, ml::models::ModelError, utils::fits::CutoutError, utils::worker::WorkerCmd};
 use mongodb::bson::Document;
 use redis::AsyncCommands;
 use std::num::NonZero;
@@ -10,9 +9,15 @@ use tracing::{error, info, warn};
 #[derive(thiserror::Error, Debug)]
 pub enum MLWorkerError {
     #[error("failed to connect to database")]
-    ConnectMongoError(#[from] mongodb::error::Error),
+    ConnectMongoError(#[source] mongodb::error::Error),
+    #[error("failed to retrieve candidates from database")]
+    RetrieveCandidatesDataError(#[source] mongodb::error::Error),
     #[error("failed to connect to redis")]
-    ConnectRedisError(#[from] redis::RedisError),
+    ConnectRedisError(#[source] redis::RedisError),
+    #[error("failed to retrieve candidates from redis")]
+    RedisError(#[source] redis::RedisError),
+    #[error("failed to push candidates to redis")]
+    RedisPushError(#[source] redis::RedisError),
     #[error("failed to read config")]
     ReadConfigError(#[from] conf::BoomConfigError),
     #[error("failed to pop candids from the input queue")]
@@ -25,6 +30,8 @@ pub enum MLWorkerError {
     MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
     #[error("error retrieving alerts")]
     ErrorRetrievingAlerts(#[source] mongodb::error::Error),
+    #[error("could not access cutout images")]
+    CutoutAccessError(#[from] CutoutError),
 }
 
 #[async_trait::async_trait]

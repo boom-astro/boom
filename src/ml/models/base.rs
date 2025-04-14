@@ -7,7 +7,7 @@ use ort::{
     session::{builder::GraphOptimizationLevel, Session},
 };
 
-use crate::utils::fits::prepare_triplet;
+use crate::utils::fits::{prepare_triplet, CutoutError};
 use mongodb::bson::Document;
 
 #[derive(thiserror::Error, Debug)]
@@ -26,6 +26,8 @@ pub enum ModelError {
     ModelOutputError(#[source] ort::Error),
     #[error("error converting predictions to vec")]
     ModelOutputToVecError,
+    #[error("error preparing cutout data")]
+    PrepareCutoutError(#[from] CutoutError),
 }
 
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
@@ -60,8 +62,7 @@ pub trait Model {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
         for i in 0..alerts.len() {
             // TODO: remove unwrap once the crate::utils::fits dedicated error type is merged to main
-            let (cutout_science, cutout_template, cutout_difference) =
-                prepare_triplet(&alerts[i]).unwrap();
+            let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
             for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
                 .iter()
                 .enumerate()

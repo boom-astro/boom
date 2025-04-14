@@ -1,9 +1,66 @@
+use apache_avro::Schema;
+use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
+use rdkafka::producer::FutureProducer;
+use rdkafka::{config::ClientConfig, producer::FutureRecord};
+use redis::AsyncCommands;
+use std::num::NonZero;
 use tokio::sync::mpsc;
-use tracing::error;
+use tokio::sync::mpsc::error::TryRecvError;
+use tracing::{error, info, trace, warn};
 
 use crate::utils::worker::WorkerCmd;
+
+// This is the schema of the avro object that we will send to kafka
+// that includes the alert data and filter results
+const ALERT_SCHEMA: &str = r#"
+{
+    "type": "record",
+    "name": "Alert",
+    "fields": [
+        {"name": "candid", "type": "long"},
+        {"name": "objectId", "type": "string"},
+        {"name": "jd", "type": "double"},
+        {"name": "ra", "type": "double"},
+        {"name": "dec", "type": "double"},
+        {"name": "filters", "type": {
+            "type": "array",
+            "items": {
+                "type": "record",
+                "name": "FilterResults",
+                "fields": [
+                    {"name": "filter_id", "type": "int"},
+                    {"name": "passed_at", "type": "double"},
+                    {"name": "annotations", "type": "string"}
+                ]
+            }
+        }},
+        {"name": "photometry", "type": {
+            "type": "array",
+            "items": {
+                "type": "record",
+                "name": "Photometry",
+                "fields": [
+                    {"name": "jd", "type": "double"},
+                    {"name": "flux",  "type": ["null", "double"]},
+                    {"name": "flux_err",  "type":"double"},
+                    {"name":"band","type":"string"},
+                    {"name":"zero_point","type":"double"},
+                    {"name":"origin","type": "string"},
+                    {"name":"programid","type":"int"},
+                    {"name":"survey","type":"string"},
+                    {"name":"ra","type":["null","double"]},
+                    {"name":"dec","type":["null","double"]}
+                ]
+            }
+        }},
+        {"name":"cutoutScience","type":{"type":"bytes"}},
+        {"name":"cutoutTemplate","type":{"type":"bytes"}},
+        {"name":"cutoutDifference","type":{"type":"bytes"}}
+    ]
+}
+"#;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
@@ -29,6 +86,129 @@ pub enum FilterError {
     InvalidFilterPipelineStage(#[source] mongodb::bson::ser::Error),
     #[error("invalid filter id")]
     InvalidFilterId,
+}
+
+pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
+    // We know that we have the programid first, followed by a comma, and then the candid.
+    // the programid is always a single digit (0-9) and the candid is a larger number.
+    // so we don't know to look for the comma to split the string.
+    // and can directly use the indexes to read the values.
+    // while this makes it very specific to this format, it is twice as fast.
+    let first_part = &tuple_str[0..1];
+    let second_part = &tuple_str[2..];
+    let first = first_part.parse::<i32>();
+    let second = second_part.parse::<i64>();
+    if let (Ok(first_value), Ok(second_value)) = (first, second) {
+        return Some((first_value, second_value));
+    }
+    None
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub enum Origin {
+    Alert,
+    ForcedPhot,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub enum Survey {
+    ZTF,
+    LSST,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Photometry {
+    pub jd: f64,
+    pub flux: Option<f64>,
+    pub flux_err: f64,
+    pub band: String,
+    pub zero_point: f64,
+    pub origin: Origin,
+    pub programid: i32,
+    pub survey: Survey,
+    pub ra: Option<f64>,
+    pub dec: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FilterResults {
+    pub filter_id: i32,
+    pub passed_at: f64, // timestamp in seconds
+    pub annotations: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Alert {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub jd: f64,
+    pub ra: f64,
+    pub dec: f64,
+    pub filters: Vec<FilterResults>,
+    pub photometry: Vec<Photometry>,
+    #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
+    pub cutout_science: Vec<u8>,
+    #[serde(with = "serde_avro_bytes", rename = "cutoutTemplate")]
+    pub cutout_template: Vec<u8>,
+    #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
+    pub cutout_difference: Vec<u8>,
+}
+
+pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
+    let schema = Schema::parse_str(ALERT_SCHEMA).map_err(|e| {
+        error!("Failed to parse alert schema: {}", e);
+        FilterWorkerError::LoadAlertSchemaError(e)
+    })?;
+
+    Ok(schema)
+}
+
+pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
+    let mut writer = Writer::new(schema, Vec::new());
+    writer.append_ser(alert).map_err(|e| {
+        error!("Failed to serialize alert to Avro: {}", e);
+        FilterWorkerError::SerializeAlertError(e)
+    })?;
+    let encoded = writer.into_inner().map_err(|e| {
+        error!("Failed to finalize Avro writer: {}", e);
+        FilterWorkerError::SerializeAlertError(e)
+    })?;
+
+    Ok(encoded)
+}
+
+// TODO, use the config file to get the kafka server
+pub async fn create_producer() -> Result<FutureProducer, FilterWorkerError> {
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", "localhost:9092")
+        .set("message.timeout.ms", "5000")
+        .create()
+        .map_err(FilterWorkerError::KafkaProducerError)?;
+
+    Ok(producer)
+}
+
+pub async fn send_alert_to_kafka(
+    alert: &Alert,
+    schema: &Schema,
+    producer: &FutureProducer,
+    topic: &str,
+    id: &str,
+) -> Result<(), FilterWorkerError> {
+    let encoded = alert_to_avro_bytes(alert, schema)?;
+
+    let record = FutureRecord::to(&topic).key(id).payload(&encoded);
+
+    producer
+        .send(record, std::time::Duration::from_secs(0))
+        .await
+        .map_err(|(e, _)| {
+            warn!("Failed to send filter result to Kafka: {}", e);
+            FilterWorkerError::SendKafkaMessageError(e)
+        })?;
+
+    Ok(())
 }
 
 pub async fn get_filter_object(
@@ -96,7 +276,7 @@ pub async fn get_filter_object(
     Ok(filter_obj)
 }
 
-pub async fn process_alerts(
+pub async fn run_filter(
     candids: Vec<i64>,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
@@ -165,27 +345,121 @@ pub enum FilterWorkerError {
     GetQueueNameError,
     #[error("failed to get filter by queue")]
     GetFilterByQueueError,
+    #[error("failed to send filter results to kafka")]
+    SendKafkaMessageError(#[source] rdkafka::error::KafkaError),
+    #[error("could not find alert by candid")]
+    GetAlertByCandidError(#[source] mongodb::error::Error),
+    #[error("could not find alert")]
+    AlertNotFound,
+    #[error("could not load alert schema")]
+    LoadAlertSchemaError(#[source] apache_avro::Error),
+    #[error("failed to serialize alert to Avro")]
+    SerializeAlertError(#[source] apache_avro::Error),
+    #[error("could not find document field")]
+    MissingFieldError(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("failed to create kafka producer")]
+    KafkaProducerError(#[source] rdkafka::error::KafkaError),
 }
 
 #[async_trait::async_trait]
 pub trait FilterWorker {
-    async fn new(
-        id: String,
-        receiver: mpsc::Receiver<WorkerCmd>,
-        config_path: &str,
-    ) -> Result<Self, FilterWorkerError>
+    async fn new(config_path: &str) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
-    async fn run(&mut self) -> Result<(), FilterWorkerError>;
+    fn input_queue_name(&self) -> String;
+    fn output_topic_name(&self) -> String;
+    fn has_filters(&self) -> bool;
+    async fn build_alert(
+        &self,
+        candid: i64,
+        filter_results: Vec<FilterResults>,
+    ) -> Result<Alert, FilterWorkerError>;
+    async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
 #[tokio::main]
 pub async fn run_filter_worker<T: FilterWorker>(
     id: String,
-    receiver: mpsc::Receiver<WorkerCmd>,
+    mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
-    let mut filter_worker = T::new(id, receiver, config_path).await?;
-    filter_worker.run().await?;
+    let mut filter_worker = T::new(config_path).await?;
+
+    if !filter_worker.has_filters() {
+        info!(
+            "No filters available for filter worker {} to process alerts",
+            &id
+        );
+        return Ok(());
+    }
+
+    // in a never ending loop, loop over the queues
+    let client_redis = redis::Client::open("redis://localhost:6379".to_string())
+        .map_err(FilterWorkerError::ConnectRedisError)?;
+    let mut con = client_redis
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(FilterWorkerError::ConnectRedisError)?;
+
+    let input_queue = filter_worker.input_queue_name();
+    let output_topic = filter_worker.output_topic_name();
+
+    let producer = create_producer().await?;
+    let schema = load_alert_schema()?;
+
+    let command_interval: i64 = 500;
+    let mut command_check_countdown = command_interval;
+
+    loop {
+        if command_check_countdown == 0 {
+            match receiver.try_recv() {
+                Ok(WorkerCmd::TERM) => {
+                    info!("filterworker {} received termination command", &id);
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    warn!("filter worker {} receiver disconnected, terminating", &id);
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    command_check_countdown = command_interval;
+                }
+            }
+        }
+        // if the queue is empty, wait for a bit and continue the loop
+        let queue_len: i64 = con
+            .llen(&input_queue)
+            .await
+            .map_err(FilterWorkerError::ConnectRedisError)?;
+        if queue_len == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        // get candids from redis
+        let alerts: Vec<String> = con
+            .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
+            .await
+            .map_err(FilterWorkerError::PopCandidError)?;
+
+        let nb_alerts = alerts.len();
+        if nb_alerts == 0 {
+            // sleep for a bit if no alerts were found
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            continue;
+        }
+
+        let alerts_output = filter_worker.process_alerts(&alerts).await?;
+        for alert in alerts_output {
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
+            trace!(
+                "Sent alert with candid {} to Kafka topic {}",
+                &alert.candid,
+                &output_topic
+            );
+        }
+        command_check_countdown -= nb_alerts as i64;
+    }
+
     Ok(())
 }
