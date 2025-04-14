@@ -32,6 +32,8 @@ pub enum MLWorkerError {
     ErrorRetrievingAlerts(#[source] mongodb::error::Error),
     #[error("could not access cutout images")]
     CutoutAccessError(#[from] CutoutError),
+    #[error("error saving ml results to database")]
+    ErrorSavingResults(#[source] mongodb::error::Error),
 }
 
 #[async_trait::async_trait]

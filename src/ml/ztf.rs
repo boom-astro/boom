@@ -247,7 +247,12 @@ impl MLWorker for ZtfMLWorker {
             processed_alerts.push(format!("{},{}", programid, candid));
         }
 
-        let _ = self.client.bulk_write(updates).await?.modified_count;
+        let _ = self
+            .client
+            .bulk_write(updates)
+            .await
+            .map_err(MLWorkerError::ErrorSavingResults)?
+            .modified_count;
 
         Ok(processed_alerts)
     }
