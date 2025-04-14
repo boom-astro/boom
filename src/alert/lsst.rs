@@ -1,13 +1,12 @@
-use apache_avro::{from_avro_datum, from_value, Schema};
+use apache_avro::{from_avro_datum, from_value};
 use flare::Time;
 use mongodb::bson::doc;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
 use tracing::trace;
 
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
+    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
@@ -17,7 +16,7 @@ use crate::{
 };
 
 const _MAGIC_BYTE: u8 = 0;
-const _SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
+pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
 #[serde_as]
 #[skip_serializing_none]
@@ -633,8 +632,7 @@ where
 
 pub struct LsstAlertWorker {
     stream_name: String,
-    client: reqwest::Client,
-    cache: HashMap<String, Schema>,
+    schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
@@ -643,93 +641,6 @@ pub struct LsstAlertWorker {
 }
 
 impl LsstAlertWorker {
-    async fn get_subjects(&self) -> Result<Vec<String>, SchemaRegistryError> {
-        let response = self
-            .client
-            .get(&format!("{}/subjects", _SCHEMA_REGISTRY_URL))
-            .send()
-            .await
-            .map_err(SchemaRegistryError::ConnectionError)?;
-
-        let response = response
-            .json::<Vec<String>>()
-            .await
-            .map_err(SchemaRegistryError::ParsingError)?;
-
-        Ok(response)
-    }
-
-    async fn get_versions(&self, subject: &str) -> Result<Vec<u32>, SchemaRegistryError> {
-        // first we check if the subject exists
-        let subjects = self.get_subjects().await?;
-        if !subjects.contains(&subject.to_string()) {
-            return Err(SchemaRegistryError::InvalidSubject);
-        }
-
-        let response = self
-            .client
-            .get(&format!(
-                "{}/subjects/{}/versions",
-                _SCHEMA_REGISTRY_URL, subject
-            ))
-            .send()
-            .await
-            .map_err(SchemaRegistryError::ConnectionError)?;
-
-        let response = response
-            .json::<Vec<u32>>()
-            .await
-            .map_err(SchemaRegistryError::ParsingError)?;
-
-        Ok(response)
-    }
-
-    async fn _get_schema_by_id(
-        &self,
-        subject: &str,
-        version: u32,
-    ) -> Result<Schema, SchemaRegistryError> {
-        let versions = self.get_versions(subject).await?;
-        if !versions.contains(&version) {
-            return Err(SchemaRegistryError::InvalidVersion);
-        }
-
-        let response = self
-            .client
-            .get(&format!(
-                "{}/subjects/{}/versions/{}",
-                _SCHEMA_REGISTRY_URL, subject, version
-            ))
-            .send()
-            .await
-            .map_err(SchemaRegistryError::ConnectionError)?;
-
-        let response = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(SchemaRegistryError::ParsingError)?;
-
-        let schema_str = response["schema"]
-            .as_str()
-            .ok_or(SchemaRegistryError::InvalidResponse)?;
-
-        let schema = Schema::parse_str(schema_str).map_err(SchemaRegistryError::InvalidSchema)?;
-        Ok(schema)
-    }
-
-    async fn get_schema(
-        &mut self,
-        subject: &str,
-        version: u32,
-    ) -> Result<&Schema, SchemaRegistryError> {
-        let key = format!("{}:{}", subject, version);
-        if !self.cache.contains_key(&key) {
-            let schema = self._get_schema_by_id(subject, version).await?;
-            self.cache.insert(key.clone(), schema);
-        }
-        Ok(self.cache.get(&key).unwrap())
-    }
-
     pub async fn alert_from_avro_bytes(
         self: &mut Self,
         avro_bytes: &[u8],
@@ -740,7 +651,10 @@ impl LsstAlertWorker {
         }
         let schema_id =
             u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self.get_schema("alert-packet", schema_id).await?;
+        let schema = self
+            .schema_registry
+            .get_schema("alert-packet", schema_id)
+            .await?;
 
         let mut slice = &avro_bytes[5..];
         let value = from_avro_datum(&schema, &mut slice, None).map_err(AlertError::DecodeError)?;
@@ -768,8 +682,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let worker = LsstAlertWorker {
             stream_name: stream_name.clone(),
-            client: reqwest::Client::new(),
-            cache: HashMap::new(),
+            schema_registry: SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL),
             xmatch_configs,
             db,
             alert_collection,

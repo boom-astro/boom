@@ -23,8 +23,11 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
     let schema = reader.writer_schema();
 
     // Then, we look for the index of the start of the data
+    // this is based on the Apache Avro specification 1.3.2
+    // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
     let mut cursor = std::io::Cursor::new(avro_bytes);
 
+    // Four bytes, ASCII 'O', 'b', 'j', followed by 1
     let mut buf = [0; 4];
     cursor
         .read_exact(&mut buf)
@@ -33,22 +36,19 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
         return Err(SchemaRegistryError::MagicBytesError);
     }
 
-    // This let's it skip through the bytes of the schema and other metadata
+    // Then there is the file metadata, including the schema
     let meta_schema = Schema::map(Schema::Bytes);
     from_avro_datum(&meta_schema, &mut cursor, None).map_err(SchemaRegistryError::InvalidSchema)?;
 
-    // we skip through the bytes created by the package the ZTF alert
-    // pipeline used to create their avro
+    // Then the 16-byte, randomly-generated sync marker for this file.
     let mut buf = [0; 16];
     cursor
         .read_exact(&mut buf)
         .map_err(SchemaRegistryError::CursorError)?;
 
-    if buf != *b"gogenavromagic10" {
-        return Err(SchemaRegistryError::MagicBytesError);
-    }
-
-    // we skip the next 4 bytes (contains info about the number of records)
+    // each avro record is preceded by a 4-byte length field. We know alert packets
+    // contain only one record so we can read the first 4 bytes, and consider
+    // everything else after that as the data
     cursor
         .read_exact(&mut [0u8; 4])
         .map_err(SchemaRegistryError::CursorError)?;

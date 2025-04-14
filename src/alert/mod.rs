@@ -5,6 +5,7 @@ pub use base::run_alert_worker;
 pub use base::AlertError;
 pub use base::AlertWorker;
 pub use base::AlertWorkerError;
+pub use base::SchemaRegistry;
 pub use base::SchemaRegistryError;
-pub use lsst::LsstAlertWorker;
+pub use lsst::{LsstAlertWorker, LSST_SCHEMA_REGISTRY_URL};
 pub use ztf::ZtfAlertWorker;

@@ -1,10 +1,11 @@
+use crate::utils::worker::WorkerCmd;
+use crate::{conf, utils::db::CreateIndexError};
+use apache_avro::Schema;
 use redis::AsyncCommands;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tracing::{error, info, trace, warn};
-
-use crate::utils::worker::WorkerCmd;
-use crate::{conf, utils::db::CreateIndexError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
@@ -68,6 +69,108 @@ pub enum AlertError {
     MissingFluxApertureError,
     #[error("missing mag zero point")]
     MissingMagZPSci,
+}
+
+pub struct SchemaRegistry {
+    client: reqwest::Client,
+    cache: HashMap<String, Schema>,
+    url: String,
+}
+
+impl SchemaRegistry {
+    pub fn new(url: &str) -> Self {
+        let client = reqwest::Client::new();
+        let cache = HashMap::new();
+        SchemaRegistry {
+            client,
+            cache,
+            url: url.to_string(),
+        }
+    }
+
+    async fn get_subjects(&self) -> Result<Vec<String>, SchemaRegistryError> {
+        let response = self
+            .client
+            .get(&format!("{}/subjects", &self.url))
+            .send()
+            .await
+            .map_err(SchemaRegistryError::ConnectionError)?;
+
+        let response = response
+            .json::<Vec<String>>()
+            .await
+            .map_err(SchemaRegistryError::ParsingError)?;
+
+        Ok(response)
+    }
+
+    async fn get_versions(&self, subject: &str) -> Result<Vec<u32>, SchemaRegistryError> {
+        // first we check if the subject exists
+        let subjects = self.get_subjects().await?;
+        if !subjects.contains(&subject.to_string()) {
+            return Err(SchemaRegistryError::InvalidSubject);
+        }
+
+        let response = self
+            .client
+            .get(&format!("{}/subjects/{}/versions", &self.url, subject))
+            .send()
+            .await
+            .map_err(SchemaRegistryError::ConnectionError)?;
+
+        let response = response
+            .json::<Vec<u32>>()
+            .await
+            .map_err(SchemaRegistryError::ParsingError)?;
+
+        Ok(response)
+    }
+
+    async fn _get_schema_by_id(
+        &self,
+        subject: &str,
+        version: u32,
+    ) -> Result<Schema, SchemaRegistryError> {
+        let versions = self.get_versions(subject).await?;
+        if !versions.contains(&version) {
+            return Err(SchemaRegistryError::InvalidVersion);
+        }
+
+        let response = self
+            .client
+            .get(&format!(
+                "{}/subjects/{}/versions/{}",
+                &self.url, subject, version
+            ))
+            .send()
+            .await
+            .map_err(SchemaRegistryError::ConnectionError)?;
+
+        let response = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(SchemaRegistryError::ParsingError)?;
+
+        let schema_str = response["schema"]
+            .as_str()
+            .ok_or(SchemaRegistryError::InvalidResponse)?;
+
+        let schema = Schema::parse_str(schema_str).map_err(SchemaRegistryError::InvalidSchema)?;
+        Ok(schema)
+    }
+
+    pub async fn get_schema(
+        &mut self,
+        subject: &str,
+        version: u32,
+    ) -> Result<&Schema, SchemaRegistryError> {
+        let key = format!("{}:{}", subject, version);
+        if !self.cache.contains_key(&key) {
+            let schema = self._get_schema_by_id(subject, version).await?;
+            self.cache.insert(key.clone(), schema);
+        }
+        Ok(self.cache.get(&key).unwrap())
+    }
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -7,4 +7,5 @@ data/alerts/lsst
 __pycache__
 /env
 .DS_Store
+/experimental
 *~

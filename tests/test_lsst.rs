@@ -4,6 +4,7 @@ use boom::{
     filter::{FilterWorker, LsstFilterWorker},
     utils::testing::{
         drop_alert_from_collections, insert_test_lsst_filter, remove_test_lsst_filter,
+        AlertRandomizerTrait, LsstAlertRandomizer,
     },
 };
 use mongodb::bson::doc;
@@ -14,21 +15,17 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_lsst_alert_from_avro_bytes() {
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/lsst/25409136044802067.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
+    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let alert = alert_worker
         .alert_from_avro_bytes(&bytes_content)
         .await
         .unwrap();
 
-    assert_eq!(alert.candid, 25409136044802067);
-    assert_eq!(
-        alert.candidate.dia_source.object_id.unwrap(),
-        25401295582003262
-    );
+    assert_eq!(alert.candid, candid);
+    assert_eq!(alert.candidate.dia_source.object_id.unwrap(), object_id);
 
-    assert!((alert.candidate.dia_source.ra - 149.802106).abs() < 1e-6);
-    assert!((alert.candidate.dia_source.dec - 2.248650).abs() < 1e-6);
+    assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
+    assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
 
     // add mag data to the candidate
 
@@ -82,17 +79,11 @@ async fn test_lsst_alert_from_avro_bytes() {
 
 #[tokio::test]
 async fn test_process_lsst_alert() {
-    // first we need to drop the alert from the database
-    drop_alert_from_collections(25409136044802067, "25401295582003262", "LSST")
-        .await
-        .unwrap();
-
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/lsst/25409136044802067.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
+    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
-    assert_eq!(result, 25409136044802067);
+    assert_eq!(result, candid);
 
     // now that it has been inserted in the database, calling process alert should return an error
     let result = alert_worker.process_alert(&bytes_content).await;
@@ -103,17 +94,21 @@ async fn test_process_lsst_alert() {
     let config_file = conf::load_config(CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
     let alert_collection_name = "LSST_alerts";
-    let filter = doc! {"_id": 25409136044802067_i64};
+    let filter = doc! {"_id": candid};
 
     let alert = db
         .collection::<mongodb::bson::Document>(alert_collection_name)
         .find_one(filter.clone())
         .await
         .unwrap();
+
     assert!(alert.is_some());
     let alert = alert.unwrap();
-    assert_eq!(alert.get_i64("_id").unwrap(), 25409136044802067);
-    assert_eq!(alert.get_i64("objectId").unwrap(), 25401295582003262);
+    assert_eq!(alert.get_i64("_id").unwrap(), candid);
+    assert_eq!(alert.get_i64("objectId").unwrap(), object_id);
+    let candidate = alert.get_document("candidate").unwrap();
+    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
+    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
     let cutout_collection_name = "LSST_alerts_cutouts";
@@ -124,14 +119,14 @@ async fn test_process_lsst_alert() {
         .unwrap();
     assert!(cutouts.is_some());
     let cutouts = cutouts.unwrap();
-    assert_eq!(cutouts.get_i64("_id").unwrap(), 25409136044802067);
+    assert_eq!(cutouts.get_i64("_id").unwrap(), candid);
     assert!(cutouts.contains_key("cutoutScience"));
     assert!(cutouts.contains_key("cutoutTemplate"));
     assert!(cutouts.contains_key("cutoutDifference"));
 
     // check that the aux collection was inserted
     let aux_collection_name = "LSST_alerts_aux";
-    let filter_aux = doc! {"_id": 25401295582003262_i64};
+    let filter_aux = doc! {"_id": object_id};
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
         .find_one(filter_aux.clone())
@@ -140,7 +135,7 @@ async fn test_process_lsst_alert() {
 
     assert!(aux.is_some());
     let aux = aux.unwrap();
-    assert_eq!(aux.get_i64("_id").unwrap(), 25401295582003262);
+    assert_eq!(aux.get_i64("_id").unwrap(), object_id);
     // check that we have the arrays prv_candidates, prv_nondetections and fp_hists
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert_eq!(prv_candidates.len(), 3);
@@ -150,41 +145,36 @@ async fn test_process_lsst_alert() {
 
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 3);
+
+    drop_alert_from_collections(candid, "LSST").await.unwrap();
 }
 
 #[tokio::test]
 async fn test_filter_lsst_alert() {
-    drop_alert_from_collections(3527242430321524769, "3527242430321524769", "LSST")
-        .await
-        .unwrap();
-
     let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/lsst/3527242430321524769.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
+    let (candid, object_id, _ra, _dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
-    assert_eq!(result, 3527242430321524769);
+    assert_eq!(result, candid);
 
     let filter_id = insert_test_lsst_filter().await.unwrap();
 
     let mut filter_worker = LsstFilterWorker::new(CONFIG_FILE).await.unwrap();
-    let result = filter_worker
-        .process_alerts(&["3527242430321524769".to_string()])
-        .await;
+    let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
     assert!(result.is_ok());
     let alerts_output = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
-    assert_eq!(alert.candid, 3527242430321524769);
-    assert_eq!(alert.object_id, "3527242430321524769");
-    assert_eq!(alert.photometry.len(), 1); // prv_candidates + prv_nondetections
+    assert_eq!(alert.candid, candid);
+    assert_eq!(alert.object_id, format!("{}", object_id));
+    assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
     let filter_passed = alert
         .filters
         .iter()
         .find(|f| f.filter_id == filter_id)
         .unwrap();
-    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.47}");
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
 
     remove_test_lsst_filter(filter_id).await.unwrap();
 }

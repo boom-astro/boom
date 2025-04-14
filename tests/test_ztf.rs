@@ -4,7 +4,10 @@ use boom::{
     filter::{FilterWorker, ZtfFilterWorker},
     utils::{
         db::mongify,
-        testing::{drop_alert_from_collections, insert_test_ztf_filter, remove_test_ztf_filter},
+        testing::{
+            drop_alert_from_collections, insert_test_ztf_filter, remove_test_ztf_filter,
+            AlertRandomizerTrait, ZtfAlertRandomizer,
+        },
     },
 };
 use mongodb::bson::doc;
@@ -15,8 +18,7 @@ const CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_alert_from_avro_bytes() {
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
@@ -24,13 +26,13 @@ async fn test_alert_from_avro_bytes() {
     let mut alert = alert.unwrap();
     assert_eq!(alert.schemavsn, "4.02");
     assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
-    assert_eq!(alert.object_id, "ZTF18abudxnw");
-    assert_eq!(alert.candid, 2695378462115010012);
+    assert_eq!(alert.object_id, object_id);
+    assert_eq!(alert.candid, candid);
 
     // validate the candidate
     let candidate = alert.clone().candidate;
-    assert_eq!(candidate.ra, 295.3031995);
-    assert_eq!(candidate.dec, -10.3958989);
+    assert_eq!(candidate.ra, ra);
+    assert_eq!(candidate.dec, dec);
 
     // validate the prv_candidates
     let prv_candidates = alert.clone().prv_candidates;
@@ -97,15 +99,15 @@ async fn test_alert_from_avro_bytes() {
         alert_doc.get_str("publisher").unwrap(),
         "ZTF (www.ztf.caltech.edu)"
     );
-    assert_eq!(alert_doc.get_str("objectId").unwrap(), "ZTF18abudxnw");
-    assert_eq!(alert_doc.get_i64("candid").unwrap(), 2695378462115010012);
+    assert_eq!(alert_doc.get_str("objectId").unwrap(), object_id);
+    assert_eq!(alert_doc.get_i64("candid").unwrap(), candid);
     assert_eq!(
         alert_doc
             .get_document("candidate")
             .unwrap()
             .get_f64("ra")
             .unwrap(),
-        295.3031995
+        ra
     );
     assert_eq!(
         alert_doc
@@ -113,7 +115,7 @@ async fn test_alert_from_avro_bytes() {
             .unwrap()
             .get_f64("dec")
             .unwrap(),
-        -10.3958989
+        dec
     );
 
     // validate the conversion to bson for prv_candidates
@@ -153,18 +155,13 @@ async fn test_alert_from_avro_bytes() {
 
 #[tokio::test]
 async fn test_process_ztf_alert() {
-    // drop the alert from the database
-    drop_alert_from_collections(2695378462115010012, "ZTF18acullba", "ZTF")
-        .await
-        .unwrap();
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/ztf/2695378462115010012.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
     println!("{:?}", result);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), 2695378462115010012);
+    assert_eq!(result.unwrap(), candid);
 
     // now that it has been inserted in the database, calling process alert should return an error
     let result = alert_worker.process_alert(&bytes_content).await;
@@ -175,7 +172,7 @@ async fn test_process_ztf_alert() {
     let config_file = conf::load_config(CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
-    let filter = doc! {"_id": 2695378462115010012_i64};
+    let filter = doc! {"_id": candid};
 
     let alert = db
         .collection::<mongodb::bson::Document>(alert_collection_name)
@@ -184,8 +181,11 @@ async fn test_process_ztf_alert() {
         .unwrap();
     assert!(alert.is_some());
     let alert = alert.unwrap();
-    assert_eq!(alert.get_i64("_id").unwrap(), 2695378462115010012);
-    assert_eq!(alert.get_str("objectId").unwrap(), "ZTF18abudxnw");
+    assert_eq!(alert.get_i64("_id").unwrap(), candid);
+    assert_eq!(alert.get_str("objectId").unwrap(), object_id);
+    let candidate = alert.get_document("candidate").unwrap();
+    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
+    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
     let cutout_collection_name = "ZTF_alerts_cutouts";
@@ -196,14 +196,14 @@ async fn test_process_ztf_alert() {
         .unwrap();
     assert!(cutouts.is_some());
     let cutouts = cutouts.unwrap();
-    assert_eq!(cutouts.get_i64("_id").unwrap(), 2695378462115010012);
+    assert_eq!(cutouts.get_i64("_id").unwrap(), candid);
     assert!(cutouts.contains_key("cutoutScience"));
     assert!(cutouts.contains_key("cutoutTemplate"));
     assert!(cutouts.contains_key("cutoutDifference"));
 
     // check that the aux collection was inserted
     let aux_collection_name = "ZTF_alerts_aux";
-    let filter_aux = doc! {"_id": "ZTF18abudxnw"};
+    let filter_aux = doc! {"_id": &object_id};
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
         .find_one(filter_aux.clone())
@@ -212,7 +212,7 @@ async fn test_process_ztf_alert() {
 
     assert!(aux.is_some());
     let aux = aux.unwrap();
-    assert_eq!(aux.get_str("_id").unwrap(), "ZTF18abudxnw");
+    assert_eq!(aux.get_str("_id").unwrap(), &object_id);
     // check that we have the arrays prv_candidates, prv_nondetections and fp_hists
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert_eq!(prv_candidates.len(), 8);
@@ -222,44 +222,39 @@ async fn test_process_ztf_alert() {
 
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 10);
+
+    drop_alert_from_collections(candid, "ZTF").await.unwrap();
 }
 
 #[tokio::test]
 async fn test_filter_ztf_alert() {
-    // drop the alert from the database
-    drop_alert_from_collections(3005140370015010009, "ZTF18acullba", "ZTF")
-        .await
-        .unwrap();
-
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let file_name = "tests/data/alerts/ztf/3005140370015010009.avro";
-    let bytes_content = std::fs::read(file_name).unwrap();
+    let (candid, object_id, _ra, _dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
-    println!("{:?}", result);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), 3005140370015010009);
+    assert_eq!(result.unwrap(), candid);
 
     let filter_id = insert_test_ztf_filter().await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(CONFIG_FILE).await.unwrap();
     let result = filter_worker
-        .process_alerts(&["1,3005140370015010009".to_string()])
+        .process_alerts(&[format!("1,{}", candid)])
         .await;
 
     assert!(result.is_ok());
     let alerts_output = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
-    assert_eq!(alert.candid, 3005140370015010009);
-    assert_eq!(alert.object_id, "ZTF18acullba");
-    assert_eq!(alert.photometry.len(), 27); // prv_candidates + prv_nondetections
+    assert_eq!(alert.candid, candid);
+    assert_eq!(alert.object_id, object_id);
+    assert_eq!(alert.photometry.len(), 11); // prv_candidates + prv_nondetections
     let filter_passed = alert
         .filters
         .iter()
         .find(|f| f.filter_id == filter_id)
         .unwrap();
-    assert_eq!(filter_passed.annotations, "{\"mag_now\":16.75}");
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":14.91}");
 
     remove_test_ztf_filter(filter_id).await.unwrap();
 }
