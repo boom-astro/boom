@@ -159,7 +159,6 @@ async fn test_process_ztf_alert() {
 
     let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
-    println!("{:?}", result);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
 
