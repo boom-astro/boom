@@ -230,7 +230,13 @@ async fn test_process_ztf_alert() {
 async fn test_ml_ztf_alert() {
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    let (candid, object_id, _ra, _dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
+    // we only randomize the candid and object_id here, since the ra/dec
+    // are features of the models and would change the results
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::new()
+        .rand_candid()
+        .rand_object_id()
+        .get()
+        .await;
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
@@ -260,12 +266,16 @@ async fn test_ml_ztf_alert() {
     let alert = alert.unwrap();
     assert_eq!(alert.get_i64("_id").unwrap(), candid);
     assert_eq!(alert.get_str("objectId").unwrap(), object_id);
+    let candidate = alert.get_document("candidate").unwrap();
+    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
+    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
-    // this object is a variable star, so all scores except acai_v should be around 0
+    // this object is a variable star, so all scores except acai_v should be ~0.0
+    // (we've also verified that the scores we get here were close to Kowalski's)
     let classifications = alert.get_document("classifications").unwrap();
     assert!(classifications.get_f64("acai_h").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_n").unwrap() < 0.01);
-    assert!(classifications.get_f64("acai_v").unwrap() > 0.98);
+    assert!(classifications.get_f64("acai_v").unwrap() > 0.99);
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
     assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
