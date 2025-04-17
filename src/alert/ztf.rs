@@ -276,6 +276,7 @@ pub struct Candidate {
     pub szmag3: Option<f32>,
     pub sgscore3: Option<f32>,
     pub distpsnr3: Option<f32>,
+    pub nmtchps: i32,
     pub dsnrms: Option<f32>,
     pub ssnrms: Option<f32>,
     pub dsdiff: Option<f32>,
@@ -285,6 +286,11 @@ pub struct Candidate {
     pub zpmed: Option<f32>,
     pub exptime: Option<f32>,
     pub drb: Option<f32>,
+
+    pub clrcoeff: Option<f32>,
+    pub clrcounc: Option<f32>,
+    pub neargaia: Option<f32>,
+    pub neargaiabright: Option<f32>,
 }
 
 fn deserialize_isdiffpos_option<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>

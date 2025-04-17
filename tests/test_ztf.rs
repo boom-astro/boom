@@ -2,6 +2,7 @@ use boom::{
     alert::{AlertWorker, ZtfAlertWorker},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
+    ml::{MLWorker, ZtfMLWorker},
     utils::{
         db::mongify,
         testing::{
@@ -223,6 +224,61 @@ async fn test_process_ztf_alert() {
     assert_eq!(fp_hists.len(), 10);
 
     drop_alert_from_collections(candid, "ZTF").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ml_ztf_alert() {
+    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+
+    // we only randomize the candid and object_id here, since the ra/dec
+    // are features of the models and would change the results
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::new()
+        .rand_candid()
+        .rand_object_id()
+        .get()
+        .await;
+    let result = alert_worker.process_alert(&bytes_content).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), candid);
+
+    let ml_worker = ZtfMLWorker::new(CONFIG_FILE).await.unwrap();
+    let result = ml_worker.process_alerts(&[candid]).await;
+    assert!(result.is_ok());
+
+    // the result should be a vec of String, for ZTF with the format
+    // "programid,candid" which is what the filter worker expects
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert, &format!("1,{}", candid));
+
+    // check that the alert was inserted in the DB, and ML scores added later
+    let config_file = conf::load_config(CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config_file).await.unwrap();
+    let alert_collection_name = "ZTF_alerts";
+    let filter = doc! {"_id": candid};
+    let alert = db
+        .collection::<mongodb::bson::Document>(alert_collection_name)
+        .find_one(filter.clone())
+        .await
+        .unwrap();
+    assert!(alert.is_some());
+    let alert = alert.unwrap();
+    assert_eq!(alert.get_i64("_id").unwrap(), candid);
+    assert_eq!(alert.get_str("objectId").unwrap(), object_id);
+    let candidate = alert.get_document("candidate").unwrap();
+    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
+    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
+
+    // this object is a variable star, so all scores except acai_v should be ~0.0
+    // (we've also verified that the scores we get here were close to Kowalski's)
+    let classifications = alert.get_document("classifications").unwrap();
+    assert!(classifications.get_f64("acai_h").unwrap() < 0.01);
+    assert!(classifications.get_f64("acai_n").unwrap() < 0.01);
+    assert!(classifications.get_f64("acai_v").unwrap() > 0.99);
+    assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
+    assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
+    assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use crate::{
     alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
-    ml::run_ml_worker,
+    ml::{run_ml_worker, ZtfMLWorker},
     utils::worker::{WorkerCmd, WorkerType},
 };
 use std::thread;
@@ -196,7 +196,7 @@ impl Worker {
             }),
             WorkerType::ML => thread::spawn(move || {
                 let run = match stream_name.as_str() {
-                    "ZTF" => run_ml_worker,
+                    "ZTF" => run_ml_worker::<ZtfMLWorker>,
                     // we don't have an ML worker for LSST yet
                     "LSST" => {
                         error!("LSST ML worker not implemented");
@@ -207,8 +207,7 @@ impl Worker {
                         return;
                     }
                 };
-
-                if let Err(error) = run(id, receiver, &stream_name, &config_path) {
+                if let Err(error) = run(id, receiver, &config_path) {
                     error!(error = %error, "failed to run ml worker");
                 }
             }),

@@ -1,5 +1,6 @@
-use flate2::read::GzDecoder;
-use std::io::Read;
+// we use zune_inflate as a replacement for flate2
+// which is a slightly faster alternative
+use zune_inflate::{DeflateDecoder, DeflateOptions};
 
 const NAXIS1_BYTES: &[u8] = "NAXIS1  =".as_bytes();
 const NAXIS2_BYTES: &[u8] = "NAXIS2  =".as_bytes();
@@ -19,6 +20,10 @@ pub enum CutoutError {
     PrepareCutoutError,
     #[error("could not parse naxis1 or naxis2 from FITS header")]
     ParseNAXISError(#[from] std::num::ParseIntError),
+    #[error("failed to decode gzip data")]
+    DecodeGzipError,
+    #[error("failed to access document field")]
+    MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
 }
 
 fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
@@ -31,10 +36,15 @@ fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
 
 /// Converts a buffer of bytes from a gzipped FITS file to a vector of flattened 2D image data
 pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
-    let mut decoder = GzDecoder::new(buffer);
-
-    let mut decompressed_data = Vec::new();
-    let _ = decoder.read_to_end(&mut decompressed_data);
+    let mut decoder = DeflateDecoder::new_with_options(
+        buffer,
+        DeflateOptions::default()
+            .set_confirm_checksum(false)
+            .set_size_hint(20160),
+    );
+    let decompressed_data = decoder
+        .decode_gzip()
+        .map_err(|_| CutoutError::DecodeGzipError)?;
 
     let subset = &decompressed_data[0..FITS_HEADER_LEN];
 
@@ -97,8 +107,8 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
     // so if NAXIS1 is not NAXIS_STANDARD, we need to add NAXIS_STANDARD - NAXIS1 zeros to the start and end of each row
     // and if NAXIS2 is not NAXIS_STANDARD, we need to add NAXIS_STANDARD - NAXIS2 zeros to the start and end of the vector
 
-    let offset1 = (NAXIS_STANDARD - naxis1) / 2; // Assuming naxis1 and naxis2 are both usize
-    let offset2 = (NAXIS_STANDARD - naxis2) / 2;
+    let offset1 = ((NAXIS_STANDARD - naxis1) as f32 / 2.0).ceil() as usize;
+    let offset2 = ((NAXIS_STANDARD - naxis2) as f32 / 2.0).ceil() as usize;
     if (offset1, offset2) != (0, 0) {
         let mut new_image_data = vec![0.0; NB_PIXELS];
         for i in 0..naxis2 {
@@ -149,22 +159,13 @@ fn prepare_cutout(cutout: &[u8]) -> Result<Vec<f32>, CutoutError> {
 pub fn prepare_triplet(
     alert_doc: &mongodb::bson::Document,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), CutoutError> {
-    let cutout_science = alert_doc
-        .get_binary_generic("cutoutScience")
-        .unwrap()
-        .to_vec();
+    let cutout_science = alert_doc.get_binary_generic("cutoutScience")?.to_vec();
     let cutout_science = prepare_cutout(&cutout_science)?;
 
-    let cutout_template = alert_doc
-        .get_binary_generic("cutoutTemplate")
-        .unwrap()
-        .to_vec();
+    let cutout_template = alert_doc.get_binary_generic("cutoutTemplate")?.to_vec();
     let cutout_template = prepare_cutout(&cutout_template)?;
 
-    let cutout_difference = alert_doc
-        .get_binary_generic("cutoutDifference")
-        .unwrap()
-        .to_vec();
+    let cutout_difference = alert_doc.get_binary_generic("cutoutDifference")?.to_vec();
     let cutout_difference = prepare_cutout(&cutout_difference)?;
 
     Ok((cutout_science, cutout_template, cutout_difference))

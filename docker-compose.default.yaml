@@ -7,7 +7,7 @@ networks:
 
 services:
   mongo:
-    image: mongo:7.0
+    image: mongo:8.0
     hostname: mongo
     expose:
       - "27017"
@@ -32,7 +32,7 @@ services:
       - ALLOW_EMPTY_PASSWORD=yes
       - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
     ports:
-      - '6379:6379'
+      - "6379:6379"
     volumes:
       - valkey:/data
     restart: always
@@ -46,7 +46,6 @@ services:
   broker:
     image: apache/kafka:latest
     hostname: broker
-    container_name: broker
     ports:
       - 9092:9092
     networks:

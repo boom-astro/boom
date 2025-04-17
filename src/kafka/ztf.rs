@@ -205,8 +205,14 @@ pub async fn produce_from_archive(
     let mut total_pushed = 0;
     let start = std::time::Instant::now();
     for entry in std::fs::read_dir(format!("data/alerts/ztf/{}", date))? {
+        if entry.is_err() {
+            continue;
+        }
         let entry = entry.unwrap();
         let path = entry.path();
+        if !path.to_str().unwrap().ends_with(".avro") {
+            continue;
+        }
         let payload = std::fs::read(path).unwrap();
 
         let record = FutureRecord::to(&topic_name)

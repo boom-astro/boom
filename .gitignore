@@ -9,3 +9,6 @@ __pycache__
 .DS_Store
 /experimental
 *~
+scripts/convert2onnx/env/
+scripts/convert2onnx/models_input/
+scripts/convert2onnx/models_output/
