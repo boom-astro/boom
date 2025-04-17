@@ -226,6 +226,10 @@ pub trait AlertRandomizerTrait {
     fn candid(self, candid: i64) -> Self;
     fn ra(self, ra: f64) -> Self;
     fn dec(self, dec: f64) -> Self;
+    fn rand_object_id(self) -> Self;
+    fn rand_candid(self) -> Self;
+    fn rand_ra(self) -> Self;
+    fn rand_dec(self) -> Self;
     fn validate_ra(ra: f64) -> bool {
         ra >= 0.0 && ra <= 360.0
     }
@@ -233,6 +237,7 @@ pub trait AlertRandomizerTrait {
         dec >= -90.0 && dec <= 90.0
     }
     async fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>);
+
     fn randomize_i64() -> i64 {
         rand::rng().random_range(0..i64::MAX)
     }
@@ -241,6 +246,29 @@ pub trait AlertRandomizerTrait {
     }
     fn randomize_dec() -> f64 {
         rand::rng().random_range(-90.0..90.0)
+    }
+    fn value_to_string(value: &Value) -> String {
+        match value {
+            Value::String(s) => s.clone(),
+            _ => panic!("Not a string"),
+        }
+    }
+
+    fn value_to_i64(value: &Value) -> i64 {
+        match value {
+            Value::Long(l) => *l,
+            Value::Union(_, box_value) => match box_value.as_ref() {
+                Value::Long(l) => *l,
+                _ => panic!("Not a long"),
+            },
+            _ => panic!("Not a long"),
+        }
+    }
+    fn value_to_f64(value: &Value) -> f64 {
+        match value {
+            Value::Double(d) => *d,
+            _ => panic!("Not a double"),
+        }
     }
     type ObjectId;
 }
@@ -317,11 +345,28 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
         self
     }
 
+    fn rand_object_id(mut self) -> Self {
+        self.object_id = Some(Self::randomize_object_id());
+        self
+    }
+    fn rand_candid(mut self) -> Self {
+        self.candid = Some(Self::randomize_i64());
+        self
+    }
+    fn rand_ra(mut self) -> Self {
+        self.ra = Some(Self::randomize_ra());
+        self
+    }
+    fn rand_dec(mut self) -> Self {
+        self.dec = Some(Self::randomize_dec());
+        self
+    }
+
     async fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
-        let candid = self.candid.unwrap_or_else(Self::randomize_i64);
-        let object_id = self.object_id.unwrap_or_else(Self::randomize_object_id);
-        let ra = self.ra.unwrap_or_else(Self::randomize_ra);
-        let dec = self.dec.unwrap_or_else(Self::randomize_dec);
+        let mut candid = self.candid;
+        let mut object_id = self.object_id;
+        let mut ra = self.ra;
+        let mut dec = self.dec;
         let (payload, schema) = match (self.payload, self.schema) {
             (Some(payload), Some(schema)) => (payload, schema),
             _ => {
@@ -344,9 +389,15 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
         for i in 0..record.len() {
             let (key, value) = &mut record[i];
             if key == "objectId" {
-                *value = Value::String(object_id.clone());
+                match object_id {
+                    Some(ref id) => *value = Value::String(id.clone()),
+                    None => object_id = Some(Self::value_to_string(value)),
+                }
             } else if key == "candid" {
-                *value = Value::Long(candid);
+                match candid {
+                    Some(id) => *value = Value::Long(id),
+                    None => candid = Some(Self::value_to_i64(value)),
+                }
             } else if key == "candidate" {
                 let candidate_record = match value {
                     Value::Record(record) => record,
@@ -357,11 +408,20 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
                 for i in 0..candidate_record.len() {
                     let (key, value) = &mut candidate_record[i];
                     if key == "ra" {
-                        *value = Value::Double(ra);
+                        match ra {
+                            Some(r) => *value = Value::Double(r),
+                            None => ra = Some(Self::value_to_f64(value)),
+                        }
                     } else if key == "dec" {
-                        *value = Value::Double(dec);
+                        match dec {
+                            Some(d) => *value = Value::Double(d),
+                            None => dec = Some(Self::value_to_f64(value)),
+                        }
                     } else if key == "candid" {
-                        *value = Value::Long(candid);
+                        match candid {
+                            Some(c) => *value = Value::Long(c),
+                            None => candid = Some(Self::value_to_i64(value)),
+                        }
                     }
                 }
             }
@@ -376,7 +436,13 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
         writer.append(new_record).unwrap();
         let new_payload = writer.into_inner().unwrap();
 
-        (candid, object_id, ra, dec, new_payload)
+        (
+            candid.unwrap(),
+            object_id.unwrap(),
+            ra.unwrap(),
+            dec.unwrap(),
+            new_payload,
+        )
     }
 }
 
@@ -463,11 +529,28 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         self
     }
 
+    fn rand_object_id(mut self) -> Self {
+        self.object_id = Some(Self::randomize_i64());
+        self
+    }
+    fn rand_candid(mut self) -> Self {
+        self.candid = Some(Self::randomize_i64());
+        self
+    }
+    fn rand_ra(mut self) -> Self {
+        self.ra = Some(Self::randomize_ra());
+        self
+    }
+    fn rand_dec(mut self) -> Self {
+        self.dec = Some(Self::randomize_dec());
+        self
+    }
+
     async fn get(mut self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
-        let candid = self.candid.unwrap_or_else(Self::randomize_i64);
-        let object_id = self.object_id.unwrap_or_else(Self::randomize_i64);
-        let ra = self.ra.unwrap_or_else(Self::randomize_ra);
-        let dec = self.dec.unwrap_or_else(Self::randomize_dec);
+        let mut candid = self.candid;
+        let mut object_id = self.object_id;
+        let mut ra = self.ra;
+        let mut dec = self.dec;
         let payload = self
             .payload
             .unwrap_or_else(|| fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap());
@@ -496,7 +579,10 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         for i in 0..record.len() {
             let (key, value) = &mut record[i];
             if key == "alertId" {
-                *value = Value::Long(candid);
+                match candid {
+                    Some(id) => *value = Value::Long(id),
+                    None => candid = Some(Self::value_to_i64(value)),
+                }
             } else if key == "diaSource" {
                 let candidate_record = match value {
                     Value::Record(record) => record,
@@ -507,13 +593,25 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
                 for i in 0..candidate_record.len() {
                     let (key, value) = &mut candidate_record[i];
                     if key == "diaSourceId" {
-                        *value = Value::Long(candid);
+                        match object_id {
+                            Some(id) => *value = Value::Long(id),
+                            None => object_id = Some(Self::value_to_i64(value)),
+                        }
                     } else if key == "diaObjectId" {
-                        *value = Value::Union(1_u32, Box::new(Value::Long(object_id)));
+                        match object_id {
+                            Some(id) => *value = Value::Union(1_u32, Box::new(Value::Long(id))),
+                            None => object_id = Some(Self::value_to_i64(value)),
+                        }
                     } else if key == "ra" {
-                        *value = Value::Double(ra);
+                        match ra {
+                            Some(r) => *value = Value::Double(r),
+                            None => ra = Some(Self::value_to_f64(value)),
+                        }
                     } else if key == "dec" {
-                        *value = Value::Double(dec);
+                        match dec {
+                            Some(d) => *value = Value::Double(d),
+                            None => dec = Some(Self::value_to_f64(value)),
+                        }
                     }
                 }
             }
@@ -544,6 +642,12 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
         // conform with the schema registry-like format
         let new_payload = [&header, &new_payload[start_idx as usize..]].concat();
 
-        (candid, object_id, ra, dec, new_payload)
+        (
+            candid.unwrap(),
+            object_id.unwrap(),
+            ra.unwrap(),
+            dec.unwrap(),
+            new_payload,
+        )
     }
 }
