@@ -16,7 +16,7 @@ impl Model for BtsBotModel {
     }
 
     fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
-        let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 20);
+        let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
         for alert in alerts {
             let candidate = alert.get_document("candidate")?;
@@ -115,7 +115,7 @@ impl Model for BtsBotModel {
             features_batch.extend(alert_features);
         }
 
-        let features_array = Array::from_shape_vec((alerts.len(), 20), features_batch)
+        let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)
             .map_err(ModelError::NewArrayError)?;
         Ok(features_array)
     }
