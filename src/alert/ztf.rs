@@ -10,11 +10,14 @@ use crate::{
 use apache_avro::from_value;
 use apache_avro::{from_avro_datum, Reader, Schema};
 use flare::Time;
+use futures::StreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::io::Read;
 use tracing::{error, trace};
+
+const LSST_DEC_LIMIT: f32 = 33.5;
 
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
     // First, we extract the schema from the avro bytes
@@ -592,6 +595,47 @@ impl AlertWorker for ZtfAlertWorker {
 
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
+        let closest_match: Option<String> = if dec <= LSST_DEC_LIMIT as f64 {
+            let mut cursor = self
+                .alert_aux_collection
+                // TODO: Compound index on _id and coordinates? Migh save reading the documents
+                // TODO: try find_one instead?
+                // TODO: errors...
+                // TODO: to test,
+                // - insert the test lsst alert a la `test_process_lsst_alert()` in test_lsst.rs
+                // - edit the coordinates in mongo to be within the search radius
+                // - process ztf alert (somewhere in test_ztf.rs?), verify that the resulting doc has the lsst object id.
+                // - Repeat, but with lsst coords slightly outside the radius, verify that there's no match.
+                .find(doc! {
+                    "coordinates.radec_geojson": {
+                        // Try "legacy coordinates" (<x> and <y> are lon/lat)
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": self.xmatch_configs[0].radius,
+                    },
+                })
+                .projection(doc! {
+                    "_id": 1
+                })
+                .limit(1) // The nearest match, nearSphere sorts by increasing distance
+                .await
+                .map_err(AlertError::FindObjectIdError)?;
+            let maybe_doc = cursor.next().await;
+            let match_id = if let Some(res) = maybe_doc {
+                Some(
+                    res.map(|doc| {
+                        // TODO: handle ValueAccessError
+                        doc.get_str("_id").unwrap().to_string()
+                    })
+                    .map_err(AlertError::FindObjectIdError)?,
+                )
+            } else {
+                None
+            };
+            match_id
+        } else {
+            None
+        };
+
         if !alert_aux_exists {
             let start = std::time::Instant::now();
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await;
@@ -604,6 +648,7 @@ impl AlertWorker for ZtfAlertWorker {
                 "prv_nondetections": prv_nondetections_doc,
                 "fp_hists": fp_hist_doc,
                 "cross_matches": xmatches,
+                "aliases": { "LSST": closest_match.into_iter().collect::<Vec<_>>() },
                 "created_at": now,
                 "updated_at": now,
                 "coordinates": {
@@ -625,10 +670,11 @@ impl AlertWorker for ZtfAlertWorker {
                 "$addToSet": {
                     "prv_candidates": { "$each": prv_candidates_doc },
                     "prv_nondetections": { "$each": prv_nondetections_doc },
-                    "fp_hists": { "$each": fp_hist_doc }
+                    "fp_hists": { "$each": fp_hist_doc },
                 },
                 "$set": {
                     "updated_at": now,
+                    "aliases.LSST": closest_match.into_iter().collect::<Vec<_>>(),
                 }
             };
 

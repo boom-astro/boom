@@ -70,7 +70,7 @@ BOOM is meant to be run in production, reading from a real-time stream of astron
 ```bash
 cargo run --release --bin kafka_producer <date_in_YYYMMDD_format> <limit>
 ```
-Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them on disk for the `Kafka` producer to read, and then will start producing them to the associated `Kafka` topic. You can leave that running in the background, and start the rest of the pipeline in another terminal. The <limit> argument is optional, and will limit the number of alerts pushed to the `Kafka` topic.
+Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them on disk for the `Kafka` producer to read, and then will start producing them to the associated `Kafka` topic, `ztf_YYYYMMDD_programid1`. You can leave that running in the background, and start the rest of the pipeline in another terminal. The <limit> argument is optional, and will limit the number of alerts pushed to the `Kafka` topic.
 
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
 ```bash
@@ -80,9 +80,9 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 
 Next, you can start the `Kafka` consumer with:
 ```bash
-cargo run --release --bin kafka_consumer <topic> <group_id> <exit_on_eof> <max_in_queue>
+cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROCESSES] [CLEAR] [max_in_queue]
 ```
-Where `<topic>` is the name of the `Kafka` topic you want to read from. In our case, it would be `ztf_YYYYMMDD_programid1`. This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. Last but not least `<max_in_queue>` allows you to set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
+Where `<SURVEY>` and `[DATE]` determine which topic to read from. In our case, `<SURVEY>` should be `ZTF` and `[DATE]` is the date in YYYMMDD format that was given to `kafka_producer` earlier, telling the consumer to read from the topic named `ztf_YYYYMMDD_programid1`. This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. Last but not least `<max_in_queue>` allows you to set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 Instead of starting each worker manually, we provide the `scheduler`. It reads the number of workers for each type from `config.yaml`. Run the scheduler with:
 ```bash

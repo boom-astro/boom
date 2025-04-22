@@ -160,7 +160,7 @@ async fn test_process_ztf_alert() {
 
     let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{:?}", result);
     assert_eq!(result.unwrap(), candid);
 
     // now that it has been inserted in the database, calling process alert should return an error
