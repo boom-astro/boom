@@ -25,6 +25,10 @@ pub enum SchemaRegistryError {
     CursorError(#[source] std::io::Error),
     #[error("could not find avro magic bytes")]
     MagicBytesError,
+    #[error("incorrect number of records in the avro file")]
+    InvalidRecordCount(usize),
+    #[error("integer overflow")]
+    IntegerOverflow,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -38,7 +42,7 @@ pub enum AlertError {
     #[error("failed to find objectid in the aux alert collection")]
     FindObjectIdError(#[source] mongodb::error::Error),
     #[error("failed to insert into the alert aux collection")]
-    InsertAuxAlertError(#[source] mongodb::error::Error),
+    InsertAlertAuxError(#[source] mongodb::error::Error),
     #[error("failed to update the alert aux collection")]
     UpdateAuxAlertError(#[source] mongodb::error::Error),
     #[error("failed to insert into the alert cutout collection")]
@@ -51,6 +55,8 @@ pub enum AlertError {
     SchemaRegistryError(#[from] SchemaRegistryError),
     #[error("alert already exists")]
     AlertExists,
+    #[error("alert aux already exists")]
+    AlertAuxExists,
     #[error("missing object_id")]
     MissingObjectId,
     #[error("missing cutout")]

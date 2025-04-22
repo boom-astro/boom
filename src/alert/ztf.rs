@@ -16,6 +16,43 @@ use serde_with::{serde_as, skip_serializing_none};
 use std::io::Read;
 use tracing::{error, trace};
 
+fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
+    let mut i = 0u64;
+    let mut buf = [0u8; 1];
+
+    let mut j = 0;
+    loop {
+        if j > 9 {
+            return Err(SchemaRegistryError::IntegerOverflow);
+        }
+        reader
+            .read_exact(&mut buf[..])
+            .map_err(SchemaRegistryError::CursorError)?;
+
+        i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
+        if (buf[0] >> 7) == 0 {
+            break;
+        } else {
+            j += 1;
+        }
+    }
+
+    Ok(i)
+}
+
+pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+    let z = decode_variable(reader)?;
+    if z & 0x1 == 0 {
+        Ok((z >> 1) as i64)
+    } else {
+        Ok(!(z >> 1) as i64)
+    }
+}
+
+fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+    Ok(zag_i64(reader)?)
+}
+
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
     // First, we extract the schema from the avro bytes
     let cursor = std::io::Cursor::new(avro_bytes);
@@ -46,12 +83,14 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
         .read_exact(&mut buf)
         .map_err(SchemaRegistryError::CursorError)?;
 
-    // each avro record is preceded by a 4-byte length field. We know alert packets
-    // contain only one record so we can read the first 4 bytes, and consider
-    // everything else after that as the data
-    cursor
-        .read_exact(&mut [0u8; 4])
-        .map_err(SchemaRegistryError::CursorError)?;
+    // each avro record is preceded by:
+    // 1. a variable-length integer, the number of records in the block
+    // 2. a variable-length integer, the number of bytes in the block
+    let nb_records = decode_long(&mut cursor)?;
+    if nb_records != 1 {
+        return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
+    }
+    let _ = decode_long(&mut cursor)?;
 
     // we now have the start index of the data
     let start_idx = cursor.position();
@@ -458,6 +497,83 @@ impl ZtfAlertWorker {
 
         Ok(alert)
     }
+
+    async fn insert_aux(
+        self: &mut Self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        prv_candidates_doc: &Vec<mongodb::bson::Document>,
+        prv_nondetections_doc: &Vec<mongodb::bson::Document>,
+        fp_hist_doc: &Vec<mongodb::bson::Document>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let start = std::time::Instant::now();
+        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await;
+        trace!("Xmatch took: {:?}", start.elapsed());
+
+        let start = std::time::Instant::now();
+        let alert_aux_doc = doc! {
+            "_id": &object_id,
+            "prv_candidates": prv_candidates_doc,
+            "prv_nondetections": prv_nondetections_doc,
+            "fp_hists": fp_hist_doc,
+            "cross_matches": xmatches,
+            "created_at": now,
+            "updated_at": now,
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [ra - 180.0, dec],
+                },
+            },
+        };
+
+        self.alert_aux_collection
+            .insert_one(alert_aux_doc)
+            .await
+            .map_err(|e| match *e.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
+                _ => AlertError::InsertAlertAuxError(e),
+            })?;
+
+        trace!("Inserting alert_aux: {:?}", start.elapsed());
+
+        Ok(())
+    }
+
+    async fn update_aux(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates_doc: &Vec<mongodb::bson::Document>,
+        prv_nondetections_doc: &Vec<mongodb::bson::Document>,
+        fp_hist_doc: &Vec<mongodb::bson::Document>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let start = std::time::Instant::now();
+
+        let update_doc = doc! {
+            "$addToSet": {
+                "prv_candidates": { "$each": prv_candidates_doc },
+                "prv_nondetections": { "$each": prv_nondetections_doc },
+                "fp_hists": { "$each": fp_hist_doc }
+            },
+            "$set": {
+                "updated_at": now,
+            }
+        };
+
+        self.alert_aux_collection
+            .update_one(doc! { "_id": object_id }, update_doc)
+            .await
+            .map_err(AlertError::UpdateAuxAlertError)?;
+
+        trace!("Updating alert_aux: {:?}", start.elapsed());
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -593,51 +709,42 @@ impl AlertWorker for ZtfAlertWorker {
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
         if !alert_aux_exists {
-            let start = std::time::Instant::now();
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await;
-            trace!("Xmatch took: {:?}", start.elapsed());
-
-            let start = std::time::Instant::now();
-            let alert_aux_doc = doc! {
-                "_id": &object_id,
-                "prv_candidates": prv_candidates_doc,
-                "prv_nondetections": prv_nondetections_doc,
-                "fp_hists": fp_hist_doc,
-                "cross_matches": xmatches,
-                "created_at": now,
-                "updated_at": now,
-                "coordinates": {
-                    "radec_geojson": {
-                        "type": "Point",
-                        "coordinates": [ra - 180.0, dec],
-                    },
-                },
-            };
-            self.alert_aux_collection
-                .insert_one(alert_aux_doc)
+            match self
+                .insert_aux(
+                    &object_id,
+                    ra,
+                    dec,
+                    &prv_candidates_doc,
+                    &prv_nondetections_doc,
+                    &fp_hist_doc,
+                    now,
+                )
                 .await
-                .map_err(AlertError::InsertAuxAlertError)?;
-
-            trace!("Inserting alert_aux: {:?}", start.elapsed());
-        } else {
-            let start = std::time::Instant::now();
-            let update_doc = doc! {
-                "$addToSet": {
-                    "prv_candidates": { "$each": prv_candidates_doc },
-                    "prv_nondetections": { "$each": prv_nondetections_doc },
-                    "fp_hists": { "$each": fp_hist_doc }
-                },
-                "$set": {
-                    "updated_at": now,
+            {
+                Ok(_) => {}
+                Err(AlertError::AlertAuxExists) => {
+                    self.update_aux(
+                        &object_id,
+                        &prv_candidates_doc,
+                        &prv_nondetections_doc,
+                        &fp_hist_doc,
+                        now,
+                    )
+                    .await?;
                 }
-            };
-
-            self.alert_aux_collection
-                .update_one(doc! { "_id": &object_id }, update_doc)
-                .await
-                .map_err(AlertError::UpdateAuxAlertError)?;
-
-            trace!("Updating alert_aux: {:?}", start.elapsed());
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            self.update_aux(
+                &object_id,
+                &prv_candidates_doc,
+                &prv_nondetections_doc,
+                &fp_hist_doc,
+                now,
+            )
+            .await?;
         }
 
         Ok(candid)

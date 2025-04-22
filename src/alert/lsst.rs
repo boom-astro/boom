@@ -817,7 +817,7 @@ impl AlertWorker for LsstAlertWorker {
             self.alert_aux_collection
                 .insert_one(alert_aux_doc)
                 .await
-                .map_err(AlertError::InsertAuxAlertError)?;
+                .map_err(AlertError::InsertAlertAuxError)?;
 
             trace!("Inserting alert_aux: {:?}", start.elapsed());
         } else {
