@@ -69,6 +69,10 @@ pub enum AlertError {
     MissingFluxApertureError,
     #[error("missing mag zero point")]
     MissingMagZPSci,
+    #[error("error from mongodb")]
+    Mongodb(#[from] mongodb::error::Error),
+    #[error("value access error from bson")]
+    BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
 }
 
 pub struct SchemaRegistry {

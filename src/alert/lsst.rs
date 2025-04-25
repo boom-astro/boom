@@ -1,4 +1,5 @@
 use apache_avro::{from_avro_datum, from_value};
+use constcat::concat;
 use flare::Time;
 use mongodb::bson::doc;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -9,12 +10,17 @@ use crate::{
     alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
     conf,
     utils::{
+        self,
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         db::{cutout2bsonbinary, get_coordinates, mongify},
         spatial::xmatch,
     },
 };
 
+pub const STREAM_NAME: &str = "LSST";
+pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
+pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
+pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 const _MAGIC_BYTE: u8 = 0;
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
@@ -668,20 +674,25 @@ impl LsstAlertWorker {
 #[async_trait::async_trait]
 impl AlertWorker for LsstAlertWorker {
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
-        let stream_name = "LSST".to_string();
-
         let config_file = conf::load_config(&config_path)?;
 
         let xmatch_configs = conf::build_xmatch_configs(&config_file, "LSST")?;
 
         let db: mongodb::Database = conf::build_db(&config_file).await?;
 
-        let alert_collection = db.collection(&format!("{}_alerts", stream_name));
-        let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
-        let alert_cutout_collection = db.collection(&format!("{}_alerts_cutouts", stream_name));
+        let alert_collection = db.collection(&ALERT_COLLECTION);
+        let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
+
+        utils::db::create_index(
+            &alert_aux_collection,
+            doc! {"coordinates.radec_geojson": "2dsphere"},
+            true,
+        )
+        .await?;
 
         let worker = LsstAlertWorker {
-            stream_name: stream_name.clone(),
+            stream_name: STREAM_NAME.to_string(),
             schema_registry: SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL),
             xmatch_configs,
             db,

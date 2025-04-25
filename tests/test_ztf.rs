@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, ZtfAlertWorker},
+    alert::{AlertWorker, LsstAlertWorker, ZtfAlertWorker},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -7,7 +7,7 @@ use boom::{
         db::mongify,
         testing::{
             drop_alert_from_collections, insert_test_ztf_filter, remove_test_ztf_filter,
-            AlertRandomizerTrait, ZtfAlertRandomizer,
+            AlertRandomizerTrait, LsstAlertRandomizer, ZtfAlertRandomizer,
         },
     },
 };
@@ -224,6 +224,78 @@ async fn test_process_ztf_alert() {
     assert_eq!(fp_hists.len(), 10);
 
     drop_alert_from_collections(candid, "ZTF").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_process_ztf_lsst_xmatch() {
+    let config_file = conf::load_config(CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config_file).await.unwrap();
+
+    // ZTF setup
+    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
+    let aux_collection_name = "ZTF_alerts_aux";
+    let filter_aux = doc! {"_id": &object_id};
+    let r = conf::build_xmatch_configs(&config_file, "ZTF").unwrap()[0].radius;
+
+    // LSST setup
+    let mut lsst_alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
+
+    // If no LSST alerts have been processed, then no match should be found:
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("LSST")
+        .unwrap();
+    assert_eq!(matches.len(), 0);
+    drop_alert_from_collections(candid, "ZTF").await.unwrap();
+
+    // // Generate an LSST alert with the same ra and dec, but shifted north a bit within the search radius:
+    let (lsst_candid, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+        .ra(ra)
+        .dec(dec + 0.9 * r * 180.0 / std::f64::consts::PI)
+        .get()
+        .await;
+    lsst_alert_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
+    // Now check again, the lsst_object_id should be present:
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("LSST")
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches,
+        vec![lsst_candid.to_string()],
+        "matches: {:?}",
+        matches
+    );
+    drop_alert_from_collections(candid, "ZTF").await.unwrap();
+    drop_alert_from_collections(lsst_candid, "LSST")
+        .await
+        .unwrap();
+
+    // And do it again for a negative result.
 }
 
 #[tokio::test]

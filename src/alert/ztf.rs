@@ -1,5 +1,8 @@
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
+    alert::{
+        base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
+        lsst,
+    },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
@@ -9,14 +12,18 @@ use crate::{
 };
 use apache_avro::from_value;
 use apache_avro::{from_avro_datum, Reader, Schema};
+use constcat::concat;
 use flare::Time;
-use futures::StreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::io::Read;
 use tracing::{error, trace};
 
+pub const STREAM_NAME: &str = "ZTF";
+pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
+pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
+pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 const LSST_DEC_LIMIT: f32 = 33.5;
 
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
@@ -466,20 +473,18 @@ impl ZtfAlertWorker {
 #[async_trait::async_trait]
 impl AlertWorker for ZtfAlertWorker {
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
-        let stream_name = "ZTF".to_string();
-
         let config_file = conf::load_config(&config_path)?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, &stream_name)?;
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)?;
 
         let db: mongodb::Database = conf::build_db(&config_file).await?;
 
-        let alert_collection = db.collection(&format!("{}_alerts", stream_name));
-        let alert_aux_collection = db.collection(&format!("{}_alerts_aux", stream_name));
-        let alert_cutout_collection = db.collection(&format!("{}_alerts_cutouts", stream_name));
+        let alert_collection = db.collection(&ALERT_COLLECTION);
+        let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let worker = ZtfAlertWorker {
-            stream_name: stream_name.clone(),
+            stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
             db,
             alert_collection,
@@ -595,20 +600,12 @@ impl AlertWorker for ZtfAlertWorker {
 
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
+        let lsst_alert_aux_collection: mongodb::Collection<mongodb::bson::Document> =
+            self.db.collection(&lsst::ALERT_AUX_COLLECTION);
         let closest_match: Option<String> = if dec <= LSST_DEC_LIMIT as f64 {
-            let mut cursor = self
-                .alert_aux_collection
-                // TODO: Compound index on _id and coordinates? Migh save reading the documents
-                // TODO: try find_one instead?
-                // TODO: errors...
-                // TODO: to test,
-                // - insert the test lsst alert a la `test_process_lsst_alert()` in test_lsst.rs
-                // - edit the coordinates in mongo to be within the search radius
-                // - process ztf alert (somewhere in test_ztf.rs?), verify that the resulting doc has the lsst object id.
-                // - Repeat, but with lsst coords slightly outside the radius, verify that there's no match.
-                .find(doc! {
+            lsst_alert_aux_collection
+                .find_one(doc! {
                     "coordinates.radec_geojson": {
-                        // Try "legacy coordinates" (<x> and <y> are lon/lat)
                         "$nearSphere": [ra - 180.0, dec],
                         "$maxDistance": self.xmatch_configs[0].radius,
                     },
@@ -616,22 +613,9 @@ impl AlertWorker for ZtfAlertWorker {
                 .projection(doc! {
                     "_id": 1
                 })
-                .limit(1) // The nearest match, nearSphere sorts by increasing distance
-                .await
-                .map_err(AlertError::FindObjectIdError)?;
-            let maybe_doc = cursor.next().await;
-            let match_id = if let Some(res) = maybe_doc {
-                Some(
-                    res.map(|doc| {
-                        // TODO: handle ValueAccessError
-                        doc.get_str("_id").unwrap().to_string()
-                    })
-                    .map_err(AlertError::FindObjectIdError)?,
-                )
-            } else {
-                None
-            };
-            match_id
+                .await?
+                .map(|doc| doc.get_i64("_id").map(|id| id.to_string()))
+                .transpose()?
         } else {
             None
         };
