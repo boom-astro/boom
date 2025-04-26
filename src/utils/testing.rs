@@ -295,8 +295,8 @@ impl AlertRandomizerTrait for ZtfAlertRandomizer {
             schema: Some(schema),
             candid: Some(Self::randomize_i64()),
             object_id: Some(Self::randomize_object_id()),
-            ra: None,
-            dec: None,
+            ra: Some(Self::randomize_ra()),
+            dec: Some(Self::randomize_dec()),
         }
     }
 
@@ -481,8 +481,8 @@ impl AlertRandomizerTrait for LsstAlertRandomizer {
             schema_registry: SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL),
             candid: Some(Self::randomize_i64()),
             object_id: Some(Self::randomize_i64()),
-            ra: None,
-            dec: None,
+            ra: Some(Self::randomize_ra()),
+            dec: Some(Self::randomize_dec()),
         }
     }
 
