@@ -711,7 +711,7 @@ impl AlertWorker for ZtfAlertWorker {
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
         if !alert_aux_exists {
-            match self
+            let result = self
                 .insert_aux(
                     &object_id,
                     ra,
@@ -721,22 +721,18 @@ impl AlertWorker for ZtfAlertWorker {
                     &fp_hist_doc,
                     now,
                 )
-                .await
-            {
-                Ok(_) => {}
-                Err(AlertError::AlertAuxExists) => {
-                    self.update_aux(
-                        &object_id,
-                        &prv_candidates_doc,
-                        &prv_nondetections_doc,
-                        &fp_hist_doc,
-                        now,
-                    )
-                    .await?;
-                }
-                Err(e) => {
-                    return Err(e);
-                }
+                .await;
+            if let Err(AlertError::AlertAuxExists) = result {
+                self.update_aux(
+                    &object_id,
+                    &prv_candidates_doc,
+                    &prv_nondetections_doc,
+                    &fp_hist_doc,
+                    now,
+                )
+                .await?;
+            } else {
+                result?;
             }
         } else {
             self.update_aux(
