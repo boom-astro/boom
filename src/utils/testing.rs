@@ -273,6 +273,7 @@ pub trait AlertRandomizerTrait {
     type ObjectId;
 }
 
+#[derive(Clone, Debug)]
 pub struct ZtfAlertRandomizer {
     payload: Option<Vec<u8>>,
     schema: Option<Schema>,
@@ -461,6 +462,7 @@ impl ZtfAlertRandomizer {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct LsstAlertRandomizer {
     payload: Option<Vec<u8>>,
     schema_registry: SchemaRegistry,

@@ -477,7 +477,7 @@ impl ZtfAlertWorker {
             return Ok(vec![]);
         }
 
-        let lsst_matches: Vec<i64> = if dec <= LSST_DEC_LIMIT as f64 {
+        let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
             let result = self
                 .lsst_alert_aux_collection
                 .find_one(doc! {

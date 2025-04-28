@@ -233,8 +233,9 @@ async fn test_process_ztf_lsst_xmatch() {
 
     // ZTF setup
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
-    let (_, object_id, ra, dec, bytes_content) =
-        ZtfAlertRandomizer::default().dec(10.0).get().await;
+    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(10.0);
+
+    let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";
     let filter_aux = doc! {"_id": &object_id};
 
@@ -277,12 +278,7 @@ async fn test_process_ztf_lsst_xmatch() {
         .await
         .unwrap();
 
-    let (_, _, _, _, bytes_content) = ZtfAlertRandomizer::default()
-        .objectid(&object_id)
-        .ra(ra)
-        .dec(dec)
-        .get()
-        .await;
+    let (_, _, _, _, bytes_content) = ztf_alert_randomizer.clone().rand_candid().get().await;
     alert_worker.process_alert(&bytes_content).await.unwrap();
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
@@ -313,12 +309,7 @@ async fn test_process_ztf_lsst_xmatch() {
         .await
         .unwrap();
 
-    let (_, _, _, _, bytes_content) = ZtfAlertRandomizer::default()
-        .objectid(&object_id)
-        .ra(ra)
-        .dec(dec)
-        .get()
-        .await;
+    let (_, _, _, _, bytes_content) = ztf_alert_randomizer.clone().rand_candid().get().await;
     alert_worker.process_alert(&bytes_content).await.unwrap();
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
@@ -337,7 +328,7 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(lsst_matches.len(), 1);
     assert_eq!(lsst_matches[0], lsst_object_id);
 
-    // 4. Further LSST alert, ZTF alert should have a new LSST alias
+    // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
     let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
         .dec(dec + 0.5 * LSST_XMATCH_RADIUS.to_degrees())
@@ -347,12 +338,8 @@ async fn test_process_ztf_lsst_xmatch() {
         .process_alert(&lsst_bytes_content)
         .await
         .unwrap();
-    let (_, _, _, _, bytes_content) = ZtfAlertRandomizer::default()
-        .objectid(&object_id)
-        .ra(ra)
-        .dec(dec)
-        .get()
-        .await;
+
+    let (_, _, _, _, bytes_content) = ztf_alert_randomizer.clone().rand_candid().get().await;
     alert_worker.process_alert(&bytes_content).await.unwrap();
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
