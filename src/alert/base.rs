@@ -205,12 +205,31 @@ pub enum AlertWorkerError {
 
 #[async_trait::async_trait]
 pub trait AlertWorker {
+    type ObjectId;
     async fn new(config_path: &str) -> Result<Self, AlertWorkerError>
     where
         Self: Sized;
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
+    async fn insert_aux(
+        self: &mut Self,
+        object_id: impl Into<Self::ObjectId> + Send,
+        ra: f64,
+        dec: f64,
+        prv_candidates_doc: &Vec<mongodb::bson::Document>,
+        prv_nondetections_doc: &Vec<mongodb::bson::Document>,
+        fp_hist_doc: &Vec<mongodb::bson::Document>,
+        now: f64,
+    ) -> Result<(), AlertError>;
+    async fn update_aux(
+        self: &mut Self,
+        object_id: impl Into<Self::ObjectId> + Send,
+        prv_candidates_doc: &Vec<mongodb::bson::Document>,
+        prv_nondetections_doc: &Vec<mongodb::bson::Document>,
+        fp_hist_doc: &Vec<mongodb::bson::Document>,
+        now: f64,
+    ) -> Result<(), AlertError>;
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError>;
 }
 
