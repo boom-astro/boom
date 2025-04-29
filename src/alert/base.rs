@@ -1,6 +1,7 @@
 use crate::utils::worker::WorkerCmd;
 use crate::{conf, utils::db::CreateIndexError};
 use apache_avro::Schema;
+use mongodb::bson::Document;
 use redis::AsyncCommands;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -25,6 +26,10 @@ pub enum SchemaRegistryError {
     CursorError(#[source] std::io::Error),
     #[error("could not find avro magic bytes")]
     MagicBytesError,
+    #[error("incorrect number of records in the avro file")]
+    InvalidRecordCount(usize),
+    #[error("integer overflow")]
+    IntegerOverflow,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -38,7 +43,7 @@ pub enum AlertError {
     #[error("failed to find objectid in the aux alert collection")]
     FindObjectIdError(#[source] mongodb::error::Error),
     #[error("failed to insert into the alert aux collection")]
-    InsertAuxAlertError(#[source] mongodb::error::Error),
+    InsertAlertAuxError(#[source] mongodb::error::Error),
     #[error("failed to update the alert aux collection")]
     UpdateAuxAlertError(#[source] mongodb::error::Error),
     #[error("failed to insert into the alert cutout collection")]
@@ -51,6 +56,8 @@ pub enum AlertError {
     SchemaRegistryError(#[from] SchemaRegistryError),
     #[error("alert already exists")]
     AlertExists,
+    #[error("alert aux already exists")]
+    AlertAuxExists,
     #[error("missing object_id")]
     MissingObjectId,
     #[error("missing cutout")]
@@ -204,12 +211,33 @@ pub enum AlertWorkerError {
 
 #[async_trait::async_trait]
 pub trait AlertWorker {
+    type ObjectId;
     async fn new(config_path: &str) -> Result<Self, AlertWorkerError>
     where
         Self: Sized;
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
+    async fn insert_aux(
+        self: &mut Self,
+        object_id: impl Into<Self::ObjectId> + Send,
+        ra: f64,
+        dec: f64,
+        prv_candidates_doc: &Vec<Document>,
+        prv_nondetections_doc: &Vec<Document>,
+        fp_hist_doc: &Vec<Document>,
+        survey_matches: &Document,
+        now: f64,
+    ) -> Result<(), AlertError>;
+    async fn update_aux(
+        self: &mut Self,
+        object_id: impl Into<Self::ObjectId> + Send,
+        prv_candidates_doc: &Vec<Document>,
+        prv_nondetections_doc: &Vec<Document>,
+        fp_hist_doc: &Vec<Document>,
+        survey_matches: &Document,
+        now: f64,
+    ) -> Result<(), AlertError>;
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError>;
 }
 
