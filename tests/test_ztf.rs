@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, LsstAlertWorker, ZtfAlertWorker, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, LsstAlertWorker, ZtfAlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -231,9 +231,9 @@ async fn test_process_ztf_lsst_xmatch() {
     let config_file = conf::load_config(CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
 
-    // ZTF setup
+    // ZTF setup: the dec should be *below* the LSST dec limit:
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
-    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(10.0);
+    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_LIMIT - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";

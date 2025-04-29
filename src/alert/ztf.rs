@@ -25,7 +25,7 @@ pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
-const LSST_DEC_LIMIT: f64 = 33.5;
+pub const LSST_DEC_LIMIT: f64 = 33.5;
 pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
 
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {

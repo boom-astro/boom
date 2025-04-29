@@ -8,4 +8,4 @@ pub use base::AlertWorkerError;
 pub use base::SchemaRegistry;
 pub use base::SchemaRegistryError;
 pub use lsst::{LsstAlertWorker, LSST_SCHEMA_REGISTRY_URL};
-pub use ztf::{ZtfAlertWorker, LSST_XMATCH_RADIUS};
+pub use ztf::{ZtfAlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS};
