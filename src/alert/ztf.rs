@@ -512,10 +512,6 @@ impl ZtfAlertWorker {
     }
 
     async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
-        if dec > LSST_DEC_LIMIT {
-            return Ok(vec![]);
-        }
-
         let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
             let result = self
                 .lsst_alert_aux_collection
@@ -543,7 +539,6 @@ impl ZtfAlertWorker {
         } else {
             vec![]
         };
-
         Ok(lsst_matches)
     }
 
