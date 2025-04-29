@@ -6,7 +6,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::{create_index, cutout2bsonbinary, get_coordinates, mongify},
         spatial::xmatch,
     },
 };
@@ -14,7 +14,7 @@ use apache_avro::from_value;
 use apache_avro::{from_avro_datum, Reader, Schema};
 use constcat::concat;
 use flare::Time;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::io::Read;
@@ -24,7 +24,9 @@ pub const STREAM_NAME: &str = "ZTF";
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
-const LSST_DEC_LIMIT: f32 = 33.5;
+
+const LSST_DEC_LIMIT: f64 = 33.5;
+pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
 
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
     // First, we extract the schema from the avro bytes
@@ -420,6 +422,7 @@ pub struct ZtfAlertWorker {
     alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
     cached_schema: Option<Schema>,
     cached_start_idx: Option<usize>,
+    lsst_alert_aux_collection: mongodb::Collection<mongodb::bson::Document>,
 }
 
 impl ZtfAlertWorker {
@@ -468,6 +471,50 @@ impl ZtfAlertWorker {
 
         Ok(alert)
     }
+
+    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
+        if dec > LSST_DEC_LIMIT {
+            return Ok(vec![]);
+        }
+
+        let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
+            let result = self
+                .lsst_alert_aux_collection
+                .find_one(doc! {
+                    "coordinates.radec_geojson": {
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": LSST_XMATCH_RADIUS,
+                    },
+                })
+                .projection(doc! {
+                    "_id": 1
+                })
+                .await;
+            match result {
+                Ok(Some(doc)) => {
+                    let object_id = doc.get_i64("_id")?;
+                    vec![object_id]
+                }
+                Ok(None) => vec![],
+                Err(e) => {
+                    error!("Error cross-matching with LSST: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        Ok(lsst_matches)
+    }
+
+    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
+        let lsst_matches = self.get_lsst_matches(ra, dec).await?;
+
+        Ok(doc! {
+            "LSST": lsst_matches,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -483,6 +530,16 @@ impl AlertWorker for ZtfAlertWorker {
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
+        create_index(
+            &alert_aux_collection,
+            doc! {"coordinates.radec_geojson": "2dsphere"},
+            false,
+        )
+        .await?;
+
+        let lsst_alert_aux_collection: mongodb::Collection<mongodb::bson::Document> =
+            db.collection(&lsst::ALERT_AUX_COLLECTION);
+
         let worker = ZtfAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
@@ -492,6 +549,7 @@ impl AlertWorker for ZtfAlertWorker {
             alert_cutout_collection,
             cached_schema: None,
             cached_start_idx: None,
+            lsst_alert_aux_collection,
         };
         Ok(worker)
     }
@@ -600,25 +658,14 @@ impl AlertWorker for ZtfAlertWorker {
 
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
-        let lsst_alert_aux_collection: mongodb::Collection<mongodb::bson::Document> =
-            self.db.collection(&lsst::ALERT_AUX_COLLECTION);
-        let closest_match: Option<String> = if dec <= LSST_DEC_LIMIT as f64 {
-            lsst_alert_aux_collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": self.xmatch_configs[0].radius,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await?
-                .map(|doc| doc.get_i64("_id").map(|id| id.to_string()))
-                .transpose()?
-        } else {
-            None
-        };
+        let start = std::time::Instant::now();
+
+        let survey_matches = self.get_survey_matches(ra, dec).await?;
+
+        trace!(
+            "Xmatching ZTF alert with other surveys: {:?}",
+            start.elapsed()
+        );
 
         if !alert_aux_exists {
             let start = std::time::Instant::now();
@@ -632,7 +679,7 @@ impl AlertWorker for ZtfAlertWorker {
                 "prv_nondetections": prv_nondetections_doc,
                 "fp_hists": fp_hist_doc,
                 "cross_matches": xmatches,
-                "aliases": { "LSST": closest_match.into_iter().collect::<Vec<_>>() },
+                "aliases": survey_matches,
                 "created_at": now,
                 "updated_at": now,
                 "coordinates": {
@@ -658,7 +705,7 @@ impl AlertWorker for ZtfAlertWorker {
                 },
                 "$set": {
                     "updated_at": now,
-                    "aliases.LSST": closest_match.into_iter().collect::<Vec<_>>(),
+                    "aliases": survey_matches,
                 }
             };
 

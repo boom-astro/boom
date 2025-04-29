@@ -75,6 +75,7 @@ pub enum AlertError {
     BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
 }
 
+#[derive(Clone, Debug)]
 pub struct SchemaRegistry {
     client: reqwest::Client,
     cache: HashMap<String, Schema>,

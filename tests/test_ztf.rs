@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, LsstAlertWorker, ZtfAlertWorker},
+    alert::{AlertWorker, LsstAlertWorker, ZtfAlertWorker, LSST_XMATCH_RADIUS},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -233,15 +233,26 @@ async fn test_process_ztf_lsst_xmatch() {
 
     // ZTF setup
     let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
-    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
+    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(10.0);
+
+    let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";
     let filter_aux = doc! {"_id": &object_id};
-    let r = conf::build_xmatch_configs(&config_file, "ZTF").unwrap()[0].radius;
 
     // LSST setup
     let mut lsst_alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
 
-    // If no LSST alerts have been processed, then no match should be found:
+    // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
+    let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+        .ra(ra)
+        .dec(dec + 1.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .get()
+        .await;
+    lsst_alert_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
     alert_worker.process_alert(&bytes_content).await.unwrap();
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
@@ -255,12 +266,11 @@ async fn test_process_ztf_lsst_xmatch() {
         .get_array("LSST")
         .unwrap();
     assert_eq!(matches.len(), 0);
-    drop_alert_from_collections(candid, "ZTF").await.unwrap();
 
-    // // Generate an LSST alert with the same ra and dec, but shifted north a bit within the search radius:
-    let (lsst_candid, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+    // 2. nearby LSST alert, ZTF alert should have an LSST alias
+    let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * r * 180.0 / std::f64::consts::PI)
+        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -268,7 +278,7 @@ async fn test_process_ztf_lsst_xmatch() {
         .await
         .unwrap();
 
-    // Now check again, the lsst_object_id should be present:
+    let (_, _, _, _, bytes_content) = ztf_alert_randomizer.clone().rand_candid().get().await;
     alert_worker.process_alert(&bytes_content).await.unwrap();
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
@@ -276,26 +286,78 @@ async fn test_process_ztf_lsst_xmatch() {
         .await
         .unwrap()
         .unwrap();
-    let matches = aux
+    let lsst_matches = aux
         .get_document("aliases")
         .unwrap()
         .get_array("LSST")
         .unwrap()
         .iter()
-        .map(|x| x.as_str().unwrap())
+        .map(|x| x.as_i64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        matches,
-        vec![lsst_candid.to_string()],
-        "matches: {:?}",
-        matches
-    );
-    drop_alert_from_collections(candid, "ZTF").await.unwrap();
-    drop_alert_from_collections(lsst_candid, "LSST")
+
+    assert_eq!(lsst_matches.len(), 1);
+    assert_eq!(lsst_matches[0], lsst_object_id);
+
+    // 3. Closer LSST alert, ZTF alert should have a new LSST alias
+    let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+        .ra(ra)
+        .dec(dec + 0.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .get()
+        .await;
+    lsst_alert_worker
+        .process_alert(&lsst_bytes_content)
         .await
         .unwrap();
 
-    // And do it again for a negative result.
+    let (_, _, _, _, bytes_content) = ztf_alert_randomizer.clone().rand_candid().get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let lsst_matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("LSST")
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lsst_matches.len(), 1);
+    assert_eq!(lsst_matches[0], lsst_object_id);
+
+    // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
+    let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+        .ra(ra)
+        .dec(dec + 0.5 * LSST_XMATCH_RADIUS.to_degrees())
+        .get()
+        .await;
+    lsst_alert_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
+    let (_, _, _, _, bytes_content) = ztf_alert_randomizer.clone().rand_candid().get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let lsst_matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("LSST")
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lsst_matches.len(), 1);
+    assert_eq!(lsst_matches[0], lsst_object_id);
+    assert_ne!(lsst_matches[0], bad_lsst_object_id);
 }
 
 #[tokio::test]
