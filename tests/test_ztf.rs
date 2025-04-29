@@ -294,9 +294,7 @@ async fn test_process_ztf_lsst_xmatch() {
         .iter()
         .map(|x| x.as_i64().unwrap())
         .collect::<Vec<_>>();
-
-    assert_eq!(lsst_matches.len(), 1);
-    assert_eq!(lsst_matches[0], lsst_object_id);
+    assert_eq!(lsst_matches, vec![lsst_object_id]);
 
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
@@ -325,8 +323,7 @@ async fn test_process_ztf_lsst_xmatch() {
         .iter()
         .map(|x| x.as_i64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lsst_matches.len(), 1);
-    assert_eq!(lsst_matches[0], lsst_object_id);
+    assert_eq!(lsst_matches, vec![lsst_object_id]);
 
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
     let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
@@ -355,9 +352,45 @@ async fn test_process_ztf_lsst_xmatch() {
         .iter()
         .map(|x| x.as_i64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lsst_matches.len(), 1);
-    assert_eq!(lsst_matches[0], lsst_object_id);
-    assert_ne!(lsst_matches[0], bad_lsst_object_id);
+    assert_eq!(lsst_matches, vec![lsst_object_id]);
+    assert_ne!(lsst_matches, vec![bad_lsst_object_id]);
+
+    // 5. This ZTF alert is above the LSST dec cutoff and therefore should not
+    //    even attempt to match. Test this by creating an LSST alert with an
+    //    unrealistically high dec that ZTF would otherwise match without this
+    //    constraint:
+    let (_, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default()
+        .dec(LSST_DEC_LIMIT + 10.0)
+        .get()
+        .await;
+
+    let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+        .ra(ra)
+        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .get()
+        .await;
+    lsst_alert_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let filter_aux = doc! {"_id": &object_id};
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux)
+        .await
+        .unwrap()
+        .unwrap();
+    let lsst_matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("LSST")
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lsst_matches.len(), 0);
 }
 
 #[tokio::test]
