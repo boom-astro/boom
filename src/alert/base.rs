@@ -226,7 +226,7 @@ pub trait AlertWorker {
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        survey_matches: &Document,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError>;
     async fn update_aux(
@@ -235,7 +235,7 @@ pub trait AlertWorker {
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        survey_matches: &Document,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError>;
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError>;

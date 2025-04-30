@@ -724,7 +724,7 @@ impl AlertWorker for LsstAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        _survey_matches: &Document,
+        _survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let start = std::time::Instant::now();
@@ -769,7 +769,7 @@ impl AlertWorker for LsstAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        _survey_matches: &Document,
+        _survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let start = std::time::Instant::now();
@@ -897,7 +897,7 @@ impl AlertWorker for LsstAlertWorker {
                     &prv_candidates_doc,
                     &prv_nondetections_doc,
                     &fp_hist_doc,
-                    &Document::new(),
+                    &None,
                     now,
                 )
                 .await;
@@ -907,7 +907,7 @@ impl AlertWorker for LsstAlertWorker {
                     &prv_candidates_doc,
                     &prv_nondetections_doc,
                     &fp_hist_doc,
-                    &Document::new(),
+                    &None,
                     now,
                 )
                 .await?;
@@ -920,7 +920,7 @@ impl AlertWorker for LsstAlertWorker {
                 &prv_candidates_doc,
                 &prv_nondetections_doc,
                 &fp_hist_doc,
-                &Document::new(),
+                &None,
                 now,
             )
             .await?;

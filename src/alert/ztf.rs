@@ -610,7 +610,7 @@ impl AlertWorker for ZtfAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        survey_matches: &Document,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let start = std::time::Instant::now();
@@ -656,7 +656,7 @@ impl AlertWorker for ZtfAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        survey_matches: &Document,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let start = std::time::Instant::now();
@@ -776,7 +776,7 @@ impl AlertWorker for ZtfAlertWorker {
         trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
 
         let start = std::time::Instant::now();
-        let survey_matches = self.get_survey_matches(ra, dec).await?;
+        let survey_matches = Some(self.get_survey_matches(ra, dec).await?);
         trace!(
             "Xmatching ZTF alert with other surveys: {:?}",
             start.elapsed()
