@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tracing::{error, info, trace, warn};
 
-use crate::utils::worker::WorkerCmd;
+use crate::{conf, utils::worker::WorkerCmd};
 
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
@@ -383,6 +383,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
+    let config = conf::load_config(config_path)?;
+
     let mut filter_worker = T::new(config_path).await?;
 
     if !filter_worker.has_filters() {
@@ -394,12 +396,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     }
 
     // in a never ending loop, loop over the queues
-    let client_redis = redis::Client::open("redis://localhost:6379".to_string())
-        .map_err(FilterWorkerError::ConnectRedisError)?;
-    let mut con = client_redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(FilterWorkerError::ConnectRedisError)?;
+    let mut con = conf::build_redis(&config).await?;
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();

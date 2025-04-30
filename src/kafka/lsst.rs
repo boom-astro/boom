@@ -1,4 +1,7 @@
-use crate::kafka::base::{consume_partitions, AlertConsumer};
+use crate::{
+    conf,
+    kafka::base::{consume_partitions, AlertConsumer},
+};
 use redis::AsyncCommands;
 use tracing::{error, info};
 
@@ -13,6 +16,7 @@ pub struct LsstAlertConsumer {
     username: String,
     password: String,
     server: String,
+    config_path: String,
 }
 
 #[async_trait::async_trait]
@@ -24,6 +28,7 @@ impl AlertConsumer for LsstAlertConsumer {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
+        config_path: &str,
     ) -> Self {
         // 45 should be divisible by n_threads
         if 45 % n_threads != 0 {
@@ -64,11 +69,12 @@ impl AlertConsumer for LsstAlertConsumer {
             username: username.unwrap(),
             password: password.unwrap(),
             server,
+            config_path: config_path.to_string(),
         }
     }
 
-    fn default() -> Self {
-        Self::new(1, None, None, None, None, None)
+    fn default(config_path: &str) -> Self {
+        Self::new(1, None, None, None, None, None, config_path)
     }
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
         // divide the 45 LSST partitions for the n_threads that will read them
@@ -89,6 +95,7 @@ impl AlertConsumer for LsstAlertConsumer {
             let username = self.username.clone();
             let password = self.password.clone();
             let server = self.server.clone();
+            let config_path = self.config_path.clone();
             let handle = tokio::spawn(async move {
                 let result = consume_partitions(
                     &i.to_string(),
@@ -101,6 +108,7 @@ impl AlertConsumer for LsstAlertConsumer {
                     &server,
                     Some(&username),
                     Some(&password),
+                    &config_path,
                 )
                 .await;
                 if let Err(e) = result {
@@ -118,8 +126,8 @@ impl AlertConsumer for LsstAlertConsumer {
     }
 
     async fn clear_output_queue(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let config = conf::load_config(&self.config_path)?;
+        let mut con = conf::build_redis(&config).await?;
         let _: () = con.del(&self.output_queue).await.unwrap();
         info!("Cleared redis queued for LSST Kafka consumer");
         Ok(())

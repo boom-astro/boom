@@ -205,11 +205,8 @@ pub async fn empty_processed_alerts_queue(
     input_queue_name: &str,
     output_queue_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client_redis = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
-    let mut con = client_redis
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
+    let config = conf::load_config("tests/config.test.yaml")?;
+    let mut con = conf::build_redis(&config).await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
     con.del::<&str, usize>("{}_temp").await.unwrap();
     con.del::<&str, usize>(output_queue_name).await.unwrap();

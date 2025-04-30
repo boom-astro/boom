@@ -247,6 +247,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), AlertWorkerError> {
+    let config = conf::load_config(config_path)?;
+
     let mut alert_processor = T::new(config_path).await?;
     let stream_name = alert_processor.stream_name();
 
@@ -254,12 +256,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let temp_queue_name = format!("{}_temp", input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
-    let client_redis = redis::Client::open("redis://localhost:6379".to_string())
-        .map_err(AlertWorkerError::ConnectRedisError)?;
-    let mut con = client_redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(AlertWorkerError::ConnectRedisError)?;
+    let mut con = conf::build_redis(&config).await?;
 
     let command_interval: i64 = 500;
     let mut command_check_countdown = command_interval;
