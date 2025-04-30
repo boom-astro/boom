@@ -138,10 +138,14 @@ It can get pretty painful in Rust to work with Avro schemas, and more specifical
     cargo install rsgen-avro --features="build-cli"
     ```
 
-2. Then, generate the Rust structs from the Avro schema with:
+2. Second, download the latest avro schema for the survey you want to add to BOOM, here are some links for references:
+    - ZTF: https://github.com/ZwickyTransientFacility/ztf-avro-alert
+    - LSST: https://github.com/lsst/alert_packet
+
+3. Then, generate the Rust structs from the Avro schema with:
 
     ```bash
-    rsgen-avro "schema/ztf/*.avsc" -
+    rsgen-avro "path/to/the/schema(s)/directory" -
     ```
 
     This will output the Rust structs to the standard output, which you can then copy-paste in a lib file in the `src` directory, so you can use them in your code.
