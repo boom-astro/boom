@@ -1,23 +1,22 @@
 use boom::{
-    alert::{AlertWorker, LsstAlertWorker, ZtfAlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
     utils::{
         db::mongify,
         testing::{
-            drop_alert_from_collections, insert_test_ztf_filter, remove_test_ztf_filter,
-            AlertRandomizerTrait, LsstAlertRandomizer, ZtfAlertRandomizer,
+            drop_alert_from_collections, insert_test_ztf_filter, lsst_alert_worker,
+            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizerTrait, LsstAlertRandomizer,
+            ZtfAlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
 use mongodb::bson::doc;
 
-const CONFIG_FILE: &str = "tests/config.test.yaml";
-
 #[tokio::test]
 async fn test_alert_from_avro_bytes() {
-    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
@@ -156,7 +155,7 @@ async fn test_alert_from_avro_bytes() {
 
 #[tokio::test]
 async fn test_process_ztf_alert() {
-    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
@@ -169,8 +168,8 @@ async fn test_process_ztf_alert() {
     assert!(result.is_err());
 
     // let's query the database to check if the alert was inserted
-    let config_file = conf::load_config(CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
 
@@ -228,11 +227,11 @@ async fn test_process_ztf_alert() {
 
 #[tokio::test]
 async fn test_process_ztf_lsst_xmatch() {
-    let config_file = conf::load_config(CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
-    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = ztf_alert_worker().await;
     let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_LIMIT - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
@@ -240,7 +239,7 @@ async fn test_process_ztf_lsst_xmatch() {
     let filter_aux = doc! {"_id": &object_id};
 
     // LSST setup
-    let mut lsst_alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut lsst_alert_worker = lsst_alert_worker().await;
 
     // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
@@ -395,7 +394,7 @@ async fn test_process_ztf_lsst_xmatch() {
 
 #[tokio::test]
 async fn test_ml_ztf_alert() {
-    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = ztf_alert_worker().await;
 
     // we only randomize the candid and object_id here, since the ra/dec
     // are features of the models and would change the results
@@ -408,7 +407,7 @@ async fn test_ml_ztf_alert() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
 
-    let ml_worker = ZtfMLWorker::new(CONFIG_FILE).await.unwrap();
+    let ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = ml_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
 
@@ -420,8 +419,8 @@ async fn test_ml_ztf_alert() {
     assert_eq!(alert, &format!("1,{}", candid));
 
     // check that the alert was inserted in the DB, and ML scores added later
-    let config_file = conf::load_config(CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
     let alert = db
@@ -450,7 +449,7 @@ async fn test_ml_ztf_alert() {
 
 #[tokio::test]
 async fn test_filter_ztf_alert() {
-    let mut alert_worker = ZtfAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
@@ -459,7 +458,7 @@ async fn test_filter_ztf_alert() {
 
     let filter_id = insert_test_ztf_filter().await.unwrap();
 
-    let mut filter_worker = ZtfFilterWorker::new(CONFIG_FILE).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker
         .process_alerts(&[format!("1,{}", candid)])
         .await;

@@ -1,13 +1,14 @@
 use boom::conf;
+use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
 fn test_load_config() {
-    let conf = conf::load_config("tests/config.test.yaml");
-    assert!(conf.is_ok());
+    let config = conf::load_config(TEST_CONFIG_FILE);
+    assert!(config.is_ok());
 
-    let conf = conf.unwrap();
+    let config = config.unwrap();
 
-    let crossmatches = conf.get_table("crossmatch").unwrap();
+    let crossmatches = config.get_table("crossmatch").unwrap();
     // check that ZTF is one of the keys
     assert!(crossmatches.get("ZTF").is_some());
     let crossmatches_ztf = crossmatches.get("ZTF").clone().cloned();
@@ -16,7 +17,7 @@ fn test_load_config() {
     // check that the crossmatch for ZTF is an array
     assert_eq!(crossmatches_ztf.len(), 4);
 
-    let hello = conf.get_string("hello");
+    let hello = config.get_string("hello");
     assert!(hello.is_ok());
 
     let hello = hello.unwrap();
@@ -25,14 +26,14 @@ fn test_load_config() {
 
 #[test]
 fn test_build_xmatch_configs() {
-    let conf = conf::load_config("tests/config.test.yaml").unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
 
-    let crossmatches = conf.get_table("crossmatch").unwrap();
+    let crossmatches = config.get_table("crossmatch").unwrap();
     let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
     assert!(crossmatches_ztf.len() > 0);
 
-    let catalog_xmatch_configs = conf::build_xmatch_configs(&conf, "ZTF").unwrap();
+    let catalog_xmatch_configs = conf::build_xmatch_configs(&config, "ZTF").unwrap();
 
     assert_eq!(catalog_xmatch_configs.len(), 4);
 
@@ -57,8 +58,8 @@ fn test_build_xmatch_configs() {
 
 #[tokio::test]
 async fn test_build_db() {
-    let conf = conf::load_config("tests/config.test.yaml").unwrap();
-    let db = conf::build_db(&conf).await.unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
 
     // try a simple query to just validate that the connection works
     let _collections = db.list_collection_names().await.unwrap();
@@ -95,7 +96,7 @@ fn test_catalogxmatchconfig() {
     assert_eq!(projection, ps1_projection);
 
     // validate the from_config method
-    let config = conf::load_config("tests/config.test.yaml").unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
     let crossmatches = config.get_table("crossmatch").unwrap();
     let crossmatches_ztf = crossmatches.get("ZTF").cloned().unwrap();
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
