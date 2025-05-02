@@ -1,6 +1,9 @@
 use crate::{
-    alert::{SchemaRegistry, LSST_SCHEMA_REGISTRY_URL},
+    alert::{
+        AlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_URL,
+    },
     conf,
+    utils::db::initialize_survey_indexes,
 };
 use apache_avro::{
     from_avro_datum,
@@ -15,13 +18,33 @@ use std::io::Read;
 use tracing::error;
 // Utility for unit tests
 
+pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
+
+pub async fn ztf_alert_worker() -> ZtfAlertWorker {
+    // initialize the ZTF indexes
+    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
+        .await
+        .unwrap();
+    initialize_survey_indexes("ZTF", &db).await.unwrap();
+    ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn lsst_alert_worker() -> LsstAlertWorker {
+    // initialize the ZTF indexes
+    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
+        .await
+        .unwrap();
+    initialize_survey_indexes("LSST", &db).await.unwrap();
+    LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
 // drops alert collections from the database
 pub async fn drop_alert_collections(
     alert_collection_name: &str,
     alert_cutout_collection_name: &str,
     alert_aux_collection_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     db.collection::<mongodb::bson::Document>(alert_collection_name)
         .drop()
@@ -39,7 +62,7 @@ pub async fn drop_alert_from_collections(
     candid: i64,
     stream_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let alert_collection_name = format!("{}_alerts", stream_name);
     let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
@@ -115,7 +138,7 @@ pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>>
       }
     };
 
-    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let x = db
         .collection::<mongodb::bson::Document>("filters")
@@ -132,7 +155,7 @@ pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>>
 }
 
 pub async fn remove_test_ztf_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
@@ -174,7 +197,7 @@ pub async fn insert_test_lsst_filter() -> Result<i32, Box<dyn std::error::Error>
       }
     };
 
-    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let x = db
         .collection::<mongodb::bson::Document>("filters")
@@ -191,7 +214,7 @@ pub async fn insert_test_lsst_filter() -> Result<i32, Box<dyn std::error::Error>
 }
 
 pub async fn remove_test_lsst_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config("tests/config.test.yaml")?;
+    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")

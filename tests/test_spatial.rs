@@ -1,12 +1,13 @@
 use boom::conf;
 use boom::utils::spatial;
+use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[tokio::test]
 async fn test_xmatch() {
-    let conf = conf::load_config("tests/config.test.yaml").unwrap();
-    let db = conf::build_db(&conf).await.unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
 
-    let catalog_xmatch_configs = conf::build_xmatch_configs(&conf, "ZTF").unwrap();
+    let catalog_xmatch_configs = conf::build_xmatch_configs(&config, "ZTF").unwrap();
     assert_eq!(catalog_xmatch_configs.len(), 4);
 
     let ra = 323.233462;

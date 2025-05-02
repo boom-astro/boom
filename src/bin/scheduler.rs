@@ -1,7 +1,10 @@
 use boom::{
     conf,
     scheduler::{get_num_workers, ThreadPool},
-    utils::worker::{check_flag, sig_int_handler, WorkerType},
+    utils::{
+        db::initialize_survey_indexes,
+        worker::{check_flag, sig_int_handler, WorkerType},
+    },
 };
 use clap::Parser;
 use std::{
@@ -76,6 +79,22 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // initialize the indexes for the survey
+    let db: mongodb::Database = match conf::build_db(&config_file).await {
+        Ok(db) => db,
+        Err(e) => {
+            warn!("could not connect to database: {}", e);
+            std::process::exit(1);
+        }
+    };
+    match initialize_survey_indexes(&stream_name, &db).await {
+        Ok(_) => info!("initialized indexes for {}", stream_name),
+        Err(e) => {
+            warn!("could not initialize indexes for {}: {}", stream_name, e);
+            std::process::exit(1);
+        }
+    }
 
     // setup signal handler thread
     let interrupt = Arc::new(Mutex::new(false));

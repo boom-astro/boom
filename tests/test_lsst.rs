@@ -1,19 +1,17 @@
 use boom::{
-    alert::{AlertWorker, LsstAlertWorker},
+    alert::AlertWorker,
     conf,
     filter::{FilterWorker, LsstFilterWorker},
     utils::testing::{
-        drop_alert_from_collections, insert_test_lsst_filter, remove_test_lsst_filter,
-        AlertRandomizerTrait, LsstAlertRandomizer,
+        drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
+        remove_test_lsst_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
     },
 };
 use mongodb::bson::doc;
 
-const CONFIG_FILE: &str = "tests/config.test.yaml";
-
 #[tokio::test]
 async fn test_lsst_alert_from_avro_bytes() {
-    let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let alert = alert_worker
@@ -79,7 +77,7 @@ async fn test_lsst_alert_from_avro_bytes() {
 
 #[tokio::test]
 async fn test_process_lsst_alert() {
-    let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
@@ -91,8 +89,8 @@ async fn test_process_lsst_alert() {
     assert!(result.is_err());
 
     // let's query the database to check if the alert was inserted
-    let config_file = conf::load_config(CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "LSST_alerts";
     let filter = doc! {"_id": candid};
 
@@ -151,7 +149,7 @@ async fn test_process_lsst_alert() {
 
 #[tokio::test]
 async fn test_filter_lsst_alert() {
-    let mut alert_worker = LsstAlertWorker::new(CONFIG_FILE).await.unwrap();
+    let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) = LsstAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await.unwrap();
@@ -159,7 +157,7 @@ async fn test_filter_lsst_alert() {
 
     let filter_id = insert_test_lsst_filter().await.unwrap();
 
-    let mut filter_worker = LsstFilterWorker::new(CONFIG_FILE).await.unwrap();
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
     assert!(result.is_ok());
