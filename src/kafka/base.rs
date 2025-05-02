@@ -4,6 +4,8 @@ use rdkafka::message::Message;
 use redis::AsyncCommands;
 use tracing::{error, info, trace};
 
+use crate::conf;
+
 pub async fn consume_partitions(
     id: &str,
     topic: &str,
@@ -15,23 +17,24 @@ pub async fn consume_partitions(
     server: &str,
     username: Option<&str>,
     password: Option<&str>,
+    config_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = ClientConfig::new();
-    config
+    let mut producer_config = ClientConfig::new();
+    producer_config
         .set("bootstrap.servers", server)
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id);
 
     if let (Some(username), Some(password)) = (username, password) {
-        config
+        producer_config
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
     } else {
-        config.set("security.protocol", "PLAINTEXT");
+        producer_config.set("security.protocol", "PLAINTEXT");
     }
 
-    let consumer: BaseConsumer = config.create().unwrap();
+    let consumer: BaseConsumer = producer_config.create().unwrap();
 
     consumer.subscribe(&[topic]).unwrap();
 
@@ -51,11 +54,8 @@ pub async fn consume_partitions(
 
     consumer.assign(&tpl).unwrap();
 
-    let mut con = redis::Client::open("redis://localhost:6379".to_string())
-        .unwrap()
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
+    let config = conf::load_config(config_path)?;
+    let mut con = conf::build_redis(&config).await?;
 
     let mut total = 0;
 
@@ -114,9 +114,10 @@ pub trait AlertConsumer: Sized {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
+        config_path: &str,
     ) -> Self;
-    fn default() -> Self {
-        Self::new(1, None, None, None, None, None)
+    fn default(config_path: &str) -> Self {
+        Self::new(1, None, None, None, None, None, config_path)
     }
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>>;
     async fn clear_output_queue(&self) -> Result<(), Box<dyn std::error::Error>>;

@@ -15,6 +15,8 @@ pub enum BoomConfigError {
     MissingKeyError,
     #[error("failed to connect to database using config")]
     ConnectMongoError(#[from] mongodb::error::Error),
+    #[error("failed to connect to redis using config")]
+    ConnectRedisError(#[source] redis::RedisError),
 }
 
 pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
@@ -205,6 +207,41 @@ pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigErro
     let db = client_mongo.database(&name);
 
     Ok(db)
+}
+
+pub async fn build_redis(
+    conf: &Config,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    let redis_conf = conf
+        .get_table("redis")
+        .map_err(BoomConfigError::InvalidConfigError)?;
+
+    let host = match redis_conf.get("host") {
+        Some(host) => host
+            .clone()
+            .into_string()
+            .map_err(BoomConfigError::InvalidConfigError)?,
+        None => "localhost".to_string(),
+    };
+
+    let port = match redis_conf.get("port") {
+        Some(port) => port
+            .clone()
+            .into_int()
+            .map_err(BoomConfigError::InvalidConfigError)? as u16,
+        None => 6379,
+    };
+
+    let uri = format!("redis://{}:{}/", host, port);
+
+    let client_redis = redis::Client::open(uri).map_err(BoomConfigError::ConnectRedisError)?;
+
+    let con = client_redis
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(BoomConfigError::ConnectRedisError)?;
+
+    Ok(con)
 }
 
 #[derive(Debug)]

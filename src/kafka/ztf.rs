@@ -1,4 +1,7 @@
-use crate::kafka::base::{consume_partitions, AlertConsumer};
+use crate::{
+    conf,
+    kafka::base::{consume_partitions, AlertConsumer},
+};
 use rdkafka::config::ClientConfig;
 use redis::AsyncCommands;
 use tracing::{error, info};
@@ -13,6 +16,7 @@ pub struct ZtfAlertConsumer {
     max_in_queue: usize,
     group_id: String,
     server: String,
+    config_path: String,
 }
 
 #[async_trait::async_trait]
@@ -24,6 +28,7 @@ impl AlertConsumer for ZtfAlertConsumer {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server: Option<&str>,
+        config_path: &str,
     ) -> Self {
         if 15 % n_threads != 0 {
             panic!("Number of threads should be a factor of 15");
@@ -49,11 +54,12 @@ impl AlertConsumer for ZtfAlertConsumer {
             max_in_queue,
             group_id,
             server,
+            config_path: config_path.to_string(),
         }
     }
 
-    fn default() -> Self {
-        Self::new(1, None, None, None, None, None)
+    fn default(config_path: &str) -> Self {
+        Self::new(1, None, None, None, None, None, config_path)
     }
 
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
@@ -75,6 +81,7 @@ impl AlertConsumer for ZtfAlertConsumer {
             let output_queue = self.output_queue.clone();
             let group_id = self.group_id.clone();
             let server = self.server.clone();
+            let config_path = self.config_path.clone();
             let handle = tokio::spawn(async move {
                 let result = consume_partitions(
                     &i.to_string(),
@@ -87,6 +94,7 @@ impl AlertConsumer for ZtfAlertConsumer {
                     &server,
                     None,
                     None,
+                    &config_path,
                 )
                 .await;
                 if let Err(e) = result {
@@ -104,8 +112,8 @@ impl AlertConsumer for ZtfAlertConsumer {
     }
 
     async fn clear_output_queue(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = redis::Client::open("redis://localhost:6379".to_string()).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let config = conf::load_config(&self.config_path)?;
+        let mut con = conf::build_redis(&config).await?;
         let _: () = con.del(&self.output_queue).await.unwrap();
         info!("Cleared redis queued for ZTF Kafka consumer");
         Ok(())

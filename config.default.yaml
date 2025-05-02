@@ -7,6 +7,9 @@ database:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+redis:
+  host: localhost
+  port: 6379
 workers:
   ZTF:
     command_interval: 500

@@ -58,13 +58,8 @@ pub async fn run_ml_worker<T: MLWorker>(
 ) -> Result<(), MLWorkerError> {
     let ml_worker = T::new(config_path).await?;
 
-    // in a never ending loop, loop over the queues
-    let client_redis = redis::Client::open("redis://localhost:6379".to_string())
-        .map_err(MLWorkerError::ConnectRedisError)?;
-    let mut con = client_redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(MLWorkerError::ConnectRedisError)?;
+    let config = conf::load_config(config_path)?;
+    let mut con = conf::build_redis(&config).await?;
 
     let input_queue = ml_worker.input_queue_name();
     let output_queue = ml_worker.output_queue_name();
