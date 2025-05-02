@@ -11,7 +11,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
-        db::{create_index, cutout2bsonbinary, get_coordinates, mongify},
+        db::{cutout2bsonbinary, get_coordinates, initialize_survey_indexes, mongify},
         spatial::xmatch,
     },
 };
@@ -685,12 +685,7 @@ impl AlertWorker for LsstAlertWorker {
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
-        create_index(
-            &alert_aux_collection,
-            doc! {"coordinates.radec_geojson": "2dsphere"},
-            false,
-        )
-        .await?;
+        initialize_survey_indexes(STREAM_NAME, &db).await?;
 
         let worker = LsstAlertWorker {
             stream_name: STREAM_NAME.to_string(),
