@@ -37,9 +37,7 @@ fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> 
         if j > 9 {
             return Err(SchemaRegistryError::IntegerOverflow);
         }
-        reader
-            .read_exact(&mut buf[..])
-            .map_err(SchemaRegistryError::CursorError)?;
+        reader.read_exact(&mut buf[..])?;
 
         i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
         if (buf[0] >> 7) == 0 {
@@ -68,7 +66,7 @@ fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
     // First, we extract the schema from the avro bytes
     let cursor = std::io::Cursor::new(avro_bytes);
-    let reader = Reader::new(cursor).map_err(SchemaRegistryError::InvalidSchema)?;
+    let reader = Reader::new(cursor)?;
     let schema = reader.writer_schema();
 
     // Then, we look for the index of the start of the data
@@ -78,22 +76,18 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
 
     // Four bytes, ASCII 'O', 'b', 'j', followed by 1
     let mut buf = [0; 4];
-    cursor
-        .read_exact(&mut buf)
-        .map_err(SchemaRegistryError::CursorError)?;
+    cursor.read_exact(&mut buf)?;
     if buf != [b'O', b'b', b'j', 1u8] {
         return Err(SchemaRegistryError::MagicBytesError);
     }
 
     // Then there is the file metadata, including the schema
     let meta_schema = Schema::map(Schema::Bytes);
-    from_avro_datum(&meta_schema, &mut cursor, None).map_err(SchemaRegistryError::InvalidSchema)?;
+    from_avro_datum(&meta_schema, &mut cursor, None)?;
 
     // Then the 16-byte, randomly-generated sync marker for this file.
     let mut buf = [0; 16];
-    cursor
-        .read_exact(&mut buf)
-        .map_err(SchemaRegistryError::CursorError)?;
+    cursor.read_exact(&mut buf)?;
 
     // each avro record is preceded by:
     // 1. a variable-length integer, the number of records in the block

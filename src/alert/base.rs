@@ -10,20 +10,18 @@ use tracing::{error, info, trace, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
-    #[error("invalid schema")]
-    InvalidSchema(#[source] apache_avro::Error),
+    #[error("error from avro")]
+    Avro(#[from] apache_avro::Error),
+    #[error("error from reqwest")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("error from std::io")]
+    Io(#[from] std::io::Error),
     #[error("invalid version")]
     InvalidVersion,
     #[error("invalid subject")]
     InvalidSubject,
-    #[error("connection error")]
-    ConnectionError(#[source] reqwest::Error),
-    #[error("parsing error")]
-    ParsingError(#[source] reqwest::Error),
     #[error("could not find expected content in response")]
     InvalidResponse,
-    #[error("cursor error")]
-    CursorError(#[source] std::io::Error),
     #[error("could not find avro magic bytes")]
     MagicBytesError,
     #[error("incorrect number of records in the avro file")]
@@ -105,13 +103,9 @@ impl SchemaRegistry {
             .client
             .get(&format!("{}/subjects", &self.url))
             .send()
-            .await
-            .map_err(SchemaRegistryError::ConnectionError)?;
+            .await?;
 
-        let response = response
-            .json::<Vec<String>>()
-            .await
-            .map_err(SchemaRegistryError::ParsingError)?;
+        let response = response.json::<Vec<String>>().await?;
 
         Ok(response)
     }
@@ -127,13 +121,9 @@ impl SchemaRegistry {
             .client
             .get(&format!("{}/subjects/{}/versions", &self.url, subject))
             .send()
-            .await
-            .map_err(SchemaRegistryError::ConnectionError)?;
+            .await?;
 
-        let response = response
-            .json::<Vec<u32>>()
-            .await
-            .map_err(SchemaRegistryError::ParsingError)?;
+        let response = response.json::<Vec<u32>>().await?;
 
         Ok(response)
     }
@@ -155,19 +145,15 @@ impl SchemaRegistry {
                 &self.url, subject, version
             ))
             .send()
-            .await
-            .map_err(SchemaRegistryError::ConnectionError)?;
+            .await?;
 
-        let response = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(SchemaRegistryError::ParsingError)?;
+        let response = response.json::<serde_json::Value>().await?;
 
         let schema_str = response["schema"]
             .as_str()
             .ok_or(SchemaRegistryError::InvalidResponse)?;
 
-        let schema = Schema::parse_str(schema_str).map_err(SchemaRegistryError::InvalidSchema)?;
+        let schema = Schema::parse_str(schema_str)?;
         Ok(schema)
     }
 
