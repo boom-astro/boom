@@ -32,24 +32,12 @@ pub enum SchemaRegistryError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AlertError {
-    #[error("failed to decode alert")]
-    DecodeError(#[source] apache_avro::Error),
-    #[error("failed to find candid in the alert collection")]
-    FindCandIdError(#[source] mongodb::error::Error),
-    #[error("failed to insert into the alert collection")]
-    InsertAlertError(#[source] mongodb::error::Error),
-    #[error("failed to find objectid in the aux alert collection")]
-    FindObjectIdError(#[source] mongodb::error::Error),
-    #[error("failed to insert into the alert aux collection")]
-    InsertAlertAuxError(#[source] mongodb::error::Error),
-    #[error("failed to update the alert aux collection")]
-    UpdateAuxAlertError(#[source] mongodb::error::Error),
-    #[error("failed to insert into the alert cutout collection")]
-    InsertCutoutError(#[source] mongodb::error::Error),
-    #[error("failed to retrieve schema for the alert")]
-    SchemaError(#[source] apache_avro::Error),
-    #[error("avro magic bytes not found")]
-    MagicBytesError,
+    #[error("error from avro")]
+    Avro(#[from] apache_avro::Error),
+    #[error("value access error from bson")]
+    BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("error from mongodb")]
+    Mongodb(#[from] mongodb::error::Error),
     #[error("schema registry error")]
     SchemaRegistryError(#[from] SchemaRegistryError),
     #[error("alert already exists")]
@@ -60,10 +48,6 @@ pub enum AlertError {
     MissingObjectId,
     #[error("missing cutout")]
     MissingCutout,
-    #[error("missing alert in avro")]
-    EmptyAlertError,
-    #[error("failed to read avro")]
-    AvroReadError(#[source] apache_avro::Error),
     #[error("missing psf flux")]
     MissingFluxPSF,
     #[error("missing psf flux error")]
@@ -74,10 +58,6 @@ pub enum AlertError {
     MissingFluxApertureError,
     #[error("missing mag zero point")]
     MissingMagZPSci,
-    #[error("error from mongodb")]
-    Mongodb(#[from] mongodb::error::Error),
-    #[error("value access error from bson")]
-    BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
 }
 
 #[derive(Clone, Debug)]

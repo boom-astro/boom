@@ -483,24 +483,17 @@ impl ZtfAlertWorker {
             Err(e) => {
                 error!("Error deserializing avro message with cached schema: {}", e);
                 let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None);
 
                 // if it's not an error this time, cache the new schema
                 // otherwise return the error
-                match value {
-                    Ok(value) => {
-                        self.cached_schema = Some(schema);
-                        self.cached_start_idx = Some(startidx);
-                        value
-                    }
-                    Err(e) => {
-                        return Err(AlertError::DecodeError(e));
-                    }
-                }
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                value
             }
         };
 
-        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).map_err(AlertError::DecodeError)?;
+        let alert: ZtfAlert = from_value::<ZtfAlert>(&value)?;
 
         Ok(alert)
     }
@@ -636,7 +629,7 @@ impl AlertWorker for ZtfAlertWorker {
                 mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
                     write_error,
                 )) if write_error.code == 11000 => AlertError::AlertAuxExists,
-                _ => AlertError::InsertAlertAuxError(e),
+                _ => e.into(),
             })?;
 
         trace!("Inserting alert_aux: {:?}", start.elapsed());
@@ -669,8 +662,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         self.alert_aux_collection
             .update_one(doc! { "_id": object_id.into() }, update_doc)
-            .await
-            .map_err(AlertError::UpdateAuxAlertError)?;
+            .await?;
 
         trace!("Updating alert_aux: {:?}", start.elapsed());
 
@@ -714,7 +706,7 @@ impl AlertWorker for ZtfAlertWorker {
                 mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
                     write_error,
                 )) if write_error.code == 11000 => AlertError::AlertExists,
-                _ => AlertError::InsertAlertError(e),
+                _ => e.into(),
             })?;
 
         trace!("Formatting & Inserting alert: {:?}", start.elapsed());
@@ -728,10 +720,7 @@ impl AlertWorker for ZtfAlertWorker {
             "cutoutDifference": cutout2bsonbinary(alert.cutout_difference.ok_or(AlertError::MissingCutout)?),
         };
 
-        self.alert_cutout_collection
-            .insert_one(cutout_doc)
-            .await
-            .map_err(AlertError::InsertCutoutError)?;
+        self.alert_cutout_collection.insert_one(cutout_doc).await?;
 
         trace!("Formatting & Inserting cutout: {:?}", start.elapsed());
 
@@ -740,8 +729,7 @@ impl AlertWorker for ZtfAlertWorker {
         let alert_aux_exists = self
             .alert_aux_collection
             .count_documents(doc! { "_id": &object_id })
-            .await
-            .map_err(AlertError::FindObjectIdError)?
+            .await?
             > 0;
 
         trace!("Checking if alert_aux exists: {:?}", start.elapsed());
