@@ -157,22 +157,10 @@ pub enum AlertWorkerError {
     LoadConfigError(#[from] conf::BoomConfigError),
     #[error("failed to create index")]
     CreateIndexError(#[from] CreateIndexError),
-    #[error("failed to connect to redis")]
-    ConnectRedisError(#[source] redis::RedisError),
-    #[error("failed to connect to mongodb")]
-    ConnectMongoError(#[source] mongodb::error::Error),
-    #[error("failed to get alert schema")]
-    GetAlertSchemaError,
-    #[error("failed to pop from the alert queue")]
-    PopAlertError(#[source] redis::RedisError),
+    #[error("error from redis")]
+    Redis(#[from] redis::RedisError),
     #[error("failed to get avro bytes from the alert queue")]
     GetAvroBytesError,
-    #[error("failed to push candid onto the candid queue")]
-    PushCandidError(#[source] redis::RedisError),
-    #[error("failed to remove alert from the alert queue")]
-    RemoveAlertError(#[source] redis::RedisError),
-    #[error("failed to push alert onto the alert queue")]
-    PushAlertError(#[source] redis::RedisError),
 }
 
 #[async_trait::async_trait]
@@ -247,10 +235,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         }
         // retrieve candids from redis
-        let Some(mut value): Option<Vec<Vec<u8>>> = con
-            .rpoplpush(&input_queue_name, &temp_queue_name)
-            .await
-            .map_err(AlertWorkerError::PopAlertError)?
+        let Some(mut value): Option<Vec<Vec<u8>>> =
+            con.rpoplpush(&input_queue_name, &temp_queue_name).await?
         else {
             info!("ALERT WORKER {}: Queue is empty", id);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -266,18 +252,15 @@ pub async fn run_alert_worker<T: AlertWorker>(
             Ok(candid) => {
                 // queue the candid for processing by the classifier
                 con.lpush::<&str, i64, isize>(&output_queue_name, candid)
-                    .await
-                    .map_err(AlertWorkerError::PushCandidError)?;
+                    .await?;
                 con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    .await
-                    .map_err(AlertWorkerError::RemoveAlertError)?;
+                    .await?;
             }
             Err(error) => match error {
                 AlertError::AlertExists => {
                     trace!("Alert already exists");
                     con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                        .await
-                        .map_err(AlertWorkerError::RemoveAlertError)?;
+                        .await?;
                 }
                 _ => {
                     warn!(error = %error, "Error processing alert, skipping");
