@@ -156,23 +156,19 @@ pub struct Alert {
 }
 
 pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
-    let schema = Schema::parse_str(ALERT_SCHEMA).map_err(|e| {
-        error!("Failed to parse alert schema: {}", e);
-        FilterWorkerError::LoadAlertSchemaError(e)
-    })?;
+    let schema = Schema::parse_str(ALERT_SCHEMA)
+        .inspect_err(|e| error!("Failed to parse alert schema: {}", e))?;
 
     Ok(schema)
 }
 
 pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
     let mut writer = Writer::new(schema, Vec::new());
-    writer.append_ser(alert).map_err(|e| {
+    writer.append_ser(alert).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
-        FilterWorkerError::SerializeAlertError(e)
     })?;
-    let encoded = writer.into_inner().map_err(|e| {
+    let encoded = writer.into_inner().inspect_err(|e| {
         error!("Failed to finalize Avro writer: {}", e);
-        FilterWorkerError::SerializeAlertError(e)
     })?;
 
     Ok(encoded)
@@ -183,8 +179,7 @@ pub async fn create_producer() -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("message.timeout.ms", "5000")
-        .create()
-        .map_err(FilterWorkerError::KafkaProducerError)?;
+        .create()?;
 
     Ok(producer)
 }
@@ -205,7 +200,7 @@ pub async fn send_alert_to_kafka(
         .await
         .map_err(|(e, _)| {
             warn!("Failed to send filter result to Kafka: {}", e);
-            FilterWorkerError::SendKafkaMessageError(e)
+            e
         })?;
 
     Ok(())
@@ -327,38 +322,26 @@ pub trait Filter {
 
 #[derive(thiserror::Error, Debug)]
 pub enum FilterWorkerError {
+    #[error("error from avro")]
+    Avro(#[from] apache_avro::Error),
+    #[error("value access error from bson")]
+    BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("error from kafka")]
+    Kafka(#[from] rdkafka::error::KafkaError),
+    #[error("error from mongo")]
+    Mongodb(#[from] mongodb::error::Error),
+    #[error("error from redis")]
+    Redis(#[from] redis::RedisError),
+    #[error("error from serde_json")]
+    SerdeJson(#[from] serde_json::Error),
     #[error("failed to load config")]
     LoadConfigError(#[from] crate::conf::BoomConfigError),
-    #[error("failed to connect to redis")]
-    ConnectRedisError(#[source] redis::RedisError),
     #[error("filter error")]
     FilterError(#[from] FilterError),
-    #[error("failed to retrieve filters from database")]
-    GetFiltersError(#[source] mongodb::error::Error),
-    #[error("failed to pop from the alert filter queue")]
-    PopCandidError(#[source] redis::RedisError),
-    #[error("failed to push filter results onto the filter results queue")]
-    PushFilterResultsError(#[source] redis::RedisError),
-    #[error("failed to serialize filter result to json")]
-    SerializeFilterResultError(#[source] serde_json::Error),
-    #[error("failed to retrive queue name for filter")]
-    GetQueueNameError,
     #[error("failed to get filter by queue")]
     GetFilterByQueueError,
-    #[error("failed to send filter results to kafka")]
-    SendKafkaMessageError(#[source] rdkafka::error::KafkaError),
-    #[error("could not find alert by candid")]
-    GetAlertByCandidError(#[source] mongodb::error::Error),
     #[error("could not find alert")]
     AlertNotFound,
-    #[error("could not load alert schema")]
-    LoadAlertSchemaError(#[source] apache_avro::Error),
-    #[error("failed to serialize alert to Avro")]
-    SerializeAlertError(#[source] apache_avro::Error),
-    #[error("could not find document field")]
-    MissingFieldError(#[from] mongodb::bson::document::ValueAccessError),
-    #[error("failed to create kafka producer")]
-    KafkaProducerError(#[source] rdkafka::error::KafkaError),
 }
 
 #[async_trait::async_trait]
@@ -424,10 +407,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
             }
         }
         // if the queue is empty, wait for a bit and continue the loop
-        let queue_len: i64 = con
-            .llen(&input_queue)
-            .await
-            .map_err(FilterWorkerError::ConnectRedisError)?;
+        let queue_len: i64 = con.llen(&input_queue).await?;
         if queue_len == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
@@ -436,8 +416,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
         // get candids from redis
         let alerts: Vec<String> = con
             .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
-            .await
-            .map_err(FilterWorkerError::PopCandidError)?;
+            .await?;
 
         let nb_alerts = alerts.len();
         if nb_alerts == 0 {

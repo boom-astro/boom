@@ -166,8 +166,7 @@ impl FilterWorker for ZtfFilterWorker {
 
         let filter_ids: Vec<i32> = filter_collection
             .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
-            .await
-            .map_err(FilterWorkerError::GetFiltersError)?
+            .await?
             .into_iter()
             .map(|x| x.as_i32().ok_or(FilterError::InvalidFilterId))
             .filter_map(Result::ok)
@@ -291,17 +290,12 @@ impl FilterWorker for ZtfFilterWorker {
         ];
 
         // Execute the aggregation pipeline
-        let mut cursor = self
-            .alert_collection
-            .aggregate(pipeline)
-            .await
-            .map_err(FilterWorkerError::GetAlertByCandidError)?;
+        let mut cursor = self.alert_collection.aggregate(pipeline).await?;
 
-        let alert_document = if let Some(result) = cursor.next().await {
-            result.map_err(FilterWorkerError::GetAlertByCandidError)?
-        } else {
-            return Err(FilterWorkerError::AlertNotFound);
-        };
+        let alert_document = cursor
+            .next()
+            .await
+            .ok_or(FilterWorkerError::AlertNotFound)??;
 
         let object_id = alert_document.get_str("objectId")?.to_string();
         let jd = alert_document.get_f64("jd")?;
@@ -449,8 +443,7 @@ impl FilterWorker for ZtfFilterWorker {
                     let candid = doc.get_i64("_id")?;
                     // might want to have the annotations as an optional field instead of empty
                     let annotations =
-                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))
-                            .map_err(FilterWorkerError::SerializeFilterResultError)?;
+                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
                     let filter_result = FilterResults {
                         filter_id: filter.id,
                         passed_at: now_ts,
