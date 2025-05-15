@@ -12,18 +12,12 @@ const NB_PIXELS: usize = NAXIS_STANDARD * NAXIS_STANDARD;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CutoutError {
-    #[error("failed to convert buffer to image")]
-    BufferToImageError,
-    #[error("failed to normalize image")]
-    NormalizeImageError,
-    #[error("failed to prepare cutout")]
-    PrepareCutoutError,
-    #[error("could not parse naxis1 or naxis2 from FITS header")]
-    ParseNAXISError(#[from] std::num::ParseIntError),
-    #[error("failed to decode gzip data")]
-    DecodeGzipError,
     #[error("failed to access document field")]
     MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("decode error from zune_inflate")]
+    DecodeGzip(#[from] zune_inflate::errors::InflateDecodeErrors),
+    #[error("integer parsing error")]
+    ParseInt(#[from] std::num::ParseIntError),
 }
 
 fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
@@ -42,9 +36,7 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
             .set_confirm_checksum(false)
             .set_size_hint(20160),
     );
-    let decompressed_data = decoder
-        .decode_gzip()
-        .map_err(|_| CutoutError::DecodeGzipError)?;
+    let decompressed_data = decoder.decode_gzip()?;
 
     let subset = &decompressed_data[0..FITS_HEADER_LEN];
 
@@ -69,9 +61,8 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
             break;
         }
     }
-    let naxis1 = String::from_utf8_lossy(&subset[naxis1_val_start..naxis1_val_end])
-        .parse::<usize>()
-        .map_err(CutoutError::ParseNAXISError)?; // Parse the value of NAXIS1 from the FITS header
+    let naxis1 =
+        String::from_utf8_lossy(&subset[naxis1_val_start..naxis1_val_end]).parse::<usize>()?; // Parse the value of NAXIS1 from the FITS header
 
     let mut naxis2_key_start = naxis1_val_end;
     let mut naxis2_val_start = 0;
@@ -94,9 +85,8 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
             break;
         }
     }
-    let naxis2 = String::from_utf8_lossy(&subset[naxis2_val_start..naxis2_val_end])
-        .parse::<usize>()
-        .map_err(CutoutError::ParseNAXISError)?; // Parse the value of NAXIS2 from the FITS header
+    let naxis2 =
+        String::from_utf8_lossy(&subset[naxis2_val_start..naxis2_val_end]).parse::<usize>()?; // Parse the value of NAXIS2 from the FITS header
 
     let mut image_data = u8_to_f32_vec(
         &decompressed_data[FITS_HEADER_LEN..(FITS_HEADER_LEN + (naxis1 * naxis2 * 4) as usize)],
