@@ -8,32 +8,18 @@ use tracing::{error, info, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MLWorkerError {
-    #[error("failed to connect to database")]
-    ConnectMongoError(#[source] mongodb::error::Error),
-    #[error("failed to retrieve candidates from database")]
-    RetrieveCandidatesDataError(#[source] mongodb::error::Error),
-    #[error("failed to connect to redis")]
-    ConnectRedisError(#[source] redis::RedisError),
-    #[error("failed to retrieve candidates from redis")]
-    RedisError(#[source] redis::RedisError),
-    #[error("failed to push candidates to redis")]
-    RedisPushError(#[source] redis::RedisError),
-    #[error("failed to read config")]
-    ReadConfigError(#[from] conf::BoomConfigError),
-    #[error("failed to pop candids from the input queue")]
-    PopCandidsError(#[source] redis::RedisError),
-    #[error("failed to push candids to the output queue")]
-    PushCandidsError(#[source] redis::RedisError),
-    #[error("failed to run model")]
-    RunModelError(#[from] ModelError),
     #[error("failed to access document field")]
     MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
-    #[error("error retrieving alerts")]
-    ErrorRetrievingAlerts(#[source] mongodb::error::Error),
+    #[error("error from mongodb")]
+    Mongodb(#[from] mongodb::error::Error),
+    #[error("error from redis")]
+    Redis(#[from] redis::RedisError),
+    #[error("failed to read config")]
+    ReadConfigError(#[from] conf::BoomConfigError),
+    #[error("failed to run model")]
+    RunModelError(#[from] ModelError),
     #[error("could not access cutout images")]
     CutoutAccessError(#[from] CutoutError),
-    #[error("error saving ml results to database")]
-    ErrorSavingResults(#[source] mongodb::error::Error),
 }
 
 #[async_trait::async_trait]
@@ -84,10 +70,7 @@ pub async fn run_ml_worker<T: MLWorker>(
             }
         }
         // if the queue is empty, wait for a bit and continue the loop
-        let queue_len: i64 = con
-            .llen(&input_queue)
-            .await
-            .map_err(MLWorkerError::ConnectRedisError)?;
+        let queue_len: i64 = con.llen(&input_queue).await?;
         if queue_len == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
@@ -96,8 +79,7 @@ pub async fn run_ml_worker<T: MLWorker>(
         // get candids from redis
         let candids: Vec<i64> = con
             .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
-            .await
-            .map_err(MLWorkerError::PopCandidsError)?;
+            .await?;
 
         let nb_candids = candids.len();
         if nb_candids == 0 {
@@ -110,8 +92,7 @@ pub async fn run_ml_worker<T: MLWorker>(
 
         // push that back to redis to the output queue
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
-            .await
-            .map_err(MLWorkerError::PushCandidsError)?;
+            .await?;
 
         command_check_countdown -= nb_candids as i64;
     }

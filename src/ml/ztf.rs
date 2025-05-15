@@ -171,8 +171,7 @@ impl MLWorker for ZtfMLWorker {
                     }
                 },
             ])
-            .await
-            .map_err(MLWorkerError::ErrorRetrievingAlerts)?;
+            .await?;
 
         let mut alerts: Vec<Document> = Vec::new();
         while let Some(result) = alert_cursor.next().await {
@@ -247,12 +246,7 @@ impl MLWorker for ZtfMLWorker {
             processed_alerts.push(format!("{},{}", programid, candid));
         }
 
-        let _ = self
-            .client
-            .bulk_write(updates)
-            .await
-            .map_err(MLWorkerError::ErrorSavingResults)?
-            .modified_count;
+        let _ = self.client.bulk_write(updates).await?.modified_count;
 
         Ok(processed_alerts)
     }
