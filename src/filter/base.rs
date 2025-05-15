@@ -64,26 +64,20 @@ const ALERT_SCHEMA: &str = r#"
 
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
-    #[error("failed to retrieve filter from database")]
-    GetFilterError(#[source] mongodb::error::Error),
-    #[error("failed to deserialize filter from database")]
-    DeserializeFilterError(#[source] mongodb::error::Error),
-    #[error("invalid filter")]
-    InvalidFilter(#[source] mongodb::bson::document::ValueAccessError),
+    #[error("value access error from bson")]
+    BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("serialization error from bson")]
+    BsonSerialization(#[from] mongodb::bson::ser::Error),
+    #[error("error from mongodb")]
+    Mongodb(#[from] mongodb::error::Error),
+    #[error("error from serde_json")]
+    SerdeJson(#[from] serde_json::Error),
     #[error("invalid filter permissions")]
     InvalidFilterPermissions,
     #[error("filter not found in database")]
     FilterNotFound,
-    #[error("invalid filter result")]
-    InvalidFilterResult(#[source] mongodb::error::Error),
-    #[error("failed to run filter")]
-    RunFilterError(#[source] mongodb::error::Error),
-    #[error("failed to deserialize filter pipeline")]
-    DeserializePipelineError(#[source] serde_json::Error),
     #[error("invalid filter pipeline")]
     InvalidFilterPipeline,
-    #[error("invalid filter pipeline stage")]
-    InvalidFilterPipelineStage(#[source] mongodb::bson::ser::Error),
     #[error("invalid filter id")]
     InvalidFilterId,
 }
@@ -253,17 +247,11 @@ pub async fn get_filter_object(
                 }
             },
         ])
-        .await
-        .map_err(FilterError::GetFilterError)?;
+        .await?;
 
-    let advance = filter_obj
-        .advance()
-        .await
-        .map_err(FilterError::GetFilterError)?;
+    let advance = filter_obj.advance().await?;
     let filter_obj = if advance {
-        filter_obj
-            .deserialize_current()
-            .map_err(FilterError::DeserializeFilterError)?
+        filter_obj.deserialize_current()?
     } else {
         return Err(FilterError::FilterNotFound);
     };
@@ -284,27 +272,20 @@ pub async fn run_filter(
     }
 
     // insert candids into filter
-    pipeline[0]
-        .get_document_mut("$match")
-        .map_err(FilterError::InvalidFilter)?
-        .insert(
-            "_id",
-            doc! {
-                "$in": candids
-            },
-        );
+    pipeline[0].get_document_mut("$match")?.insert(
+        "_id",
+        doc! {
+            "$in": candids
+        },
+    );
 
     // run filter
-    let mut result = alert_collection
-        .aggregate(pipeline)
-        .await
-        .map_err(FilterError::RunFilterError)?;
+    let mut result = alert_collection.aggregate(pipeline).await?;
 
     let mut out_documents: Vec<Document> = Vec::new();
 
     while let Some(doc) = result.next().await {
-        let doc = doc.map_err(FilterError::InvalidFilterResult)?;
-        out_documents.push(doc);
+        out_documents.push(doc?);
     }
 
     Ok(out_documents)

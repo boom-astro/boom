@@ -122,16 +122,14 @@ impl Filter for ZtfFilter {
             .as_str()
             .ok_or(FilterError::FilterNotFound)?;
 
-        let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)
-            .map_err(FilterError::DeserializePipelineError)?;
+        let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
         let filter_pipeline = filter_pipeline
             .as_array()
             .ok_or(FilterError::InvalidFilterPipeline)?;
 
         // append stages to prefix
         for stage in filter_pipeline {
-            let x = mongodb::bson::to_document(stage)
-                .map_err(FilterError::InvalidFilterPipelineStage)?;
+            let x = mongodb::bson::to_document(stage)?;
             pipeline.push(x);
         }
 
