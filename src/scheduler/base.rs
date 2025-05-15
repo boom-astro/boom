@@ -11,8 +11,8 @@ use tracing::{error, info, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
-    #[error("could not retrieve number of workers")]
-    NumWorkersError(#[from] config::ConfigError),
+    #[error("error from config")]
+    Config(#[from] config::ConfigError),
 }
 
 // get num worker from config file, by stream name and worker type
