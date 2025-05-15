@@ -14,24 +14,18 @@ use mongodb::bson::Document;
 pub enum ModelError {
     #[error("failed to access document field")]
     MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
-    #[error("failed to load model")]
-    LoadModelError(#[source] ort::Error),
-    #[error("error creating new array")]
-    NewArrayError(#[source] ndarray::ShapeError),
-    #[error("failed to create model inputs")]
-    InputError(#[source] ort::Error),
-    #[error("error running model")]
-    RunModelError(#[source] ort::Error),
-    #[error("error retrieving predictions")]
-    ModelOutputError(#[source] ort::Error),
-    #[error("error converting predictions to vec")]
-    ModelOutputToVecError,
+    #[error("shape error from ndarray")]
+    NdarrayShape(#[from] ndarray::ShapeError),
+    #[error("error from ort")]
+    Ort(#[from] ort::Error),
     #[error("error preparing cutout data")]
     PrepareCutoutError(#[from] CutoutError),
+    #[error("error converting predictions to vec")]
+    ModelOutputToVecError,
 }
 
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
-    let builder = Session::builder().map_err(ModelError::LoadModelError)?;
+    let builder = Session::builder()?;
 
     // if CUDA or Apple's CoreML aren't available,
     // it will fall back to CPU execution provider
@@ -41,14 +35,10 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
             // adding the coreml feature in Cargo.toml is creating some issues
             // at compile time. Needs to be fixed so we can add this back
             // CoreMLExecutionProvider::default().build(),
-        ])
-        .map_err(ModelError::LoadModelError)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(ModelError::LoadModelError)?
-        .with_intra_threads(1)
-        .map_err(ModelError::LoadModelError)?
-        .commit_from_file(path)
-        .map_err(ModelError::LoadModelError)?;
+        ])?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(1)?
+        .commit_from_file(path)?;
 
     Ok(model)
 }
@@ -68,8 +58,7 @@ pub trait Model {
                 .enumerate()
             {
                 let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j as usize]);
-                let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())
-                    .map_err(ModelError::NewArrayError)?;
+                let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
                 slice.assign(&cutout_array);
             }
         }

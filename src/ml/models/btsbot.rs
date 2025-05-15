@@ -115,8 +115,7 @@ impl Model for BtsBotModel {
             features_batch.extend(alert_features);
         }
 
-        let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)
-            .map_err(ModelError::NewArrayError)?;
+        let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)?;
         Ok(features_array)
     }
 
@@ -128,19 +127,11 @@ impl Model for BtsBotModel {
         let model_inputs = inputs! {
             "triplet" => image_features.clone(),
             "metadata" =>  metadata_features.clone(),
-        }
-        .map_err(ModelError::InputError)?;
+        }?;
 
-        let outputs = self
-            .model
-            .run(model_inputs)
-            .map_err(ModelError::RunModelError)?;
+        let outputs = self.model.run(model_inputs)?;
 
-        match outputs["fc_out"]
-            .try_extract_tensor::<f32>()
-            .map_err(ModelError::ModelOutputError)?
-            .as_slice()
-        {
+        match outputs["fc_out"].try_extract_tensor::<f32>()?.as_slice() {
             Some(scores) => Ok(scores.to_vec()),
             None => Err(ModelError::ModelOutputToVecError),
         }

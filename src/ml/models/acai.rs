@@ -85,8 +85,7 @@ impl Model for AcaiModel {
             features_batch.extend(alert_features);
         }
 
-        let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)
-            .map_err(ModelError::NewArrayError)?;
+        let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)?;
         Ok(features_array)
     }
 
@@ -98,19 +97,11 @@ impl Model for AcaiModel {
         let model_inputs = inputs! {
             "features" =>  metadata_features.clone(),
             "triplets" => image_features.clone(),
-        }
-        .map_err(ModelError::InputError)?;
+        }?;
 
-        let outputs = self
-            .model
-            .run(model_inputs)
-            .map_err(ModelError::RunModelError)?;
+        let outputs = self.model.run(model_inputs)?;
 
-        match outputs["score"]
-            .try_extract_tensor::<f32>()
-            .map_err(ModelError::ModelOutputError)?
-            .as_slice()
-        {
+        match outputs["score"].try_extract_tensor::<f32>()?.as_slice() {
             Some(scores) => Ok(scores.to_vec()),
             None => Err(ModelError::ModelOutputToVecError),
         }
