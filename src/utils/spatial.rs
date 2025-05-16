@@ -5,16 +5,32 @@ use tracing::warn;
 
 use crate::conf;
 
+#[derive(thiserror::Error, Debug)]
+pub enum XmatchError {
+    #[error("value access error from bson")]
+    BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
+    #[error("error from mongodb")]
+    Mongodb(#[from] mongodb::error::Error),
+    #[error("distance_key field is null")]
+    NullDistanceKey,
+    #[error("distance_max field is null")]
+    NullDistanceMax,
+    #[error("distance_max_near field is null")]
+    NullDistanceMaxNear,
+    #[error("failed to convert the bson data into a document")]
+    AsDocumentError,
+}
+
 pub async fn xmatch(
     ra: f64,
     dec: f64,
     xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
     db: &mongodb::Database,
-) -> mongodb::bson::Document {
+) -> Result<mongodb::bson::Document, XmatchError> {
     // TODO, make the xmatch config a hashmap for faster access
     // while looping over the xmatch results of the batched queries
     if xmatch_configs.len() == 0 {
-        return doc! {};
+        return Ok(doc! {});
     }
     let ra_geojson = ra - 180.0;
     let dec_geojson = dec;
@@ -88,7 +104,7 @@ pub async fn xmatch(
 
     let collection: mongodb::Collection<mongodb::bson::Document> =
         db.collection(&xmatch_configs[0].catalog);
-    let mut cursor = collection.aggregate(x_matches_pipeline).await.unwrap();
+    let mut cursor = collection.aggregate(x_matches_pipeline).await?;
 
     let mut xmatch_docs = doc! {};
     // pre add the catalogs + empty vec to the xmatch_docs
@@ -97,53 +113,46 @@ pub async fn xmatch(
         xmatch_docs.insert(&xmatch_config.catalog, mongodb::bson::Bson::Array(vec![]));
     }
 
-    while let Some(doc) = cursor.next().await {
-        let doc = doc.unwrap();
-        let catalog = doc.get_str("catalog").unwrap();
-        let matches = doc.get_array("matches").unwrap();
+    while let Some(result) = cursor.next().await {
+        let doc = result?;
+        let catalog = doc.get_str("catalog")?;
+        let matches = doc.get_array("matches")?;
 
         let xmatch_config = xmatch_configs
             .iter()
             .find(|x| x.catalog == catalog)
-            .unwrap();
+            .expect("this should never panic, the doc was derived from the catalogs");
 
         if !xmatch_config.use_distance {
             xmatch_docs.insert(catalog, matches);
         } else {
-            let distance_key = xmatch_config.distance_key.as_ref().unwrap();
-            let distance_max = xmatch_config.distance_max.unwrap();
-            let distance_max_near = xmatch_config.distance_max_near.unwrap();
+            let distance_key = xmatch_config
+                .distance_key
+                .as_ref()
+                .ok_or(XmatchError::NullDistanceKey)?;
+            let distance_max = xmatch_config
+                .distance_max
+                .ok_or(XmatchError::NullDistanceMax)?;
+            let distance_max_near = xmatch_config
+                .distance_max_near
+                .ok_or(XmatchError::NullDistanceMaxNear)?;
 
             let mut matches_filtered: Vec<mongodb::bson::Document> = vec![];
             for xmatch_doc in matches.iter() {
-                let xmatch_doc = xmatch_doc.as_document().unwrap();
-                let xmatch_ra = match xmatch_doc.get_f64("ra") {
-                    Ok(x) => x,
-                    _ => {
-                        warn!("No ra in xmatch doc");
-                        continue;
-                    }
+                let xmatch_doc = xmatch_doc
+                    .as_document()
+                    .ok_or(XmatchError::AsDocumentError)?;
+                let Ok(xmatch_ra) = xmatch_doc.get_f64("ra") else {
+                    warn!("No ra in xmatch doc");
+                    continue;
                 };
-                let xmatch_dec = match xmatch_doc.get_f64("dec") {
-                    Ok(x) => x,
-                    _ => {
-                        warn!("No dec in xmatch doc");
-                        continue;
-                    }
+                let Ok(xmatch_dec) = xmatch_doc.get_f64("dec") else {
+                    warn!("No dec in xmatch doc");
+                    continue;
                 };
-                let doc_z_option = match xmatch_doc.get(&distance_key) {
-                    Some(z) => z.as_f64(),
-                    _ => {
-                        warn!("No z in xmatch doc");
-                        continue;
-                    }
-                };
-                let doc_z = match doc_z_option {
-                    Some(z) => z,
-                    None => {
-                        warn!("No z in xmatch doc");
-                        continue;
-                    }
+                let Ok(doc_z) = xmatch_doc.get_f64(&distance_key) else {
+                    warn!("No z in xmatch doc");
+                    continue;
                 };
 
                 let cm_radius = if doc_z < 0.01 {
@@ -175,5 +184,5 @@ pub async fn xmatch(
         }
     }
 
-    xmatch_docs
+    Ok(xmatch_docs)
 }

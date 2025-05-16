@@ -13,7 +13,9 @@ async fn test_xmatch() {
     let ra = 323.233462;
     let dec = 14.112528;
 
-    let xmatches = spatial::xmatch(ra, dec, &catalog_xmatch_configs, &db).await;
+    let xmatches = spatial::xmatch(ra, dec, &catalog_xmatch_configs, &db)
+        .await
+        .unwrap();
     assert_eq!(xmatches.len(), 4);
 
     // xmatch is a Vec<Vec<bson::Document>>

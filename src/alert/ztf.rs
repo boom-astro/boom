@@ -594,7 +594,7 @@ impl AlertWorker for ZtfAlertWorker {
         now: f64,
     ) -> Result<(), AlertError> {
         let start = std::time::Instant::now();
-        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await;
+        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
         trace!("Xmatch took: {:?}", start.elapsed());
 
         let start = std::time::Instant::now();

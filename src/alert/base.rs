@@ -1,5 +1,8 @@
 use crate::utils::worker::WorkerCmd;
-use crate::{conf, utils::db::CreateIndexError};
+use crate::{
+    conf,
+    utils::{db::CreateIndexError, spatial::XmatchError},
+};
 use apache_avro::Schema;
 use mongodb::bson::Document;
 use redis::AsyncCommands;
@@ -40,6 +43,8 @@ pub enum AlertError {
     Mongodb(#[from] mongodb::error::Error),
     #[error("schema registry error")]
     SchemaRegistryError(#[from] SchemaRegistryError),
+    #[error("error from xmatch")]
+    Xmatch(#[from] XmatchError),
     #[error("alert already exists")]
     AlertExists,
     #[error("alert aux already exists")]
