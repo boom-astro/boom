@@ -652,7 +652,7 @@ impl LsstAlertWorker {
     ) -> Result<LsstAlert, AlertError> {
         let magic = avro_bytes[0];
         if magic != _MAGIC_BYTE {
-            Err(SchemaRegistryError::MagicBytesError)?;
+            Err(AlertError::MagicBytesError)?;
         }
         let schema_id =
             u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);

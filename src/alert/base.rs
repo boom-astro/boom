@@ -63,6 +63,8 @@ pub enum AlertError {
     MissingFluxApertureError,
     #[error("missing mag zero point")]
     MissingMagZPSci,
+    #[error("could not find avro magic bytes")]
+    MagicBytesError,
 }
 
 #[derive(Clone, Debug)]
