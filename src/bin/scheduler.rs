@@ -16,8 +16,8 @@ use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(required = true, help = "Name of stream to ingest")]
-    stream: Option<String>,
+    #[arg(help = "Name of stream to ingest")]
+    stream: String,
 
     #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
     config: Option<String>,
@@ -42,13 +42,7 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let stream_name = match args.stream {
-        Some(stream) => stream,
-        None => {
-            warn!("No stream name provided");
-            std::process::exit(1);
-        }
-    };
+    let stream_name = args.stream;
     info!("Starting scheduler for {} alert processing", stream_name);
 
     if !args.config.is_some() {
