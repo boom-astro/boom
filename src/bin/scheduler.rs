@@ -11,8 +11,8 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tracing::{info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{info, warn, Subscriber};
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer};
 
 #[derive(Parser)]
 struct Cli {
@@ -23,13 +23,22 @@ struct Cli {
     config: Option<String>,
 }
 
+// TODO: factor this out into the lib so it's reusable
+fn build_subscriber() -> impl Subscriber {
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_thread_ids(true)
+        .with_thread_names(true);
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .expect("Failed to create EnvFilter");
+    tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter))
+}
+
 #[tokio::main]
 async fn main() {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let subscriber = build_subscriber();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set the default subscriber");
 
     let args = Cli::parse();
 
