@@ -30,6 +30,11 @@ BOOM runs on macOS and Linux. You'll need:
 - Rust: You can either use [rustup](https://www.rust-lang.org/tools/install) to install Rust, or you can use [Homebrew](https://brew.sh/) to install it. If you choose the latter, you can run `brew install rust` in your terminal. We recommend using rustup, as it allows you to easily switch between different versions of Rust, and to keep your Rust installation up to date. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `brew`, `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
 - `wget` and `tar`: `tar` is already installed on macOS, but you can install `wget` with `brew install wget` or any other package manager you prefer.
+- System packages are essential for compiling and linking some Rust crates that require native libraries like OpenSSL and SASL. Run the following to install necessary system packages:
+  ```bash
+  sudo apt update
+  sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
+  ```
 
 #### Linux
 
@@ -52,21 +57,22 @@ BOOM runs on macOS and Linux. You'll need:
     uv pip install -r requirements.txt
     ```
     Note: If requirements.txt is missing, it can be skipped. It's only required for the ML pipeline.
-2. Next, copy the default config file, `config.default.yaml`, to `config.yaml`:
+   
+3. Next, copy the default config file, `config.default.yaml`, to `config.yaml`:
     ```bash
     cp config.default.yaml config.yaml
     ```
-3. Same for the `docker-compose.yaml` file:
+4. Same for the `docker-compose.yaml` file:
     ```bash
     cp docker-compose.default.yaml docker-compose.yaml
     ```
-4. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+5. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-5. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+6. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
