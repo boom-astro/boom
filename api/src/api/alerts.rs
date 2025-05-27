@@ -1,9 +1,9 @@
 use crate::models::response;
-use actix_web::{get, web, HttpResponse};
+use actix_web::{HttpResponse, get, web};
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, Document},
     Client, Collection,
+    bson::{Document, doc},
 };
 
 const DB_NAME: &str = "boom";

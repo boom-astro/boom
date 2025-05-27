@@ -8,9 +8,9 @@ use boom_api::{
     models::query_models::{QueryKwargs, Unit},
 };
 use mongodb::{
-    bson::{doc, Document},
-    options::FindOptions,
     Client,
+    bson::{Document, doc},
+    options::FindOptions,
 };
 
 // TODO: put in config

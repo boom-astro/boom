@@ -1,7 +1,7 @@
 mod api;
 mod models;
 
-use actix_web::{web, App, HttpServer};
+use actix_web::{App, HttpServer, web};
 use mongodb::Client;
 
 #[actix_web::main]

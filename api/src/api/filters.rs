@@ -1,8 +1,8 @@
 use crate::models::filter_models::*;
-use actix_web::{patch, post, web, HttpResponse};
+use actix_web::{HttpResponse, patch, post, web};
 use mongodb::{
-    bson::{doc, Document},
     Client, Collection,
+    bson::{Document, doc},
 };
 use std::vec;
 use uuid::Uuid;

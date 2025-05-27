@@ -1,9 +1,9 @@
 use crate::models::{query_models::*, response};
-use actix_web::{get, web, HttpResponse};
+use actix_web::{HttpResponse, get, web};
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, Document},
     Client, Collection, IndexModel,
+    bson::{Document, doc},
 };
 use std::collections::HashMap;
 
