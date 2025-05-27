@@ -33,6 +33,7 @@ zune-inflate = { version = "0.2", default-features = false, features = [
 ] }
 ndarray = "0.16.1"
 rand = "0.9.0"
+openssl = { version = "0.10.72", features = ["vendored"] }
 
 [dev-dependencies]
 criterion = "0.5"
