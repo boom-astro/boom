@@ -7,7 +7,7 @@ use serde_with::{serde_as, skip_serializing_none};
 use tracing::trace;
 
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
+    alert::base::{deserialize_mjd, AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
@@ -614,14 +614,6 @@ where
         .map(NonDetection::from)
         .collect::<Vec<NonDetection>>();
     Ok(Some(nondetections))
-}
-
-fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mjd = <f64 as Deserialize>::deserialize(deserializer)?;
-    Ok(mjd + 2400000.5)
 }
 
 fn deserialize_mjd_option<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>

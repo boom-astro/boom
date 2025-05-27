@@ -1,7 +1,9 @@
 mod base;
+mod decam;
 mod lsst;
 mod ztf;
 
-pub use base::AlertConsumer;
+pub use base::{AlertConsumer, AlertProducer};
+pub use decam::{DecamAlertConsumer, DecamAlertProducer};
 pub use lsst::LsstAlertConsumer;
-pub use ztf::{download_alerts_from_archive, produce_from_archive, ZtfAlertConsumer};
+pub use ztf::{ZtfAlertConsumer, ZtfAlertProducer};

@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
+    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
+    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
 };
 
 #[derive(Debug)]
@@ -14,6 +14,54 @@ pub struct ZtfFilter {
     pub id: i32,
     pub pipeline: Vec<Document>,
     pub permissions: Vec<i32>,
+}
+
+fn uses_field_in_stage(
+    stage: &serde_json::Value,
+    field: &str,
+    avoid_prefixes: &Option<Vec<String>>,
+) -> bool {
+    if let Some(stage_obj) = stage.as_object() {
+        let stage_str = serde_json::to_string(stage_obj).unwrap();
+        let field_indexes: Vec<(usize, &str)> = stage_str.match_indices(field).collect();
+        for (field_index, _) in field_indexes {
+            match avoid_prefixes {
+                Some(prefixes) => {
+                    // 1. take the length of the prefix
+                    // read the string from field_index - 1 to the field_index
+                    // if the string == prefix, skip
+                    // 2. if the string is not a prefix, return true
+                    let field_str = stage_str.to_string();
+                    for prefix in prefixes {
+                        let prefix_len = prefix.len();
+                        if prefix_len + 1 > field_index {
+                            continue;
+                        }
+                        let prefix_idx = field_index - 1 - prefix_len;
+                        let prefix_str = &field_str[prefix_idx..field_index - 1];
+                        if prefix_str != prefix {
+                            return true;
+                        }
+                    }
+                }
+                None => return true,
+            }
+        }
+    }
+    false
+}
+
+fn uses_field_in_filter(
+    filter_pipeline: &[serde_json::Value],
+    field: String,
+    avoid_prefixes: Option<Vec<String>>,
+) -> (bool, usize) {
+    for (i, stage) in filter_pipeline.iter().enumerate() {
+        if uses_field_in_stage(stage, &field, &avoid_prefixes) {
+            return (true, i);
+        }
+    }
+    (false, 0)
 }
 
 #[async_trait::async_trait]
@@ -53,42 +101,72 @@ impl Filter for ZtfFilter {
                 }
             },
             doc! {
-                "$lookup": doc! {
-                    "from": format!("ZTF_alerts_aux"),
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
                 "$project": doc! {
                     "objectId": 1,
                     "candidate": 1,
                     "classifications": 1,
                     "coordinates": 1,
-                    "cross_matches": doc! {
-                        "$arrayElemAt": [
-                            "$aux.cross_matches",
-                            0
-                        ]
-                    },
-                    "prv_candidates": doc! {
+                }
+            },
+        ];
+
+        let mut aux_add_fields = doc! {};
+
+        let lsst_aux_pipeline = vec![
+            doc! {
+                "$lookup": doc! {
+                    "from": format!("LSST_alerts_aux"),
+                    "localField": "aliases.LSST.0",
+                    "foreignField": "_id",
+                    "as": "lsst_aux"
+                }
+            },
+            doc! {
+                "$addFields": doc! {
+                    "LSST.prv_candidates": doc! {
                         "$filter": doc! {
                             "input": doc! {
                                 "$arrayElemAt": [
-                                    "$aux.prv_candidates",
+                                    "$lsst_aux.prv_candidates",
                                     0
                                 ]
                             },
                             "as": "x",
                             "cond": doc! {
                                 "$and": [
-                                    {
-                                        "$in": [
-                                            "$$x.programid",
-                                            &permissions
+                                    { // maximum 1 year of past data
+                                        "$lt": [
+                                            {
+                                                "$subtract": [
+                                                    "$candidate.jd",
+                                                    "$$x.jd"
+                                                ]
+                                            },
+                                            365
                                         ]
                                     },
+                                    { // only datapoints up to (and including) current alert
+                                        "$lte": [
+                                            "$$x.jd",
+                                            "$candidate.jd"
+                                        ]
+                                    }
+
+                                ]
+                            }
+                        }
+                    },
+                    "LSST.prv_nondetections": doc! {
+                        "$filter": doc! {
+                            "input": doc! {
+                                "$arrayElemAt": [
+                                    "$aux.prv_nondetections",
+                                    0
+                                ]
+                            },
+                            "as": "x",
+                            "cond": doc! {
+                                "$and": [
                                     { // maximum 1 year of past data
                                         "$lt": [
                                             {
@@ -113,14 +191,68 @@ impl Filter for ZtfFilter {
                     },
                 }
             },
+            doc! {
+                "$unset": "lsst_aux"
+            },
+        ];
+
+        let decam_aux_pipeline = vec![
+            doc! {
+                "$lookup": doc! {
+                    "from": format!("DECAM_alerts_aux"),
+                    "localField": "aliases.DECAM.0",
+                    "foreignField": "_id",
+                    "as": "decam_aux"
+                }
+            },
+            doc! {
+                "$addFields": doc! {
+                    "DECAM.fp_hists": doc! {
+                        "$filter": doc! {
+                            "input": doc! {
+                                "$arrayElemAt": [
+                                    "$decam_aux.fp_hists",
+                                    0
+                                ]
+                            },
+                            "as": "x",
+                            "cond": doc! {
+                                "$and": [
+                                    { // maximum 1 year of past data
+                                        "$lt": [
+                                            {
+                                                "$subtract": [
+                                                    "$candidate.jd",
+                                                    "$$x.jd"
+                                                ]
+                                            },
+                                            365
+                                        ]
+                                    },
+                                    { // only datapoints up to (and including) current alert
+                                        "$lte": [
+                                            "$$x.jd",
+                                            "$candidate.jd"
+                                        ]
+                                    }
+
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+            doc! {
+                "$unset": "decam_aux"
+            },
         ];
 
         // get filter pipeline as str and convert to Vec<Bson>
         let filter_pipeline = filter_obj
             .get("pipeline")
-            .ok_or(FilterError::FilterNotFound)?
+            .ok_or(FilterError::FilterPipelineError)?
             .as_str()
-            .ok_or(FilterError::FilterNotFound)?;
+            .ok_or(FilterError::FilterPipelineError)?;
 
         let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)
             .map_err(FilterError::DeserializePipelineError)?;
@@ -128,10 +260,216 @@ impl Filter for ZtfFilter {
             .as_array()
             .ok_or(FilterError::InvalidFilterPipeline)?;
 
-        // append stages to prefix
-        for stage in filter_pipeline {
-            let x = mongodb::bson::to_document(stage)
+        let (use_prv_candidates, use_prv_candidates_index) = uses_field_in_filter(
+            filter_pipeline,
+            "prv_candidates".to_string(),
+            Some(vec!["LSST".to_string()]),
+        );
+        let (use_prv_nondetections, use_prv_nondetections_index) =
+            uses_field_in_filter(filter_pipeline, "prv_nondetections".to_string(), None);
+        let (use_cross_matches, use_cross_matches_index) =
+            uses_field_in_filter(filter_pipeline, "cross_matches".to_string(), None);
+
+        if use_prv_candidates {
+            // insert it in aux addFields stage
+            aux_add_fields.insert(
+                "prv_candidates".to_string(),
+                doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_candidates",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // ZTF alert stream permissions
+                                    "$in": [
+                                        "$$x.programid",
+                                        &permissions
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            );
+        }
+        if use_prv_nondetections {
+            // insert it in aux addFields stage
+            aux_add_fields.insert(
+                "prv_nondetections".to_string(),
+                doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_nondetections",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // ZTF alert stream permissions
+                                    "$in": [
+                                        "$$x.programid",
+                                        &permissions
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            );
+        }
+        if use_cross_matches {
+            // insert it in aux addFields stage
+            aux_add_fields.insert(
+                "cross_matches".to_string(),
+                doc! {
+                    "$arrayElemAt": [
+                        "$aux.cross_matches",
+                        0
+                    ]
+                },
+            );
+        }
+
+        // check where "LSST" is used in the filter pipeline
+        let (mut insert_lsst_pipeline, insert_lsst_index) =
+            uses_field_in_filter(filter_pipeline, "LSST".to_string(), None);
+        // check where "DECAM" is used in the filter pipeline
+        let (mut insert_decam_pipeline, insert_decam_index) =
+            uses_field_in_filter(filter_pipeline, "DECAM".to_string(), None);
+        if insert_lsst_pipeline || insert_decam_pipeline {
+            aux_add_fields.insert(
+                "aliases".to_string(),
+                doc! {
+                    "$arrayElemAt": [
+                        "$aux.aliases",
+                        0
+                    ]
+                },
+            );
+        }
+
+        // next we create 2 variables
+        // 1. insert_aux_pipeline: if we need to insert the aux pipeline
+        // 2. insert_aux_index: the index where we need to insert the aux pipeline
+        // for 1, that is true if any of use_prv_candidates, use_prv_nondetections, use_cross_matches
+        // or use_lsst_pipeline is true
+        // for 2, that is the lowest value of use_prv_candidates_index, use_prv_nondetections_index,
+        // use_cross_matches_index, use_lsst_index (only using those that are true)
+        let mut insert_aux_pipeline = use_prv_candidates
+            || use_prv_nondetections
+            || use_cross_matches
+            || insert_lsst_pipeline
+            || insert_decam_pipeline;
+        let mut insert_aux_index = usize::MAX;
+        if use_prv_candidates {
+            insert_aux_index = insert_aux_index.min(use_prv_candidates_index);
+        }
+        if use_prv_nondetections {
+            insert_aux_index = insert_aux_index.min(use_prv_nondetections_index);
+        }
+        if use_cross_matches {
+            insert_aux_index = insert_aux_index.min(use_cross_matches_index);
+        }
+        if insert_lsst_pipeline {
+            insert_aux_index = insert_aux_index.min(insert_lsst_index);
+        }
+        if insert_decam_pipeline {
+            insert_aux_index = insert_aux_index.min(insert_decam_index);
+        }
+
+        // some sanity checks
+        if insert_aux_index == usize::MAX && insert_aux_pipeline {
+            panic!("insert_aux_index is MAX but insert_aux_pipeline is true");
+        }
+
+        // now we loop over the base_pipeline and insert stages from the filter_pipeline
+        // and when i = insert_index, we insert the aux_pipeline before the stage
+        for i in 0..filter_pipeline.len() {
+            let x = mongodb::bson::to_document(&filter_pipeline[i])
                 .map_err(FilterError::InvalidFilterPipelineStage)?;
+
+            if insert_aux_pipeline && i == insert_aux_index {
+                pipeline.push(doc! {
+                    "$lookup": doc! {
+                        "from": format!("ZTF_alerts_aux"),
+                        "localField": "objectId",
+                        "foreignField": "_id",
+                        "as": "aux"
+                    }
+                });
+                pipeline.push(doc! {
+                    "$addFields": &aux_add_fields
+                });
+                pipeline.push(doc! {
+                    "$unset": "aux"
+                });
+                insert_aux_pipeline = false; // only insert once
+            }
+
+            if insert_lsst_pipeline && i == insert_lsst_index {
+                // insert lsst_aux_pipeline before this stage
+                for aux_stage in lsst_aux_pipeline.iter() {
+                    let aux_stage = mongodb::bson::to_document(aux_stage)
+                        .map_err(FilterError::InvalidFilterPipelineStage)?;
+                    pipeline.push(aux_stage);
+                }
+                insert_lsst_pipeline = false; // only insert once
+            }
+
+            if insert_decam_pipeline && i == insert_decam_index {
+                // insert decam_aux_pipeline before this stage
+                for aux_stage in decam_aux_pipeline.iter() {
+                    let aux_stage = mongodb::bson::to_document(aux_stage)
+                        .map_err(FilterError::InvalidFilterPipelineStage)?;
+                    pipeline.push(aux_stage);
+                }
+                insert_decam_pipeline = false; // only insert once
+            }
+
+            // push the current stage
             pipeline.push(x);
         }
 
@@ -231,7 +569,8 @@ impl FilterWorker for ZtfFilterWorker {
                     "dec": "$candidate.dec",
                     "cutoutScience": 1,
                     "cutoutTemplate": 1,
-                    "cutoutDifference": 1
+                    "cutoutDifference": 1,
+                    "classifications": 1,
                 }
             },
             doc! {
@@ -285,7 +624,8 @@ impl FilterWorker for ZtfFilterWorker {
                             "$cutouts.cutoutDifference",
                             0
                         ]
-                    }
+                    },
+                    "classifications": 1,
                 }
             },
         ];
@@ -380,13 +720,29 @@ impl FilterWorker for ZtfFilterWorker {
 
         // we ignore the forced photometry for now, but will add it later
 
+        // last but not least, we need to get the classifications
+        let mut classifications = Vec::new();
+        // classifications in the alert is a document with classifier names as keys and the scores as values
+        // we need to convert it to a vec of Classification structs
+        if let Some(classifications_doc) = alert_document.get_document("classifications").ok() {
+            for (key, value) in classifications_doc.iter() {
+                if let Some(score) = value.as_f64() {
+                    classifications.push(Classification {
+                        classifier: key.to_string(),
+                        score,
+                    });
+                }
+            }
+        }
+
         let alert = Alert {
             candid,
             object_id,
             jd,
             ra,
             dec,
-            filters: filter_results, // assuming you have filter results to attach
+            filters: filter_results,
+            classifications,
             photometry,
             cutout_science,
             cutout_template,

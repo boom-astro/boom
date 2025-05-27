@@ -1,9 +1,11 @@
 use crate::utils::worker::WorkerCmd;
 use crate::{conf, utils::db::CreateIndexError};
-use apache_avro::Schema;
+use apache_avro::{from_avro_datum, Reader, Schema};
 use mongodb::bson::Document;
 use redis::AsyncCommands;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+use std::io::Read;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tracing::{error, info, trace, warn};
@@ -185,6 +187,88 @@ impl SchemaRegistry {
     }
 }
 
+fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
+    let mut i = 0u64;
+    let mut buf = [0u8; 1];
+
+    let mut j = 0;
+    loop {
+        if j > 9 {
+            return Err(SchemaRegistryError::IntegerOverflow);
+        }
+        reader
+            .read_exact(&mut buf[..])
+            .map_err(SchemaRegistryError::CursorError)?;
+
+        i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
+        if (buf[0] >> 7) == 0 {
+            break;
+        } else {
+            j += 1;
+        }
+    }
+
+    Ok(i)
+}
+
+pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+    let z = decode_variable(reader)?;
+    if z & 0x1 == 0 {
+        Ok((z >> 1) as i64)
+    } else {
+        Ok(!(z >> 1) as i64)
+    }
+}
+
+fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+    Ok(zag_i64(reader)?)
+}
+
+pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
+    // First, we extract the schema from the avro bytes
+    let cursor = std::io::Cursor::new(avro_bytes);
+    let reader = Reader::new(cursor).map_err(SchemaRegistryError::InvalidSchema)?;
+    let schema = reader.writer_schema();
+
+    // Then, we look for the index of the start of the data
+    // this is based on the Apache Avro specification 1.3.2
+    // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
+    let mut cursor = std::io::Cursor::new(avro_bytes);
+
+    // Four bytes, ASCII 'O', 'b', 'j', followed by 1
+    let mut buf = [0; 4];
+    cursor
+        .read_exact(&mut buf)
+        .map_err(SchemaRegistryError::CursorError)?;
+    if buf != [b'O', b'b', b'j', 1u8] {
+        return Err(SchemaRegistryError::MagicBytesError);
+    }
+
+    // Then there is the file metadata, including the schema
+    let meta_schema = Schema::map(Schema::Bytes);
+    from_avro_datum(&meta_schema, &mut cursor, None).map_err(SchemaRegistryError::InvalidSchema)?;
+
+    // Then the 16-byte, randomly-generated sync marker for this file.
+    let mut buf = [0; 16];
+    cursor
+        .read_exact(&mut buf)
+        .map_err(SchemaRegistryError::CursorError)?;
+
+    // each avro record is preceded by:
+    // 1. a variable-length integer, the number of records in the block
+    // 2. a variable-length integer, the number of bytes in the block
+    let nb_records = decode_long(&mut cursor)?;
+    if nb_records != 1 {
+        return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
+    }
+    let _ = decode_long(&mut cursor)?;
+
+    // we now have the start index of the data
+    let start_idx = cursor.position();
+
+    Ok((schema.to_owned(), start_idx as usize))
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum AlertWorkerError {
     #[error("failed to load config")]
@@ -207,6 +291,14 @@ pub enum AlertWorkerError {
     RemoveAlertError(#[source] redis::RedisError),
     #[error("failed to push alert onto the alert queue")]
     PushAlertError(#[source] redis::RedisError),
+}
+
+pub fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mjd = <f64 as Deserialize>::deserialize(deserializer)?;
+    Ok(mjd + 2400000.5)
 }
 
 #[async_trait::async_trait]
@@ -315,14 +407,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
                 }
                 _ => {
                     warn!(error = %error, "Error processing alert, skipping");
-                    // TODO: Handle alerts that we could not parse from avro
-                    // so we don't re-push them to the queue
-                    // con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
-                    //     .await
-                    //     .map_err(AlertWorkerError::PushAlertError)?;
-                    // con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    //     .await
-                    //     .map_err(AlertWorkerError::RemoveAlertError)?;
                 }
             },
         }

@@ -1,21 +1,21 @@
 use boom::{
-    alert::{AlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, LSST_DEC_LIMIT, ZTF_LSST_XMATCH_RADIUS},
     conf,
-    filter::{FilterWorker, ZtfFilterWorker},
+    filter::{Filter, FilterWorker, ZtfFilter, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
     utils::{
         db::mongify,
         testing::{
             drop_alert_from_collections, insert_test_ztf_filter, lsst_alert_worker,
-            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizerTrait, LsstAlertRandomizer,
+            remove_test_filter, ztf_alert_worker, AlertRandomizerTrait, LsstAlertRandomizer,
             ZtfAlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 
 #[tokio::test]
-async fn test_alert_from_avro_bytes() {
+async fn test_ztf_alert_from_avro_bytes() {
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
@@ -244,7 +244,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 1.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 1.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -269,7 +269,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 2. nearby LSST alert, ZTF alert should have an LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -298,7 +298,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -327,7 +327,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
     let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.5 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.5 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -365,7 +365,7 @@ async fn test_process_ztf_lsst_xmatch() {
 
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -448,6 +448,313 @@ async fn test_ml_ztf_alert() {
 }
 
 #[tokio::test]
+async fn test_build_ztf_filter() {
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
+    let filter_collection = db.collection("filters");
+
+    let filter_id = insert_test_ztf_filter(None).await.unwrap();
+    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
+    remove_test_filter(filter_id).await.unwrap();
+
+    let filter = filter_result.unwrap();
+    let pipeline: Vec<Document> = vec![
+        doc! { "$match": {} },
+        doc! {
+            "$project": {
+                "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1
+            }
+        },
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    assert_eq!(pipeline, filter.pipeline);
+    assert_eq!(vec![1], filter.permissions);
+
+    // check that a filter that uses the prv_candidates field is built correctly
+    let input_pipeline = vec![
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! { "$match": { "prv_candidates.0.magpsf": { "$exists": true } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    let filter_id = insert_test_ztf_filter(Some(input_pipeline)).await.unwrap();
+    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
+    remove_test_filter(filter_id).await.unwrap();
+
+    let filter = filter_result.unwrap();
+    let input_pipeline = vec![
+        doc! { "$match": {} },
+        doc! {
+            "$project": {
+                "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1
+            }
+        },
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! {
+            "$lookup": doc! {
+                "from": format!("ZTF_alerts_aux"),
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$addFields": doc! {
+                "prv_candidates": doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_candidates",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                {
+                                    "$in": [
+                                        "$$x.programid",
+                                        [1]
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        doc! {
+            "$unset": "aux"
+        },
+        doc! { "$match": { "prv_candidates.0.magpsf": { "$exists": true } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    assert_eq!(input_pipeline, filter.pipeline);
+
+    // check that a filter that uses the prv_candidates field is built correctly
+    let input_pipeline = vec![
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! { "$match": { "prv_candidates.0": { "$exists": true } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    let filter_id = insert_test_ztf_filter(Some(input_pipeline)).await.unwrap();
+    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
+    remove_test_filter(filter_id).await.unwrap();
+
+    let filter = filter_result.unwrap();
+    let input_pipeline = vec![
+        doc! { "$match": {} },
+        doc! {
+            "$project": {
+                "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1
+            }
+        },
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! {
+            "$lookup": doc! {
+                "from": format!("ZTF_alerts_aux"),
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$addFields": doc! {
+                "prv_candidates": doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_candidates",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                {
+                                    "$in": [
+                                        "$$x.programid",
+                                        [1]
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            }
+        },
+        doc! {
+            "$unset": "aux"
+        },
+        doc! { "$match": { "prv_candidates.0": { "$exists": true } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    assert_eq!(input_pipeline, filter.pipeline);
+
+    // check that a filter that uses the LSST field is built correctly
+    let input_pipeline = vec![
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! { "$match": { "LSST.prv_candidates.0": { "$exists": true } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    let filter_id = insert_test_ztf_filter(Some(input_pipeline)).await.unwrap();
+    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
+    remove_test_filter(filter_id).await.unwrap();
+
+    let filter = filter_result.unwrap();
+    let input_pipeline = vec![
+        doc! { "$match": {} },
+        doc! {
+            "$project": {
+                "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1
+            }
+        },
+        doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! {
+            "$lookup": doc! {
+                "from": format!("ZTF_alerts_aux"),
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$addFields": doc! {
+                "aliases": doc! {
+                    "$arrayElemAt": [
+                        "$aux.aliases",
+                        0
+                    ]
+                }
+            }
+        },
+        doc! {
+            "$unset": "aux"
+        },
+        doc! {
+            "$lookup": doc! {
+                "from": format!("LSST_alerts_aux"),
+                "localField": "aliases.LSST.0",
+                "foreignField": "_id",
+                "as": "lsst_aux"
+            }
+        },
+        doc! {
+            "$addFields": doc! {
+                "LSST.prv_candidates": doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$lsst_aux.prv_candidates",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+                "LSST.prv_nondetections": doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_nondetections",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            }
+        },
+        doc! {
+            "$unset": "lsst_aux"
+        },
+        doc! { "$match": { "LSST.prv_candidates.0": { "$exists": true } } },
+        doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+    ];
+    assert_eq!(input_pipeline, filter.pipeline);
+}
+
+#[tokio::test]
 async fn test_filter_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
@@ -456,7 +763,8 @@ async fn test_filter_ztf_alert() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
 
-    let filter_id = insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_ztf_filter(None).await.unwrap();
+    println!("Filter ID: {}", filter_id);
 
     let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker
@@ -477,5 +785,5 @@ async fn test_filter_ztf_alert() {
         .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":14.91}");
 
-    remove_test_ztf_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id).await.unwrap();
 }

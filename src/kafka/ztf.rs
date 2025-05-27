@@ -1,6 +1,6 @@
 use crate::{
     conf,
-    kafka::base::{consume_partitions, AlertConsumer},
+    kafka::base::{consume_partitions, AlertConsumer, AlertProducer},
 };
 use rdkafka::config::ClientConfig;
 use redis::AsyncCommands;
@@ -16,6 +16,7 @@ pub struct ZtfAlertConsumer {
     max_in_queue: usize,
     group_id: String,
     server: String,
+    program_id: u8,
     config_path: String,
 }
 
@@ -28,6 +29,7 @@ impl AlertConsumer for ZtfAlertConsumer {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server: Option<&str>,
+        program_id: Option<u8>,
         config_path: &str,
     ) -> Self {
         if 15 % n_threads != 0 {
@@ -48,18 +50,24 @@ impl AlertConsumer for ZtfAlertConsumer {
             n_threads, topic, output_queue, group_id, server
         );
 
+        let program_id = match program_id {
+            Some(id) => id,
+            None => 1,
+        };
+
         ZtfAlertConsumer {
             output_queue,
             n_threads,
             max_in_queue,
             group_id,
             server,
+            program_id,
             config_path: config_path.to_string(),
         }
     }
 
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, None, config_path)
+        Self::new(1, None, None, None, None, None, None, config_path)
     }
 
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
@@ -71,7 +79,7 @@ impl AlertConsumer for ZtfAlertConsumer {
 
         // ZTF uses nightly topics, and no user/pass (IP whitelisting)
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        let topic = format!("ztf_{}_programid1", date.format("%Y%m%d"));
+        let topic = format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id);
 
         let mut handles = vec![];
         for i in 0..self.n_threads {
@@ -120,134 +128,225 @@ impl AlertConsumer for ZtfAlertConsumer {
     }
 }
 
-pub fn download_alerts_from_archive(date: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    if date.len() != 8 {
-        return Err("Invalid date format".into());
-    }
-
-    let data_folder = format!("data/alerts/ztf/{}", date);
-    std::fs::create_dir_all(&data_folder)?;
-
-    if std::fs::read_dir(&data_folder)?.count() > 0 {
-        info!("Alerts already downloaded to {}", data_folder);
-        let count = std::fs::read_dir(&data_folder).unwrap().count();
-        return Ok(count as i64);
-    }
-
-    info!("Downloading alerts for date {}", date);
-    let url = format!(
-        "https://ztf.uw.edu/alerts/public/ztf_public_{}.tar.gz",
-        date
-    );
-    let output = std::process::Command::new("wget")
-        .arg(&url)
-        .arg("-P")
-        .arg(&data_folder)
-        .arg("-O")
-        .arg(format!("{}/ztf_public_{}.tar.gz", data_folder, date))
-        .output()?;
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        if error_msg.contains("404 Not Found") {
-            return Err("No alerts found for this date".into());
-        }
-        return Err(format!("Failed to download alerts: {}", error_msg).into());
-    } else {
-        info!("Downloaded alerts to {}", data_folder);
-    }
-
-    let output = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(format!("{}/ztf_public_{}.tar.gz", data_folder, date))
-        .arg("-C")
-        .arg(&data_folder)
-        .output()?;
-    if !output.status.success() {
-        return Err("Failed to extract alerts".into());
-    } else {
-        info!("Extracted alerts to {}", data_folder);
-    }
-
-    std::fs::remove_file(format!("{}/ztf_public_{}.tar.gz", data_folder, date))?;
-
-    let count = std::fs::read_dir(&data_folder)?.count();
-
-    Ok(count as i64)
+pub struct ZtfAlertProducer {
+    date: String,
+    program_id: u8,
+    limit: i64,
+    partnership_archive_username: Option<String>,
+    partnership_archive_password: Option<String>,
 }
 
-pub async fn produce_from_archive(
-    date: &str,
-    limit: i64,
-    topic: Option<String>,
-) -> Result<i64, Box<dyn std::error::Error>> {
-    match download_alerts_from_archive(&date) {
-        Ok(count) => count,
-        Err(e) => {
-            error!("Error downloading alerts: {}", e);
-            return Err(e);
-        }
-    };
-
-    let topic_name = match topic {
-        Some(t) => t,
-        None => format!("ztf_{}_programid1", &date),
-    };
-
-    info!("Initializing ZTF alert kafka producer");
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
-        .set("message.timeout.ms", "5000")
-        // it's best to increase batch.size if the cluster
-        // is running on another machine. Locally, lower means less
-        // latency, since we are not limited by network speed anyways
-        .set("batch.size", "16384")
-        .set("linger.ms", "5")
-        .set("acks", "1")
-        .set("max.in.flight.requests.per.connection", "5")
-        .set("retries", "3")
-        .create()
-        .expect("Producer creation error");
-
-    info!("Pushing alerts to {}", topic_name);
-
-    let mut total_pushed = 0;
-    let start = std::time::Instant::now();
-    for entry in std::fs::read_dir(format!("data/alerts/ztf/{}", date))? {
-        if entry.is_err() {
-            continue;
-        }
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if !path.to_str().unwrap().ends_with(".avro") {
-            continue;
-        }
-        let payload = std::fs::read(path).unwrap();
-
-        let record = FutureRecord::to(&topic_name)
-            .payload(&payload)
-            .key("ztf")
-            .timestamp(chrono::Utc::now().timestamp_millis());
-
-        producer
-            .send(record, std::time::Duration::from_secs(0))
-            .await
-            .unwrap();
-
-        total_pushed += 1;
-        if total_pushed % 1000 == 0 {
-            info!("Pushed {} items since {:?}", total_pushed, start.elapsed());
+impl ZtfAlertProducer {
+    pub fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
+        if self.date.len() != 8 {
+            return Err("Invalid date format".into());
         }
 
-        if limit > 0 && total_pushed >= limit {
-            info!("Reached limit of {} pushed items", limit);
-            break;
+        info!(
+            "Downloading alerts for date {} (programid: {})",
+            self.date, self.program_id
+        );
+        let file_name = match self.program_id {
+            1 => format!("ztf_public_{}.tar.gz", self.date),
+            2 => format!("ztf_partnership_{}.tar.gz", self.date),
+            _ => return Err("Invalid program ID".into()),
+        };
+        let data_folder = match self.program_id {
+            1 => format!("data/alerts/ztf/public/{}", self.date),
+            2 => format!("data/alerts/ztf/partnership/{}", self.date),
+            _ => return Err("Invalid program ID".into()),
+        };
+
+        std::fs::create_dir_all(&data_folder)?;
+
+        if std::fs::read_dir(&data_folder)?.count() > 0 {
+            info!("Alerts already downloaded to {}", data_folder);
+            let count = std::fs::read_dir(&data_folder).unwrap().count();
+            return Ok(count as i64);
+        }
+
+        let mut command = std::process::Command::new("wget");
+        match self.program_id {
+            1 => command
+                .arg(&format!("https://ztf.uw.edu/alerts/public/{}", file_name))
+                .arg("-P")
+                .arg(&data_folder)
+                .arg("-O")
+                .arg(format!("{}/{}.temp", data_folder, file_name)),
+            2 => {
+                if self.partnership_archive_username.is_none()
+                    || self.partnership_archive_password.is_none()
+                {
+                    return Err("Partnership archive credentials not set".into());
+                }
+                let username = self.partnership_archive_username.as_ref().unwrap();
+                let password = self.partnership_archive_password.as_ref().unwrap();
+                command
+                    .arg(&format!(
+                        "https://ztf.uw.edu/alerts/partnership/{}",
+                        file_name
+                    ))
+                    .arg("-P")
+                    .arg(&data_folder)
+                    .arg("--user")
+                    .arg(username)
+                    .arg("--password")
+                    .arg(password)
+                    .arg("-O")
+                    .arg(format!("{}/{}.temp", data_folder, file_name))
+            }
+            _ => return Err("Invalid program ID".into()),
+        };
+        let output = command.output()?;
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            if error_msg.contains("404 Not Found") {
+                return Err("No alerts found for this date".into());
+            }
+            // delete the temp file if it exists
+            let _ = std::fs::remove_file(format!("{}/{}.temp", data_folder, file_name));
+            return Err(format!("Failed to download alerts: {}", error_msg).into());
+        } else {
+            info!("Downloaded alerts to {}", data_folder);
+            // rename the temp file to the final name
+            std::fs::rename(
+                format!("{}/{}.temp", data_folder, file_name),
+                format!("{}/{}", data_folder, file_name),
+            )?;
+        }
+
+        // when we untar it, the name of the folder should be the same as the file name
+        let output = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(format!("{}/{}", data_folder, file_name))
+            .arg("-C")
+            .arg(&data_folder)
+            .output()?;
+        if !output.status.success() {
+            return Err("Failed to extract alerts".into());
+        } else {
+            info!("Extracted alerts to {}", data_folder);
+        }
+
+        std::fs::remove_file(format!("{}/{}", data_folder, file_name))?;
+
+        let count = std::fs::read_dir(&data_folder)?.count();
+
+        Ok(count as i64)
+    }
+}
+
+#[async_trait::async_trait]
+impl AlertProducer for ZtfAlertProducer {
+    fn new(date: String, limit: i64, program_id: Option<u8>) -> Self {
+        // if u8 is not provided, default to 1
+        let program_id = match program_id {
+            Some(id) => id,
+            None => 1,
+        };
+
+        // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
+        // and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD set as env variables
+        let partnership_archive_username = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_USERNAME") {
+            Ok(username) => Some(username),
+            Err(_) => None,
+        };
+        let partnership_archive_password = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_PASSWORD") {
+            Ok(password) => Some(password),
+            Err(_) => None,
+        };
+        if program_id > 1 {
+            if partnership_archive_username.is_none() || partnership_archive_password.is_none() {
+                error!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for program ID > 1");
+                std::process::exit(1);
+            }
+        }
+
+        ZtfAlertProducer {
+            date,
+            limit,
+            program_id,
+            partnership_archive_username,
+            partnership_archive_password,
         }
     }
 
-    info!("Pushed {} alerts to the queue", total_pushed);
+    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
+        match self.download_alerts_from_archive() {
+            Ok(count) => count,
+            Err(e) => {
+                error!("Error downloading alerts: {}", e);
+                return Err(e);
+            }
+        };
 
-    // close producer
-    producer.flush(std::time::Duration::from_secs(1)).unwrap();
+        let topic_name = match topic {
+            Some(t) => t,
+            None => format!("ztf_{}_programid{}", self.date, self.program_id),
+        };
 
-    Ok(total_pushed as i64)
+        info!("Initializing ZTF alert kafka producer");
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "localhost:9092")
+            .set("message.timeout.ms", "5000")
+            // it's best to increase batch.size if the cluster
+            // is running on another machine. Locally, lower means less
+            // latency, since we are not limited by network speed anyways
+            .set("batch.size", "16384")
+            .set("linger.ms", "5")
+            .set("acks", "1")
+            .set("max.in.flight.requests.per.connection", "5")
+            .set("retries", "3")
+            .create()
+            .expect("Producer creation error");
+
+        info!("Pushing alerts to {}", topic_name);
+
+        let data_folder = match self.program_id {
+            1 => format!("data/alerts/ztf/public/{}", self.date),
+            2 => format!("data/alerts/ztf/partnership/{}", self.date),
+            _ => return Err("Invalid program ID".into()),
+        };
+
+        let mut total_pushed = 0;
+        let start = std::time::Instant::now();
+        for entry in std::fs::read_dir(&data_folder)? {
+            if entry.is_err() {
+                continue;
+            }
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if !path.to_str().unwrap().ends_with(".avro") {
+                continue;
+            }
+            let payload = std::fs::read(path).unwrap();
+
+            let record = FutureRecord::to(&topic_name)
+                .payload(&payload)
+                .key("ztf")
+                .timestamp(chrono::Utc::now().timestamp_millis());
+
+            producer
+                .send(record, std::time::Duration::from_secs(0))
+                .await
+                .unwrap();
+
+            total_pushed += 1;
+            if total_pushed % 1000 == 0 {
+                info!("Pushed {} items since {:?}", total_pushed, start.elapsed());
+            }
+
+            if self.limit > 0 && total_pushed >= self.limit {
+                info!("Reached limit of {} pushed items", self.limit);
+                break;
+            }
+        }
+
+        info!("Pushed {} alerts to the queue", total_pushed);
+
+        // close producer
+        producer.flush(std::time::Duration::from_secs(1)).unwrap();
+
+        Ok(total_pushed as i64)
+    }
 }

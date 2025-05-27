@@ -34,7 +34,7 @@ async fn main() {
     let args = Cli::parse();
 
     let stream_name = match args.stream {
-        Some(stream) => stream,
+        Some(stream) => stream.to_uppercase(),
         None => {
             warn!("No stream name provided");
             std::process::exit(1);

@@ -36,6 +36,17 @@ const ALERT_SCHEMA: &str = r#"
                 ]
             }
         }},
+        {"name": "classifications", "type": {
+            "type": "array",
+            "items": {
+                "type": "record",
+                "name": "Classification",
+                "fields": [
+                    {"name": "classifier", "type": "string"},
+                    {"name": "score", "type": "double"}
+                ]
+            }
+        }},
         {"name": "photometry", "type": {
             "type": "array",
             "items": {
@@ -74,6 +85,8 @@ pub enum FilterError {
     InvalidFilterPermissions,
     #[error("filter not found in database")]
     FilterNotFound,
+    #[error("filter pipeline could not be parsed")]
+    FilterPipelineError,
     #[error("invalid filter result")]
     InvalidFilterResult(#[source] mongodb::error::Error),
     #[error("failed to run filter")]
@@ -114,6 +127,7 @@ pub enum Origin {
 pub enum Survey {
     ZTF,
     LSST,
+    DECAM,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -128,6 +142,12 @@ pub struct Photometry {
     pub survey: Survey,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Classification {
+    pub classifier: String,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -146,6 +166,7 @@ pub struct Alert {
     pub ra: f64,
     pub dec: f64,
     pub filters: Vec<FilterResults>,
+    pub classifications: Vec<Classification>,
     pub photometry: Vec<Photometry>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
     pub cutout_science: Vec<u8>,

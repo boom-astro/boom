@@ -4,7 +4,7 @@ use boom::{
     filter::{FilterWorker, LsstFilterWorker},
     utils::testing::{
         drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
-        remove_test_lsst_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
+        remove_test_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
     },
 };
 use mongodb::bson::doc;
@@ -174,5 +174,5 @@ async fn test_filter_lsst_alert() {
         .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
 
-    remove_test_lsst_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id).await.unwrap();
 }

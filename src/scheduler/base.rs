@@ -1,6 +1,6 @@
 use crate::{
-    alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
-    filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
+    alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
+    filter::{run_filter_worker, DecamFilterWorker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
     utils::worker::{WorkerCmd, WorkerType},
 };
@@ -121,7 +121,10 @@ impl ThreadPool {
     /// Add a new worker to the thread pool
     fn add_worker(&mut self) {
         let id = uuid::Uuid::new_v4().to_string();
-        info!("adding worker with id {}", id);
+        info!(
+            "adding worker with id {} (type: {})",
+            &id, &self.worker_type
+        );
         self.workers.push(Worker::new(
             self.worker_type,
             id.clone(),
@@ -172,6 +175,7 @@ impl Worker {
                 let run = match stream_name.as_str() {
                     "ZTF" => run_alert_worker::<ZtfAlertWorker>,
                     "LSST" => run_alert_worker::<LsstAlertWorker>,
+                    "DECAM" => run_alert_worker::<DecamAlertWorker>,
                     _ => {
                         error!("Unknown stream name: {}", stream_name);
                         return;
@@ -185,6 +189,7 @@ impl Worker {
                 let run = match stream_name.as_str() {
                     "ZTF" => run_filter_worker::<ZtfFilterWorker>,
                     "LSST" => run_filter_worker::<LsstFilterWorker>,
+                    "DECAM" => run_filter_worker::<DecamFilterWorker>,
                     _ => {
                         error!("Unknown stream name: {}", stream_name);
                         return;
@@ -200,6 +205,10 @@ impl Worker {
                     // we don't have an ML worker for LSST yet
                     "LSST" => {
                         error!("LSST ML worker not implemented");
+                        return;
+                    }
+                    "DECAM" => {
+                        error!("DECAM ML worker not implemented");
                         return;
                     }
                     _ => {

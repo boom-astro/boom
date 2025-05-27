@@ -1,16 +1,18 @@
 use chrono::TimeZone;
 use clap::Parser;
-use tracing::Level;
+use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use boom::kafka::{AlertConsumer, LsstAlertConsumer, ZtfAlertConsumer};
+use boom::kafka::{AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, ZtfAlertConsumer};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(help = "Survey to consume alerts from. Options are 'ZTF' or 'LSST'")]
+    #[arg(help = "Survey to consume alerts from. Options are 'ZTF', 'LSST', or 'DECam'")]
     survey: String,
     #[arg(help = "UTC date for which we want to consume alerts, with format YYYYMMDD")]
     date: Option<String>,
+    #[arg(help = "ID of the program to consume the alerts (ZTF only, defaults to 1=public).")]
+    program_id: Option<u8>,
     #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
     config: Option<String>,
     #[arg(help = "Number of processes to use to read the Kafka stream in parallel")]
@@ -49,11 +51,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let date = date.and_hms_opt(0, 0, 0).unwrap();
     let timestamp = chrono::Utc.from_utc_datetime(&date).timestamp();
 
+    let program_id = args.program_id.unwrap_or(1);
+    // program_id might be between 1 and 3 included
+    if program_id < 1 || program_id > 3 {
+        error!("Invalid program ID: {}, must be 1, 2, or 3", program_id);
+        return Ok(());
+    }
+
+    let survey = survey.to_lowercase();
+
     match survey.as_str() {
-        "ZTF" => {
+        "ztf" => {
             let consumer = ZtfAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
+                Some(&format!(
+                    "ztf_{}_programid{}",
+                    date.format("%Y%m%d"),
+                    program_id
+                )),
+                None,
+                None,
+                None,
+                Some(program_id),
+                &config_path,
+            );
+            if clear {
+                let _ = consumer.clear_output_queue();
+            }
+            consumer.consume(timestamp).await?;
+        }
+        "lsst" => {
+            let consumer = LsstAlertConsumer::new(
+                processes,
+                Some(max_in_queue),
+                Some(&format!("lsst_{}_programid1", date.format("%Y%m%d"))),
                 None,
                 None,
                 None,
@@ -65,10 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             consumer.consume(timestamp).await?;
         }
-        "LSST" => {
-            let consumer = LsstAlertConsumer::new(
+        "decam" => {
+            let consumer = DecamAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
+                Some(&format!("decam_{}_programid1", date.format("%Y%m%d"))),
                 None,
                 None,
                 None,
