@@ -1,5 +1,4 @@
-mod api;
-mod models;
+use boom_api::api;
 
 use actix_web::{App, HttpServer, web};
 use mongodb::Client;

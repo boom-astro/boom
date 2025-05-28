@@ -4,6 +4,7 @@ use actix_web::{
 };
 #[cfg(test)]
 use boom_api::{
+    DB_NAME,
     api::{query, query::build_options},
     models::query_models::{QueryKwargs, Unit},
 };
@@ -14,7 +15,6 @@ use mongodb::{
 };
 
 // TODO: put in config
-const DB_NAME: &str = "boom";
 const CATALOG_NAME: &str = "ZTF";
 
 // TODO: get info for client from the config file

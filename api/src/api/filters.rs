@@ -7,7 +7,7 @@ use mongodb::{
 use std::vec;
 use uuid::Uuid;
 
-const DB_NAME: &str = "boom";
+use crate::DB_NAME;
 
 struct Filter {
     pub pipeline: Vec<mongodb::bson::Document>,

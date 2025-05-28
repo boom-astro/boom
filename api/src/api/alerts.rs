@@ -6,7 +6,7 @@ use mongodb::{
     bson::{Document, doc},
 };
 
-const DB_NAME: &str = "boom";
+use crate::DB_NAME;
 
 #[get("/alerts/{survey_name}/get_object/{object_id}")]
 pub async fn get_object(

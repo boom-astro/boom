@@ -1,3 +1,4 @@
+use crate::DB_NAME;
 use crate::models::{query_models::*, response};
 use actix_web::{HttpResponse, get, web};
 use futures::TryStreamExt;
@@ -6,8 +7,6 @@ use mongodb::{
     bson::{Document, doc},
 };
 use std::collections::HashMap;
-
-const DB_NAME: &str = "boom";
 
 // builds find options for mongo query
 pub fn build_options(
