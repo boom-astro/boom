@@ -1,5 +1,5 @@
 use boom_api::api;
-use boom_api::conf::load_config;
+use boom_api::conf::AppConfig;
 
 use actix_web::{App, HttpServer, web};
 use mongodb::{Client, Database};
@@ -7,7 +7,7 @@ use mongodb::{Client, Database};
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Read the config file
-    let config = load_config().database;
+    let config = AppConfig::from_default_path().database;
     let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
         format!(
             "mongodb://{}:{}@{}:{}",

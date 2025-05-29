@@ -12,9 +12,20 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
 }
 
-pub fn load_config() -> AppConfig {
+impl AppConfig {
+    pub fn from_default_path() -> Self {
+        load_config(None)
+    }
+
+    pub fn from_path(config_path: &str) -> Self {
+        load_config(Some(config_path))
+    }
+}
+
+pub fn load_config(config_path: Option<&str>) -> AppConfig {
+    let config_fpath = config_path.unwrap_or("config.yaml");
     let config = Config::builder()
-        .add_source(File::with_name("config.yaml"))
+        .add_source(File::with_name(config_fpath))
         .build()
         .expect("a config.yaml file should exist");
     let db_conf = config

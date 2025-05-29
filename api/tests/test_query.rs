@@ -2,7 +2,7 @@ use actix_web::web;
 #[cfg(test)]
 use boom_api::{
     api::{query, query::build_options},
-    conf::load_config,
+    conf::AppConfig,
     models::query_models::{QueryKwargs, Unit},
 };
 use mongodb::{
@@ -15,7 +15,9 @@ use mongodb::{
 const CATALOG_NAME: &str = "ZTF";
 
 pub async fn get_db() -> web::Data<Database> {
-    let config = load_config().database;
+    // Read config from the root of the project
+    // TODO: Perhaps we should have a special config for tests?
+    let config = AppConfig::from_path("../config.yaml").database;
     let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
         format!(
             "mongodb://{}:{}@{}:{}",
