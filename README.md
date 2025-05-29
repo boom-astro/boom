@@ -50,29 +50,21 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-1. We'll start by creating a python virtual environment to manage our python install and dependencies. Here's how you can do that with `uv`:
-    ```bash
-    uv venv --python 3.10
-    source .venv/bin/activate
-    uv pip install -r requirements.txt
-    ```
-    Note: If requirements.txt is missing, it can be skipped. It's only required for the ML pipeline.
-   
-3. Next, copy the default config file, `config.default.yaml`, to `config.yaml`:
+1. Copy the default config file, `config.default.yaml`, to `config.yaml`:
     ```bash
     cp config.default.yaml config.yaml
     ```
-4. Same for the `docker-compose.yaml` file:
+2. Same for the `docker-compose.yaml` file:
     ```bash
     cp docker-compose.default.yaml docker-compose.yaml
     ```
-5. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+3. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-6. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
