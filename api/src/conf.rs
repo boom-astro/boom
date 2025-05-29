@@ -8,6 +8,18 @@ pub struct DatabaseConfig {
     pub password: String,
 }
 
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        DatabaseConfig {
+            name: "boom".to_string(),
+            host: "localhost".to_string(),
+            port: 27017,
+            username: "mongoadmin".to_string(),
+            password: "mongoadminsecret".to_string(),
+        }
+    }
+}
+
 pub struct AppConfig {
     pub database: DatabaseConfig,
 }
@@ -22,8 +34,17 @@ impl AppConfig {
     }
 }
 
+impl Default for AppConfig {
+    fn default() -> Self {
+        AppConfig {
+            database: DatabaseConfig::default(),
+        }
+    }
+}
+
 pub fn load_config(config_path: Option<&str>) -> AppConfig {
     let config_fpath = config_path.unwrap_or("config.yaml");
+    let default_config = AppConfig::default();
     let config = Config::builder()
         .add_source(File::with_name(config_fpath))
         .build()
@@ -36,34 +57,34 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
             .clone()
             .into_string()
             .unwrap_or_else(|e| panic!("Invalid host: {}", e)),
-        None => "localhost".to_string(),
+        None => default_config.database.host.clone(),
     };
     let port = match db_conf.get("port") {
         Some(port) => port
             .clone()
             .into_int()
             .unwrap_or_else(|e| panic!("Invalid port: {}", e)) as u16,
-        None => 27017,
+        None => default_config.database.port,
     };
     let name = match db_conf.get("name") {
         Some(name) => name
             .clone()
             .into_string()
             .unwrap_or_else(|e| panic!("Invalid name: {}", e)),
-        None => "boom".to_string(),
+        None => default_config.database.name.clone(),
     };
     let username = db_conf
         .get("username")
         .and_then(|username| username.clone().into_string().ok())
-        .unwrap_or("mongoadmin".to_string());
+        .unwrap_or(default_config.database.username);
     let password = db_conf
         .get("password")
         .and_then(|password| password.clone().into_string().ok())
-        .unwrap_or("mongoadminsecret".to_string());
+        .unwrap_or(default_config.database.password);
     {
         AppConfig {
             database: DatabaseConfig {
-                name: name,
+                name,
                 host,
                 port,
                 username,
