@@ -1,0 +1,20 @@
+{
+  "pipeline": [
+    {
+      "$match": {
+        "candidate.drb": {
+          "$gt": 0.5
+        },
+        "candidate.ndethist": {
+          "$gt": 1.0
+        },
+        "candidate.magpsf": {
+          "$lte": 18.5
+        }
+      }
+    }
+  ],
+  "catalog": "ZTF",
+  "permissions": [1],
+  "id": -3
+}

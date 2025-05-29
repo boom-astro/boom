@@ -1,3 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["api"]
+
 [package]
 name = "boom"
 version = "0.1.0"

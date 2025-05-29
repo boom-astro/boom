@@ -33,5 +33,7 @@ jobs:
       run: |
         cp docker-compose.default.yaml docker-compose.yaml
         docker compose up --build -d
-    - name: Tests
+    - name: Test BOOM
       run: cargo test --release
+    - name: Test BOOM API
+      run: cargo test --release --package boom-api
