@@ -1,7 +1,4 @@
-use actix_web::{
-    test::{self, TestRequest},
-    web,
-};
+use actix_web::web;
 #[cfg(test)]
 use boom_api::{
     DB_NAME,
