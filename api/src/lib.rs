@@ -1,4 +1,3 @@
 pub mod api;
+pub mod conf;
 pub mod models;
-
-pub const DB_NAME: &str = "boom";
