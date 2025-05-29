@@ -1,12 +1,16 @@
 use boom_api::api;
 
 use actix_web::{App, HttpServer, web};
+use config::{Config, File};
 use mongodb::Client;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Read the config file
-    let config = boom::conf::load_config("config.yaml").expect("a config.yaml file should exist");
+    let config = Config::builder()
+        .add_source(File::with_name("config.yaml"))
+        .build()
+        .expect("a config.yaml file should exist");
     let db_conf = config
         .get_table("database")
         .expect("a database table should exist in the config file");
