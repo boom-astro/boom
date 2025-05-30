@@ -7,7 +7,10 @@ use crate::{
 use std::thread;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, span, warn};
+
+const DEBUG: tracing::Level = tracing::Level::DEBUG;
+const INFO: tracing::Level = tracing::Level::INFO;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
@@ -16,8 +19,9 @@ pub enum SchedulerError {
 }
 
 // get num worker from config file, by stream name and worker type
+#[instrument(level = DEBUG, skip(conf), err)]
 pub fn get_num_workers(
-    conf: config::Config,
+    conf: &config::Config,
     stream_name: &str,
     worker_type: &str,
 ) -> Result<i64, SchedulerError> {
@@ -69,6 +73,7 @@ impl ThreadPool {
     /// size: number of workers initially inside of threadpool
     /// stream_name: source stream. e.g. 'ZTF'
     /// config_path: path to config file
+    #[instrument(level = INFO)]
     pub fn new(
         worker_type: WorkerType,
         size: usize,
@@ -121,7 +126,7 @@ impl ThreadPool {
     /// Add a new worker to the thread pool
     fn add_worker(&mut self) {
         let id = uuid::Uuid::new_v4().to_string();
-        info!("adding worker with id {}", id);
+        info!(%id, "adding worker");
         self.workers.push(Worker::new(
             self.worker_type,
             id.clone(),
@@ -158,6 +163,7 @@ impl Worker {
     /// receiver: receiver by which the owning threadpool communicates with the worker
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
+    #[instrument(level = DEBUG)]
     fn new(
         worker_type: WorkerType,
         id: String,
@@ -169,47 +175,54 @@ impl Worker {
         let thread = match worker_type {
             // TODO: Spawn a new worker thread when one dies? (A supervisor or something like that?)
             WorkerType::Alert => thread::spawn(move || {
-                let run = match stream_name.as_str() {
-                    "ZTF" => run_alert_worker::<ZtfAlertWorker>,
-                    "LSST" => run_alert_worker::<LsstAlertWorker>,
-                    _ => {
-                        error!("Unknown stream name: {}", stream_name);
-                        return;
+                span!(INFO, "alert worker", %id, %stream_name, %config_path).in_scope(|| {
+                    let run = match stream_name.as_str() {
+                        "ZTF" => run_alert_worker::<ZtfAlertWorker>,
+                        "LSST" => run_alert_worker::<LsstAlertWorker>,
+                        _ => {
+                            error!("Unknown stream name");
+                            return;
+                        }
+                    };
+                    // TODO: instrument run_alert_worker
+                    if let Err(error) = run(id, receiver, &config_path) {
+                        error!(%error, "alert worker failed");
                     }
-                };
-                if let Err(error) = run(id, receiver, &config_path) {
-                    error!(error = %error, "failed to run alert worker");
-                }
+                })
             }),
             WorkerType::Filter => thread::spawn(move || {
-                let run = match stream_name.as_str() {
-                    "ZTF" => run_filter_worker::<ZtfFilterWorker>,
-                    "LSST" => run_filter_worker::<LsstFilterWorker>,
-                    _ => {
-                        error!("Unknown stream name: {}", stream_name);
-                        return;
+                span!(INFO, "filter worker", %id, %stream_name, %config_path).in_scope(|| {
+                    let run = match stream_name.as_str() {
+                        "ZTF" => run_filter_worker::<ZtfFilterWorker>,
+                        "LSST" => run_filter_worker::<LsstFilterWorker>,
+                        _ => {
+                            error!("Unknown stream name");
+                            return;
+                        }
+                    };
+                    if let Err(error) = run(id, receiver, &config_path) {
+                        error!(%error, "filter worker failed");
                     }
-                };
-                if let Err(error) = run(id, receiver, &config_path) {
-                    error!(error = %error, "failed to run filter worker");
-                }
+                })
             }),
             WorkerType::ML => thread::spawn(move || {
-                let run = match stream_name.as_str() {
-                    "ZTF" => run_ml_worker::<ZtfMLWorker>,
-                    // we don't have an ML worker for LSST yet
-                    "LSST" => {
-                        error!("LSST ML worker not implemented");
-                        return;
+                span!(INFO, "ml worker", %id, %stream_name, %config_path).in_scope(|| {
+                    let run = match stream_name.as_str() {
+                        "ZTF" => run_ml_worker::<ZtfMLWorker>,
+                        // we don't have an ML worker for LSST yet
+                        "LSST" => {
+                            error!("LSST ML worker not implemented");
+                            return;
+                        }
+                        _ => {
+                            error!("Unknown stream name");
+                            return;
+                        }
+                    };
+                    if let Err(error) = run(id, receiver, &config_path) {
+                        error!(%error, "ml worker failed");
                     }
-                    _ => {
-                        error!("Unknown stream name: {}", stream_name);
-                        return;
-                    }
-                };
-                if let Err(error) = run(id, receiver, &config_path) {
-                    error!(error = %error, "failed to run ml worker");
-                }
+                })
             }),
         };
 

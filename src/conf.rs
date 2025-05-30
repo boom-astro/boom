@@ -3,7 +3,9 @@ use config::{Config, Value};
 // our public API. It's almost always asking for trouble.
 use config::File;
 use std::path::Path;
-use tracing::error;
+use tracing::{error, instrument};
+
+const DEBUG: tracing::Level = tracing::Level::DEBUG;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
@@ -19,6 +21,7 @@ pub enum BoomConfigError {
     MissingKeyError,
 }
 
+#[instrument(level = DEBUG, err)]
 pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
     let path = Path::new(filepath);
 
@@ -54,6 +57,7 @@ pub fn build_xmatch_configs(
     Ok(catalog_xmatch_configs)
 }
 
+#[instrument(level = DEBUG, skip_all, err)]
 pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigError> {
     let db_conf = conf.get_table("database")?;
 

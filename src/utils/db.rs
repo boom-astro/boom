@@ -7,6 +7,8 @@ use mongodb::{
 use serde::Serialize;
 use tracing::instrument;
 
+const INFO: tracing::Level = tracing::Level::INFO;
+
 #[derive(thiserror::Error, Debug)]
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
@@ -54,6 +56,7 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
 
 // This function, for a given survey name (ZTF, LSST), will create
 // the required indexes on the alerts and alerts_aux collections
+#[instrument(level = INFO, skip(db), err)]
 pub async fn initialize_survey_indexes(
     survey: &str,
     db: &Database,

@@ -3,11 +3,15 @@ use std::{
     fmt,
     sync::{Arc, Mutex},
 };
-use tracing::warn;
+use tracing::{instrument, warn};
+
+const DEBUG: tracing::Level = tracing::Level::DEBUG;
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
+#[instrument(level = DEBUG, skip_all)]
 pub async fn sig_int_handler(flag: Arc<Mutex<bool>>) {
     tokio::spawn(async move {
+        // TODO: instrument this?
         tokio::signal::ctrl_c().await.unwrap();
         warn!("Received interrupt signal. Finishing up...");
         let mut flag = flag.try_lock().unwrap();
@@ -28,6 +32,7 @@ pub fn check_exit(flag: Arc<Mutex<bool>>) {
 }
 
 // checks returns value of flag
+#[instrument(level = DEBUG, skip_all)]
 pub fn check_flag(flag: Arc<Mutex<bool>>) -> bool {
     match flag.try_lock() {
         Ok(x) => {

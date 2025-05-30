@@ -11,8 +11,10 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tracing::{info, warn, Subscriber};
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer};
+use tracing::{info, instrument, warn, Subscriber};
+use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+
+const INFO: tracing::Level = tracing::Level::INFO;
 
 #[derive(Parser)]
 struct Cli {
@@ -24,110 +26,75 @@ struct Cli {
 }
 
 // TODO: factor this out into the lib so it's reusable
-fn build_subscriber() -> impl Subscriber {
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_thread_ids(true)
-        .with_thread_names(true);
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .expect("Failed to create EnvFilter");
-    tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter))
+#[derive(Debug, thiserror::Error)]
+enum BuildSubscriberError {
+    #[error("failed to parse filtering directive")]
+    Parse(#[from] tracing_subscriber::filter::ParseError),
 }
 
-#[tokio::main]
-async fn main() {
-    let subscriber = build_subscriber();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set the default subscriber");
+fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_thread_names(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE);
+    let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
+    Ok(tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter)))
+}
 
-    let args = Cli::parse();
-
-    let stream_name = args.stream;
-    info!("Starting scheduler for {} alert processing", stream_name);
-
-    if !args.config.is_some() {
-        warn!("No config file provided, using config.yaml");
-    }
-    let config_path = match args.config {
-        Some(path) => path,
-        None => "config.yaml".to_string(),
-    };
-    let config_file = match conf::load_config(&config_path) {
-        Ok(config) => config,
-        Err(e) => {
-            warn!("could not load config file: {}", e);
-            std::process::exit(1);
-        }
-    };
+#[instrument(level = INFO, skip_all)]
+async fn run(args: Cli) {
+    let default_config_path = "config.yaml".to_string();
+    let config_path = args.config.unwrap_or_else(|| {
+        warn!("no config file provided, using {}", default_config_path);
+        default_config_path
+    });
+    let config = conf::load_config(&config_path).expect("could not load config file");
 
     // get num workers from config file
-    let n_alert = match get_num_workers(config_file.to_owned(), &stream_name, "alert") {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("could not retrieve number of alert workers: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let n_ml = match get_num_workers(config_file.to_owned(), &stream_name, "ml") {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("could not retrieve number of ml workers: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let n_filter = match get_num_workers(config_file.to_owned(), &stream_name, "filter") {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("could not retrieve number of filter workers: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let n_alert = get_num_workers(&config, &args.stream, "alert")
+        .expect("could not retrieve number of alert workers");
+    let n_ml = get_num_workers(&config, &args.stream, "ml")
+        .expect("could not retrieve number of ml workers");
+    let n_filter = get_num_workers(&config, &args.stream, "filter")
+        .expect("could not retrieve number of filter workers");
 
     // initialize the indexes for the survey
-    let db: mongodb::Database = match conf::build_db(&config_file).await {
-        Ok(db) => db,
-        Err(e) => {
-            warn!("could not connect to database: {}", e);
-            std::process::exit(1);
-        }
-    };
-    match initialize_survey_indexes(&stream_name, &db).await {
-        Ok(_) => info!("initialized indexes for {}", stream_name),
-        Err(e) => {
-            warn!("could not initialize indexes for {}: {}", stream_name, e);
-            std::process::exit(1);
-        }
-    }
+    let db: mongodb::Database = conf::build_db(&config)
+        .await
+        .expect("could not create mongodb client");
+    initialize_survey_indexes(&args.stream, &db)
+        .await
+        .expect("could not initialize indexes");
 
     // setup signal handler thread
     let interrupt = Arc::new(Mutex::new(false));
     sig_int_handler(Arc::clone(&interrupt)).await;
 
-    info!("creating alert, ml, and filter workers...");
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
-        stream_name.clone(),
+        args.stream.clone(),
         config_path.clone(),
     );
     let ml_pool = ThreadPool::new(
         WorkerType::ML,
         n_ml as usize,
-        stream_name.clone(),
+        args.stream.clone(),
         config_path.clone(),
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        stream_name.clone(),
+        args.stream.clone(),
         config_path.clone(),
     );
-    info!("created workers");
 
     loop {
-        info!("heart beat (MAIN)");
+        info!("heart beat");
         let exit = check_flag(Arc::clone(&interrupt));
         if exit {
+            // TODO: fields/context.
             warn!("killed thread(s)");
             drop(alert_pool);
             drop(ml_pool);
@@ -136,5 +103,12 @@ async fn main() {
         }
         thread::sleep(std::time::Duration::from_secs(1));
     }
-    std::process::exit(0);
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Cli::parse();
+    let subscriber = build_subscriber().expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+    run(args).await;
 }
