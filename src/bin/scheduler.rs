@@ -4,7 +4,7 @@ use boom::{
     utils::{
         db::initialize_survey_indexes,
         o11y::build_subscriber,
-        worker::{check_flag, sig_int_handler, WorkerType},
+        worker::{check_flag, spawn_sigint_handler, WorkerType},
     },
 };
 use clap::Parser;
@@ -52,7 +52,7 @@ async fn run(args: Cli) {
 
     // setup signal handler thread
     let interrupt = Arc::new(Mutex::new(false));
-    sig_int_handler(Arc::clone(&interrupt)).await;
+    spawn_sigint_handler(Arc::clone(&interrupt)).await;
 
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
