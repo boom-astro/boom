@@ -26,7 +26,6 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "registry"]}
 uuid = { version = "1.12", features = ["v4"] }
 flate2 = "1.1.0"
-anyhow = "1.0.96"
 reqwest = { version = "0.12.12", features = ["json"] }
 async-trait = "0.1.87"
 serde_with = "3.12.0"
