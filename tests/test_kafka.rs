@@ -11,7 +11,7 @@ async fn test_download_from_archive() {
     let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None);
     let result = ztf_alert_producer.download_alerts_from_archive();
     assert!(result.is_ok());
-    assert!(std::path::Path::new(&format!("data/alerts/ztf/{}", &date)).exists());
+    assert!(std::path::Path::new(&format!("data/alerts/ztf/public/{}", &date)).exists());
     assert_eq!(result.unwrap(), 271);
 }
 
