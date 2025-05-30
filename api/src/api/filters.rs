@@ -1,13 +1,11 @@
 use crate::models::filter_models::*;
 use actix_web::{HttpResponse, patch, post, web};
 use mongodb::{
-    Client, Collection,
+    Collection, Database,
     bson::{Document, doc},
 };
 use std::vec;
 use uuid::Uuid;
-
-const DB_NAME: &str = "boom";
 
 struct Filter {
     pub pipeline: Vec<mongodb::bson::Document>,
@@ -95,14 +93,12 @@ fn build_test_pipeline(
 
 // tests the functionality of a filter by running it on alerts in database
 async fn run_test_pipeline(
-    client: web::Data<Client>,
+    db: web::Data<Database>,
     catalog: String,
     pipeline: Vec<mongodb::bson::Document>,
 ) -> Result<(), mongodb::error::Error> {
-    let collection: Collection<mongodb::bson::Document> = client
-        .database(DB_NAME)
-        .collection(format!("{}_alerts", catalog).as_str());
-
+    let collection: Collection<mongodb::bson::Document> =
+        db.collection(format!("{}_alerts", catalog).as_str());
     let result = collection.aggregate(pipeline).await;
     match result {
         Ok(_) => {
@@ -145,7 +141,7 @@ fn build_filter_bson(filter: Filter) -> Result<mongodb::bson::Document, mongodb:
 
 #[patch("/filters/{filter_id}")]
 pub async fn add_filter_version(
-    client: web::Data<Client>,
+    db: web::Data<Database>,
     filter_id: web::Path<i32>,
     body: web::Json<FilterSubmissionBody>,
 ) -> HttpResponse {
@@ -157,8 +153,7 @@ pub async fn add_filter_version(
                 .body("pipeline not provided. pipeline required for adding a filter version");
         }
     };
-
-    let collection: Collection<Document> = client.database(DB_NAME).collection("filters");
+    let collection: Collection<Document> = db.collection("filters");
     let owner_filter = match collection.find_one(doc! {"filter_id": filter_id}).await {
         Ok(Some(filter)) => filter,
         Ok(None) => {
@@ -181,7 +176,7 @@ pub async fn add_filter_version(
     // create test version of filter and test it
     let test_pipeline = build_test_pipeline(catalog.to_string(), permissions, pipeline.clone());
 
-    match run_test_pipeline(client.clone(), catalog.to_string(), test_pipeline).await {
+    match run_test_pipeline(db.clone(), catalog.to_string(), test_pipeline).await {
         Ok(()) => {}
         Err(e) => {
             return HttpResponse::BadRequest().body(format!(
@@ -226,7 +221,7 @@ pub async fn add_filter_version(
 
 #[post("/filters")]
 pub async fn post_filter(
-    client: web::Data<Client>,
+    db: web::Data<Database>,
     body: web::Json<FilterSubmissionBody>,
 ) -> HttpResponse {
     let body = body.clone();
@@ -261,7 +256,7 @@ pub async fn post_filter(
     let test_pipeline = build_test_pipeline(catalog.clone(), permissions.clone(), pipeline.clone());
 
     // perform test run to ensure no errors
-    match run_test_pipeline(client.clone(), catalog.clone(), test_pipeline).await {
+    match run_test_pipeline(db.clone(), catalog.clone(), test_pipeline).await {
         Ok(()) => {}
         Err(e) => {
             return HttpResponse::BadRequest().body(format!(
@@ -272,8 +267,7 @@ pub async fn post_filter(
     }
 
     // save original filter to database
-    let filter_collection: Collection<mongodb::bson::Document> =
-        client.database(DB_NAME).collection("filters");
+    let filter_collection: Collection<mongodb::bson::Document> = db.collection("filters");
     let database_filter = Filter {
         pipeline,
         permissions,
