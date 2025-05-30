@@ -1,12 +1,19 @@
+//! Common observability utilities.
+//!
+//! This module provides a collection of tools for instrumentation and logging
+//! throughout the application.
+//!
 use tracing::Subscriber;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
 
+/// The error type returned when building a subscriber.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildSubscriberError {
     #[error("failed to parse filtering directive")]
     Parse(#[from] tracing_subscriber::filter::ParseError),
 }
 
+/// Build a tracing subscriber.
 pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_thread_names(true)
