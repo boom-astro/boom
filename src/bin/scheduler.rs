@@ -3,6 +3,7 @@ use boom::{
     scheduler::{get_num_workers, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
+        o11y::build_subscriber,
         worker::{check_flag, sig_int_handler, WorkerType},
     },
 };
@@ -11,8 +12,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tracing::{info, instrument, warn, Subscriber};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+use tracing::{info, instrument, warn};
 
 const INFO: tracing::Level = tracing::Level::INFO;
 
@@ -23,23 +23,6 @@ struct Cli {
 
     #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
     config: Option<String>,
-}
-
-// TODO: factor this out into the lib so it's reusable
-#[derive(Debug, thiserror::Error)]
-enum BuildSubscriberError {
-    #[error("failed to parse filtering directive")]
-    Parse(#[from] tracing_subscriber::filter::ParseError),
-}
-
-fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE);
-    let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
-    Ok(tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter)))
 }
 
 #[instrument(level = INFO, skip_all)]
