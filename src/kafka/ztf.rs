@@ -151,14 +151,18 @@ impl ZtfAlertProducer {
             "Downloading alerts for date {} (programid: {})",
             self.date, self.program_id
         );
-        let file_name = match self.program_id {
-            1 => format!("ztf_public_{}.tar.gz", self.date),
-            2 => format!("ztf_partnership_{}.tar.gz", self.date),
-            _ => return Err("Invalid program ID".into()),
-        };
-        let data_folder = match self.program_id {
-            1 => format!("data/alerts/ztf/public/{}", self.date),
-            2 => format!("data/alerts/ztf/partnership/{}", self.date),
+
+        let (file_name, data_folder, base_url) = match self.program_id {
+            1 => (
+                format!("ztf_public_{}.tar.gz", self.date),
+                format!("data/alerts/ztf/public/{}", self.date),
+                "https://ztf.uw.edu/alerts/public/".to_string(),
+            ),
+            2 => (
+                format!("ztf_partnership_{}.tar.gz", self.date),
+                format!("data/alerts/ztf/partnership/{}", self.date),
+                "https://ztf.uw.edu/alerts/partnership/".to_string(),
+            ),
             _ => return Err("Invalid program ID".into()),
         };
 
@@ -171,37 +175,28 @@ impl ZtfAlertProducer {
         }
 
         let mut command = std::process::Command::new("wget");
-        match self.program_id {
-            1 => command
-                .arg(&format!("https://ztf.uw.edu/alerts/public/{}", file_name))
-                .arg("-P")
-                .arg(&data_folder)
-                .arg("-O")
-                .arg(format!("{}/{}.temp", data_folder, file_name)),
-            2 => {
-                if self.partnership_archive_username.is_none()
-                    || self.partnership_archive_password.is_none()
-                {
-                    return Err("Partnership archive credentials not set".into());
-                }
-                let username = self.partnership_archive_username.as_ref().unwrap();
-                let password = self.partnership_archive_password.as_ref().unwrap();
-                command
-                    .arg(&format!(
-                        "https://ztf.uw.edu/alerts/partnership/{}",
-                        file_name
-                    ))
-                    .arg("-P")
-                    .arg(&data_folder)
-                    .arg("--user")
-                    .arg(username)
-                    .arg("--password")
-                    .arg(password)
-                    .arg("-O")
-                    .arg(format!("{}/{}.temp", data_folder, file_name))
+        command
+            .arg(&format!("{}{}", base_url, file_name))
+            .arg("-P")
+            .arg(&data_folder)
+            .arg("-O")
+            .arg(format!("{}/{}.temp", data_folder, file_name));
+
+        if self.program_id == 2 {
+            if self.partnership_archive_username.is_none()
+                || self.partnership_archive_password.is_none()
+            {
+                return Err("Partnership archive credentials not set".into());
             }
-            _ => return Err("Invalid program ID".into()),
-        };
+            let username = self.partnership_archive_username.as_ref().unwrap();
+            let password = self.partnership_archive_password.as_ref().unwrap();
+            command
+                .arg("--user")
+                .arg(username)
+                .arg("--password")
+                .arg(password);
+        }
+
         let output = command.output()?;
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
