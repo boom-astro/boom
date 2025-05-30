@@ -6,6 +6,12 @@ use tracing::{error, info, trace};
 
 use crate::conf;
 
+#[async_trait::async_trait]
+pub trait AlertProducer {
+    fn new(date: String, limit: i64, program_id: Option<u8>) -> Self;
+    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
+}
+
 pub async fn consume_partitions(
     id: &str,
     topic: &str,
@@ -114,10 +120,11 @@ pub trait AlertConsumer: Sized {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
+        program_id: Option<u8>,
         config_path: &str,
     ) -> Self;
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, None, config_path)
+        Self::new(1, None, None, None, None, None, None, config_path)
     }
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>>;
     async fn clear_output_queue(&self) -> Result<(), Box<dyn std::error::Error>>;

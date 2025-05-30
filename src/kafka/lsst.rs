@@ -28,6 +28,7 @@ impl AlertConsumer for LsstAlertConsumer {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
+        _program_id: Option<u8>,
         config_path: &str,
     ) -> Self {
         // 45 should be divisible by n_threads
@@ -74,7 +75,7 @@ impl AlertConsumer for LsstAlertConsumer {
     }
 
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, None, config_path)
+        Self::new(1, None, None, None, None, None, None, config_path)
     }
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
         // divide the 45 LSST partitions for the n_threads that will read them
