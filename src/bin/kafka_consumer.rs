@@ -58,9 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let survey = survey.to_lowercase();
-
-    match survey.as_str() {
+    match survey.to_lowercase().as_str() {
         "ztf" => {
             let consumer = ZtfAlertConsumer::new(
                 processes,

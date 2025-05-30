@@ -6,8 +6,8 @@ use boom::kafka::{AlertProducer, ZtfAlertProducer};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(required = true, help = "Name of stream to ingest")]
-    stream: Option<String>,
+    #[arg(help = "Survey to produce alerts for. Options are: 'ZTF'")]
+    survey: String,
     #[arg(help = "Date of archival alerts to produce, with format YYYYMMDD. Defaults to today.")]
     date: Option<String>,
     #[arg(
@@ -54,19 +54,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let stream = args.stream.unwrap_or_else(|| {
-        error!("No stream specified");
-        std::process::exit(1);
-    });
-    let stream = stream.to_lowercase();
+    let survey = args.survey;
 
-    match stream.as_str() {
+    match survey.to_lowercase().as_str() {
         "ztf" => {
             let producer = ZtfAlertProducer::new(date, limit, Some(program_id));
             producer.produce(None).await?;
         }
         _ => {
-            error!("Unknown stream (supported: ztf): {}", stream);
+            error!("Unknown survey (supported: 'ZTF'): {}", survey);
             return Ok(());
         }
     }
