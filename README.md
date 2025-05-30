@@ -73,9 +73,9 @@ BOOM runs on macOS and Linux. You'll need:
 
 BOOM is meant to be run in production, reading from a real-time stream of astronomical alerts. **That said, we can create our own Kafka stream using the[ZTF alerts public archive](https://ztf.uw.edu/alerts/public/) to test BOOM.** To do so, you can start the `Kafka` producer with:
 ```bash
-cargo run --release --bin kafka_producer <date_in_YYYMMDD_format>
+cargo run --release --bin kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ```
-Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them on disk for the `Kafka` producer to read, and then will start producing them to the associated `Kafka` topic, `ztf_YYYYMMDD_programid1`. You can leave that running in the background, and start the rest of the pipeline in another terminal.
+Where `<survey>` is the name of the survey (`ZTF` only for this binary, for now), `[DATE]` is the date of the alerts you want to read (in `YYYYMMDD` format), and `[PROGRAMID]` (optional) is the ID of the program to use (ZTF only parameter: 1 for public, 2 for partnership, 3 for caltech). We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them on disk for the `Kafka` producer to read, and then will start producing them to the associated `Kafka` topic, `ztf_YYYYMMDD_programid1`. You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
 ```bash
@@ -85,15 +85,19 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 
 Next, you can start the `Kafka` consumer with:
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROCESSES] [CLEAR] [max_in_queue]
+cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROGRAMID] [PROCESSES] [CLEAR] [max_in_queue]
 ```
-Where `<SURVEY>` and `[DATE]` determine which topic to read from. In our case, `<SURVEY>` should be `ZTF` and `[DATE]` is the date in YYYMMDD format that was given to `kafka_producer` earlier, telling the consumer to read from the topic named `ztf_YYYYMMDD_programid1`. 
+Where `<SURVEY>`, `[DATE]`, and `[PROGRAMID]` determine which topic to read from. In our case, `<SURVEY>` should be `ZTF`, `[DATE]` and `[PROGRAMID]` should match the values passed to the `kafka_producer` earlier.
 
 Note: This version of the code requires the correct order of arguments. Run the following for help:
 ```bash
 cargo run --release --bin kafka_consumer -- --help
 ```
-This naming scheme follows the actual naming scheme used by the real ZTF alert streams.  `<group_id>` is the name of the `Kafka` consumer group (optional), and `<exit_on_eof>` is a boolean that tells the consumer to exit when it reaches the end of the topic. You can set it to `true` for testing purposes, and `false` for production, as you would want the consumer to keep running and reading new alerts as they come in. Last but not least `<max_in_queue>` allows you to set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
+Some of the optional parameters are:
+- `<config>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
+- `<processes>` is the number of processes to spawn for the consumer. This is useful if you want to speed up reading from the `Kafka` topic, by splitting the kafka topic partitions across multiple processes. By default, it is set to 1, which means that only one process will be reading from the `Kafka` topic. You can set it to any number you want, as long as the total number of partitions can be divided by that number. For example, ZTF has a total of 15 partitions, so you can set it to 1, 3, 5, or 15. LSST on the other hand, has 45 of them. If you set it to a number that does not divide the total number of partitions, the script will panic.
+- `<clear>` is a boolean that determines whether to clear the `Redis`/`Valkey` queue before starting the consumer. If set to `true`, it will clear the queue, otherwise it will just append the new alerts to the existing queue. This is useful if you want to start fresh with a new set of alerts.
+- `<max_in_queue>` let's you set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 Instead of starting each worker manually, we provide the `scheduler`. It reads the number of workers for each type from `config.yaml`. Run the scheduler with:
 ```bash
