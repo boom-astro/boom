@@ -1,11 +1,13 @@
 use clap::Parser;
-use tracing::{error, info, Level};
+use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use boom::kafka::produce_from_archive;
+use boom::kafka::{AlertProducer, ZtfAlertProducer};
 
 #[derive(Parser)]
 struct Cli {
+    #[arg(required = true, help = "Name of stream to ingest")]
+    stream: Option<String>,
     #[arg(help = "Date of archival alerts to produce, with format YYYYMMDD. Defaults to today.")]
     date: Option<String>,
     #[arg(
@@ -14,6 +16,11 @@ struct Cli {
         help = "Limit the number of alerts produced"
     )]
     limit: Option<i64>,
+    #[arg(
+        value_name = "PROGRAMID",
+        help = "ID of the program producing the alerts (ZTF only, defaults to 1=public)."
+    )]
+    program_id: Option<u8>,
 }
 
 #[tokio::main]
@@ -30,7 +37,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(d) = args.date {
         if d.len() == 8 {
-            info!("Using date from argument: {}", d);
             date = d;
         } else {
             error!("Invalid date format: {}", d);
@@ -41,7 +47,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limit = l;
     }
 
-    produce_from_archive(&date, limit, None).await?;
+    let program_id = args.program_id.unwrap_or(1);
+    // program_id might be between 1 and 3 included
+    if program_id < 1 || program_id > 3 {
+        error!("Invalid program ID: {}, must be 1, 2, or 3", program_id);
+        return Ok(());
+    }
+
+    let stream = args.stream.unwrap_or_else(|| {
+        error!("No stream specified");
+        std::process::exit(1);
+    });
+    let stream = stream.to_lowercase();
+
+    match stream.as_str() {
+        "ztf" => {
+            let producer = ZtfAlertProducer::new(date, limit, Some(program_id));
+            producer.produce(None).await?;
+        }
+        _ => {
+            error!("Unknown stream (supported: ztf): {}", stream);
+            return Ok(());
+        }
+    }
 
     Ok(())
 }

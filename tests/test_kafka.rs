@@ -1,4 +1,4 @@
-use boom::kafka::{download_alerts_from_archive, produce_from_archive};
+use boom::kafka::{AlertProducer, ZtfAlertProducer};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 
@@ -7,10 +7,11 @@ use tracing_subscriber::FmtSubscriber;
 
 #[tokio::test]
 async fn test_download_from_archive() {
-    let date = "20231118";
-    let result = download_alerts_from_archive(date);
+    let date = "20231118".to_string();
+    let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None);
+    let result = ztf_alert_producer.download_alerts_from_archive();
     assert!(result.is_ok());
-    assert!(std::path::Path::new("data/alerts/ztf/20231118").exists());
+    assert!(std::path::Path::new(&format!("data/alerts/ztf/{}", &date)).exists());
     assert_eq!(result.unwrap(), 271);
 }
 
@@ -22,12 +23,15 @@ async fn test_produce_from_archive() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
+    let date = "20240617".to_string();
+    let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None);
+
     let topic = uuid::Uuid::new_v4().to_string();
 
-    let result = produce_from_archive("20240617", 0, Some(topic.clone())).await;
+    let result = ztf_alert_producer.produce(Some(topic.clone())).await;
     assert!(result.is_ok());
     assert!(result.unwrap() == 710);
-    assert!(std::path::Path::new("data/alerts/ztf/20240617").exists());
+    assert!(std::path::Path::new(&format!("data/alerts/ztf/{}", &date)).exists());
 
     let consumer: BaseConsumer = match ClientConfig::new()
         .set("group.id", "test")
