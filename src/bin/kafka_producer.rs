@@ -32,33 +32,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args = Cli::parse();
-    let mut date = chrono::Utc::now().format("%Y%m%d").to_string();
-    let mut limit = 0;
 
-    if let Some(d) = args.date {
-        if d.len() == 8 {
-            date = d;
-        } else {
-            error!("Invalid date format: {}", d);
+    let date = match args.date {
+        Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap(),
+        None => chrono::Utc::now().date_naive().pred_opt().unwrap(),
+    };
+    let date = date.and_hms_opt(0, 0, 0).unwrap();
+    let date_str = date.format("%Y%m%d").to_string();
+    let limit = match args.limit {
+        Some(l) => l,
+        None => 0, // Default to 0 if no limit is provided
+    };
+
+    let program_id = match args.program_id {
+        Some(id) if id >= 1 && id <= 3 => id,
+        None => 1, // Default to 1 if no program ID is provided
+        _ => {
+            error!(
+                "Invalid program ID: {}, must be 1, 2, or 3",
+                args.program_id.unwrap_or(0)
+            );
             return Ok(());
         }
-    }
-    if let Some(l) = args.limit {
-        limit = l;
-    }
-
-    let program_id = args.program_id.unwrap_or(1);
-    // program_id might be between 1 and 3 included
-    if program_id < 1 || program_id > 3 {
-        error!("Invalid program ID: {}, must be 1, 2, or 3", program_id);
-        return Ok(());
-    }
+    };
 
     let survey = args.survey;
 
     match survey.to_lowercase().as_str() {
         "ztf" => {
-            let producer = ZtfAlertProducer::new(date, limit, Some(program_id));
+            let producer = ZtfAlertProducer::new(date_str, limit, Some(program_id));
             producer.produce(None).await?;
         }
         _ => {

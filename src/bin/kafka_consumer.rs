@@ -33,30 +33,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Cli::parse();
 
-    // TODO: based on the location of the telescope, figure out the exact timestamp
-    // for the start of the night
     let date = match args.date {
         Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap(),
         None => chrono::Utc::now().date_naive().pred_opt().unwrap(),
     };
-    let survey = args.survey;
+    let date = date.and_hms_opt(0, 0, 0).unwrap();
+    let timestamp = chrono::Utc.from_utc_datetime(&date).timestamp();
+
+    let program_id = match args.program_id {
+        Some(id) if id >= 1 && id <= 3 => id,
+        None => 1, // Default to 1 if no program ID is provided
+        _ => {
+            error!(
+                "Invalid program ID: {}, must be 1, 2, or 3",
+                args.program_id.unwrap_or(0)
+            );
+            return Ok(());
+        }
+    };
+
+    let processes = args.processes.unwrap_or(1);
+    let max_in_queue = args.max_in_queue.unwrap_or(15000);
+    let clear = args.clear.unwrap_or(false);
+
     let config_path = match args.config {
         Some(path) => path,
         None => "config.yaml".to_string(),
     };
-    let processes = args.processes.unwrap_or(1);
-    let clear = args.clear.unwrap_or(false);
-    let max_in_queue = args.max_in_queue.unwrap_or(15000);
 
-    let date = date.and_hms_opt(0, 0, 0).unwrap();
-    let timestamp = chrono::Utc.from_utc_datetime(&date).timestamp();
-
-    let program_id = args.program_id.unwrap_or(1);
-    // program_id might be between 1 and 3 included
-    if program_id < 1 || program_id > 3 {
-        error!("Invalid program ID: {}, must be 1, 2, or 3", program_id);
-        return Ok(());
-    }
+    let survey = args.survey;
 
     match survey.to_lowercase().as_str() {
         "ztf" => {
