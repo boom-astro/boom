@@ -36,7 +36,12 @@ impl AlertConsumer for ZtfAlertConsumer {
             panic!("Number of threads should be a factor of 15");
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let topic = topic.unwrap_or("ztf").to_string();
+        let topic = topic
+            .unwrap_or(&format!(
+                "ztf_{}_programid1",
+                chrono::Utc::now().format("%Y%m%d")
+            ))
+            .to_string();
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();

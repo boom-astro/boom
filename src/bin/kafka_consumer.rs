@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let program_id = match args.program_id {
         Some(id) if id >= 1 && id <= 3 => id,
-        None => 1, // Default to 1 if no program ID is provided
+        None => 1, // Default to program ID 1 (public)
         _ => {
             error!(
                 "Invalid program ID: {}, must be 1, 2, or 3",
