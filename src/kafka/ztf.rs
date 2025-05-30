@@ -52,7 +52,7 @@ impl AlertConsumer for ZtfAlertConsumer {
 
         let program_id = match program_id {
             Some(id) => id,
-            None => 1,
+            None => 1, // Default to program ID 1 (public)
         };
 
         ZtfAlertConsumer {
@@ -242,7 +242,7 @@ impl AlertProducer for ZtfAlertProducer {
         // if u8 is not provided, default to 1
         let program_id = match program_id {
             Some(id) => id,
-            None => 1,
+            None => 1, // Default to program ID 1 (public)
         };
 
         // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
