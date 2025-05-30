@@ -31,7 +31,7 @@ async fn test_produce_from_archive() {
     let result = ztf_alert_producer.produce(Some(topic.clone())).await;
     assert!(result.is_ok());
     assert!(result.unwrap() == 710);
-    assert!(std::path::Path::new(&format!("data/alerts/ztf/{}", &date)).exists());
+    assert!(std::path::Path::new(&format!("data/alerts/ztf/public/{}", &date)).exists());
 
     let consumer: BaseConsumer = match ClientConfig::new()
         .set("group.id", "test")
