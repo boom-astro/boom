@@ -10,17 +10,10 @@ struct Cli {
     survey: String,
     #[arg(help = "Date of archival alerts to produce, with format YYYYMMDD. Defaults to today.")]
     date: Option<String>,
-    #[arg(
-        long,
-        value_name = "LIMIT",
-        help = "Limit the number of alerts produced"
-    )]
-    limit: Option<i64>,
-    #[arg(
-        value_name = "PROGRAMID",
-        help = "ID of the program producing the alerts (ZTF only, defaults to 1=public)."
-    )]
+    #[arg(help = "ID of the program to consume the alerts (ZTF only, defaults to 1=public).")]
     program_id: Option<u8>,
+    #[arg(help = "Limit the number of alerts produced")]
+    limit: Option<i64>,
 }
 
 #[tokio::main]
