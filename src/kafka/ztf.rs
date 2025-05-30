@@ -255,11 +255,10 @@ impl AlertProducer for ZtfAlertProducer {
             Ok(password) => Some(password),
             Err(_) => None,
         };
-        if program_id > 1 {
-            if partnership_archive_username.is_none() || partnership_archive_password.is_none() {
-                error!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for program ID > 1");
-                std::process::exit(1);
-            }
+        if program_id > 1
+            && (partnership_archive_username.is_none() || partnership_archive_password.is_none())
+        {
+            panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for program ID > 1");
         }
 
         ZtfAlertProducer {
