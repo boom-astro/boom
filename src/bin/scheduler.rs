@@ -3,7 +3,7 @@ use boom::{
     scheduler::{get_num_workers, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
-        o11y::build_subscriber,
+        o11y::{build_subscriber, INFO},
         worker::{check_flag, spawn_sigint_handler, WorkerType},
     },
 };
@@ -13,8 +13,6 @@ use std::{
     thread,
 };
 use tracing::{info, instrument, warn};
-
-const INFO: tracing::Level = tracing::Level::INFO;
 
 #[derive(Parser)]
 struct Cli {

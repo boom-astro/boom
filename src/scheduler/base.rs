@@ -2,15 +2,15 @@ use crate::{
     alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
-    utils::worker::{WorkerCmd, WorkerType},
+    utils::{
+        o11y::{DEBUG, INFO},
+        worker::{WorkerCmd, WorkerType},
+    },
 };
 use std::thread;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{error, info, instrument, span, warn};
-
-const DEBUG: tracing::Level = tracing::Level::DEBUG;
-const INFO: tracing::Level = tracing::Level::INFO;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {

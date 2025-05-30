@@ -1,3 +1,5 @@
+use crate::utils::o11y::INFO;
+
 use flare::spatial::radec2lb;
 use mongodb::{
     bson::{doc, to_document, Document},
@@ -6,8 +8,6 @@ use mongodb::{
 };
 use serde::Serialize;
 use tracing::instrument;
-
-const INFO: tracing::Level = tracing::Level::INFO;
 
 #[derive(thiserror::Error, Debug)]
 #[error("failed to create index")]

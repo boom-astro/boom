@@ -1,11 +1,11 @@
+use crate::utils::o11y::DEBUG;
+
 use config::Config;
 use std::{
     fmt,
     sync::{Arc, Mutex},
 };
 use tracing::{instrument, span, warn, Instrument};
-
-const DEBUG: tracing::Level = tracing::Level::DEBUG;
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
 #[instrument(level = DEBUG, skip_all)]

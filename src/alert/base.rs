@@ -1,7 +1,11 @@
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
-    utils::{db::CreateIndexError, spatial::XmatchError},
+    utils::{
+        db::CreateIndexError,
+        o11y::{DEBUG, INFO},
+        spatial::XmatchError,
+    },
 };
 use apache_avro::Schema;
 use mongodb::bson::Document;
@@ -9,7 +13,7 @@ use redis::AsyncCommands;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, instrument, trace, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {

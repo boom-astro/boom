@@ -1,11 +1,11 @@
+use crate::utils::o11y::DEBUG;
+
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
 use config::File;
 use std::path::Path;
 use tracing::{error, instrument};
-
-const DEBUG: tracing::Level = tracing::Level::DEBUG;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
