@@ -76,8 +76,18 @@ pub enum FilterError {
     InvalidFilterPermissions,
     #[error("filter not found in database")]
     FilterNotFound,
+    #[error("filter pipeline could not be parsed")]
+    FilterPipelineError,
+    #[error("invalid filter result")]
+    InvalidFilterResult(#[source] mongodb::error::Error),
+    #[error("failed to run filter")]
+    RunFilterError(#[source] mongodb::error::Error),
+    #[error("failed to deserialize filter pipeline")]
+    DeserializePipelineError(#[source] serde_json::Error),
     #[error("invalid filter pipeline")]
     InvalidFilterPipeline,
+    #[error("invalid filter pipeline stage")]
+    InvalidFilterPipelineStage(#[source] mongodb::bson::ser::Error),
     #[error("invalid filter id")]
     InvalidFilterId,
 }
@@ -198,6 +208,54 @@ pub async fn send_alert_to_kafka(
         })?;
 
     Ok(())
+}
+
+pub fn uses_field_in_stage(
+    stage: &serde_json::Value,
+    field: &str,
+    avoid_prefixes: &Option<Vec<String>>,
+) -> bool {
+    if let Some(stage_obj) = stage.as_object() {
+        let stage_str = serde_json::to_string(stage_obj).unwrap();
+        let field_indexes: Vec<(usize, &str)> = stage_str.match_indices(field).collect();
+        for (field_index, _) in field_indexes {
+            match avoid_prefixes {
+                Some(prefixes) => {
+                    // 1. take the length of the prefix
+                    // read the string from field_index - 1 to the field_index
+                    // if the string == prefix, skip
+                    // 2. if the string is not a prefix, return true
+                    let field_str = stage_str.to_string();
+                    for prefix in prefixes {
+                        let prefix_len = prefix.len();
+                        if prefix_len + 1 > field_index {
+                            continue;
+                        }
+                        let prefix_idx = field_index - 1 - prefix_len;
+                        let prefix_str = &field_str[prefix_idx..field_index - 1];
+                        if prefix_str != prefix {
+                            return true;
+                        }
+                    }
+                }
+                None => return true,
+            }
+        }
+    }
+    false
+}
+
+pub fn uses_field_in_filter(
+    filter_pipeline: &[serde_json::Value],
+    field: String,
+    avoid_prefixes: Option<Vec<String>>,
+) -> (bool, usize) {
+    for (i, stage) in filter_pipeline.iter().enumerate() {
+        if uses_field_in_stage(stage, &field, &avoid_prefixes) {
+            return (true, i);
+        }
+    }
+    (false, 0)
 }
 
 pub async fn get_filter_object(
