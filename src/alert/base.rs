@@ -223,7 +223,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
 
-    let command_interval: i64 = 500;
+    let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
     let mut count = 0;
 
@@ -231,20 +231,13 @@ pub async fn run_alert_worker<T: AlertWorker>(
     loop {
         // check for command from threadpool
         if command_check_countdown == 0 {
-            match receiver.try_recv() {
-                Ok(WorkerCmd::TERM) => {
-                    info!("alert worker received termination command");
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("alert worker receiver disconnected");
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    command_check_countdown = command_interval;
-                }
+            if should_terminate(&mut receiver) {
+                break;
+            } else {
+                command_check_countdown = command_interval + 1;
             }
         }
+        command_check_countdown -= 1;
         // retrieve candids from redis
         let Some(mut value): Option<Vec<Vec<u8>>> = con
             .rpoplpush(&input_queue_name, &temp_queue_name)
@@ -304,7 +297,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
             );
         }
         count += 1;
-        command_check_countdown -= 1;
     }
     Ok(())
 }

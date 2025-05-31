@@ -368,29 +368,23 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let producer = create_producer().await?;
     let schema = load_alert_schema()?;
 
-    let command_interval: i64 = 500;
+    let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
     loop {
         if command_check_countdown == 0 {
-            match receiver.try_recv() {
-                Ok(WorkerCmd::TERM) => {
-                    info!("filterworker {} received termination command", &id);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("filter worker {} receiver disconnected, terminating", &id);
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    command_check_countdown = command_interval;
-                }
+            if should_terminate(&mut receiver) {
+                break;
+            } else {
+                command_check_countdown = command_interval + 1;
             }
         }
+        command_check_countdown -= 1;
         // if the queue is empty, wait for a bit and continue the loop
         let queue_len: i64 = con.llen(&input_queue).await?;
         if queue_len == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            command_check_countdown = 0;
             continue;
         }
 
@@ -407,6 +401,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         let alerts_output = filter_worker.process_alerts(&alerts).await?;
+        command_check_countdown -= nb_alerts - 1; // As if iterated this many times
+
         for alert in alerts_output {
             send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
             trace!(
@@ -415,7 +411,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 &output_topic
             );
         }
-        command_check_countdown -= nb_alerts as i64;
     }
 
     Ok(())
