@@ -5,6 +5,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex},
 };
+use tokio::sync::mpsc::{error::TryRecvError, Receiver};
 use tracing::{instrument, span, warn, Instrument};
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
@@ -97,12 +98,24 @@ pub enum WorkerCmd {
 
 impl fmt::Display for WorkerCmd {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let enum_str;
-        match self {
-            WorkerCmd::TERM => {
-                enum_str = "TERM";
-            }
-        }
+        let enum_str = match self {
+            WorkerCmd::TERM => "TERM",
+        };
         write!(f, "{}", enum_str)
+    }
+}
+
+#[instrument(skip_all)]
+pub(crate) fn should_terminate(receiver: &mut Receiver<WorkerCmd>) -> bool {
+    match receiver.try_recv() {
+        Ok(WorkerCmd::TERM) => {
+            info!("received termination command");
+            true
+        }
+        Err(TryRecvError::Disconnected) => {
+            warn!("disconnected from worker command sender");
+            true
+        }
+        Err(TryRecvError::Empty) => false,
     }
 }
