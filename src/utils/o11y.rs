@@ -133,11 +133,12 @@ macro_rules! log_error {
 
 pub use log_error;
 
-/// Create a closure that calls `log_error` with a given error.
+/// Create a closure that takes an error and emits it as an event (as an ERROR
+/// event by default) using `log_error`.
 ///
 /// This macro has exactly the same interface as `log_error` except it doesn't
-/// take an `error` argument (the error is instead passed to the closure). It is
-/// particularly useful in `Result` methods like `unwrap_or_else` and
+/// take the error as an argument (the error is instead passed to the closure).
+/// It is particularly useful in `Result` methods like `unwrap_or_else` and
 /// `inspect_err`.
 ///
 /// Examples:
