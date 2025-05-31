@@ -344,7 +344,7 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
-#[instrument(skip(receiver, config_path), err)]
+#[instrument(skip_all, err)]
 pub async fn run_filter_worker<T: FilterWorker>(
     id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,

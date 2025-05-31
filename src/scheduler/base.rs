@@ -222,7 +222,7 @@ impl Worker {
                             return;
                         }
                     };
-                    run(id, receiver, &config_path).unwrap_or_else(as_error!("ml worker failed"));
+                    run(receiver, &config_path).unwrap_or_else(as_error!("ml worker failed"));
                 })
             }),
         };

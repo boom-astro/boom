@@ -44,9 +44,8 @@ pub trait MLWorker {
 }
 
 #[tokio::main]
-#[instrument(skip(receiver, config_path), err)]
+#[instrument(skip_all, err)]
 pub async fn run_ml_worker<T: MLWorker>(
-    id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), MLWorkerError> {
