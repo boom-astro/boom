@@ -48,9 +48,9 @@ async fn run(args: Cli) {
         .await
         .expect("could not initialize indexes");
 
-    // setup signal handler thread
+    // setup signal handler task
     let interrupt = Arc::new(Mutex::new(false));
-    spawn_sigint_handler(Arc::clone(&interrupt)).await;
+    spawn_sigint_handler(Arc::clone(&interrupt));
 
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,

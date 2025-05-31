@@ -10,7 +10,7 @@ use tracing::{info, instrument, span, warn, Instrument};
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
 #[instrument(skip_all)]
-pub async fn spawn_sigint_handler(flag: Arc<Mutex<bool>>) {
+pub fn spawn_sigint_handler(flag: Arc<Mutex<bool>>) {
     tokio::spawn(
         async move {
             tokio::signal::ctrl_c().await.unwrap();
