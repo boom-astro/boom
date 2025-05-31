@@ -7,7 +7,7 @@ use crate::{
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
         db::{cutout2bsonbinary, get_coordinates, mongify},
-        o11y::{as_error, log_error, DEBUG, WARN},
+        o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
 };
@@ -29,7 +29,7 @@ pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts"
 pub const LSST_DEC_LIMIT: f64 = 33.5;
 pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
 
-#[instrument(level = DEBUG, skip_all, err)]
+#[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
     let mut i = 0u64;
     let mut buf = [0u8; 1];
@@ -52,7 +52,7 @@ fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> 
     Ok(i)
 }
 
-#[instrument(level = DEBUG, skip_all, err)]
+#[instrument(skip_all, err)]
 pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     let z = decode_variable(reader)?;
     if z & 0x1 == 0 {
@@ -62,12 +62,12 @@ pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     }
 }
 
-#[instrument(level = DEBUG, skip_all, err)]
+#[instrument(skip_all, err)]
 fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     Ok(zag_i64(reader)?)
 }
 
-#[instrument(level = DEBUG, skip_all, err)]
+#[instrument(skip_all, err)]
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
     // First, we extract the schema from the avro bytes
     let cursor = std::io::Cursor::new(avro_bytes);
@@ -464,7 +464,7 @@ pub struct ZtfAlertWorker {
 }
 
 impl ZtfAlertWorker {
-    #[instrument(level = DEBUG, skip_all, err)]
+    #[instrument(skip_all, err)]
     pub async fn alert_from_avro_bytes(
         self: &mut Self,
         avro_bytes: &[u8],
@@ -511,7 +511,7 @@ impl ZtfAlertWorker {
         Ok(alert)
     }
 
-    #[instrument(level = DEBUG, skip(self), err)]
+    #[instrument(skip(self), err)]
     async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
         let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
             let result = self
@@ -543,7 +543,7 @@ impl ZtfAlertWorker {
         Ok(lsst_matches)
     }
 
-    #[instrument(level = DEBUG, skip(self), err)]
+    #[instrument(skip(self), err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
         let lsst_matches = self.get_lsst_matches(ra, dec).await?;
 
@@ -552,9 +552,17 @@ impl ZtfAlertWorker {
         })
     }
 
-    #[instrument(level = DEBUG, err, skip(
-        self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, xmatches, survey_matches
-    ))]
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            xmatches,
+            survey_matches
+        ),
+        err
+    )]
     async fn insert_alert_aux(
         &self,
         object_id: String,
@@ -596,7 +604,11 @@ impl ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(level = DEBUG, skip(self, candidate_doc), err)]
+    // TODO: Is AlertExists a true error? If not, then how/where do we want to
+    // report it? Maybe it would work for the return type to be a status enum
+    // instead of unit, so we would have, e.g., Ok(Success), Ok(AlertExists),
+    // and Err(AlertError::...)
+    #[instrument(skip(self, candidate_doc), err)]
     async fn format_and_insert_alert(
         &self,
         candid: i64,
@@ -627,7 +639,7 @@ impl ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(level = DEBUG, skip(self, cutout_science, cutout_template, cutout_difference), err)]
+    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
     async fn format_and_insert_cutout(
         &self,
         candid: i64,
@@ -646,7 +658,7 @@ impl ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(level = DEBUG, skip(self), err)]
+    #[instrument(skip(self), err)]
     async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
         let alert_aux_exists = self
             .alert_aux_collection
@@ -656,7 +668,7 @@ impl ZtfAlertWorker {
         Ok(alert_aux_exists)
     }
 
-    #[instrument(level = DEBUG, skip_all)]
+    #[instrument(skip_all)]
     fn format_prv_candidates_and_fp_hist(
         &self,
         prv_candidates: Option<Vec<PrvCandidate>>,
@@ -689,7 +701,7 @@ impl ZtfAlertWorker {
 impl AlertWorker for ZtfAlertWorker {
     type ObjectId = String;
 
-    #[instrument(level = DEBUG, err)]
+    #[instrument(err)]
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
         let config_file =
             conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
@@ -734,7 +746,16 @@ impl AlertWorker for ZtfAlertWorker {
         format!("{}_alerts_classifier_queue", self.stream_name)
     }
 
-    #[instrument(level = DEBUG, skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, survey_matches), err)]
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            survey_matches
+        ),
+        err
+    )]
     async fn insert_aux(
         self: &mut Self,
         object_id: impl Into<Self::ObjectId> + Send + Debug,
@@ -762,7 +783,16 @@ impl AlertWorker for ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(level = DEBUG, skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, survey_matches), err)]
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            survey_matches
+        ),
+        err
+    )]
     async fn update_aux(
         self: &mut Self,
         object_id: impl Into<Self::ObjectId> + Send + Debug,
@@ -789,7 +819,7 @@ impl AlertWorker for ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(level = DEBUG, skip_all, err)]
+    #[instrument(skip_all, err)]
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
         let now = Time::now().to_jd();
         let mut alert = self

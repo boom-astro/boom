@@ -1,7 +1,4 @@
-use crate::{
-    conf,
-    utils::o11y::{as_error, DEBUG},
-};
+use crate::{conf, utils::o11y::as_error};
 
 use flare::spatial::great_circle_distance;
 use futures::stream::StreamExt;
@@ -24,7 +21,7 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
-#[instrument(level = DEBUG, skip(xmatch_configs), fields(database = db.name()), err)]
+#[instrument(skip(xmatch_configs), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
     dec: f64,

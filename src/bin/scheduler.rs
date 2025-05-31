@@ -3,7 +3,7 @@ use boom::{
     scheduler::{get_num_workers, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
-        o11y::{build_subscriber, INFO},
+        o11y::build_subscriber,
         worker::{check_flag, spawn_sigint_handler, WorkerType},
     },
 };
@@ -23,7 +23,7 @@ struct Cli {
     config: Option<String>,
 }
 
-#[instrument(level = INFO, skip_all)]
+#[instrument(skip_all)]
 async fn run(args: Cli) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
@@ -75,8 +75,7 @@ async fn run(args: Cli) {
         info!("heart beat");
         let exit = check_flag(Arc::clone(&interrupt));
         if exit {
-            warn!("killed thread(s)");
-            // TODO: instrument drop and friends
+            info!("shutting down");
             drop(alert_pool);
             drop(ml_pool);
             drop(filter_pool);

@@ -2,8 +2,9 @@ use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
-        o11y::{as_error, log_error, INFO, WARN},
+        o11y::{as_error, log_error, WARN},
         spatial::XmatchError,
+        worker::should_terminate,
     },
 };
 use apache_avro::Schema;
@@ -11,8 +12,7 @@ use mongodb::bson::Document;
 use redis::AsyncCommands;
 use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
@@ -203,13 +203,24 @@ pub trait AlertWorker {
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError>;
 }
 
+fn report_progress(start: &std::time::Instant, stream: &str, count: u64, message: &str) {
+    let elapsed = start.elapsed().as_secs();
+    info!(
+        stream,
+        count,
+        elapsed,
+        average_rate = count as f64 / elapsed as f64,
+        "{}",
+        message,
+    );
+}
 #[tokio::main]
-#[instrument(level = INFO, skip(receiver), err)]
+#[instrument(skip_all, err)]
 pub async fn run_alert_worker<T: AlertWorker>(
-    id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), AlertWorkerError> {
+    debug!(?config_path);
     let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
 
     let mut alert_processor = T::new(config_path).await?;
@@ -286,17 +297,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
                 }
             },
         }
-        if count % 1000 == 0 {
-            let elapsed = start.elapsed().as_secs();
-            info!(
-                stream = stream_name,
-                count,
-                elapsed,
-                rate = count as f64 / elapsed as f64,
-                "summary"
-            );
+        if count > 0 && count % 1000 == 0 {
+            report_progress(&start, &stream_name, count, "progress");
         }
         count += 1;
     }
+    report_progress(&start, &stream_name, count, "summary");
     Ok(())
 }

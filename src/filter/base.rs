@@ -1,3 +1,8 @@
+use crate::{
+    conf,
+    utils::worker::{should_terminate, WorkerCmd},
+};
+
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
@@ -7,10 +12,7 @@ use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use std::num::NonZero;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, trace, warn};
-
-use crate::{conf, utils::worker::WorkerCmd};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
@@ -342,11 +344,13 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
+#[instrument(skip(receiver, config_path), err)]
 pub async fn run_filter_worker<T: FilterWorker>(
     id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
+    debug!(?config_path);
     let config = conf::load_config(config_path)?;
 
     let mut filter_worker = T::new(config_path).await?;

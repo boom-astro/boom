@@ -1,10 +1,17 @@
-use crate::{conf, ml::models::ModelError, utils::fits::CutoutError, utils::worker::WorkerCmd};
+use crate::{
+    conf,
+    ml::models::ModelError,
+    utils::{
+        fits::CutoutError,
+        worker::{should_terminate, WorkerCmd},
+    },
+};
+
 use mongodb::bson::Document;
 use redis::AsyncCommands;
 use std::num::NonZero;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, warn};
+use tracing::{debug, error, instrument};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MLWorkerError {
@@ -37,11 +44,13 @@ pub trait MLWorker {
 }
 
 #[tokio::main]
+#[instrument(skip(receiver, config_path), err)]
 pub async fn run_ml_worker<T: MLWorker>(
     id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), MLWorkerError> {
+    debug!(?config_path);
     let ml_worker = T::new(config_path).await?;
 
     let config = conf::load_config(config_path)?;

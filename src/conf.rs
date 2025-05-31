@@ -1,4 +1,4 @@
-use crate::utils::o11y::{as_error, DEBUG};
+use crate::utils::o11y::as_error;
 
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
@@ -21,7 +21,7 @@ pub enum BoomConfigError {
     MissingKeyError,
 }
 
-#[instrument(level = DEBUG, err)]
+#[instrument(err)]
 pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
     let path = Path::new(filepath);
 
@@ -35,7 +35,7 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
     Ok(conf)
 }
 
-#[instrument(level = DEBUG, skip(conf), err)]
+#[instrument(skip(conf), err)]
 pub fn build_xmatch_configs(
     conf: &Config,
     stream_name: &str,
@@ -58,7 +58,7 @@ pub fn build_xmatch_configs(
     Ok(catalog_xmatch_configs)
 }
 
-#[instrument(level = DEBUG, skip_all, err)]
+#[instrument(skip_all, err)]
 pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigError> {
     let db_conf = conf.get_table("database")?;
 
@@ -172,7 +172,7 @@ pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigErro
     Ok(db)
 }
 
-#[instrument(level = DEBUG, skip_all, err)]
+#[instrument(skip_all, err)]
 pub async fn build_redis(
     conf: &Config,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
@@ -213,7 +213,6 @@ pub struct CatalogXmatchConfig {
 }
 
 impl CatalogXmatchConfig {
-    #[instrument(level = DEBUG, skip(projection))]
     pub fn new(
         catalog: &str,
         radius: f64,
@@ -235,7 +234,7 @@ impl CatalogXmatchConfig {
     }
 
     // based on the code in the main function, create a from_config function
-    #[instrument(level = DEBUG, skip_all, err)]
+    #[instrument(skip_all, err)]
     pub fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
 

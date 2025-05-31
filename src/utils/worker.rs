@@ -6,15 +6,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc::{error::TryRecvError, Receiver};
-use tracing::{instrument, span, warn, Instrument};
+use tracing::{info, instrument, span, warn, Instrument};
 
 // spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
-#[instrument(level = DEBUG, skip_all)]
+#[instrument(skip_all)]
 pub async fn spawn_sigint_handler(flag: Arc<Mutex<bool>>) {
     tokio::spawn(
         async move {
             tokio::signal::ctrl_c().await.unwrap();
-            warn!("received interrupt signal, finishing up");
+            warn!("received interrupt signal");
             let mut flag = flag.try_lock().unwrap();
             *flag = true;
         }
@@ -35,7 +35,7 @@ pub fn check_exit(flag: Arc<Mutex<bool>>) {
 }
 
 // checks returns value of flag
-#[instrument(level = DEBUG, skip_all)]
+#[instrument(skip_all)]
 pub fn check_flag(flag: Arc<Mutex<bool>>) -> bool {
     match flag.try_lock() {
         Ok(x) => {
