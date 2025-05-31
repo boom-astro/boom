@@ -356,10 +356,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut filter_worker = T::new(config_path).await?;
 
     if !filter_worker.has_filters() {
-        info!(
-            "No filters available for filter worker {} to process alerts",
-            &id
-        );
+        info!("no filters available for processing");
         return Ok(());
     }
 
