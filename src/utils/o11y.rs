@@ -144,18 +144,19 @@ pub use log_error;
 /// Examples:
 ///
 /// ```no_run
-/// use boom::utils::o11y::{as_error, WARN};
+/// use boom::utils::o11y::{as_error, log_error, WARN};
 /// use std::io::{Error, ErrorKind};
 ///
-/// let error = Error::new(ErrorKind::Other, "borked");
-/// let result: Result<(), Error>
+/// fn f() -> Result<(), Error> {
+///     Err(Error::new(ErrorKind::Other, "borked"))
+/// }
 ///
-/// result.unwrap_or_else(as_error!());
-/// result.inspect_err(as_error!(WARN, "oh no"));
+/// f().unwrap_or_else(as_error!());
+/// let _ = f().inspect_err(as_error!(WARN, "oh no"));
 ///
 /// // The above are equivalent to,
-/// result.unwrap_or_else(|error| log_error!(error));
-/// result.inspect_err(|error| log_error!(WARN, error, "oh no"));
+/// f().unwrap_or_else(|error| log_error!(error));
+/// let _ = f().inspect_err(|error| log_error!(WARN, error, "oh no"));
 /// ```
 #[macro_export]
 macro_rules! as_error {

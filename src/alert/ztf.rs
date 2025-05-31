@@ -15,11 +15,11 @@ use apache_avro::from_value;
 use apache_avro::{from_avro_datum, Reader, Schema};
 use constcat::concat;
 use flare::Time;
-use mongodb::bson::{doc, oid::ObjectId, Document};
+use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::{fmt::Debug, io::Read};
-use tracing::{error, instrument, trace};
+use tracing::instrument;
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
