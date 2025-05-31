@@ -75,8 +75,8 @@ async fn run(args: Cli) {
         info!("heart beat");
         let exit = check_flag(Arc::clone(&interrupt));
         if exit {
-            // TODO: fields/context.
             warn!("killed thread(s)");
+            // TODO: instrument drop and friends
             drop(alert_pool);
             drop(ml_pool);
             drop(filter_pool);

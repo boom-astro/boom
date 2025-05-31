@@ -1,4 +1,4 @@
-use crate::utils::o11y::INFO;
+use crate::utils::o11y::{DEBUG, INFO};
 
 use flare::spatial::radec2lb;
 use mongodb::{
@@ -13,7 +13,7 @@ use tracing::instrument;
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
 
-#[instrument(skip(collection, index), err, fields(collection = collection.name()))]
+#[instrument(level = INFO, skip(collection, index), fields(collection = collection.name()), err)]
 pub async fn create_index(
     collection: &Collection<Document>,
     index: Document,
@@ -27,6 +27,7 @@ pub async fn create_index(
     Ok(())
 }
 
+#[instrument(level = DEBUG, skip_all)]
 pub fn mongify<T: Serialize>(value: &T) -> Document {
     // we removed all the sanitizing logic
     // in favor of using serde's attributes to clean up the data
@@ -35,6 +36,7 @@ pub fn mongify<T: Serialize>(value: &T) -> Document {
     to_document(value).unwrap()
 }
 
+#[instrument(level = DEBUG)]
 pub fn get_coordinates(ra: f64, dec: f64) -> Document {
     let (l, b) = radec2lb(ra, dec);
     doc! {
@@ -47,6 +49,7 @@ pub fn get_coordinates(ra: f64, dec: f64) -> Document {
     }
 }
 
+#[instrument(level = DEBUG)]
 pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     return mongodb::bson::Binary {
         subtype: mongodb::bson::spec::BinarySubtype::Generic,
@@ -56,7 +59,7 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
 
 // This function, for a given survey name (ZTF, LSST), will create
 // the required indexes on the alerts and alerts_aux collections
-#[instrument(level = INFO, skip(db), err)]
+#[instrument(level = INFO, skip(db), fields(database = db.name()), err)]
 pub async fn initialize_survey_indexes(
     survey: &str,
     db: &Database,
@@ -73,7 +76,7 @@ pub async fn initialize_survey_indexes(
         "_id": 1,
     };
     create_index(&alerts_collection, index.clone(), false).await?;
-    create_index(&alerts_aux_collection, index.clone(), false).await?;
+    create_index(&alerts_aux_collection, index, false).await?;
 
     // create a simple index on the objectId field of the alerts collection
     let index = doc! {

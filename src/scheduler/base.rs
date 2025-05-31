@@ -3,7 +3,7 @@ use crate::{
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
     utils::{
-        o11y::{DEBUG, INFO},
+        o11y::{as_error, DEBUG, INFO},
         worker::{WorkerCmd, WorkerType},
     },
 };
@@ -124,6 +124,7 @@ impl ThreadPool {
     }
 
     /// Add a new worker to the thread pool
+    #[instrument(level = DEBUG, skip(self))]
     fn add_worker(&mut self) {
         let id = uuid::Uuid::new_v4().to_string();
         info!(%id, "adding worker");
@@ -180,14 +181,12 @@ impl Worker {
                         "ZTF" => run_alert_worker::<ZtfAlertWorker>,
                         "LSST" => run_alert_worker::<LsstAlertWorker>,
                         _ => {
-                            error!("Unknown stream name");
+                            error!("unknown stream name");
                             return;
                         }
                     };
-                    // TODO: instrument run_alert_worker
-                    if let Err(error) = run(id, receiver, &config_path) {
-                        error!(%error, "alert worker failed");
-                    }
+                    run(id, receiver, &config_path)
+                        .unwrap_or_else(as_error!("alert worker failed"));
                 })
             }),
             WorkerType::Filter => thread::spawn(move || {
@@ -196,7 +195,7 @@ impl Worker {
                         "ZTF" => run_filter_worker::<ZtfFilterWorker>,
                         "LSST" => run_filter_worker::<LsstFilterWorker>,
                         _ => {
-                            error!("Unknown stream name");
+                            error!("unknown stream name");
                             return;
                         }
                     };
@@ -215,7 +214,7 @@ impl Worker {
                             return;
                         }
                         _ => {
-                            error!("Unknown stream name");
+                            error!("unknown stream name");
                             return;
                         }
                     };

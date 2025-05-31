@@ -2,18 +2,17 @@ use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
-        db::CreateIndexError,
-        o11y::{DEBUG, INFO},
+        o11y::{as_error, log_error, INFO, WARN},
         spatial::XmatchError,
     },
 };
 use apache_avro::Schema;
 use mongodb::bson::Document;
 use redis::AsyncCommands;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
@@ -166,8 +165,6 @@ impl SchemaRegistry {
 pub enum AlertWorkerError {
     #[error("failed to load config")]
     LoadConfigError(#[from] conf::BoomConfigError),
-    #[error("failed to create index")]
-    CreateIndexError(#[from] CreateIndexError),
     #[error("error from redis")]
     Redis(#[from] redis::RedisError),
     #[error("failed to get avro bytes from the alert queue")]
@@ -185,7 +182,7 @@ pub trait AlertWorker {
     fn output_queue_name(&self) -> String;
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: impl Into<Self::ObjectId> + Send + Debug,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -196,7 +193,7 @@ pub trait AlertWorker {
     ) -> Result<(), AlertError>;
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: impl Into<Self::ObjectId> + Send + Debug,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
@@ -207,12 +204,13 @@ pub trait AlertWorker {
 }
 
 #[tokio::main]
+#[instrument(level = INFO, skip(receiver), err)]
 pub async fn run_alert_worker<T: AlertWorker>(
     id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), AlertWorkerError> {
-    let config = conf::load_config(config_path)?;
+    let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
 
     let mut alert_processor = T::new(config_path).await?;
     let stream_name = alert_processor.stream_name();
@@ -221,7 +219,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let temp_queue_name = format!("{}_temp", input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
-    let mut con = conf::build_redis(&config).await?;
+    let mut con = conf::build_redis(&config)
+        .await
+        .inspect_err(as_error!("failed to create redis client"))?;
 
     let command_interval: i64 = 500;
     let mut command_check_countdown = command_interval;
@@ -233,11 +233,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
         if command_check_countdown == 0 {
             match receiver.try_recv() {
                 Ok(WorkerCmd::TERM) => {
-                    info!("alert worker {} received termination command", id);
+                    info!("alert worker received termination command");
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    warn!("alert worker {} receiver disconnected, terminating", id);
+                    warn!("alert worker receiver disconnected");
                     break;
                 }
                 Err(TryRecvError::Empty) => {
@@ -246,10 +246,12 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         }
         // retrieve candids from redis
-        let Some(mut value): Option<Vec<Vec<u8>>> =
-            con.rpoplpush(&input_queue_name, &temp_queue_name).await?
+        let Some(mut value): Option<Vec<Vec<u8>>> = con
+            .rpoplpush(&input_queue_name, &temp_queue_name)
+            .await
+            .inspect_err(as_error!("failed to pop from input queue"))?
         else {
-            info!("ALERT WORKER {}: Queue is empty", id);
+            info!("queue is empty");
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             command_check_countdown = 0;
             continue;
@@ -263,18 +265,23 @@ pub async fn run_alert_worker<T: AlertWorker>(
             Ok(candid) => {
                 // queue the candid for processing by the classifier
                 con.lpush::<&str, i64, isize>(&output_queue_name, candid)
-                    .await?;
+                    .await
+                    .inspect_err(as_error!("failed to push to output queue"))?;
                 con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    .await?;
+                    .await
+                    .inspect_err(as_error!("failed to remove new alert from temp queue"))?;
             }
             Err(error) => match error {
                 AlertError::AlertExists => {
-                    trace!("Alert already exists");
+                    debug!("alert already exists");
                     con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                        .await?;
+                        .await
+                        .inspect_err(as_error!(
+                            "failed to remove existing alert from temp queue"
+                        ))?;
                 }
                 _ => {
-                    warn!(error = %error, "Error processing alert, skipping");
+                    log_error!(WARN, error, "error processing alert, skipping");
                     // TODO: Handle alerts that we could not parse from avro
                     // so we don't re-push them to the queue
                     // con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
@@ -289,11 +296,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
         if count % 1000 == 0 {
             let elapsed = start.elapsed().as_secs();
             info!(
-                "\nProcessed {} {} alerts in {} seconds, avg: {:.4} alerts/s\n",
+                stream = stream_name,
                 count,
-                stream_name,
                 elapsed,
-                count as f64 / elapsed as f64
+                rate = count as f64 / elapsed as f64,
+                "summary"
             );
         }
         count += 1;
