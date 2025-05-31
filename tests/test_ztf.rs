@@ -1,7 +1,7 @@
 use boom::{
     alert::{AlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
     conf,
-    filter::{FilterWorker, ZtfFilterWorker},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
     utils::{
         db::mongify,
@@ -456,20 +456,34 @@ async fn test_filter_ztf_alert() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
 
+    // then run the ML worker to get the classifications
+    let ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = ml_worker.process_alerts(&[candid]).await;
+    assert!(result.is_ok());
+    // the result should be a vec of String, for ZTF with the format
+    // "programid,candid" which is what the filter worker expects
+    let ml_output = result.unwrap();
+    assert_eq!(ml_output.len(), 1);
+    let candid_programid_str = &ml_output[0];
+    assert_eq!(candid_programid_str, &format!("1,{}", candid));
+
     let filter_id = insert_test_ztf_filter().await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker
-        .process_alerts(&[format!("1,{}", candid)])
+        .process_alerts(&[candid_programid_str.clone()])
         .await;
 
+    remove_test_ztf_filter(filter_id).await.unwrap();
     assert!(result.is_ok());
+
     let alerts_output = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.object_id, object_id);
     assert_eq!(alert.photometry.len(), 11); // prv_candidates + prv_nondetections
+
     let filter_passed = alert
         .filters
         .iter()
@@ -477,5 +491,11 @@ async fn test_filter_ztf_alert() {
         .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":14.91}");
 
-    remove_test_ztf_filter(filter_id).await.unwrap();
+    let classifications = &alert.classifications;
+    assert_eq!(classifications.len(), 6);
+
+    // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let encoded = alert_to_avro_bytes(&alert, &schema);
+    assert!(encoded.is_ok());
 }

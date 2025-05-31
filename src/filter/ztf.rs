@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
+    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
+    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
 };
 
 #[derive(Debug)]
@@ -228,7 +228,8 @@ impl FilterWorker for ZtfFilterWorker {
                     "dec": "$candidate.dec",
                     "cutoutScience": 1,
                     "cutoutTemplate": 1,
-                    "cutoutDifference": 1
+                    "cutoutDifference": 1,
+                    "classifications": 1,
                 }
             },
             doc! {
@@ -282,7 +283,8 @@ impl FilterWorker for ZtfFilterWorker {
                             "$cutouts.cutoutDifference",
                             0
                         ]
-                    }
+                    },
+                    "classifications": 1,
                 }
             },
         ];
@@ -372,6 +374,21 @@ impl FilterWorker for ZtfFilterWorker {
 
         // we ignore the forced photometry for now, but will add it later
 
+        // last but not least, we need to get the classifications
+        let mut classifications = Vec::new();
+        // classifications in the alert is a document with classifier names as keys and the scores as values
+        // we need to convert it to a vec of Classification structs
+        if let Some(classifications_doc) = alert_document.get_document("classifications").ok() {
+            for (key, value) in classifications_doc.iter() {
+                if let Some(score) = value.as_f64() {
+                    classifications.push(Classification {
+                        classifier: key.to_string(),
+                        score,
+                    });
+                }
+            }
+        }
+
         let alert = Alert {
             candid,
             object_id,
@@ -379,6 +396,7 @@ impl FilterWorker for ZtfFilterWorker {
             ra,
             dec,
             filters: filter_results, // assuming you have filter results to attach
+            classifications,
             photometry,
             cutout_science,
             cutout_template,

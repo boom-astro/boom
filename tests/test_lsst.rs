@@ -1,7 +1,7 @@
 use boom::{
     alert::AlertWorker,
     conf,
-    filter::{FilterWorker, LsstFilterWorker},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::testing::{
         drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
         remove_test_lsst_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
@@ -160,13 +160,16 @@ async fn test_filter_lsst_alert() {
     let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
+    remove_test_lsst_filter(filter_id).await.unwrap();
     assert!(result.is_ok());
+
     let alerts_output = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.object_id, format!("{}", object_id));
     assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
+
     let filter_passed = alert
         .filters
         .iter()
@@ -174,5 +177,11 @@ async fn test_filter_lsst_alert() {
         .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
 
-    remove_test_lsst_filter(filter_id).await.unwrap();
+    let classifications = &alert.classifications;
+    assert_eq!(classifications.len(), 0);
+
+    // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let encoded = alert_to_avro_bytes(&alert, &schema);
+    assert!(encoded.is_ok())
 }
