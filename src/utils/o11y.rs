@@ -202,11 +202,33 @@ pub enum BuildSubscriberError {
 
 /// Build a tracing subscriber.
 pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    let mut fmt_layer = tracing_subscriber::fmt::layer()
         .with_thread_names(true)
         .with_file(true)
-        .with_line_number(true)
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE);
+        .with_line_number(true);
+
+    if let Some(kind) = std::env::var("RUST_LOG_SPAN_EVENTS")
+        .ok()
+        .and_then(|string| {
+            string
+                .split('|')
+                .map(|part| match part.trim().to_lowercase().as_str() {
+                    "new" => Some(FmtSpan::NEW),
+                    "enter" => Some(FmtSpan::ENTER),
+                    "exit" => Some(FmtSpan::EXIT),
+                    "close" => Some(FmtSpan::CLOSE),
+                    "none" => Some(FmtSpan::NONE),
+                    "active" => Some(FmtSpan::ACTIVE),
+                    "full" => Some(FmtSpan::FULL),
+                    _ => None,
+                })
+                .flatten()
+                .reduce(|lhs, rhs| lhs | rhs)
+        })
+    {
+        fmt_layer = fmt_layer.with_span_events(kind);
+    }
+
     let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
     Ok(tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter)))
 }
