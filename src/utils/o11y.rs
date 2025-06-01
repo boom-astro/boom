@@ -211,7 +211,7 @@ pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
         .ok()
         .and_then(|string| {
             string
-                .split('|')
+                .split(',')
                 .map(|part| match part.trim().to_lowercase().as_str() {
                     "new" => Some(FmtSpan::NEW),
                     "enter" => Some(FmtSpan::ENTER),
