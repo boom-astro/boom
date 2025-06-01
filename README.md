@@ -18,7 +18,6 @@ BOOM runs on macOS and Linux. You'll need:
 
 - `Docker` and `docker compose`: used to run the database, cache/task queue, and `Kafka`;
 - `Rust` (a systems programming language) `>= 1.55.0`;
-- `Python` (a high-level programming language) `>= 3.10`: we recommend using `uv` to create a virtual environment with the required Python dependencies.
 - `wget` and `tar`: used to download and extract the ZTF alerts for testing purposes.
 - If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
 
@@ -28,7 +27,6 @@ BOOM runs on macOS and Linux. You'll need:
 
 - Docker: On macOS we recommend using [Docker Desktop](https://www.docker.com/products/docker-desktop) to install docker. You can download it from the website, and follow the installation instructions. The website will ask you to "choose a plan", but really you just need to create an account and stick with the free tier that offers all of the features you will ever need. Once installed, you can verify the installation by running `docker --version` in your terminal, and `docker compose version` to check that docker compose is installed as well.
 - Rust: You can either use [rustup](https://www.rust-lang.org/tools/install) to install Rust, or you can use [Homebrew](https://brew.sh/) to install it. If you choose the latter, you can run `brew install rust` in your terminal. We recommend using rustup, as it allows you to easily switch between different versions of Rust, and to keep your Rust installation up to date. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
-- Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `brew`, `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
 - `wget` and `tar`: `tar` is already installed on macOS, but you can install `wget` with `brew install wget` or any other package manager you prefer.
 - System packages are essential for compiling and linking some Rust crates that require native libraries like OpenSSL and SASL. Run the following to install necessary system packages:
   ```bash
@@ -40,7 +38,6 @@ BOOM runs on macOS and Linux. You'll need:
 
 - Docker: You can either install Docker Desktop (same instructions as for macOS), or you can just install Docker Engine. The latter is more lightweight. You can follow the [official installation instructions](https://docs.docker.com/engine/install/) for your specific Linux distribution. If you only installed Docker Engine, you'll want to also install [docker compose](https://docs.docker.com/compose/install/). Once installed, you can verify the installation by running `docker --version` in your terminal, and `docker compose version` to check that docker compose is installed as well.
 - Rust: You can use [rustup](https://www.rust-lang.org/tools/install) to install Rust. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
-- Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
 - `wget` and `tar`: Most Linux distributions come with `wget` and `tar` pre-installed. If not, you can install them with your package manager.
 - System packages are essential for compiling and linking some Rust crates that require native libraries like OpenSSL and SASL. Run the following to install necessary system packages:
   ```bash
@@ -50,29 +47,21 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-1. We'll start by creating a python virtual environment to manage our python install and dependencies. Here's how you can do that with `uv`:
-    ```bash
-    uv venv --python 3.10
-    source .venv/bin/activate
-    uv pip install -r requirements.txt
-    ```
-    Note: If requirements.txt is missing, it can be skipped. It's only required for the ML pipeline.
-   
-3. Next, copy the default config file, `config.default.yaml`, to `config.yaml`:
+1. Copy the default config file, `config.default.yaml`, to `config.yaml`:
     ```bash
     cp config.default.yaml config.yaml
     ```
-4. Same for the `docker-compose.yaml` file:
+2. Same for the `docker-compose.yaml` file:
     ```bash
     cp docker-compose.default.yaml docker-compose.yaml
     ```
-5. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+3. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-6. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
@@ -89,7 +78,6 @@ Where `<date_in_YYYMMDD_format>` is the date of the alerts you want to read. We 
 ```bash
 docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
-
 
 Next, you can start the `Kafka` consumer with:
 ```bash
@@ -108,8 +96,6 @@ Instead of starting each worker manually, we provide the `scheduler`. It reads t
 cargo run --release --bin scheduler <stream_name> <config_path>
 ```
 Where `<stream_name>` is the name of the stream you want to process. In our case, it would be `ZTF`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
-
-*Before running the scheduler, make sure that you are in your Python virtual environment. This is required for the ML worker, that will run Python-based ML models. If you created it with `uv` as instructed earlier, you can enter the virtual environment with `source .venv/bin/activate`.*
 
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -174,10 +160,6 @@ We already went through this process for the ZTF Avro schema (so no need to do i
 ### Dealing with Rust structs and MongoDB BSON documents:
 
 We could in theory just query` MongoDB` in a way that allows us to get Rust structs out of it, and also do the same when writing to the database. However under the hood the `mongodb` crate just serializes back and forth, and since Rust structs can't just "remove" their fields that are null (in a way, they need to enforce a schema), we would end up with a lot of null fields in the database. To avoid this, we use the `bson` crate to serialize the Rust structs to BSON documents, sanitize them (remove the null fields and such), and then write them to the database. When querying the DB, both bson documents or Rust structs can be returned, it depends on the use case.
-
-### Why still using Python for some parts of the pipeline?
-
-For everything ML-related, it's not that easy to just take anyone's model (that was 99% of the time trained with a Python library) and just run it in Rust. We could try (and successfully did for a handful of models) converting them to ONNX, and then running them with `tch-rs` (a Rust wrapper around the `libtorch` C++ library). However, this proved to be a pain on a lot of systems. Thanks to the fact that we use something like `Redis`/`Valkey` as a cache/task queue, we can pretty much send data between whatever language we want, and have the ML models run in Python, and the rest of the pipeline run in Rust. It will also come in handy for the filtering pipeline, as we can leverage any of Python's libraries to do some fancy & complex computation that would be a pain for your average astronomer to write in Rust. So for now, we limit the Rust code to all of the "core" parts of the pipeline where performance is key, and use Python where we can affort to lose a bit of performance for more flexibility.
 
 ### Why `Redis`/`Valkey` as a cache/task queue?
 
