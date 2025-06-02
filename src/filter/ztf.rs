@@ -85,11 +85,11 @@ impl Filter for ZtfFilter {
             filter_pipeline,
             "prv_candidates".to_string(),
             Some(vec!["LSST".to_string()]), // to not mix LSST prv_candidates with ZTFs
-        );
+        )?;
         let (use_prv_nondetections, use_prv_nondetections_index) =
-            uses_field_in_filter(filter_pipeline, "prv_nondetections".to_string(), None);
+            uses_field_in_filter(filter_pipeline, "prv_nondetections".to_string(), None)?;
         let (use_cross_matches, use_cross_matches_index) =
-            uses_field_in_filter(filter_pipeline, "cross_matches".to_string(), None);
+            uses_field_in_filter(filter_pipeline, "cross_matches".to_string(), None)?;
 
         if use_prv_candidates {
             // insert it in aux addFields stage

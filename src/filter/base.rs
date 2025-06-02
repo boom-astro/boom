@@ -214,9 +214,9 @@ pub fn uses_field_in_stage(
     stage: &serde_json::Value,
     field: &str,
     avoid_prefixes: &Option<Vec<String>>,
-) -> bool {
+) -> Result<bool, FilterError> {
     if let Some(stage_obj) = stage.as_object() {
-        let stage_str = serde_json::to_string(stage_obj).unwrap();
+        let stage_str = serde_json::to_string(stage_obj).map_err(FilterError::SerdeJson)?;
         let field_indexes: Vec<(usize, &str)> = stage_str.match_indices(field).collect();
         for (field_index, _) in field_indexes {
             match avoid_prefixes {
@@ -231,28 +231,28 @@ pub fn uses_field_in_stage(
                         let prefix_idx = field_index - 1 - prefix_len;
                         let prefix_str = &field_str[prefix_idx..field_index - 1];
                         if prefix_str != prefix {
-                            return true;
+                            return Ok(true);
                         }
                     }
                 }
-                None => return true,
+                None => return Ok(true),
             }
         }
     }
-    false
+    Ok(false)
 }
 
 pub fn uses_field_in_filter(
     filter_pipeline: &[serde_json::Value],
     field: String,
     avoid_prefixes: Option<Vec<String>>,
-) -> (bool, usize) {
+) -> Result<(bool, usize), FilterError> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
-        if uses_field_in_stage(stage, &field, &avoid_prefixes) {
-            return (true, i);
+        if uses_field_in_stage(stage, &field, &avoid_prefixes)? {
+            return Ok((true, i));
         }
     }
-    (false, 0)
+    Ok((false, 0))
 }
 
 pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result<(), FilterError> {

@@ -25,19 +25,19 @@ async fn test_uses_field_in_filter() {
 
     // uses_field_in_filter should return true for "candidate.drb"
     let (uses_field, stage_index) =
-        uses_field_in_filter(&pipeline, "candidate.drb".to_string(), None);
+        uses_field_in_filter(&pipeline, "candidate.drb".to_string(), None).unwrap();
     assert!(uses_field);
     assert_eq!(stage_index, 0);
 
     // uses_field_in_filter should also return true for "candidate.magpsf", but it should be in the second stage
     let (uses_field, stage_index) =
-        uses_field_in_filter(&pipeline, "candidate.magpsf".to_string(), None);
+        uses_field_in_filter(&pipeline, "candidate.magpsf".to_string(), None).unwrap();
     assert!(uses_field);
     assert_eq!(stage_index, 1);
 
     // uses_field_in_filter should return true for "LSST.prv_candidates"
     let (uses_field, stage_index) =
-        uses_field_in_filter(&pipeline, "LSST.prv_candidates".to_string(), None);
+        uses_field_in_filter(&pipeline, "LSST.prv_candidates".to_string(), None).unwrap();
     assert!(uses_field);
     assert_eq!(stage_index, 0);
 
@@ -46,13 +46,14 @@ async fn test_uses_field_in_filter() {
         &pipeline,
         "prv_candidates".to_string(),
         Some(vec!["LSST".to_string()]),
-    );
+    )
+    .unwrap();
     assert!(!uses_field);
     assert_eq!(stage_index, 0);
 
     // uses_field_in_filter should return false for "candidate.jd"
     let (uses_field, stage_index) =
-        uses_field_in_filter(&pipeline, "candidate.jd".to_string(), None);
+        uses_field_in_filter(&pipeline, "candidate.jd".to_string(), None).unwrap();
     assert!(!uses_field);
     assert_eq!(stage_index, 0);
 }
