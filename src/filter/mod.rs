@@ -2,7 +2,7 @@ mod base;
 mod lsst;
 mod ztf;
 
-use base::{
+pub use base::{
     get_filter_object, parse_programid_candid_tuple, uses_field_in_filter,
     validate_filter_pipeline, Alert, FilterResults, Origin, Photometry, Survey,
 };

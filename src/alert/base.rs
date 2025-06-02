@@ -92,6 +92,12 @@ impl SchemaRegistry {
             .send()
             .await?;
 
+        // print the response status and content for debugging
+        if !response.status().is_success() {
+            println!("Failed to get subjects: {}", response.status());
+            return Err(SchemaRegistryError::InvalidResponse);
+        }
+
         let response = response.json::<Vec<String>>().await?;
 
         Ok(response)
@@ -110,6 +116,16 @@ impl SchemaRegistry {
             .send()
             .await?;
 
+        // print the response status and content for debugging
+        if !response.status().is_success() {
+            println!(
+                "Failed to get versions for subject {}: {}",
+                subject,
+                response.status()
+            );
+            return Err(SchemaRegistryError::InvalidResponse);
+        }
+
         let response = response.json::<Vec<u32>>().await?;
 
         Ok(response)
@@ -124,6 +140,8 @@ impl SchemaRegistry {
         if !versions.contains(&version) {
             return Err(SchemaRegistryError::InvalidVersion);
         }
+
+        println!("Versions for subject {}: {:?}", subject, versions);
 
         let response = self
             .client

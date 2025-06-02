@@ -264,8 +264,8 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // so we make sure that:
     // - project stages that are an include stages (no "field: 0") specify objectId: 1
     // - project stages that are an exclude stage (with "field: 0") do not mention objectId
-    // - project stages do not mention the _id field
-    // - unset stages do not mention the objectId or _id fields
+    // - project stages co not exclude the _id field or objectId
+    // - unset stages do not delete the objectId or _id fields
     // - we don't have any group, unwind, or lookup stages
     // - that the last stage is a project that includes objectId
     let nb_stages = filter_pipeline.len();
@@ -322,14 +322,22 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
 
         // check for unset stages
         if stage.get("$unset").is_some() {
+            // unset can just be a string or an array of strings
             let unset_stage = stage.get("$unset").unwrap();
-            // its a document just like the project stage
-            if let Some(unset_obj) = unset_stage.as_object() {
-                for (key, _) in unset_obj.iter() {
-                    if key == "objectId" || key == "_id" {
+            if let Some(unset_array) = unset_stage.as_array() {
+                for value in unset_array {
+                    if value == &serde_json::Value::String("objectId".to_string())
+                        || value == &serde_json::Value::String("_id".to_string())
+                    {
                         return Err(FilterError::InvalidFilterPipeline);
                     }
                 }
+            } else if let Some(unset_str) = unset_stage.as_str() {
+                if unset_str == "objectId" || unset_str == "_id" {
+                    return Err(FilterError::InvalidFilterPipeline);
+                }
+            } else {
+                return Err(FilterError::InvalidFilterPipeline);
             }
         }
 
@@ -478,11 +486,16 @@ pub enum FilterWorkerError {
     GetFilterByQueueError,
     #[error("could not find alert")]
     AlertNotFound,
+    #[error("filter not found")]
+    FilterNotFound,
 }
 
 #[async_trait::async_trait]
 pub trait FilterWorker {
-    async fn new(config_path: &str) -> Result<Self, FilterWorkerError>
+    async fn new(
+        config_path: &str,
+        filter_ids: Option<Vec<i32>>,
+    ) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
     fn input_queue_name(&self) -> String;
@@ -504,7 +517,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 ) -> Result<(), FilterWorkerError> {
     let config = conf::load_config(config_path)?;
 
-    let mut filter_worker = T::new(config_path).await?;
+    let mut filter_worker = T::new(config_path, None).await?;
 
     if !filter_worker.has_filters() {
         info!(

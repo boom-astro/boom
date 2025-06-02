@@ -157,7 +157,9 @@ async fn test_filter_lsst_alert() {
 
     let filter_id = insert_test_lsst_filter().await.unwrap();
 
-    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id]))
+        .await
+        .unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
     assert!(result.is_ok());

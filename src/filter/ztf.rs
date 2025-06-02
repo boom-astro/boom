@@ -264,7 +264,10 @@ pub struct ZtfFilterWorker {
 
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
-    async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
+    async fn new(
+        config_path: &str,
+        filter_ids: Option<Vec<i32>>,
+    ) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let alert_collection = db.collection("ZTF_alerts");
@@ -273,7 +276,7 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filter_ids: Vec<i32> = filter_collection
+        let all_filter_ids: Vec<i32> = filter_collection
             .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
             .await?
             .into_iter()
@@ -282,8 +285,18 @@ impl FilterWorker for ZtfFilterWorker {
             .collect();
 
         let mut filters: Vec<ZtfFilter> = Vec::new();
-        for filter_id in filter_ids {
-            filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+        if let Some(filter_ids) = filter_ids {
+            // if filter_ids is provided, we only build those filters
+            for filter_id in filter_ids {
+                if !all_filter_ids.contains(&filter_id) {
+                    return Err(FilterWorkerError::FilterNotFound);
+                }
+                filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+            }
+        } else {
+            for filter_id in all_filter_ids {
+                filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+            }
         }
 
         // create a hashmap of filters per programid (permissions)

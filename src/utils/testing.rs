@@ -106,7 +106,15 @@ pub async fn drop_alert_from_collections(
     Ok(())
 }
 
-pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>> {
+pub async fn insert_test_ztf_filter(
+    use_prv_candidates: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    // if use_prv_candidates is true, we use the prv_candidates field in the filter
+    let pipeline = if use_prv_candidates {
+        "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]"
+    } else {
+        "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]"
+    };
     // we randomize the filter id
     let filter_id = rand::random::<i32>();
     let filter_obj: mongodb::bson::Document = doc! {
@@ -122,7 +130,7 @@ pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>>
       "fv": [
         {
             "fid": "v2e0fs",
-            "pipeline": "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
+            "pipeline": pipeline,
             "created_at": {
             "$date": "2020-10-21T08:39:43.693Z"
             }
