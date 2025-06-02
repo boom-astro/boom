@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter, Alert,
-    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
-    Survey,
+    get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, Alert, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, Origin, Photometry, Survey,
 };
 
 #[derive(Debug)]
@@ -77,6 +77,9 @@ impl Filter for ZtfFilter {
         let filter_pipeline = filter_pipeline
             .as_array()
             .ok_or(FilterError::InvalidFilterPipeline)?;
+
+        // validate filter
+        validate_filter_pipeline(&filter_pipeline)?;
 
         let (use_prv_candidates, use_prv_candidates_index) = uses_field_in_filter(
             filter_pipeline,

@@ -7,7 +7,7 @@ use serde_with::{serde_as, skip_serializing_none};
 use tracing::trace;
 
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry, SchemaRegistryError},
+    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},

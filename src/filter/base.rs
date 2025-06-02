@@ -258,6 +258,103 @@ pub fn uses_field_in_filter(
     (false, 0)
 }
 
+pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result<(), FilterError> {
+    // the pipelines have project stages that keep or reject fields
+    // but we need the objectId and _id to always be present in the output
+    // so we make sure that:
+    // - project stages that are an include stages (no "field: 0") specify objectId: 1
+    // - project stages that are an exclude stage (with "field: 0") do not mention objectId
+    // - project stages do not mention the _id field
+    // - unset stages do not mention the objectId or _id fields
+    // - we don't have any group, unwind, or lookup stages
+    // - that the last stage is a project that includes objectId
+    let nb_stages = filter_pipeline.len();
+    for (i, stage) in filter_pipeline.iter().enumerate() {
+        if stage.get("$group").is_some()
+            || stage.get("$unwind").is_some()
+            || stage.get("$lookup").is_some()
+        {
+            return Err(FilterError::InvalidFilterPipeline);
+        }
+        // check for project stages
+        if stage.get("$project").is_some() {
+            // dont convert to a string here, just look over key/values
+            // we build the following variables:
+            // - includes_object_id: bool, if the stage includes objectId
+            // - excludes_object_id: bool, if the stage excludes objectId
+            // - excludes_id: bool, if the stage excludes _id
+            // - include_stage: bool, if the stage is an include stage (no "field: 0")
+            let project_stage = stage.get("$project").unwrap();
+            let mut includes_object_id = false;
+            let mut excludes_object_id = false;
+            let mut excludes_id = false;
+            let mut include_stage = true;
+            if let Some(project_obj) = project_stage.as_object() {
+                for (key, value) in project_obj.iter() {
+                    if key == "objectId" {
+                        if value == &serde_json::Value::Number(1.into()) {
+                            includes_object_id = true;
+                        } else if value == &serde_json::Value::Number(0.into()) {
+                            excludes_object_id = true;
+                        }
+                    } else if key == "_id" {
+                        if value == &serde_json::Value::Number(0.into()) {
+                            excludes_id = true;
+                        }
+                    } else if value == &serde_json::Value::Number(0.into()) {
+                        include_stage = false;
+                    }
+                }
+            }
+            // make sure that _id is never excluded
+            if excludes_id {
+                return Err(FilterError::InvalidFilterPipeline);
+            }
+            // if it's an exclude, make sure that objectId is not excluded
+            if !include_stage && excludes_object_id {
+                return Err(FilterError::InvalidFilterPipeline);
+            }
+            // if it's an include, make sure that objectId is included
+            if include_stage && !includes_object_id {
+                return Err(FilterError::InvalidFilterPipeline);
+            }
+        }
+
+        // check for unset stages
+        if stage.get("$unset").is_some() {
+            let unset_stage = stage.get("$unset").unwrap();
+            // its a document just like the project stage
+            if let Some(unset_obj) = unset_stage.as_object() {
+                for (key, _) in unset_obj.iter() {
+                    if key == "objectId" || key == "_id" {
+                        return Err(FilterError::InvalidFilterPipeline);
+                    }
+                }
+            }
+        }
+
+        // check for the last stage
+        if i == nb_stages - 1 {
+            // the last stage must be a project stage that includes objectId
+            if let Some(project_stage) = stage.get("$project") {
+                if let Some(project_obj) = project_stage.as_object() {
+                    if !project_obj.contains_key("objectId")
+                        || project_obj.get("objectId") != Some(&serde_json::Value::Number(1.into()))
+                    {
+                        return Err(FilterError::InvalidFilterPipeline);
+                    }
+                } else {
+                    return Err(FilterError::InvalidFilterPipeline);
+                }
+            } else {
+                return Err(FilterError::InvalidFilterPipeline);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn get_filter_object(
     filter_id: i32,
     catalog: &str,

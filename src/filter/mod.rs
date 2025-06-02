@@ -3,8 +3,8 @@ mod lsst;
 mod ztf;
 
 use base::{
-    get_filter_object, parse_programid_candid_tuple, uses_field_in_filter, Alert, FilterResults,
-    Origin, Photometry, Survey,
+    get_filter_object, parse_programid_candid_tuple, uses_field_in_filter,
+    validate_filter_pipeline, Alert, FilterResults, Origin, Photometry, Survey,
 };
 pub use base::{
     run_filter, run_filter_worker, Filter, FilterError, FilterWorker, FilterWorkerError,
