@@ -221,14 +221,11 @@ pub fn uses_field_in_stage(
         for (field_index, _) in field_indexes {
             match avoid_prefixes {
                 Some(prefixes) => {
-                    // 1. take the length of the prefix
-                    // read the string from field_index - 1 to the field_index
-                    // if the string == prefix, skip
-                    // 2. if the string is not a prefix, return true
+                    // as soon as there is one occurence of the field that is not preceded by any of the prefixes, we return true
                     let field_str = stage_str.to_string();
                     for prefix in prefixes {
                         let prefix_len = prefix.len();
-                        if prefix_len + 1 > field_index {
+                        if (field_index as i64 - 1 - prefix_len as i64) < 0 {
                             continue;
                         }
                         let prefix_idx = field_index - 1 - prefix_len;
@@ -264,7 +261,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // so we make sure that:
     // - project stages that are an include stages (no "field: 0") specify objectId: 1
     // - project stages that are an exclude stage (with "field: 0") do not mention objectId
-    // - project stages co not exclude the _id field or objectId
+    // - project stages do not exclude the _id field or objectId
     // - unset stages do not delete the objectId or _id fields
     // - we don't have any group, unwind, or lookup stages
     // - that the last stage is a project that includes objectId
