@@ -213,7 +213,7 @@ impl Filter for ZtfFilter {
 
         // some sanity checks
         if insert_aux_index == usize::MAX && insert_aux_pipeline {
-            panic!("insert_aux_index is MAX but insert_aux_pipeline is true");
+            return Err(FilterError::InvalidFilterPipeline);
         }
 
         // now we loop over the base_pipeline and insert stages from the filter_pipeline
