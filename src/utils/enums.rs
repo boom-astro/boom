@@ -7,6 +7,15 @@ pub enum Survey {
     Lsst,
 }
 
+impl Survey {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Survey::Ztf => "ZTF",
+            Survey::Lsst => "LSST",
+        }
+    }
+}
+
 #[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProgramId {
