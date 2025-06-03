@@ -5,10 +5,11 @@ use redis::AsyncCommands;
 use tracing::{error, info, trace};
 
 use crate::conf;
+use crate::utils::enums::ProgramId;
 
 #[async_trait::async_trait]
 pub trait AlertProducer {
-    fn new(date: String, limit: i64, program_id: Option<u8>) -> Self;
+    fn new(date: String, limit: i64, program_id: Option<ProgramId>) -> Self;
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
 }
 
@@ -120,7 +121,7 @@ pub trait AlertConsumer: Sized {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
-        program_id: Option<u8>,
+        program_id: Option<ProgramId>,
         config_path: &str,
     ) -> Self;
     fn default(config_path: &str) -> Self {

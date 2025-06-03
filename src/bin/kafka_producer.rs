@@ -3,16 +3,23 @@ use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use boom::kafka::{AlertProducer, ZtfAlertProducer};
+use boom::utils::enums::{ProgramId, Survey};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(help = "Survey to produce alerts for. Options are: 'ZTF'")]
-    survey: String,
-    #[arg(help = "Date of archival alerts to produce, with format YYYYMMDD. Defaults to today.")]
+    #[arg(value_enum, help = "Survey to produce alerts for (from file).")]
+    survey: Survey,
+    #[arg(
+        help = "UTC date of archival alerts to produce, with format YYYYMMDD. Defaults to today."
+    )]
     date: Option<String>,
-    #[arg(help = "ID of the program to consume the alerts (ZTF only, defaults to 1=public).")]
-    program_id: Option<u8>,
-    #[arg(help = "Limit the number of alerts produced")]
+    #[arg(
+        default_value_t,
+        value_enum,
+        help = "ID of the program to produce the alerts (ZTF-only)."
+    )]
+    program_id: ProgramId,
+    #[arg(long, help = "Limit the number of alerts produced")]
     limit: Option<i64>,
 }
 
@@ -37,27 +44,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => 0, // Default to 0 if no limit is provided
     };
 
-    let program_id = match args.program_id {
-        Some(id) if id >= 1 && id <= 3 => id,
-        None => 1, // Default to program ID 1 (public)
-        _ => {
-            error!(
-                "Invalid program ID: {}, must be 1, 2, or 3",
-                args.program_id.unwrap_or(0)
-            );
-            return Ok(());
-        }
-    };
+    let program_id = args.program_id;
 
-    let survey = args.survey;
-
-    match survey.to_lowercase().as_str() {
-        "ztf" => {
+    match args.survey {
+        Survey::Ztf => {
             let producer = ZtfAlertProducer::new(date_str, limit, Some(program_id));
             producer.produce(None).await?;
         }
         _ => {
-            error!("Unknown survey (supported: 'ZTF'): {}", survey);
+            error!("Only ZTF survey is supported for producing alerts from file (for now).");
             return Ok(());
         }
     }

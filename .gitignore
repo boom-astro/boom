@@ -2,9 +2,7 @@
 Cargo.lock
 config.yaml
 docker-compose.yaml
-data/alerts/ztf
-data/alerts/lsst
-data/alerts/decam
+data/alerts
 data/schema
 __pycache__
 /env

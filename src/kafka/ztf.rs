@@ -1,12 +1,13 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, AlertProducer},
+    utils::enums::ProgramId,
 };
 use rdkafka::config::ClientConfig;
-use redis::AsyncCommands;
-use tracing::{error, info};
-
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
+use redis::AsyncCommands;
+use tempfile::NamedTempFile;
+use tracing::{error, info};
 
 const ZTF_SERVER_URL: &str = "localhost:9092";
 
@@ -16,7 +17,7 @@ pub struct ZtfAlertConsumer {
     max_in_queue: usize,
     group_id: String,
     server: String,
-    program_id: u8,
+    program_id: ProgramId,
     config_path: String,
 }
 
@@ -29,7 +30,7 @@ impl AlertConsumer for ZtfAlertConsumer {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server: Option<&str>,
-        program_id: Option<u8>,
+        program_id: Option<ProgramId>,
         config_path: &str,
     ) -> Self {
         if 15 % n_threads != 0 {
@@ -55,10 +56,7 @@ impl AlertConsumer for ZtfAlertConsumer {
             n_threads, topic, output_queue, group_id, server
         );
 
-        let program_id = match program_id {
-            Some(id) => id,
-            None => 1, // Default to program ID 1 (public)
-        };
+        let program_id = program_id.unwrap_or(ProgramId::Public);
 
         ZtfAlertConsumer {
             output_queue,
@@ -84,7 +82,11 @@ impl AlertConsumer for ZtfAlertConsumer {
 
         // ZTF uses nightly topics, and no user/pass (IP whitelisting)
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        let topic = format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id);
+        let topic = format!(
+            "ztf_{}_programid{}",
+            date.format("%Y%m%d"),
+            self.program_id.as_u8()
+        );
 
         let mut handles = vec![];
         for i in 0..self.n_threads {
@@ -135,7 +137,7 @@ impl AlertConsumer for ZtfAlertConsumer {
 
 pub struct ZtfAlertProducer {
     date: String,
-    program_id: u8,
+    program_id: ProgramId,
     limit: i64,
     partnership_archive_username: Option<String>,
     partnership_archive_password: Option<String>,
@@ -148,17 +150,17 @@ impl ZtfAlertProducer {
         }
 
         info!(
-            "Downloading alerts for date {} (programid: {})",
+            "Downloading alerts for date {} (programid: {:?})",
             self.date, self.program_id
         );
 
         let (file_name, data_folder, base_url) = match self.program_id {
-            1 => (
+            ProgramId::Public => (
                 format!("ztf_public_{}.tar.gz", self.date),
                 format!("data/alerts/ztf/public/{}", self.date),
                 "https://ztf.uw.edu/alerts/public/".to_string(),
             ),
-            2 => (
+            ProgramId::Partnership => (
                 format!("ztf_partnership_{}.tar.gz", self.date),
                 format!("data/alerts/ztf/partnership/{}", self.date),
                 "https://ztf.uw.edu/alerts/partnership/".to_string(),
@@ -168,9 +170,16 @@ impl ZtfAlertProducer {
 
         std::fs::create_dir_all(&data_folder)?;
 
-        if std::fs::read_dir(&data_folder)?.count() > 0 {
-            info!("Alerts already downloaded to {}", data_folder);
-            let count = std::fs::read_dir(&data_folder).unwrap().count();
+        let output_temp_file = NamedTempFile::new_in(&data_folder)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        let output_temp_path = output_temp_file.path().to_str().unwrap();
+
+        let count = std::fs::read_dir(&data_folder)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "avro"))
+            .count();
+        if count > 0 {
+            info!("Alerts already downloaded to {}{}", data_folder, file_name);
             return Ok(count as i64);
         }
 
@@ -180,9 +189,9 @@ impl ZtfAlertProducer {
             .arg("-P")
             .arg(&data_folder)
             .arg("-O")
-            .arg(format!("{}/{}.temp", data_folder, file_name));
+            .arg(&output_temp_path);
 
-        if self.program_id == 2 {
+        if self.program_id == ProgramId::Partnership {
             if self.partnership_archive_username.is_none()
                 || self.partnership_archive_password.is_none()
             {
@@ -203,22 +212,14 @@ impl ZtfAlertProducer {
             if error_msg.contains("404 Not Found") {
                 return Err("No alerts found for this date".into());
             }
-            // delete the temp file if it exists
-            let _ = std::fs::remove_file(format!("{}/{}.temp", data_folder, file_name));
-            return Err(format!("Failed to download alerts: {}", error_msg).into());
         } else {
             info!("Downloaded alerts to {}", data_folder);
-            // rename the temp file to the final name
-            std::fs::rename(
-                format!("{}/{}.temp", data_folder, file_name),
-                format!("{}/{}", data_folder, file_name),
-            )?;
         }
 
         // when we untar it, the name of the folder should be the same as the file name
         let output = std::process::Command::new("tar")
             .arg("-xzf")
-            .arg(format!("{}/{}", data_folder, file_name))
+            .arg(output_temp_path)
             .arg("-C")
             .arg(&data_folder)
             .output()?;
@@ -228,8 +229,6 @@ impl ZtfAlertProducer {
             info!("Extracted alerts to {}", data_folder);
         }
 
-        std::fs::remove_file(format!("{}/{}", data_folder, file_name))?;
-
         let count = std::fs::read_dir(&data_folder)?.count();
 
         Ok(count as i64)
@@ -238,12 +237,9 @@ impl ZtfAlertProducer {
 
 #[async_trait::async_trait]
 impl AlertProducer for ZtfAlertProducer {
-    fn new(date: String, limit: i64, program_id: Option<u8>) -> Self {
+    fn new(date: String, limit: i64, program_id: Option<ProgramId>) -> Self {
         // if u8 is not provided, default to 1
-        let program_id = match program_id {
-            Some(id) => id,
-            None => 1, // Default to program ID 1 (public)
-        };
+        let program_id = program_id.unwrap_or(ProgramId::Public);
 
         // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
         // and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD set as env variables
@@ -255,10 +251,10 @@ impl AlertProducer for ZtfAlertProducer {
             Ok(password) => Some(password),
             Err(_) => None,
         };
-        if program_id > 1
+        if program_id == ProgramId::Partnership
             && (partnership_archive_username.is_none() || partnership_archive_password.is_none())
         {
-            panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for program ID > 1");
+            panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for partnership program ID");
         }
 
         ZtfAlertProducer {
@@ -281,7 +277,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         let topic_name = match topic {
             Some(t) => t,
-            None => format!("ztf_{}_programid{}", self.date, self.program_id),
+            None => format!("ztf_{}_programid{}", self.date, self.program_id.as_u8()),
         };
 
         info!("Initializing ZTF alert kafka producer");
@@ -302,8 +298,8 @@ impl AlertProducer for ZtfAlertProducer {
         info!("Pushing alerts to {}", topic_name);
 
         let data_folder = match self.program_id {
-            1 => format!("data/alerts/ztf/public/{}", self.date),
-            2 => format!("data/alerts/ztf/partnership/{}", self.date),
+            ProgramId::Public => format!("data/alerts/ztf/public/{}", self.date),
+            ProgramId::Partnership => format!("data/alerts/ztf/partnership/{}", self.date),
             _ => return Err("Invalid program ID".into()),
         };
 

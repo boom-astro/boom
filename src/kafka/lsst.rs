@@ -1,6 +1,7 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer},
+    utils::enums::ProgramId,
 };
 use redis::AsyncCommands;
 use tracing::{error, info};
@@ -28,7 +29,7 @@ impl AlertConsumer for LsstAlertConsumer {
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
-        _program_id: Option<u8>,
+        _program_id: Option<ProgramId>,
         config_path: &str,
     ) -> Self {
         // 45 should be divisible by n_threads

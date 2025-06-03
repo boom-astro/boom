@@ -1,25 +1,40 @@
 use chrono::TimeZone;
 use clap::Parser;
-use tracing::{error, Level};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use boom::kafka::{AlertConsumer, LsstAlertConsumer, ZtfAlertConsumer};
+use boom::utils::enums::{ProgramId, Survey};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(help = "Survey to consume alerts from. Options are 'ZTF', 'LSST'")]
-    survey: String,
+    #[arg(value_enum, help = "Survey to consume alerts from.")]
+    survey: Survey,
     #[arg(help = "UTC date for which we want to consume alerts, with format YYYYMMDD")]
     date: Option<String>,
-    #[arg(help = "ID of the program to consume the alerts (ZTF only, defaults to 1=public).")]
-    program_id: Option<u8>,
+    #[arg(
+        default_value_t,
+        value_enum,
+        help = "ID of the program to consume the alerts (ZTF-only)."
+    )]
+    program_id: ProgramId,
     #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
     config: Option<String>,
-    #[arg(help = "Number of processes to use to read the Kafka stream in parallel")]
+    #[arg(
+        long,
+        help = "Number of processes to use to read the Kafka stream in parallel"
+    )]
     processes: Option<usize>,
-    #[arg(help = "Clear the queue of alerts already consumed from Kafka and pushed to Redis")]
+    #[arg(
+        long,
+        help = "Clear the in-memory (Valkey) queue of alerts already consumed from Kafka"
+    )]
     clear: Option<bool>,
-    #[arg(help = "Set a maximum number of alerts to hold in redis, default is 15000")]
+    #[arg(
+        long,
+        help = "Set a maximum number of alerts to hold in memory (Valkey), default is 15000",
+        value_name = "MAX"
+    )]
     max_in_queue: Option<usize>,
 }
 
@@ -40,17 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let date = date.and_hms_opt(0, 0, 0).unwrap();
     let timestamp = chrono::Utc.from_utc_datetime(&date).timestamp();
 
-    let program_id = match args.program_id {
-        Some(id) if id >= 1 && id <= 3 => id,
-        None => 1, // Default to program ID 1 (public)
-        _ => {
-            error!(
-                "Invalid program ID: {}, must be 1, 2, or 3",
-                args.program_id.unwrap_or(0)
-            );
-            return Ok(());
-        }
-    };
+    let program_id = args.program_id;
 
     let processes = args.processes.unwrap_or(1);
     let max_in_queue = args.max_in_queue.unwrap_or(15000);
@@ -63,15 +68,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let survey = args.survey;
 
-    match survey.to_lowercase().as_str() {
-        "ztf" => {
+    match survey {
+        Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
                 Some(&format!(
                     "ztf_{}_programid{}",
                     date.format("%Y%m%d"),
-                    program_id
+                    program_id.as_u8()
                 )),
                 None,
                 None,
@@ -84,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             consumer.consume(timestamp).await?;
         }
-        "lsst" => {
+        Survey::Lsst => {
             let consumer = LsstAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
@@ -99,9 +104,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = consumer.clear_output_queue();
             }
             consumer.consume(timestamp).await?;
-        }
-        _ => {
-            panic!("Invalid survey provided. Options are 'ZTF' or 'LSST'");
         }
     }
 
