@@ -8,7 +8,8 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 3. The ML workers, running alerts through a series of ML classifiers, and writing the results back to the `MongoDB` database.
 4. The Filter workers, running user-defined filters on the alerts, and sending the results to Kafka topics for other services to consume.
 
-Workers are managed by a Scheduler that can spawn or kill workers of each type. Currently, the number of workers is static, but we are working on dynamically scaling the number of workers based on the load of the system.
+Workers are managed by a Scheduler that can spawn or kill workers of each type.
+Currently, the number of workers is static, but we are working on dynamically scaling the number of workers based on the load of the system.
 
 BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time.
 
@@ -73,7 +74,8 @@ BOOM runs on macOS and Linux. You'll need:
 
 ### Alert Production (not required for production use)
 
-BOOM is meant to be run in production, reading from a real-time Kafka stream of astronomical alerts. **That said, we made it possible to process ZTF alerts from the [ZTF alerts public archive](https://ztf.uw.edu/alerts/public/).** This is a great way to test BOOM on real data at scale, and not just using the unit tests. To start a Kafka producer, you can run the following command:
+BOOM is meant to be run in production, reading from a real-time Kafka stream of astronomical alerts. **That said, we made it possible to process ZTF alerts from the [ZTF alerts public archive](https://ztf.uw.edu/alerts/public/).**
+This is a great way to test BOOM on real data at scale, and not just using the unit tests. To start a Kafka producer, you can run the following command:
 ```bash
 cargo run --release --bin kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ```
@@ -114,7 +116,8 @@ Now that alerts have been queued for processing, let's start the workers that wi
 ```bash
 cargo run --release --bin scheduler <SURVEY> [CONFIG_PATH]
 ```
-Where `<SURVEY>` is the name of the stream you want to process. In our case, it would be `ztf`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
+Where `<SURVEY>` is the name of the stream you want to process.
+In our case, it would be `ztf`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
 
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -124,12 +127,14 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 
 ## Stopping BOOM:
 
-To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then stop the scheduler with `CTRL+C` as well. You can also stop the docker containers with:
+To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then stop the scheduler with `CTRL+C` as well.
+You can also stop the docker containers with:
 ```bash
 docker compose down
 ```
 
-When you stop the scheduler, it will attempt to gracefully stop all the workers by sending them interrupt signals. This is still a work in progress, so you might see some error handling taking place in the logs.
+When you stop the scheduler, it will attempt to gracefully stop all the workers by sending them interrupt signals.
+This is still a work in progress, so you might see some error handling taking place in the logs.
 
 **In the next version of the README, we'll provide the user with example scripts to read the output of BOOM (i.e. the alerts that passed the filters) from `Kafka` topics. For now, alerts are send back to `Redis`/`valkey` if they pass any filters.**
 
@@ -144,7 +149,8 @@ Tests currently require the kafka, valkey, and mongo Docker containers to be run
 
 *When running the tests, the config file found in `tests/config.test.yaml` will be used.*
 
-The test suite also runs automagically on every push to the repository, and on every pull request. You can check the status of the tests in the "Actions" tab of the GitHub repository.
+The test suite also runs automagically on every push to the repository, and on every pull request.
+You can check the status of the tests in the "Actions" tab of the GitHub repository.
 
 ## Contributing
 
@@ -154,7 +160,10 @@ We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) (TB
 
 ### Dealing with Avro & Rust structs:
 
-It can get pretty painful in Rust to work with Avro schemas, and more specifically to have to write Rust structs that match them. To make this easier, we can use the super useful `rsgen-avro` crate to generate Rust structs from the Avro schemas. Consider this a one-time process that provides a starting point for a given set of schemas. The generated structs can then be modified over time as needed:
+It can get pretty painful in Rust to work with Avro schemas, and more specifically to have to write Rust structs that match them.
+To make this easier, we can use the super useful `rsgen-avro` crate to generate Rust structs from the Avro schemas.
+Consider this a one-time process that provides a starting point for a given set of schemas.
+The generated structs can then be modified over time as needed:
 
 1. First, install `rsgen-avro` as a binary with:
 
@@ -174,15 +183,15 @@ It can get pretty painful in Rust to work with Avro schemas, and more specifical
 
     This will output the Rust structs to the standard output, which you can then copy-paste in a lib file in the `src` directory, so you can use them in your code.
 
-We already went through this process for the ZTF Avro schema (so no need to do it again), and the corresponding Rust structs are in the `src/types.rs` file. We only slightly modified the `Alert` struct to add methods to create an alert from the bytes of an Avro record (`from_avro_bytes`).
+We already went through this process for the ZTF Avro schema (so no need to do it again), and the corresponding Rust structs are in the `src/types.rs` file.
+We only slightly modified the `Alert` struct to add methods to create an alert from the bytes of an Avro record (`from_avro_bytes`).
 
 ### Dealing with Rust structs and MongoDB BSON documents:
 
-We could in theory just query` MongoDB` in a way that allows us to get Rust structs out of it, and also do the same when writing to the database. However under the hood the `mongodb` crate just serializes back and forth, and since Rust structs can't just "remove" their fields that are null (in a way, they need to enforce a schema), we would end up with a lot of null fields in the database. To avoid this, we use the `bson` crate to serialize the Rust structs to BSON documents, sanitize them (remove the null fields and such), and then write them to the database. When querying the DB, both bson documents or Rust structs can be returned, it depends on the use case.
-
-### Why still using Python for some parts of the pipeline?
-
-For everything ML-related, it's not that easy to just take anyone's model (that was 99% of the time trained with a Python library) and just run it in Rust. We could try (and successfully did for a handful of models) converting them to ONNX, and then running them with `tch-rs` (a Rust wrapper around the `libtorch` C++ library). However, this proved to be a pain on a lot of systems. Thanks to the fact that we use something like `Redis`/`Valkey` as a cache/task queue, we can pretty much send data between whatever language we want, and have the ML models run in Python, and the rest of the pipeline run in Rust. It will also come in handy for the filtering pipeline, as we can leverage any of Python's libraries to do some fancy & complex computation that would be a pain for your average astronomer to write in Rust. So for now, we limit the Rust code to all of the "core" parts of the pipeline where performance is key, and use Python where we can affort to lose a bit of performance for more flexibility.
+We could in theory just query` MongoDB` in a way that allows us to get Rust structs out of it, and also do the same when writing to the database.
+However under the hood the `mongodb` crate just serializes back and forth, and since Rust structs can't just "remove" their fields that are null (in a way, they need to enforce a schema), we would end up with a lot of null fields in the database.
+To avoid this, we use the `bson` crate to serialize the Rust structs to BSON documents, sanitize them (remove the null fields and such), and then write them to the database.
+When querying the DB, both bson documents or Rust structs can be returned, it depends on the use case.
 
 ### Why `Redis`/`Valkey` as a cache/task queue?
 
@@ -194,8 +203,14 @@ There are multiple answers to this:
 
 ### Why `MongoDB` as a database?
 
-`MongoDB` proved to be a great choice for another broker that `BOOM` is heavily inspired from: `Kowalski`. Mongo has great support across multiple programming languages, is highly flexible, has a rich query language that we can build complex pipelines with (perfect for filtering alerts), and is easy to maintain. It is also fast, and can handle a lot of data. We could have gone with `PostgreSQL`, but we would have lost some flexibility, and we would have had to enforce a schema on the data, which is not ideal for an alert stream that can have a lot of different fields. With `MongoDB`, we do not have to enforce a schema or run database migrations whenever we want to add another astronomical catalog to crossmatch with the alerts.
+`MongoDB` proved to be a great choice for another broker that `BOOM` is heavily inspired from: `Kowalski`.
+Mongo has great support across multiple programming languages, is highly flexible, has a rich query language that we can build complex pipelines with (perfect for filtering alerts), and is easy to maintain.
+It is also fast, and can handle a lot of data. We could have gone with `PostgreSQL`, but we would have lost some flexibility, and we would have had to enforce a schema on the data, which is not ideal for an alert stream that can have a lot of different fields.
+With `MongoDB`, we do not have to enforce a schema or run database migrations whenever we want to add another astronomical catalog to crossmatch with the alerts.
 
 ### Why `Kafka` as a message broker?
 
-`Kafka` has been the standard for astronomical alert brokering for a while now, and offers a lot of features that are useful for our use case. It is highly scalable, fault-tolerant, and can handle a lot of data. It also has a rich ecosystem of tools and libraries that we can leverage to build the rest of the system. We could have gone with `Redis`/`Valkey` as a message broker, but reading from `Kafka` topics is what other downstream services expect, and it would have been a pain to have to maintain a custom solution for that. This way, we can keep the internal cache/task queue and the public facing message broker separate.
+`Kafka` has been the standard for astronomical alert brokering for a while now, and offers a lot of features that are useful for our use case.
+It is highly scalable, fault-tolerant, and can handle a lot of data.
+It also has a rich ecosystem of tools and libraries that we can leverage to build the rest of the system.
+We could have gone with `Redis`/`Valkey` as a message broker, but reading from `Kafka` topics is what other downstream services expect, and it would have been a pain to have to maintain a custom solution for that. This way, we can keep the internal cache/task queue and the public facing message broker separate.
