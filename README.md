@@ -71,55 +71,50 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Running BOOM:
 
-BOOM is meant to be run in production, reading from a real-time stream of astronomical alerts. **That said, we can create our own Kafka stream using the[ZTF alerts public archive](https://ztf.uw.edu/alerts/public/) to test BOOM.** To do so, you can start the `Kafka` producer with:
+### Alert Production (not required for production use)
+
+BOOM is meant to be run in production, reading from a real-time Kafka stream of astronomical alerts. **That said, we made it possible to process ZTF alerts from the [ZTF alerts public archive](https://ztf.uw.edu/alerts/public/).** This is a great way to test BOOM on real data at scale, and not just using the unit tests. To start a Kafka producer, you can run the following command:
 ```bash
 cargo run --release --bin kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ```
-Where `<SURVEY>` is the name of the survey (`ZTF` only for this binary, for now),
-`[DATE]` is the date of the alerts you want to read (in `YYYYMMDD` format),
-and `[PROGRAMID]` (optional) is the ID of the program to use (ZTF only parameter: 
-1 for public, 2 for partnership, 3 for caltech). 
-We suggest using a night with a very small number of alerts to just get the code running, 
-like `20240617` for example. 
-The script will take care of downloading the alerts from the ZTF IPAC server,
-writing them on disk for the `Kafka` producer to read,
-and then will start producing them to the associated `Kafka` topic, 
-`ztf_YYYYMMDD_programid1`.
-You can leave that running in the background, and start the rest of the pipeline in another terminal.
-Optionally, you can specify a `[LIMIT]` parameter to limit the number of alerts to produce.
-This is useful for testing purposes,
-as it will only produce the specified number of alerts, and then stop.
 
+_To see the list of all parameters, documentation, and examples, run the following command:_
+```bash
+cargo run --release --bin kafka_producer -- --help
+```
+
+As an example, let's say you want to produce public ZTF alerts that were observed on `20240617` UTC. You can run the following command:
+```bash
+cargo run --release --bin kafka_producer ztf 20240617 public
+```
+You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
 ```bash
 docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
 
+### Alert Consumption
 
 Next, you can start the `Kafka` consumer with:
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROGRAMID] [PROCESSES] [CLEAR] [max_in_queue]
+cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROGRAMID]
 ```
-Where `<SURVEY>`, `[DATE]`, and `[PROGRAMID]` determine which topic to read from. In our case, `<SURVEY>` should be `ZTF`, `[DATE]` and `[PROGRAMID]` should match the values passed to the `kafka_producer` earlier.
 
-Note: This version of the code requires the correct order of arguments. Run the following for help:
+This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
+
+To continue with the previous example, you can run:
 ```bash
-cargo run --release --bin kafka_consumer -- --help
+cargo run --release --bin kafka_consumer ztf 20240617 public
 ```
-Some of the optional parameters are:
-- `<config>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
-- `<processes>` is the number of processes to spawn for the consumer. This is useful if you want to speed up reading from the `Kafka` topic, by splitting the kafka topic partitions across multiple processes. By default, it is set to 1, which means that only one process will be reading from the `Kafka` topic. You can set it to any number you want, as long as the total number of partitions can be divided by that number. For example, ZTF has a total of 15 partitions, so you can set it to 1, 3, 5, or 15. LSST on the other hand, has 45 of them. If you set it to a number that does not divide the total number of partitions, the script will panic.
-- `<clear>` is a boolean that determines whether to clear the `Redis`/`Valkey` queue before starting the consumer. If set to `true`, it will clear the queue, otherwise it will just append the new alerts to the existing queue. This is useful if you want to start fresh with a new set of alerts.
-- `<max_in_queue>` let's you set a limit on how many alert packets can be in the redis queue at once. By default, this is set to 1000, and can be set to 0 to be ignored. The script will read the alerts from the `Kafka` topic, and write them to the `Redis`/`Valkey` queue. You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
-Instead of starting each worker manually, we provide the `scheduler`. It reads the number of workers for each type from `config.yaml`. Run the scheduler with:
+### Alert Processing
+
+Now that alerts have been queued for processing, let's start the workers that will process them. Instead of starting each worker manually, we provide the `scheduler` binary. You can run it with:
 ```bash
-cargo run --release --bin scheduler <stream_name> <config_path>
+cargo run --release --bin scheduler <SURVEY> [CONFIG_PATH]
 ```
-Where `<stream_name>` is the name of the stream you want to process. In our case, it would be `ZTF`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
-
-*Before running the scheduler, make sure that you are in your Python virtual environment. This is required for the ML worker, that will run Python-based ML models. If you created it with `uv` as instructed earlier, you can enter the virtual environment with `source .venv/bin/activate`.*
+Where `<SURVEY>` is the name of the stream you want to process. In our case, it would be `ztf`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
 
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -142,7 +137,7 @@ When you stop the scheduler, it will attempt to gracefully stop all the workers 
 
 We are currently working on adding tests to the codebase. You can run the tests with:
 ```bash
-cargo test
+cargo test --release
 ```
 
 Tests currently require the kafka, valkey, and mongo Docker containers to be running as described above.
