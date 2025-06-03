@@ -203,7 +203,7 @@ pub enum BuildSubscriberError {
 /// Build a tracing subscriber.
 pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
     let mut fmt_layer = tracing_subscriber::fmt::layer()
-        .with_thread_names(true)
+        .with_target(false)
         .with_file(true)
         .with_line_number(true);
 

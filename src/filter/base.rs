@@ -185,11 +185,11 @@ pub async fn send_alert_to_kafka(
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-    id: &str,
+    key: &str,
 ) -> Result<(), FilterWorkerError> {
     let encoded = alert_to_avro_bytes(alert, schema)?;
 
-    let record = FutureRecord::to(&topic).key(id).payload(&encoded);
+    let record = FutureRecord::to(&topic).key(key).payload(&encoded);
 
     producer
         .send(record, std::time::Duration::from_secs(0))
@@ -346,11 +346,12 @@ pub trait FilterWorker {
 #[tokio::main]
 #[instrument(skip_all, err)]
 pub async fn run_filter_worker<T: FilterWorker>(
-    id: String,
+    key: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
+
     let config = conf::load_config(config_path)?;
 
     let mut filter_worker = T::new(config_path).await?;
@@ -405,7 +406,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
         command_check_countdown -= nb_alerts - 1; // As if iterated this many times
 
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key).await?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
                 &alert.candid,

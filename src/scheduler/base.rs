@@ -97,9 +97,17 @@ impl ThreadPool {
     #[instrument(skip(self))]
     async fn terminate(&self) {
         for worker in &self.workers {
-            info!(id = ?worker.id, "sending termination signal");
+            let handle = worker
+                .handle
+                .as_ref()
+                .expect("handle already consumed, but that should be impossible");
+            let tid = handle.thread().id();
+            info!(?tid, "sending termination signal");
             worker.terminate().await.unwrap_or_else(|_| {
-                warn!(id = ?worker.id, "failed to send termination signal (thread likely already terminated)");
+                warn!(
+                    ?tid,
+                    "failed to send termination signal (thread likely already terminated)"
+                );
             });
         }
     }
@@ -108,9 +116,10 @@ impl ThreadPool {
     #[instrument(skip(self))]
     fn join(&mut self) {
         for worker in &mut self.workers {
-            if let Some(thread) = worker.thread.take() {
-                match thread.join() {
-                    Ok(_) => info!(id = ?worker.id, "successfully shut down worker"),
+            if let Some(handle) = worker.handle.take() {
+                let tid = handle.thread().id();
+                match handle.join() {
+                    Ok(_) => info!(?tid, "successfully shut down worker"),
                     Err(_) => {
                         // NOTE: `JoinHandle::join` produces an error if the
                         // thread panicked. The error value contains the panic
@@ -119,7 +128,7 @@ impl ThreadPool {
                         // But, if logging/tracing is enabled for the thread,
                         // then the message will be recorded anyway and we don't
                         // need to worry about capturing it here.
-                        warn!(id = ?worker.id, "worker panicked")
+                        warn!(?tid, "worker panicked")
                     }
                 }
             }
@@ -129,11 +138,8 @@ impl ThreadPool {
     /// Add a new worker to the thread pool
     #[instrument(skip(self))]
     fn add_worker(&mut self) {
-        let id = uuid::Uuid::new_v4().to_string();
-        info!(?id, "adding worker");
         self.workers.push(Worker::new(
             self.worker_type,
-            id.clone(),
             self.stream_name.clone(),
             self.config_path.clone(),
         ));
@@ -154,8 +160,8 @@ impl Drop for ThreadPool {
 /// controlled completely by a threadpool and has a listening channel through
 /// which it listens for commands from it.
 pub struct Worker {
-    id: String,
-    thread: Option<thread::JoinHandle<()>>,
+    // Needs to be Option because JoinHandle::join() consumes the handle.
+    handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<WorkerCmd>,
 }
 
@@ -168,18 +174,12 @@ impl Worker {
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
     #[instrument]
-    fn new(
-        worker_type: WorkerType,
-        id: String,
-        stream_name: String,
-        config_path: String,
-    ) -> Worker {
-        let id_copy = id.clone();
+    fn new(worker_type: WorkerType, stream_name: String, config_path: String) -> Worker {
         let (sender, receiver) = mpsc::channel(1);
-        let thread = match worker_type {
-            // TODO: Spawn a new worker thread when one dies? (A supervisor or something like that?)
+        let handle = match worker_type {
             WorkerType::Alert => thread::spawn(move || {
-                span!(INFO, "alert worker", ?id, ?stream_name).in_scope(|| {
+                let tid = std::thread::current().id();
+                span!(INFO, "alert worker", ?tid, ?stream_name).in_scope(|| {
                     debug!(?config_path);
                     let run = match stream_name.as_str() {
                         "ZTF" => run_alert_worker::<ZtfAlertWorker>,
@@ -193,7 +193,8 @@ impl Worker {
                 })
             }),
             WorkerType::Filter => thread::spawn(move || {
-                span!(INFO, "filter worker", ?id, ?stream_name).in_scope(|| {
+                let tid = std::thread::current().id();
+                span!(INFO, "filter worker", ?tid, ?stream_name).in_scope(|| {
                     debug!(?config_path);
                     let run = match stream_name.as_str() {
                         "ZTF" => run_filter_worker::<ZtfFilterWorker>,
@@ -203,12 +204,14 @@ impl Worker {
                             return;
                         }
                     };
-                    run(id, receiver, &config_path)
+                    let key = uuid::Uuid::new_v4().to_string();
+                    run(key, receiver, &config_path)
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),
             WorkerType::ML => thread::spawn(move || {
-                span!(INFO, "ml worker", ?id, ?stream_name).in_scope(|| {
+                let tid = std::thread::current().id();
+                span!(INFO, "ml worker", ?tid, ?stream_name).in_scope(|| {
                     debug!(?config_path);
                     let run = match stream_name.as_str() {
                         "ZTF" => run_ml_worker::<ZtfMLWorker>,
@@ -228,8 +231,7 @@ impl Worker {
         };
 
         Worker {
-            id: id_copy,
-            thread: Some(thread),
+            handle: Some(handle),
             sender,
         }
     }
