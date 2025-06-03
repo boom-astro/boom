@@ -180,6 +180,7 @@ impl Worker {
             WorkerType::Alert => thread::spawn(move || {
                 let tid = std::thread::current().id();
                 span!(INFO, "alert worker", ?tid, ?stream_name).in_scope(|| {
+                    info!("starting alert worker");
                     debug!(?config_path);
                     let run = match stream_name.as_str() {
                         "ZTF" => run_alert_worker::<ZtfAlertWorker>,
@@ -195,6 +196,7 @@ impl Worker {
             WorkerType::Filter => thread::spawn(move || {
                 let tid = std::thread::current().id();
                 span!(INFO, "filter worker", ?tid, ?stream_name).in_scope(|| {
+                    info!("starting filter worker");
                     debug!(?config_path);
                     let run = match stream_name.as_str() {
                         "ZTF" => run_filter_worker::<ZtfFilterWorker>,
@@ -212,6 +214,7 @@ impl Worker {
             WorkerType::ML => thread::spawn(move || {
                 let tid = std::thread::current().id();
                 span!(INFO, "ml worker", ?tid, ?stream_name).in_scope(|| {
+                    info!("starting ml worker");
                     debug!(?config_path);
                     let run = match stream_name.as_str() {
                         "ZTF" => run_ml_worker::<ZtfMLWorker>,
