@@ -291,9 +291,9 @@ async fn test_process_ztf_lsst_xmatch() {
         .get_array("LSST")
         .unwrap()
         .iter()
-        .map(|x| x.as_i64().unwrap())
+        .map(|x| x.as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lsst_matches, vec![lsst_object_id]);
+    assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
 
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
@@ -320,9 +320,9 @@ async fn test_process_ztf_lsst_xmatch() {
         .get_array("LSST")
         .unwrap()
         .iter()
-        .map(|x| x.as_i64().unwrap())
+        .map(|x| x.as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lsst_matches, vec![lsst_object_id]);
+    assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
 
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
     let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
@@ -349,9 +349,9 @@ async fn test_process_ztf_lsst_xmatch() {
         .get_array("LSST")
         .unwrap()
         .iter()
-        .map(|x| x.as_i64().unwrap())
+        .map(|x| x.as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lsst_matches, vec![lsst_object_id]);
+    assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
     assert_ne!(lsst_matches, vec![bad_lsst_object_id]);
 
     // 5. This ZTF alert is above the LSST dec cutoff and therefore should not

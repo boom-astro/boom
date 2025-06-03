@@ -181,7 +181,7 @@ pub trait AlertWorker {
     fn output_queue_name(&self) -> String;
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -192,7 +192,7 @@ pub trait AlertWorker {
     ) -> Result<(), AlertError>;
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,

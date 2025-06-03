@@ -249,7 +249,7 @@ impl FilterWorker for LsstFilterWorker {
             .await
             .ok_or(FilterWorkerError::AlertNotFound)??;
 
-        let object_id = alert_document.get_i64("objectId")?;
+        let object_id = alert_document.get_str("objectId")?.to_string();
         let jd = alert_document.get_f64("jd")?;
         let ra = alert_document.get_f64("ra")?;
         let dec = alert_document.get_f64("dec")?;
@@ -317,7 +317,7 @@ impl FilterWorker for LsstFilterWorker {
 
         let alert = Alert {
             candid,
-            object_id: format!("{}", object_id),
+            object_id,
             jd,
             ra,
             dec,

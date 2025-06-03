@@ -103,7 +103,7 @@ async fn test_process_lsst_alert() {
     assert!(alert.is_some());
     let alert = alert.unwrap();
     assert_eq!(alert.get_i64("_id").unwrap(), candid);
-    assert_eq!(alert.get_i64("objectId").unwrap(), object_id);
+    assert_eq!(alert.get_str("objectId").unwrap(), &object_id);
     let candidate = alert.get_document("candidate").unwrap();
     assert_eq!(candidate.get_f64("ra").unwrap(), ra);
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);
@@ -124,7 +124,7 @@ async fn test_process_lsst_alert() {
 
     // check that the aux collection was inserted
     let aux_collection_name = "LSST_alerts_aux";
-    let filter_aux = doc! {"_id": object_id};
+    let filter_aux = doc! {"_id": &object_id};
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
         .find_one(filter_aux.clone())
@@ -133,7 +133,7 @@ async fn test_process_lsst_alert() {
 
     assert!(aux.is_some());
     let aux = aux.unwrap();
-    assert_eq!(aux.get_i64("_id").unwrap(), object_id);
+    assert_eq!(aux.get_str("_id").unwrap(), &object_id);
     // check that we have the arrays prv_candidates, prv_nondetections and fp_hists
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert_eq!(prv_candidates.len(), 3);
@@ -165,7 +165,7 @@ async fn test_filter_lsst_alert() {
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
-    assert_eq!(alert.object_id, format!("{}", object_id));
+    assert_eq!(&alert.object_id, &object_id);
     assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
     let filter_passed = alert
         .filters
