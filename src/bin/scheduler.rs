@@ -88,13 +88,9 @@ async fn main() {
         }
     };
     match initialize_survey_indexes(&survey, &db).await {
-        Ok(_) => info!("initialized indexes for {}", survey.as_str()),
+        Ok(_) => info!("initialized indexes for {}", survey),
         Err(e) => {
-            warn!(
-                "could not initialize indexes for {}: {}",
-                survey.as_str(),
-                e
-            );
+            warn!("could not initialize indexes for {}: {}", survey, e);
             std::process::exit(1);
         }
     }

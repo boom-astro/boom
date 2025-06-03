@@ -1,7 +1,6 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer},
-    utils::enums::ProgramId,
 };
 use redis::AsyncCommands;
 use tracing::{error, info};
@@ -20,16 +19,14 @@ pub struct LsstAlertConsumer {
     config_path: String,
 }
 
-#[async_trait::async_trait]
-impl AlertConsumer for LsstAlertConsumer {
-    fn new(
+impl LsstAlertConsumer {
+    pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
         topic: Option<&str>,
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
-        _program_id: Option<ProgramId>,
         config_path: &str,
     ) -> Self {
         // 45 should be divisible by n_threads
@@ -74,9 +71,12 @@ impl AlertConsumer for LsstAlertConsumer {
             config_path: config_path.to_string(),
         }
     }
+}
 
+#[async_trait::async_trait]
+impl AlertConsumer for LsstAlertConsumer {
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, None, None, config_path)
+        Self::new(1, None, None, None, None, None, config_path)
     }
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
         // divide the 45 LSST partitions for the n_threads that will read them

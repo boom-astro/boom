@@ -7,11 +7,11 @@ pub enum Survey {
     Lsst,
 }
 
-impl Survey {
-    pub fn as_str(&self) -> &str {
+impl std::fmt::Display for Survey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Survey::Ztf => "ZTF",
-            Survey::Lsst => "LSST",
+            Survey::Ztf => write!(f, "ZTF"),
+            Survey::Lsst => write!(f, "LSST"),
         }
     }
 }
@@ -28,12 +28,12 @@ pub enum ProgramId {
     Caltech = 3, // ZTF-only
 }
 
-impl ProgramId {
-    pub fn as_u8(&self) -> u8 {
+impl std::fmt::Display for ProgramId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProgramId::Public => 1,
-            ProgramId::Partnership => 2,
-            ProgramId::Caltech => 3,
+            ProgramId::Public => write!(f, "1"),
+            ProgramId::Partnership => write!(f, "2"),
+            ProgramId::Caltech => write!(f, "3"),
         }
     }
 }

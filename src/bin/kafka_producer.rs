@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.survey {
         Survey::Ztf => {
-            let producer = ZtfAlertProducer::new(date, limit, Some(program_id), true);
+            let producer = ZtfAlertProducer::new(date, limit, program_id, true);
             producer.produce(None).await?;
         }
         _ => {

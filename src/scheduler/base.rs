@@ -26,7 +26,7 @@ pub fn get_num_workers(
 ) -> Result<i64, SchedulerError> {
     let table = conf.get_table("workers")?;
     let stream_table = table
-        .get(survey_name.as_str())
+        .get(&format!("{}", survey_name))
         .ok_or(config::ConfigError::NotFound(
             "survey_name not found in workers table".to_string(),
         ))?

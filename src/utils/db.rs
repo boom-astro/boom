@@ -60,8 +60,8 @@ pub async fn initialize_survey_indexes(
     survey: &Survey,
     db: &Database,
 ) -> Result<(), CreateIndexError> {
-    let alerts_collection_name = format!("{}_alerts", survey.as_str());
-    let alerts_aux_collection_name = format!("{}_alerts_aux", survey.as_str());
+    let alerts_collection_name = format!("{}_alerts", survey);
+    let alerts_aux_collection_name = format!("{}_alerts_aux", survey);
 
     let alerts_collection: Collection<Document> = db.collection(&alerts_collection_name);
     let alerts_aux_collection: Collection<Document> = db.collection(&alerts_aux_collection_name);

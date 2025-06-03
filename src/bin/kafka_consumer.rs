@@ -76,12 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(&format!(
                     "ztf_{}_programid{}",
                     date.format("%Y%m%d"),
-                    program_id.as_u8()
+                    program_id
                 )),
                 None,
                 None,
                 None,
-                Some(program_id),
+                program_id,
                 &config_path,
             );
             if clear {
@@ -94,7 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 processes,
                 Some(max_in_queue),
                 Some(&format!("lsst_{}_programid1", date.format("%Y%m%d"))),
-                None,
                 None,
                 None,
                 None,

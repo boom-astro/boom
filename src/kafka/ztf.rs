@@ -23,16 +23,15 @@ pub struct ZtfAlertConsumer {
     config_path: String,
 }
 
-#[async_trait::async_trait]
-impl AlertConsumer for ZtfAlertConsumer {
-    fn new(
+impl ZtfAlertConsumer {
+    pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
         topic: Option<&str>,
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server: Option<&str>,
-        program_id: Option<ProgramId>,
+        program_id: ProgramId,
         config_path: &str,
     ) -> Self {
         if 15 % n_threads != 0 {
@@ -58,8 +57,6 @@ impl AlertConsumer for ZtfAlertConsumer {
             n_threads, topic, output_queue, group_id, server
         );
 
-        let program_id = program_id.unwrap_or(ProgramId::Public);
-
         ZtfAlertConsumer {
             output_queue,
             n_threads,
@@ -70,9 +67,21 @@ impl AlertConsumer for ZtfAlertConsumer {
             config_path: config_path.to_string(),
         }
     }
+}
 
+#[async_trait::async_trait]
+impl AlertConsumer for ZtfAlertConsumer {
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, None, None, config_path)
+        Self::new(
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ProgramId::Public,
+            config_path,
+        )
     }
 
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
@@ -84,11 +93,7 @@ impl AlertConsumer for ZtfAlertConsumer {
 
         // ZTF uses nightly topics, and no user/pass (IP whitelisting)
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        let topic = format!(
-            "ztf_{}_programid{}",
-            date.format("%Y%m%d"),
-            self.program_id.as_u8()
-        );
+        let topic = format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id);
 
         let mut handles = vec![];
         for i in 0..self.n_threads {
@@ -147,6 +152,33 @@ pub struct ZtfAlertProducer {
 }
 
 impl ZtfAlertProducer {
+    pub fn new(date: chrono::NaiveDate, limit: i64, program_id: ProgramId, verbose: bool) -> Self {
+        // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
+        // and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD set as env variables
+        let partnership_archive_username = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_USERNAME") {
+            Ok(username) => Some(username),
+            Err(_) => None,
+        };
+        let partnership_archive_password = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_PASSWORD") {
+            Ok(password) => Some(password),
+            Err(_) => None,
+        };
+        if program_id == ProgramId::Partnership
+            && (partnership_archive_username.is_none() || partnership_archive_password.is_none())
+        {
+            panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for partnership program ID");
+        }
+
+        ZtfAlertProducer {
+            date,
+            limit,
+            program_id,
+            partnership_archive_username,
+            partnership_archive_password,
+            verbose,
+        }
+    }
+
     pub async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
         let date_str = self.date.format("%Y%m%d").to_string();
         info!(
@@ -227,41 +259,6 @@ impl ZtfAlertProducer {
 
 #[async_trait::async_trait]
 impl AlertProducer for ZtfAlertProducer {
-    fn new(
-        date: chrono::NaiveDate,
-        limit: i64,
-        program_id: Option<ProgramId>,
-        verbose: bool,
-    ) -> Self {
-        // if u8 is not provided, default to 1
-        let program_id = program_id.unwrap_or(ProgramId::Public);
-
-        // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
-        // and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD set as env variables
-        let partnership_archive_username = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_USERNAME") {
-            Ok(username) => Some(username),
-            Err(_) => None,
-        };
-        let partnership_archive_password = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_PASSWORD") {
-            Ok(password) => Some(password),
-            Err(_) => None,
-        };
-        if program_id == ProgramId::Partnership
-            && (partnership_archive_username.is_none() || partnership_archive_password.is_none())
-        {
-            panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for partnership program ID");
-        }
-
-        ZtfAlertProducer {
-            date,
-            limit,
-            program_id,
-            partnership_archive_username,
-            partnership_archive_password,
-            verbose,
-        }
-    }
-
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
         let date_str = self.date.format("%Y%m%d").to_string();
         match self.download_alerts_from_archive().await {
@@ -274,7 +271,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         let topic_name = match topic {
             Some(t) => t,
-            None => format!("ztf_{}_programid{}", date_str, self.program_id.as_u8()),
+            None => format!("ztf_{}_programid{}", date_str, self.program_id),
         };
 
         info!("Initializing ZTF alert kafka producer");
