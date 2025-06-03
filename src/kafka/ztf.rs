@@ -138,7 +138,7 @@ impl AlertConsumer for ZtfAlertConsumer {
 }
 
 pub struct ZtfAlertProducer {
-    date: String,
+    date: chrono::NaiveDate,
     program_id: ProgramId,
     limit: i64,
     partnership_archive_username: Option<String>,
@@ -148,24 +148,21 @@ pub struct ZtfAlertProducer {
 
 impl ZtfAlertProducer {
     pub async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
-        if self.date.len() != 8 {
-            return Err("Invalid date format".into());
-        }
-
+        let date_str = self.date.format("%Y%m%d").to_string();
         info!(
             "Downloading alerts for date {} (programid: {:?})",
-            self.date, self.program_id
+            date_str, self.program_id
         );
 
         let (file_name, data_folder, base_url) = match self.program_id {
             ProgramId::Public => (
-                format!("ztf_public_{}.tar.gz", self.date),
-                format!("data/alerts/ztf/public/{}", self.date),
+                format!("ztf_public_{}.tar.gz", date_str),
+                format!("data/alerts/ztf/public/{}", date_str),
                 "https://ztf.uw.edu/alerts/public/".to_string(),
             ),
             ProgramId::Partnership => (
-                format!("ztf_partnership_{}.tar.gz", self.date),
-                format!("data/alerts/ztf/partnership/{}", self.date),
+                format!("ztf_partnership_{}.tar.gz", date_str),
+                format!("data/alerts/ztf/partnership/{}", date_str),
                 "https://ztf.uw.edu/alerts/partnership/".to_string(),
             ),
             _ => return Err("Invalid program ID".into()),
@@ -230,7 +227,12 @@ impl ZtfAlertProducer {
 
 #[async_trait::async_trait]
 impl AlertProducer for ZtfAlertProducer {
-    fn new(date: String, limit: i64, program_id: Option<ProgramId>, verbose: bool) -> Self {
+    fn new(
+        date: chrono::NaiveDate,
+        limit: i64,
+        program_id: Option<ProgramId>,
+        verbose: bool,
+    ) -> Self {
         // if u8 is not provided, default to 1
         let program_id = program_id.unwrap_or(ProgramId::Public);
 
@@ -261,6 +263,7 @@ impl AlertProducer for ZtfAlertProducer {
     }
 
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
+        let date_str = self.date.format("%Y%m%d").to_string();
         match self.download_alerts_from_archive().await {
             Ok(count) => count,
             Err(e) => {
@@ -271,7 +274,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         let topic_name = match topic {
             Some(t) => t,
-            None => format!("ztf_{}_programid{}", self.date, self.program_id.as_u8()),
+            None => format!("ztf_{}_programid{}", date_str, self.program_id.as_u8()),
         };
 
         info!("Initializing ZTF alert kafka producer");
@@ -290,8 +293,8 @@ impl AlertProducer for ZtfAlertProducer {
             .expect("Producer creation error");
 
         let data_folder = match self.program_id {
-            ProgramId::Public => format!("data/alerts/ztf/public/{}", self.date),
-            ProgramId::Partnership => format!("data/alerts/ztf/partnership/{}", self.date),
+            ProgramId::Public => format!("data/alerts/ztf/public/{}", date_str),
+            ProgramId::Partnership => format!("data/alerts/ztf/partnership/{}", date_str),
             _ => return Err("Invalid program ID".into()),
         };
 

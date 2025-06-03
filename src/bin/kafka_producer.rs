@@ -37,15 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap(),
         None => chrono::Utc::now().date_naive().pred_opt().unwrap(),
     };
-    let date = date.and_hms_opt(0, 0, 0).unwrap();
-    let date_str = date.format("%Y%m%d").to_string();
     let limit = args.limit.unwrap_or(0);
 
     let program_id = args.program_id;
 
     match args.survey {
         Survey::Ztf => {
-            let producer = ZtfAlertProducer::new(date_str, limit, Some(program_id), true);
+            let producer = ZtfAlertProducer::new(date, limit, Some(program_id), true);
             producer.produce(None).await?;
         }
         _ => {
