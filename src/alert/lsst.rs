@@ -7,7 +7,7 @@ use serde_with::{serde_as, skip_serializing_none};
 use tracing::trace;
 
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry, SchemaRegistryError},
+    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
@@ -17,6 +17,8 @@ use crate::{
 };
 
 pub const STREAM_NAME: &str = "LSST";
+pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
+pub const LSST_UNCERTAINTY: f64 = 0.1; // 0.1 arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");

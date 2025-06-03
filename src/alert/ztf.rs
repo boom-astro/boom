@@ -1,7 +1,7 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
-        lsst,
+        base::{AlertError, AlertWorker, AlertWorkerError},
+        decam, get_schema_and_startidx, lsst,
     },
     conf,
     utils::{
@@ -11,98 +11,25 @@ use crate::{
     },
 };
 use apache_avro::from_value;
-use apache_avro::{from_avro_datum, Reader, Schema};
+use apache_avro::{from_avro_datum, Schema};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::io::Read;
 use tracing::{error, trace};
 
 pub const STREAM_NAME: &str = "ZTF";
+// pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
+pub const ZTF_UNCERTAINTY: f64 = 2.; // 2 arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
-pub const LSST_DEC_LIMIT: f64 = 33.5;
-pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
-
-fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
-    let mut i = 0u64;
-    let mut buf = [0u8; 1];
-
-    let mut j = 0;
-    loop {
-        if j > 9 {
-            return Err(SchemaRegistryError::IntegerOverflow);
-        }
-        reader.read_exact(&mut buf[..])?;
-
-        i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
-        if (buf[0] >> 7) == 0 {
-            break;
-        } else {
-            j += 1;
-        }
-    }
-
-    Ok(i)
-}
-
-pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    let z = decode_variable(reader)?;
-    if z & 0x1 == 0 {
-        Ok((z >> 1) as i64)
-    } else {
-        Ok(!(z >> 1) as i64)
-    }
-}
-
-fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    Ok(zag_i64(reader)?)
-}
-
-pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
-    // First, we extract the schema from the avro bytes
-    let cursor = std::io::Cursor::new(avro_bytes);
-    let reader = Reader::new(cursor)?;
-    let schema = reader.writer_schema();
-
-    // Then, we look for the index of the start of the data
-    // this is based on the Apache Avro specification 1.3.2
-    // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
-    let mut cursor = std::io::Cursor::new(avro_bytes);
-
-    // Four bytes, ASCII 'O', 'b', 'j', followed by 1
-    let mut buf = [0; 4];
-    cursor.read_exact(&mut buf)?;
-    if buf != [b'O', b'b', b'j', 1u8] {
-        return Err(SchemaRegistryError::MagicBytesError);
-    }
-
-    // Then there is the file metadata, including the schema
-    let meta_schema = Schema::map(Schema::Bytes);
-    from_avro_datum(&meta_schema, &mut cursor, None)?;
-
-    // Then the 16-byte, randomly-generated sync marker for this file.
-    let mut buf = [0; 16];
-    cursor.read_exact(&mut buf)?;
-
-    // each avro record is preceded by:
-    // 1. a variable-length integer, the number of records in the block
-    // 2. a variable-length integer, the number of bytes in the block
-    let nb_records = decode_long(&mut cursor)?;
-    if nb_records != 1 {
-        return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
-    }
-    let _ = decode_long(&mut cursor)?;
-
-    // we now have the start index of the data
-    let start_idx = cursor.position();
-
-    Ok((schema.to_owned(), start_idx as usize))
-}
+pub const ZTF_LSST_XMATCH_RADIUS: f64 =
+    (ZTF_UNCERTAINTY.max(lsst::LSST_UNCERTAINTY) / 3600.0_f64).to_radians(); // 2 arcseconds in radians
+pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
+    (ZTF_UNCERTAINTY.max(decam::DECAM_UNCERTAINTY) / 3600.0_f64).to_radians(); // 2 arcseconds in radians
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
@@ -456,6 +383,7 @@ pub struct ZtfAlertWorker {
     cached_schema: Option<Schema>,
     cached_start_idx: Option<usize>,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
+    decam_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl ZtfAlertWorker {
@@ -498,14 +426,20 @@ impl ZtfAlertWorker {
         Ok(alert)
     }
 
-    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
-        let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
+    async fn get_lsst_matches(
+        &self,
+        ra: f64,
+        dec: f64,
+        dec_range: (f64, f64),
+        radius_rad: f64,
+    ) -> Result<Vec<i64>, AlertError> {
+        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
             let result = self
                 .lsst_alert_aux_collection
                 .find_one(doc! {
                     "coordinates.radec_geojson": {
                         "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": LSST_XMATCH_RADIUS,
+                        "$maxDistance": radius_rad,
                     },
                 })
                 .projection(doc! {
@@ -526,14 +460,57 @@ impl ZtfAlertWorker {
         } else {
             vec![]
         };
-        Ok(lsst_matches)
+        Ok(matches)
+    }
+
+    async fn get_decam_matches(
+        &self,
+        ra: f64,
+        dec: f64,
+        dec_range: (f64, f64),
+        radius_rad: f64,
+    ) -> Result<Vec<String>, AlertError> {
+        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
+            let result = self
+                .decam_alert_aux_collection
+                .find_one(doc! {
+                    "coordinates.radec_geojson": {
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": radius_rad,
+                    },
+                })
+                .projection(doc! {
+                    "_id": 1
+                })
+                .await;
+            match result {
+                Ok(Some(doc)) => {
+                    let object_id = doc.get_str("_id")?.to_string();
+                    vec![object_id]
+                }
+                Ok(None) => vec![],
+                Err(e) => {
+                    error!("Error cross-matching with DECam: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+        Ok(matches)
     }
 
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
-        let lsst_matches = self.get_lsst_matches(ra, dec).await?;
+        let lsst_matches = self
+            .get_lsst_matches(ra, dec, lsst::LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS)
+            .await?;
+        let decam_matches = self
+            .get_decam_matches(ra, dec, decam::DECAM_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS)
+            .await?;
 
         Ok(doc! {
             "LSST": lsst_matches,
+            "DECAM": decam_matches,
         })
     }
 }
@@ -556,6 +533,9 @@ impl AlertWorker for ZtfAlertWorker {
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&lsst::ALERT_AUX_COLLECTION);
 
+        let decam_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&decam::ALERT_AUX_COLLECTION);
+
         let worker = ZtfAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
@@ -566,6 +546,7 @@ impl AlertWorker for ZtfAlertWorker {
             cached_schema: None,
             cached_start_idx: None,
             lsst_alert_aux_collection,
+            decam_alert_aux_collection,
         };
         Ok(worker)
     }

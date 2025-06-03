@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS},
     conf,
     filter::{FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -232,7 +232,7 @@ async fn test_process_ztf_lsst_xmatch() {
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
     let mut alert_worker = ztf_alert_worker().await;
-    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_LIMIT - 10.0);
+    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_RANGE.1 - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";
@@ -244,7 +244,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 1.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 1.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -269,7 +269,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 2. nearby LSST alert, ZTF alert should have an LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -298,7 +298,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -327,7 +327,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
     let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.5 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.5 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -359,13 +359,13 @@ async fn test_process_ztf_lsst_xmatch() {
     //    unrealistically high dec that ZTF would otherwise match without this
     //    constraint:
     let (_, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default()
-        .dec(LSST_DEC_LIMIT + 10.0)
+        .dec(LSST_DEC_RANGE.1 + 10.0)
         .get()
         .await;
 
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
