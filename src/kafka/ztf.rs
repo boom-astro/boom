@@ -2,6 +2,7 @@ use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, AlertProducer},
     utils::enums::ProgramId,
+    utils::data::download_to_file,
 };
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -144,7 +145,7 @@ pub struct ZtfAlertProducer {
 }
 
 impl ZtfAlertProducer {
-    pub fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
+    pub async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
         if self.date.len() != 8 {
             return Err("Invalid date format".into());
         }
@@ -170,10 +171,6 @@ impl ZtfAlertProducer {
 
         std::fs::create_dir_all(&data_folder)?;
 
-        let output_temp_file = NamedTempFile::new_in(&data_folder)
-            .map_err(|e| format!("Failed to create temp file: {}", e))?;
-        let output_temp_path = output_temp_file.path().to_str().unwrap();
-
         let count = std::fs::read_dir(&data_folder)?
             .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "avro"))
@@ -183,38 +180,27 @@ impl ZtfAlertProducer {
             return Ok(count as i64);
         }
 
-        let mut command = std::process::Command::new("wget");
-        command
-            .arg(&format!("{}{}", base_url, file_name))
-            .arg("-P")
-            .arg(&data_folder)
-            .arg("-O")
-            .arg(&output_temp_path);
+        let mut output_temp_file = NamedTempFile::new_in(&data_folder)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?;
 
-        if self.program_id == ProgramId::Partnership {
-            if self.partnership_archive_username.is_none()
-                || self.partnership_archive_password.is_none()
-            {
-                return Err("Partnership archive credentials not set".into());
+        // use download_to_file function to download the file
+        match download_to_file(
+            &mut output_temp_file,
+            &format!("{}{}", base_url, file_name),
+            self.partnership_archive_username.as_deref(),
+            self.partnership_archive_password.as_deref(),
+        ).await {
+            Ok(_) => info!("Downloaded alerts to {}", data_folder),
+            Err(e) => {
+                if e.to_string().contains("404 Not Found") {
+                    return Err("No alerts found for this date".into());
+                } else {
+                    return Err(e);
+                }
             }
-            let username = self.partnership_archive_username.as_ref().unwrap();
-            let password = self.partnership_archive_password.as_ref().unwrap();
-            command
-                .arg("--user")
-                .arg(username)
-                .arg("--password")
-                .arg(password);
         }
 
-        let output = command.output()?;
-        if !output.status.success() {
-            let error_msg = String::from_utf8_lossy(&output.stderr);
-            if error_msg.contains("404 Not Found") {
-                return Err("No alerts found for this date".into());
-            }
-        } else {
-            info!("Downloaded alerts to {}", data_folder);
-        }
+        let output_temp_path = output_temp_file.path().to_str().unwrap();
 
         // when we untar it, the name of the folder should be the same as the file name
         let output = std::process::Command::new("tar")
@@ -228,6 +214,8 @@ impl ZtfAlertProducer {
         } else {
             info!("Extracted alerts to {}", data_folder);
         }
+
+        drop(output_temp_file); // Close the temp file
 
         let count = std::fs::read_dir(&data_folder)?.count();
 
@@ -267,7 +255,7 @@ impl AlertProducer for ZtfAlertProducer {
     }
 
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
-        match self.download_alerts_from_archive() {
+        match self.download_alerts_from_archive().await {
             Ok(count) => count,
             Err(e) => {
                 error!("Error downloading alerts: {}", e);
