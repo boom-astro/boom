@@ -75,7 +75,20 @@ BOOM is meant to be run in production, reading from a real-time stream of astron
 ```bash
 cargo run --release --bin kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ```
-Where `<SURVEY>` is the name of the survey (`ZTF` only for this binary, for now), `[DATE]` is the date of the alerts you want to read (in `YYYYMMDD` format), and `[PROGRAMID]` (optional) is the ID of the program to use (ZTF only parameter: 1 for public, 2 for partnership, 3 for caltech). We suggest using a night with a very small number of alerts to just get the code running, like `20240617` for example. The script will take care of downloading the alerts from the ZTF IPAC server, writing them on disk for the `Kafka` producer to read, and then will start producing them to the associated `Kafka` topic, `ztf_YYYYMMDD_programid1`. You can leave that running in the background, and start the rest of the pipeline in another terminal. Optionally, you can specify a `[LIMIT]` parameter to limit the number of alerts to produce. This is useful for testing purposes, as it will only produce the specified number of alerts, and then stop.
+Where `<SURVEY>` is the name of the survey (`ZTF` only for this binary, for now),
+`[DATE]` is the date of the alerts you want to read (in `YYYYMMDD` format),
+and `[PROGRAMID]` (optional) is the ID of the program to use (ZTF only parameter: 
+1 for public, 2 for partnership, 3 for caltech). 
+We suggest using a night with a very small number of alerts to just get the code running, 
+like `20240617` for example. 
+The script will take care of downloading the alerts from the ZTF IPAC server,
+writing them on disk for the `Kafka` producer to read,
+and then will start producing them to the associated `Kafka` topic, 
+`ztf_YYYYMMDD_programid1`.
+You can leave that running in the background, and start the rest of the pipeline in another terminal.
+Optionally, you can specify a `[LIMIT]` parameter to limit the number of alerts to produce.
+This is useful for testing purposes,
+as it will only produce the specified number of alerts, and then stop.
 
 
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
