@@ -117,7 +117,10 @@ Now that alerts have been queued for processing, let's start the workers that wi
 cargo run --release --bin scheduler <SURVEY> [CONFIG_PATH]
 ```
 Where `<SURVEY>` is the name of the stream you want to process.
-In our case, it would be `ztf`. `<config_path>` is the path to the config file, which is `config.yaml` by default, and can be omitted.
+For example, to process ZTF alerts, you can run:
+```bash
+cargo run --release --bin scheduler ztf
+```
 
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -142,7 +145,7 @@ This is still a work in progress, so you might see some error handling taking pl
 
 We are currently working on adding tests to the codebase. You can run the tests with:
 ```bash
-cargo test --release
+cargo test
 ```
 
 Tests currently require the kafka, valkey, and mongo Docker containers to be running as described above.
@@ -154,7 +157,8 @@ You can check the status of the tests in the "Actions" tab of the GitHub reposit
 
 ## Contributing
 
-We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) (TBD) file for more information. We rely on [GitHub issues](https://github.com/boom-astro/boom/issues) to track bugs and feature requests.
+We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) (TBD) file for more information. 
+We rely on [GitHub issues](https://github.com/boom-astro/boom/issues) to track bugs and feature requests.
 
 ## Implementation details:
 
