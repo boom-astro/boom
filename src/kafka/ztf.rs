@@ -1,8 +1,8 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, AlertProducer},
-    utils::enums::ProgramId,
     utils::data::download_to_file,
+    utils::enums::ProgramId,
 };
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -189,7 +189,9 @@ impl ZtfAlertProducer {
             &format!("{}{}", base_url, file_name),
             self.partnership_archive_username.as_deref(),
             self.partnership_archive_password.as_deref(),
-        ).await {
+        )
+        .await
+        {
             Ok(_) => info!("Downloaded alerts to {}", data_folder),
             Err(e) => {
                 if e.to_string().contains("404 Not Found") {
