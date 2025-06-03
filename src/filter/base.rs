@@ -87,8 +87,6 @@ pub enum FilterError {
     InvalidFilterPermissions,
     #[error("filter not found in database")]
     FilterNotFound,
-    #[error("filter pipeline could not be parsed")]
-    FilterPipelineError,
     #[error("invalid filter pipeline")]
     InvalidFilterPipeline,
     #[error("invalid filter id")]

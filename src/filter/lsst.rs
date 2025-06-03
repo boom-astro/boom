@@ -89,9 +89,9 @@ impl Filter for LsstFilter {
 
         let filter_pipeline = filter_obj
             .get("pipeline")
-            .ok_or(FilterError::FilterPipelineError)?
+            .ok_or(FilterError::InvalidFilterPipeline)?
             .as_str()
-            .ok_or(FilterError::FilterPipelineError)?;
+            .ok_or(FilterError::InvalidFilterPipeline)?;
 
         let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
         let filter_pipeline = filter_pipeline
