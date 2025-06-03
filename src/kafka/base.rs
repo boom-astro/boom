@@ -9,7 +9,7 @@ use crate::utils::enums::ProgramId;
 
 #[async_trait::async_trait]
 pub trait AlertProducer {
-    fn new(date: String, limit: i64, program_id: Option<ProgramId>) -> Self;
+    fn new(date: String, limit: i64, program_id: Option<ProgramId>, verbose: bool) -> Self;
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
 }
 

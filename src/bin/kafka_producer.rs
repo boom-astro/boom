@@ -26,7 +26,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::INFO)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -39,16 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let date = date.and_hms_opt(0, 0, 0).unwrap();
     let date_str = date.format("%Y%m%d").to_string();
-    let limit = match args.limit {
-        Some(l) => l,
-        None => 0, // Default to 0 if no limit is provided
-    };
+    let limit = args.limit.unwrap_or(0);
 
     let program_id = args.program_id;
 
     match args.survey {
         Survey::Ztf => {
-            let producer = ZtfAlertProducer::new(date_str, limit, Some(program_id));
+            let producer = ZtfAlertProducer::new(date_str, limit, Some(program_id), true);
             producer.produce(None).await?;
         }
         _ => {

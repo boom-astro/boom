@@ -8,7 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 #[tokio::test]
 async fn test_download_from_archive() {
     let date = "20231118".to_string();
-    let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None);
+    let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None, false);
     let result = ztf_alert_producer.download_alerts_from_archive().await;
     assert!(result.is_ok());
     assert!(std::path::Path::new(&format!("data/alerts/ztf/public/{}", &date)).exists());
@@ -24,7 +24,7 @@ async fn test_produce_from_archive() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let date = "20240617".to_string();
-    let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None);
+    let ztf_alert_producer = ZtfAlertProducer::new(date.clone(), 0, None, false);
 
     let topic = uuid::Uuid::new_v4().to_string();
 

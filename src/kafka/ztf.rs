@@ -4,6 +4,7 @@ use crate::{
     utils::data::download_to_file,
     utils::enums::ProgramId,
 };
+use indicatif::ProgressBar;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use redis::AsyncCommands;
@@ -142,6 +143,7 @@ pub struct ZtfAlertProducer {
     limit: i64,
     partnership_archive_username: Option<String>,
     partnership_archive_password: Option<String>,
+    verbose: bool,
 }
 
 impl ZtfAlertProducer {
@@ -189,6 +191,7 @@ impl ZtfAlertProducer {
             &format!("{}{}", base_url, file_name),
             self.partnership_archive_username.as_deref(),
             self.partnership_archive_password.as_deref(),
+            self.verbose,
         )
         .await
         {
@@ -227,7 +230,7 @@ impl ZtfAlertProducer {
 
 #[async_trait::async_trait]
 impl AlertProducer for ZtfAlertProducer {
-    fn new(date: String, limit: i64, program_id: Option<ProgramId>) -> Self {
+    fn new(date: String, limit: i64, program_id: Option<ProgramId>, verbose: bool) -> Self {
         // if u8 is not provided, default to 1
         let program_id = program_id.unwrap_or(ProgramId::Public);
 
@@ -253,6 +256,7 @@ impl AlertProducer for ZtfAlertProducer {
             program_id,
             partnership_archive_username,
             partnership_archive_password,
+            verbose,
         }
     }
 
@@ -285,13 +289,28 @@ impl AlertProducer for ZtfAlertProducer {
             .create()
             .expect("Producer creation error");
 
-        info!("Pushing alerts to {}", topic_name);
-
         let data_folder = match self.program_id {
             ProgramId::Public => format!("data/alerts/ztf/public/{}", self.date),
             ProgramId::Partnership => format!("data/alerts/ztf/partnership/{}", self.date),
             _ => return Err("Invalid program ID".into()),
         };
+
+        // count the number of avro files in the data folder
+        let count = std::fs::read_dir(&data_folder)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "avro"))
+            .count();
+
+        let total_size = if self.limit > 0 {
+            count.min(self.limit as usize) as u64
+        } else {
+            count as u64
+        };
+
+        let progress_bar = ProgressBar::new(total_size)
+            .with_message(format!("Pushing alerts to {}", topic_name))
+            .with_style(indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {human_pos}/{human_len} ({eta})")?);
 
         let mut total_pushed = 0;
         let start = std::time::Instant::now();
@@ -317,8 +336,8 @@ impl AlertProducer for ZtfAlertProducer {
                 .unwrap();
 
             total_pushed += 1;
-            if total_pushed % 1000 == 0 {
-                info!("Pushed {} items since {:?}", total_pushed, start.elapsed());
+            if self.verbose {
+                progress_bar.inc(1);
             }
 
             if self.limit > 0 && total_pushed >= self.limit {
@@ -327,7 +346,11 @@ impl AlertProducer for ZtfAlertProducer {
             }
         }
 
-        info!("Pushed {} alerts to the queue", total_pushed);
+        info!(
+            "Pushed {} alerts to the queue in {:?}",
+            total_pushed,
+            start.elapsed()
+        );
 
         // close producer
         producer.flush(std::time::Duration::from_secs(1)).unwrap();
