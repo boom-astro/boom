@@ -38,11 +38,6 @@ async fn main() {
         }
     };
 
-    let survey = match survey {
-        Survey::Ztf => "ZTF",
-        Survey::Lsst => "LSST",
-    };
-
     // create a bson document with filter_id, active, catalog, permissions
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
 
