@@ -456,9 +456,11 @@ async fn test_filter_ztf_alert() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), candid);
 
-    let filter_id = insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_ztf_filter(true).await.unwrap();
 
-    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id]))
+        .await
+        .unwrap();
     let result = filter_worker
         .process_alerts(&[format!("1,{}", candid)])
         .await;

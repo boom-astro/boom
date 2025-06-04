@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
+    get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, Alert, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, Origin, Photometry, Survey,
 };
 
 #[derive(Debug)]
@@ -53,83 +54,193 @@ impl Filter for ZtfFilter {
                 }
             },
             doc! {
-                "$lookup": doc! {
-                    "from": format!("ZTF_alerts_aux"),
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
                 "$project": doc! {
                     "objectId": 1,
                     "candidate": 1,
                     "classifications": 1,
                     "coordinates": 1,
-                    "cross_matches": doc! {
-                        "$arrayElemAt": [
-                            "$aux.cross_matches",
-                            0
-                        ]
-                    },
-                    "prv_candidates": doc! {
-                        "$filter": doc! {
-                            "input": doc! {
-                                "$arrayElemAt": [
-                                    "$aux.prv_candidates",
-                                    0
-                                ]
-                            },
-                            "as": "x",
-                            "cond": doc! {
-                                "$and": [
-                                    {
-                                        "$in": [
-                                            "$$x.programid",
-                                            &permissions
-                                        ]
-                                    },
-                                    { // maximum 1 year of past data
-                                        "$lt": [
-                                            {
-                                                "$subtract": [
-                                                    "$candidate.jd",
-                                                    "$$x.jd"
-                                                ]
-                                            },
-                                            365
-                                        ]
-                                    },
-                                    { // only datapoints up to (and including) current alert
-                                        "$lte": [
-                                            "$$x.jd",
-                                            "$candidate.jd"
-                                        ]
-                                    }
-
-                                ]
-                            }
-                        }
-                    },
                 }
             },
         ];
 
+        let mut aux_add_fields = doc! {};
+
         // get filter pipeline as str and convert to Vec<Bson>
         let filter_pipeline = filter_obj
             .get("pipeline")
-            .ok_or(FilterError::FilterNotFound)?
+            .ok_or(FilterError::FilterPipelineError)?
             .as_str()
-            .ok_or(FilterError::FilterNotFound)?;
+            .ok_or(FilterError::FilterPipelineError)?;
 
-        let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
+        let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)
+            .map_err(FilterError::DeserializePipelineError)?;
         let filter_pipeline = filter_pipeline
             .as_array()
             .ok_or(FilterError::InvalidFilterPipeline)?;
 
-        // append stages to prefix
-        for stage in filter_pipeline {
-            let x = mongodb::bson::to_document(stage)?;
+        // validate filter
+        validate_filter_pipeline(&filter_pipeline)?;
+
+        let (use_prv_candidates, use_prv_candidates_index) = uses_field_in_filter(
+            filter_pipeline,
+            "prv_candidates".to_string(),
+            Some(vec!["LSST".to_string()]), // to not mix LSST prv_candidates with ZTFs
+        )?;
+        let (use_prv_nondetections, use_prv_nondetections_index) =
+            uses_field_in_filter(filter_pipeline, "prv_nondetections".to_string(), None)?;
+        let (use_cross_matches, use_cross_matches_index) =
+            uses_field_in_filter(filter_pipeline, "cross_matches".to_string(), None)?;
+
+        if use_prv_candidates {
+            // insert it in aux addFields stage
+            aux_add_fields.insert(
+                "prv_candidates".to_string(),
+                doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_candidates",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // apply ZTF alert stream permissions
+                                    "$in": [
+                                        "$$x.programid",
+                                        &permissions
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            );
+        }
+        if use_prv_nondetections {
+            aux_add_fields.insert(
+                "prv_nondetections".to_string(),
+                doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_nondetections",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // ZTF alert stream permissions
+                                    "$in": [
+                                        "$$x.programid",
+                                        &permissions
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            );
+        }
+        if use_cross_matches {
+            aux_add_fields.insert(
+                "cross_matches".to_string(),
+                doc! {
+                    "$arrayElemAt": [
+                        "$aux.cross_matches",
+                        0
+                    ]
+                },
+            );
+        }
+
+        // next we create 2 variables
+        // 1. insert_aux_pipeline: if we need to insert the aux pipeline
+        // 2. insert_aux_index: the index where we need to insert the aux pipeline
+        // for 1, that is true if any of use_prv_candidates, use_prv_nondetections, use_cross_matches
+        // for 2, that is the lowest value of use_prv_candidates_index, use_prv_nondetections_index, or use_cross_matches_index
+        let mut insert_aux_pipeline =
+            use_prv_candidates || use_prv_nondetections || use_cross_matches;
+
+        let mut insert_aux_index = usize::MAX;
+        if use_prv_candidates {
+            insert_aux_index = insert_aux_index.min(use_prv_candidates_index);
+        }
+        if use_prv_nondetections {
+            insert_aux_index = insert_aux_index.min(use_prv_nondetections_index);
+        }
+        if use_cross_matches {
+            insert_aux_index = insert_aux_index.min(use_cross_matches_index);
+        }
+
+        // some sanity checks
+        if insert_aux_index == usize::MAX && insert_aux_pipeline {
+            return Err(FilterError::InvalidFilterPipeline);
+        }
+
+        // now we loop over the base_pipeline and insert stages from the filter_pipeline
+        // and when i = insert_index, we insert the aux_pipeline before the stage
+        for i in 0..filter_pipeline.len() {
+            let x = mongodb::bson::to_document(&filter_pipeline[i])
+                .map_err(FilterError::InvalidFilterPipelineStage)?;
+
+            if insert_aux_pipeline && i == insert_aux_index {
+                pipeline.push(doc! {
+                    "$lookup": doc! {
+                        "from": format!("ZTF_alerts_aux"),
+                        "localField": "objectId",
+                        "foreignField": "_id",
+                        "as": "aux"
+                    }
+                });
+                pipeline.push(doc! {
+                    "$addFields": &aux_add_fields
+                });
+                pipeline.push(doc! {
+                    "$unset": "aux"
+                });
+                insert_aux_pipeline = false; // only insert once
+            }
+
+            // push the current stage
             pipeline.push(x);
         }
 
@@ -153,7 +264,10 @@ pub struct ZtfFilterWorker {
 
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
-    async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
+    async fn new(
+        config_path: &str,
+        filter_ids: Option<Vec<i32>>,
+    ) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let alert_collection = db.collection("ZTF_alerts");
@@ -162,7 +276,7 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filter_ids: Vec<i32> = filter_collection
+        let all_filter_ids: Vec<i32> = filter_collection
             .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
             .await?
             .into_iter()
@@ -171,8 +285,18 @@ impl FilterWorker for ZtfFilterWorker {
             .collect();
 
         let mut filters: Vec<ZtfFilter> = Vec::new();
-        for filter_id in filter_ids {
-            filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+        if let Some(filter_ids) = filter_ids {
+            // if filter_ids is provided, we only build those filters
+            for filter_id in filter_ids {
+                if !all_filter_ids.contains(&filter_id) {
+                    return Err(FilterWorkerError::FilterNotFound);
+                }
+                filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+            }
+        } else {
+            for filter_id in all_filter_ids {
+                filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+            }
         }
 
         // create a hashmap of filters per programid (permissions)
