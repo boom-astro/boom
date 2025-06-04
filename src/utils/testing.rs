@@ -1,6 +1,7 @@
 use crate::{
     alert::{
-        AlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_URL,
+        AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
+        LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     utils::{db::initialize_survey_indexes, enums::Survey},
@@ -36,6 +37,17 @@ pub async fn lsst_alert_worker() -> LsstAlertWorker {
         .unwrap();
     initialize_survey_indexes(&Survey::Lsst, &db).await.unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn decam_alert_worker() -> DecamAlertWorker {
+    // initialize the DECAM indexes
+    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
+        .await
+        .unwrap();
+    initialize_survey_indexes(&Survey::Decam, &db)
+        .await
+        .unwrap();
+    DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 // drops alert collections from the database
@@ -88,14 +100,14 @@ pub async fn drop_alert_from_collections(
         // 1. if the stream name is ZTF we read the object id as a string and drop the aux entry
         // 2. otherwise we consider it an i64 and drop the aux entry
         match stream_name {
-            "ZTF" => {
-                let object_id = alert.get_str("objectId")?;
+            "LSST" => {
+                let object_id = alert.get_i64("objectId")?;
                 db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
                     .delete_one(doc! {"_id": object_id})
                     .await?;
             }
             _ => {
-                let object_id = alert.get_i64("objectId")?;
+                let object_id = alert.get_str("objectId")?;
                 db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
                     .delete_one(doc! {"_id": object_id})
                     .await?;
@@ -238,7 +250,7 @@ pub async fn empty_processed_alerts_queue(
 }
 
 #[async_trait::async_trait]
-pub trait AlertRandomizerTrait {
+pub trait AlertRandomizer {
     fn default() -> Self;
     fn new() -> Self;
     fn path(self, path: &str) -> Self;
@@ -304,7 +316,7 @@ pub struct ZtfAlertRandomizer {
 }
 
 #[async_trait::async_trait]
-impl AlertRandomizerTrait for ZtfAlertRandomizer {
+impl AlertRandomizer for ZtfAlertRandomizer {
     type ObjectId = String;
 
     fn default() -> Self {
@@ -483,6 +495,194 @@ impl ZtfAlertRandomizer {
 }
 
 #[derive(Clone, Debug)]
+pub struct DecamAlertRandomizer {
+    payload: Option<Vec<u8>>,
+    schema: Option<Schema>,
+    candid: Option<i64>,
+    object_id: Option<String>,
+    ra: Option<f64>,
+    dec: Option<f64>,
+}
+
+#[async_trait::async_trait]
+impl AlertRandomizer for DecamAlertRandomizer {
+    type ObjectId = String;
+
+    fn default() -> Self {
+        let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
+        let reader = Reader::new(&payload[..]).unwrap();
+        let schema = reader.writer_schema().clone();
+        Self {
+            payload: Some(payload),
+            schema: Some(schema),
+            candid: Some(Self::randomize_i64()),
+            object_id: Some(Self::randomize_object_id()),
+            ra: Some(Self::randomize_ra()),
+            dec: Some(Self::randomize_dec()),
+        }
+    }
+
+    fn new() -> Self {
+        Self {
+            payload: None,
+            schema: None,
+            candid: None,
+            object_id: None,
+            ra: None,
+            dec: None,
+        }
+    }
+
+    fn path(mut self, path: &str) -> Self {
+        let payload = fs::read(path).unwrap();
+        let reader = Reader::new(&payload[..]).unwrap();
+        let schema = reader.writer_schema().clone();
+        self.payload = Some(payload);
+        self.schema = Some(schema);
+        self
+    }
+
+    fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
+        self.object_id = Some(object_id.into());
+        self
+    }
+
+    fn candid(mut self, candid: i64) -> Self {
+        self.candid = Some(candid);
+        self
+    }
+
+    fn ra(mut self, ra: f64) -> Self {
+        match Self::validate_ra(ra) {
+            true => self.ra = Some(ra),
+            false => panic!("RA must be between 0 and 360"),
+        }
+        self
+    }
+    fn dec(mut self, dec: f64) -> Self {
+        match Self::validate_dec(dec) {
+            true => self.dec = Some(dec),
+            false => panic!("Dec must be between -90 and 90"),
+        }
+        self
+    }
+
+    fn rand_object_id(mut self) -> Self {
+        self.object_id = Some(Self::randomize_object_id());
+        self
+    }
+    fn rand_candid(mut self) -> Self {
+        self.candid = Some(Self::randomize_i64());
+        self
+    }
+    fn rand_ra(mut self) -> Self {
+        self.ra = Some(Self::randomize_ra());
+        self
+    }
+    fn rand_dec(mut self) -> Self {
+        self.dec = Some(Self::randomize_dec());
+        self
+    }
+
+    async fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
+        let mut candid = self.candid;
+        let mut object_id = self.object_id;
+        let mut ra = self.ra;
+        let mut dec = self.dec;
+        let (payload, schema) = match (self.payload, self.schema) {
+            (Some(payload), Some(schema)) => (payload, schema),
+            _ => {
+                let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
+                let reader = Reader::new(&payload[..]).unwrap();
+                let schema = reader.writer_schema().clone();
+                (payload, schema)
+            }
+        };
+
+        let reader = Reader::new(&payload[..]).unwrap();
+        let value = reader.into_iter().next().unwrap().unwrap();
+        let mut record = match value {
+            Value::Record(record) => record,
+            _ => {
+                panic!("Not a record");
+            }
+        };
+
+        for i in 0..record.len() {
+            let (key, value) = &mut record[i];
+            if key == "objectId" {
+                match object_id {
+                    Some(ref id) => *value = Value::String(id.clone()),
+                    None => object_id = Some(Self::value_to_string(value)),
+                }
+            } else if key == "candid" {
+                match candid {
+                    Some(id) => *value = Value::Long(id),
+                    None => candid = Some(Self::value_to_i64(value)),
+                }
+            } else if key == "candidate" {
+                let candidate_record = match value {
+                    Value::Record(record) => record,
+                    _ => {
+                        panic!("Not a record");
+                    }
+                };
+                for i in 0..candidate_record.len() {
+                    let (key, value) = &mut candidate_record[i];
+                    if key == "ra" {
+                        match ra {
+                            Some(r) => *value = Value::Double(r),
+                            None => ra = Some(Self::value_to_f64(value)),
+                        }
+                    } else if key == "dec" {
+                        match dec {
+                            Some(d) => *value = Value::Double(d),
+                            None => dec = Some(Self::value_to_f64(value)),
+                        }
+                    } else if key == "candid" {
+                        match candid {
+                            Some(c) => *value = Value::Long(c),
+                            None => candid = Some(Self::value_to_i64(value)),
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut writer = Writer::new(&schema, Vec::new());
+        let mut new_record = Record::new(writer.schema()).unwrap();
+        for (key, value) in record {
+            new_record.put(&key, value);
+        }
+
+        writer.append(new_record).unwrap();
+        let new_payload = writer.into_inner().unwrap();
+
+        (
+            candid.unwrap(),
+            object_id.unwrap(),
+            ra.unwrap(),
+            dec.unwrap(),
+            new_payload,
+        )
+    }
+}
+
+impl DecamAlertRandomizer {
+    fn randomize_object_id() -> String {
+        let mut rng = rand::rng();
+        let mut object_id = String::from("DECAM");
+        for _ in 0..2 {
+            object_id.push(rng.random_range('0'..='9'));
+        }
+        for _ in 0..7 {
+            object_id.push(rng.random_range('a'..='z'));
+        }
+        object_id
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct LsstAlertRandomizer {
     payload: Option<Vec<u8>>,
     schema_registry: SchemaRegistry,
@@ -493,7 +693,7 @@ pub struct LsstAlertRandomizer {
 }
 
 #[async_trait::async_trait]
-impl AlertRandomizerTrait for LsstAlertRandomizer {
+impl AlertRandomizer for LsstAlertRandomizer {
     type ObjectId = i64;
 
     fn default() -> Self {

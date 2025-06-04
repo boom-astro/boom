@@ -7,7 +7,7 @@ use boom::{
         db::mongify,
         testing::{
             drop_alert_from_collections, insert_test_ztf_filter, lsst_alert_worker,
-            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizerTrait, LsstAlertRandomizer,
+            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizer, LsstAlertRandomizer,
             ZtfAlertRandomizer, TEST_CONFIG_FILE,
         },
     },

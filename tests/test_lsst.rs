@@ -4,7 +4,7 @@ use boom::{
     filter::{FilterWorker, LsstFilterWorker},
     utils::testing::{
         drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
-        remove_test_lsst_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
+        remove_test_lsst_filter, AlertRandomizer, LsstAlertRandomizer, TEST_CONFIG_FILE,
     },
 };
 use mongodb::bson::doc;
