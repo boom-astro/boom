@@ -31,8 +31,7 @@ BOOM runs on macOS and Linux. You'll need:
 - Docker: On macOS we recommend using [Docker Desktop](https://www.docker.com/products/docker-desktop) to install docker. You can download it from the website, and follow the installation instructions. The website will ask you to "choose a plan", but really you just need to create an account and stick with the free tier that offers all of the features you will ever need. Once installed, you can verify the installation by running `docker --version` in your terminal, and `docker compose version` to check that docker compose is installed as well.
 - Rust: You can either use [rustup](https://www.rust-lang.org/tools/install) to install Rust, or you can use [Homebrew](https://brew.sh/) to install it. If you choose the latter, you can run `brew install rust` in your terminal. We recommend using rustup, as it allows you to easily switch between different versions of Rust, and to keep your Rust installation up to date. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `brew`, `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
-- `libssl` and `libsasl2`: These libraries are required for some Rust crates that depend on native libraries for secure connections and authentication. They should come with macos by default, but you can install them with Homebrew too: `brew install openssl@3 cyrus-sasl`.
-- `tar`: Most macOS installations come with `tar` pre-installed. If not, you can install it with Homebrew: `brew install gnu-tar`.
+- System packages are essential for compiling and linking some Rust crates. All those used by BOOM should come with macOS by default, but if you get any errors when compiling it you can try to install them again with Homebrew: `brew install openssl@3 cyrus-sasl gnu-tar`.
 
 #### Linux
 
@@ -40,7 +39,7 @@ BOOM runs on macOS and Linux. You'll need:
 - Rust: You can use [rustup](https://www.rust-lang.org/tools/install) to install Rust. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
 - `wget` and `tar`: Most Linux distributions come with `wget` and `tar` pre-installed. If not, you can install them with your package manager.
-- System packages are essential for compiling and linking some Rust crates that require native libraries like OpenSSL and SASL. Run the following to install necessary system packages:
+- System packages are essential for compiling and linking some Rust crates. On linux, you can install them with your package manager. For example with `apt` on Ubuntu or Debian-based systems, you can run:
   ```bash
   sudo apt update
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
