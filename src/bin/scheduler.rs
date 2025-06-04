@@ -3,6 +3,7 @@ use boom::{
     scheduler::{get_num_workers, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
+        enums::Survey,
         worker::{check_flag, sig_int_handler, WorkerType},
     },
 };
@@ -16,8 +17,12 @@ use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(required = true, help = "Name of stream to ingest")]
-    stream: Option<String>,
+    #[arg(
+        value_enum,
+        required = true,
+        help = "Name of stream/survey to process alerts for."
+    )]
+    survey: Survey,
 
     #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
     config: Option<String>,
@@ -33,14 +38,8 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let stream_name = match args.stream {
-        Some(stream) => stream,
-        None => {
-            warn!("No stream name provided");
-            std::process::exit(1);
-        }
-    };
-    info!("Starting scheduler for {} alert processing", stream_name);
+    let survey = args.survey;
+    info!("Starting scheduler for {:?} alert processing", &survey);
 
     if !args.config.is_some() {
         warn!("No config file provided, using config.yaml");
@@ -58,21 +57,21 @@ async fn main() {
     };
 
     // get num workers from config file
-    let n_alert = match get_num_workers(config_file.to_owned(), &stream_name, "alert") {
+    let n_alert = match get_num_workers(config_file.to_owned(), &survey, "alert") {
         Ok(n) => n,
         Err(e) => {
             warn!("could not retrieve number of alert workers: {}", e);
             std::process::exit(1);
         }
     };
-    let n_ml = match get_num_workers(config_file.to_owned(), &stream_name, "ml") {
+    let n_ml = match get_num_workers(config_file.to_owned(), &survey, "ml") {
         Ok(n) => n,
         Err(e) => {
             warn!("could not retrieve number of ml workers: {}", e);
             std::process::exit(1);
         }
     };
-    let n_filter = match get_num_workers(config_file.to_owned(), &stream_name, "filter") {
+    let n_filter = match get_num_workers(config_file.to_owned(), &survey, "filter") {
         Ok(n) => n,
         Err(e) => {
             warn!("could not retrieve number of filter workers: {}", e);
@@ -88,10 +87,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    match initialize_survey_indexes(&stream_name, &db).await {
-        Ok(_) => info!("initialized indexes for {}", stream_name),
+    match initialize_survey_indexes(&survey, &db).await {
+        Ok(_) => info!("initialized indexes for {}", survey),
         Err(e) => {
-            warn!("could not initialize indexes for {}: {}", stream_name, e);
+            warn!("could not initialize indexes for {}: {}", survey, e);
             std::process::exit(1);
         }
     }
@@ -104,19 +103,19 @@ async fn main() {
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
-        stream_name.clone(),
+        survey.clone(),
         config_path.clone(),
     );
     let ml_pool = ThreadPool::new(
         WorkerType::ML,
         n_ml as usize,
-        stream_name.clone(),
+        survey.clone(),
         config_path.clone(),
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        stream_name.clone(),
+        survey.clone(),
         config_path.clone(),
     );
     info!("created workers");
