@@ -19,9 +19,8 @@ pub struct LsstAlertConsumer {
     config_path: String,
 }
 
-#[async_trait::async_trait]
-impl AlertConsumer for LsstAlertConsumer {
-    fn new(
+impl LsstAlertConsumer {
+    pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
         topic: Option<&str>,
@@ -72,7 +71,10 @@ impl AlertConsumer for LsstAlertConsumer {
             config_path: config_path.to_string(),
         }
     }
+}
 
+#[async_trait::async_trait]
+impl AlertConsumer for LsstAlertConsumer {
     fn default(config_path: &str) -> Self {
         Self::new(1, None, None, None, None, None, config_path)
     }

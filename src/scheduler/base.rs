@@ -2,7 +2,10 @@ use crate::{
     alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
-    utils::worker::{WorkerCmd, WorkerType},
+    utils::{
+        enums::Survey,
+        worker::{WorkerCmd, WorkerType},
+    },
 };
 use std::thread;
 use tokio::sync::mpsc;
@@ -18,14 +21,14 @@ pub enum SchedulerError {
 // get num worker from config file, by stream name and worker type
 pub fn get_num_workers(
     conf: config::Config,
-    stream_name: &str,
+    survey_name: &Survey,
     worker_type: &str,
 ) -> Result<i64, SchedulerError> {
     let table = conf.get_table("workers")?;
     let stream_table = table
-        .get(stream_name)
+        .get(&format!("{}", survey_name))
         .ok_or(config::ConfigError::NotFound(
-            "stream_name not found in workers table".to_string(),
+            "survey_name not found in workers table".to_string(),
         ))?
         .to_owned()
         .into_table()?;
@@ -54,7 +57,7 @@ pub fn get_num_workers(
 // the use of a messages
 pub struct ThreadPool {
     worker_type: WorkerType,
-    stream_name: String,
+    survey_name: Survey,
     config_path: String,
     workers: Vec<Worker>,
 }
@@ -67,17 +70,17 @@ impl ThreadPool {
     ///
     /// worker_type: a `WorkerType` enum to designate which type of workers this threadpool contains
     /// size: number of workers initially inside of threadpool
-    /// stream_name: source stream. e.g. 'ZTF'
+    /// survey_name: source stream. e.g. 'ZTF'
     /// config_path: path to config file
     pub fn new(
         worker_type: WorkerType,
         size: usize,
-        stream_name: String,
+        survey_name: Survey,
         config_path: String,
     ) -> Self {
         let mut thread_pool = ThreadPool {
             worker_type,
-            stream_name,
+            survey_name,
             config_path,
             workers: Vec::new(),
         };
@@ -125,7 +128,7 @@ impl ThreadPool {
         self.workers.push(Worker::new(
             self.worker_type,
             id.clone(),
-            self.stream_name.clone(),
+            self.survey_name.clone(),
             self.config_path.clone(),
         ));
     }
@@ -161,7 +164,7 @@ impl Worker {
     fn new(
         worker_type: WorkerType,
         id: String,
-        stream_name: String,
+        survey_name: Survey,
         config_path: String,
     ) -> Worker {
         let id_copy = id.clone();
@@ -169,41 +172,29 @@ impl Worker {
         let thread = match worker_type {
             // TODO: Spawn a new worker thread when one dies? (A supervisor or something like that?)
             WorkerType::Alert => thread::spawn(move || {
-                let run = match stream_name.as_str() {
-                    "ZTF" => run_alert_worker::<ZtfAlertWorker>,
-                    "LSST" => run_alert_worker::<LsstAlertWorker>,
-                    _ => {
-                        error!("Unknown stream name: {}", stream_name);
-                        return;
-                    }
+                let run = match survey_name {
+                    Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
+                    Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                 };
                 if let Err(error) = run(id, receiver, &config_path) {
                     error!(error = %error, "failed to run alert worker");
                 }
             }),
             WorkerType::Filter => thread::spawn(move || {
-                let run = match stream_name.as_str() {
-                    "ZTF" => run_filter_worker::<ZtfFilterWorker>,
-                    "LSST" => run_filter_worker::<LsstFilterWorker>,
-                    _ => {
-                        error!("Unknown stream name: {}", stream_name);
-                        return;
-                    }
+                let run = match survey_name {
+                    Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
+                    Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
                 };
                 if let Err(error) = run(id, receiver, &config_path) {
                     error!(error = %error, "failed to run filter worker");
                 }
             }),
             WorkerType::ML => thread::spawn(move || {
-                let run = match stream_name.as_str() {
-                    "ZTF" => run_ml_worker::<ZtfMLWorker>,
+                let run = match survey_name {
+                    Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
                     // we don't have an ML worker for LSST yet
-                    "LSST" => {
+                    Survey::Lsst => {
                         error!("LSST ML worker not implemented");
-                        return;
-                    }
-                    _ => {
-                        error!("Unknown stream name: {}", stream_name);
                         return;
                     }
                 };

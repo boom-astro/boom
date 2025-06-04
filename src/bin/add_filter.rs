@@ -3,12 +3,13 @@ use mongodb::bson::doc;
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use boom::utils::enums::Survey;
 use boom::{conf, utils::db::create_index};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(help = "Survey to add a filter for. Options are 'ZTF' or 'LSST'")]
-    survey: String,
+    #[arg(value_enum, help = "Survey to add a filter for.")]
+    survey: Survey,
     #[arg(help = "Filter ID to add")]
     filter_id: i32,
     #[arg(help = "Path to the JSON file containing the filter")]
@@ -35,6 +36,11 @@ async fn main() {
             eprintln!("Error reading filter file: {}", e);
             std::process::exit(1);
         }
+    };
+
+    let survey = match survey {
+        Survey::Ztf => "ZTF",
+        Survey::Lsst => "LSST",
     };
 
     // create a bson document with filter_id, active, catalog, permissions

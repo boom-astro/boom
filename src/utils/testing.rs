@@ -3,7 +3,7 @@ use crate::{
         AlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
-    utils::db::initialize_survey_indexes,
+    utils::{db::initialize_survey_indexes, enums::Survey},
 };
 use apache_avro::{
     from_avro_datum,
@@ -25,7 +25,7 @@ pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
         .await
         .unwrap();
-    initialize_survey_indexes("ZTF", &db).await.unwrap();
+    initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
@@ -34,7 +34,7 @@ pub async fn lsst_alert_worker() -> LsstAlertWorker {
     let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
         .await
         .unwrap();
-    initialize_survey_indexes("LSST", &db).await.unwrap();
+    initialize_survey_indexes(&Survey::Lsst, &db).await.unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
