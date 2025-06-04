@@ -608,7 +608,7 @@ impl ZtfAlertWorker {
     // report it? Maybe it would work for the return type to be a status enum
     // instead of unit, so we would have, e.g., Ok(Success), Ok(AlertExists),
     // and Err(AlertError::...)
-    #[instrument(skip(self, candidate_doc), err)]
+    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
     async fn format_and_insert_alert(
         &self,
         candid: i64,
