@@ -8,10 +8,7 @@ use boom::{conf, utils::db::create_index};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(
-        value_enum,
-        help = "Survey to add a filter for. Options are 'ZTF' or 'LSST'"
-    )]
+    #[arg(value_enum, help = "Survey to add a filter for.")]
     survey: Survey,
     #[arg(help = "Filter ID to add")]
     filter_id: i32,

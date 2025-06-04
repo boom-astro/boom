@@ -1,7 +1,7 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, AlertProducer},
-    utils::data::download_to_file,
+    utils::data::{count_files_in_dir, download_to_file},
     utils::enums::ProgramId,
 };
 use indicatif::ProgressBar;
@@ -202,10 +202,7 @@ impl ZtfAlertProducer {
 
         std::fs::create_dir_all(&data_folder)?;
 
-        let count = std::fs::read_dir(&data_folder)?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "avro"))
-            .count();
+        let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
         if count > 0 {
             info!("Alerts already downloaded to {}{}", data_folder, file_name);
             return Ok(count as i64);
@@ -251,7 +248,7 @@ impl ZtfAlertProducer {
 
         drop(output_temp_file); // Close the temp file
 
-        let count = std::fs::read_dir(&data_folder)?.count();
+        let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
 
         Ok(count as i64)
     }
@@ -295,11 +292,7 @@ impl AlertProducer for ZtfAlertProducer {
             _ => return Err("Invalid program ID".into()),
         };
 
-        // count the number of avro files in the data folder
-        let count = std::fs::read_dir(&data_folder)?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "avro"))
-            .count();
+        let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
 
         let total_size = if self.limit > 0 {
             count.min(self.limit as usize) as u64

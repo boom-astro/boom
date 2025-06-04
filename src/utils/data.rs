@@ -43,3 +43,19 @@ pub async fn download_to_file(
 
     Ok(())
 }
+
+pub fn count_files_in_dir(dir: &str, extensions: Option<&[&str]>) -> Result<usize, std::io::Error> {
+    let count = match extensions {
+        Some(extensions) => std::fs::read_dir(dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .map_or(false, |ext| extensions.contains(&ext.to_str().unwrap()))
+            })
+            .count(),
+        None => std::fs::read_dir(dir)?.filter_map(Result::ok).count(),
+    };
+    Ok(count)
+}
