@@ -1,9 +1,6 @@
 use crate::{
-    alert::{
-        base::{
-            deserialize_mjd, get_schema_and_startidx, AlertError, AlertWorker, AlertWorkerError,
-        },
-        lsst,
+    alert::base::{
+        deserialize_mjd, get_schema_and_startidx, AlertError, AlertWorker, AlertWorkerError,
     },
     conf,
     utils::{
@@ -24,9 +21,6 @@ pub const DECAM_UNCERTAINTY: f64 = 0.1; // 0.1 arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
-
-pub const LSST_DEC_LIMIT: f64 = 33.5;
-pub const LSST_XMATCH_RADIUS: f64 = (0.3_f64 / 3600.0_f64).to_radians(); // 0.3 arcseconds in radians
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct FpHist {
@@ -88,7 +82,6 @@ pub struct DecamAlertWorker {
     alert_cutout_collection: mongodb::Collection<Document>,
     cached_schema: Option<Schema>,
     cached_start_idx: Option<usize>,
-    lsst_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl DecamAlertWorker {
@@ -130,45 +123,6 @@ impl DecamAlertWorker {
 
         Ok(alert)
     }
-
-    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
-        let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
-            let result = self
-                .lsst_alert_aux_collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": LSST_XMATCH_RADIUS,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_i64("_id")?;
-                    vec![object_id]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with LSST: {}", e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(lsst_matches)
-    }
-
-    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
-        let lsst_matches = self.get_lsst_matches(ra, dec).await?;
-
-        Ok(doc! {
-            "LSST": lsst_matches,
-        })
-    }
 }
 
 #[async_trait::async_trait]
@@ -186,9 +140,6 @@ impl AlertWorker for DecamAlertWorker {
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
-        let lsst_alert_aux_collection: mongodb::Collection<Document> =
-            db.collection(&lsst::ALERT_AUX_COLLECTION);
-
         let worker = DecamAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
@@ -198,7 +149,6 @@ impl AlertWorker for DecamAlertWorker {
             alert_cutout_collection,
             cached_schema: None,
             cached_start_idx: None,
-            lsst_alert_aux_collection,
         };
         Ok(worker)
     }
@@ -361,13 +311,6 @@ impl AlertWorker for DecamAlertWorker {
 
         trace!("Formatting fp_hist: {:?}", start.elapsed());
 
-        let start = std::time::Instant::now();
-        let survey_matches = Some(self.get_survey_matches(ra, dec).await?);
-        trace!(
-            "Xmatching ZTF alert with other surveys: {:?}",
-            start.elapsed()
-        );
-
         if !alert_aux_exists {
             let result = self
                 .insert_aux(
@@ -377,7 +320,7 @@ impl AlertWorker for DecamAlertWorker {
                     &Vec::new(),
                     &Vec::new(),
                     &fp_hist_doc,
-                    &survey_matches,
+                    &None,
                     now,
                 )
                 .await;
@@ -387,7 +330,7 @@ impl AlertWorker for DecamAlertWorker {
                     &Vec::new(),
                     &Vec::new(),
                     &fp_hist_doc,
-                    &survey_matches,
+                    &None,
                     now,
                 )
                 .await?;
@@ -400,7 +343,7 @@ impl AlertWorker for DecamAlertWorker {
                 &Vec::new(),
                 &Vec::new(),
                 &fp_hist_doc,
-                &survey_matches,
+                &None,
                 now,
             )
             .await?;
