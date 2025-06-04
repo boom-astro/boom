@@ -1,47 +1,56 @@
 use clap::Parser;
-use tracing::{error, info, Level};
+use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use boom::kafka::produce_from_archive;
+use boom::kafka::{AlertProducer, ZtfAlertProducer};
+use boom::utils::enums::{ProgramId, Survey};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(help = "Date of archival alerts to produce, with format YYYYMMDD. Defaults to today.")]
+    #[arg(value_enum, help = "Survey to produce alerts for (from file).")]
+    survey: Survey,
+    #[arg(
+        help = "UTC date of archival alerts to produce, with format YYYYMMDD. Defaults to today."
+    )]
     date: Option<String>,
     #[arg(
-        long,
-        value_name = "LIMIT",
-        help = "Limit the number of alerts produced"
+        default_value_t,
+        value_enum,
+        help = "ID of the program to produce the alerts (ZTF-only)."
     )]
+    program_id: ProgramId,
+    #[arg(long, help = "Limit the number of alerts produced")]
     limit: Option<i64>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::INFO)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args = Cli::parse();
-    let mut date = chrono::Utc::now().format("%Y%m%d").to_string();
-    let mut limit = 0;
 
-    if let Some(d) = args.date {
-        if d.len() == 8 {
-            info!("Using date from argument: {}", d);
-            date = d;
-        } else {
-            error!("Invalid date format: {}", d);
+    let date = match args.date {
+        Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap(),
+        None => chrono::Utc::now().date_naive().pred_opt().unwrap(),
+    };
+    let limit = args.limit.unwrap_or(0);
+
+    let program_id = args.program_id;
+
+    match args.survey {
+        Survey::Ztf => {
+            let producer = ZtfAlertProducer::new(date, limit, program_id, true);
+            producer.produce(None).await?;
+        }
+        _ => {
+            error!("Only ZTF survey is supported for producing alerts from file (for now).");
             return Ok(());
         }
     }
-    if let Some(l) = args.limit {
-        limit = l;
-    }
-
-    produce_from_archive(&date, limit, None).await?;
 
     Ok(())
 }
