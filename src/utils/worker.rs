@@ -1,26 +1,10 @@
-use crate::utils::o11y::DEBUG;
-
 use config::Config;
 use std::{
     fmt,
     sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc::{error::TryRecvError, Receiver};
-use tracing::{info, instrument, span, warn, Instrument};
-
-// spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
-#[instrument(skip_all)]
-pub fn spawn_sigint_handler(flag: Arc<Mutex<bool>>) {
-    tokio::spawn(
-        async move {
-            tokio::signal::ctrl_c().await.unwrap();
-            warn!("received interrupt signal");
-            let mut flag = flag.try_lock().unwrap();
-            *flag = true;
-        }
-        .instrument(span!(DEBUG, "sigint handler")),
-    );
-}
+use tracing::{info, instrument, warn};
 
 // checks if a flag is set to true and, if so, exits the program
 pub fn check_exit(flag: Arc<Mutex<bool>>) {
@@ -31,21 +15,6 @@ pub fn check_exit(flag: Arc<Mutex<bool>>) {
             }
         }
         _ => {}
-    }
-}
-
-// checks returns value of flag
-#[instrument(skip_all)]
-pub fn check_flag(flag: Arc<Mutex<bool>>) -> bool {
-    match flag.try_lock() {
-        Ok(x) => {
-            if *x {
-                true
-            } else {
-                false
-            }
-        }
-        _ => false,
     }
 }
 

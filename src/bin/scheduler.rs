@@ -1,18 +1,14 @@
 use boom::{
     conf,
     scheduler::{get_num_workers, ThreadPool},
-    utils::{
-        db::initialize_survey_indexes,
-        o11y::build_subscriber,
-        worker::{check_flag, spawn_sigint_handler, WorkerType},
-    },
+    utils::{db::initialize_survey_indexes, o11y::build_subscriber, worker::WorkerType},
 };
+
+use std::time::Duration;
+
 use clap::Parser;
-use std::{
-    sync::{Arc, Mutex},
-    thread,
-};
-use tracing::{info, instrument, warn};
+use tokio::sync::oneshot;
+use tracing::{info, info_span, instrument, warn, Instrument};
 
 #[derive(Parser)]
 struct Cli {
@@ -48,9 +44,21 @@ async fn run(args: Cli) {
         .await
         .expect("could not initialize indexes");
 
-    // setup signal handler task
-    let interrupt = Arc::new(Mutex::new(false));
-    spawn_sigint_handler(Arc::clone(&interrupt));
+    // Spawn sigint handler task
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(
+        async {
+            info!("wating for ctrl-c");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to listen for ctrl-c event");
+            info!("received ctrl-c, sending shutdown signal");
+            shutdown_tx
+                .send(())
+                .expect("failed to send shutdown signal, receiver disconnected");
+        }
+        .instrument(info_span!("sigint handler")),
+    );
 
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
@@ -71,18 +79,26 @@ async fn run(args: Cli) {
         config_path.clone(),
     );
 
-    loop {
-        info!("heart beat");
-        let exit = check_flag(Arc::clone(&interrupt));
-        if exit {
-            info!("shutting down");
-            drop(alert_pool);
-            drop(ml_pool);
-            drop(filter_pool);
-            break;
+    // All that's left is to wait for sigint:
+    let heartbeat_handle = tokio::spawn(
+        async {
+            loop {
+                info!("heartbeat");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
-        thread::sleep(std::time::Duration::from_secs(1));
-    }
+        .instrument(info_span!("heartbeat task")),
+    );
+    let _ = shutdown_rx
+        .await
+        .expect("failed to await shutdown signal, sender disconnected");
+
+    // Shut down:
+    info!("shutting down");
+    heartbeat_handle.abort();
+    drop(alert_pool);
+    drop(ml_pool);
+    drop(filter_pool);
 }
 
 #[tokio::main]
