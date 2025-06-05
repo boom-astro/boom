@@ -583,10 +583,7 @@ where
     D: Deserializer<'de>,
 {
     let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
-    match objid {
-        Some(id) => Ok(Some(id.to_string())),
-        None => Ok(None),
-    }
+    Ok(objid.map(|i| i.to_string()))
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
