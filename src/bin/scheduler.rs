@@ -81,8 +81,8 @@ async fn run(args: Cli) {
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        args.survey.clone(),
-        config_path.clone(),
+        args.survey,
+        config_path,
     );
 
     // All that's left is to wait for sigint:
