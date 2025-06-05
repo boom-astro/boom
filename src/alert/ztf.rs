@@ -511,8 +511,7 @@ impl ZtfAlertWorker {
         Ok(alert)
     }
 
-    #[instrument(skip(self), err)]
-    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
+    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<String>, AlertError> {
         let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
             let result = self
                 .lsst_alert_aux_collection
@@ -528,8 +527,8 @@ impl ZtfAlertWorker {
                 .await;
             match result {
                 Ok(Some(doc)) => {
-                    let object_id = doc.get_i64("_id")?;
-                    vec![object_id]
+                    let object_id = doc.get_str("_id")?;
+                    vec![object_id.to_string()]
                 }
                 Ok(None) => vec![],
                 Err(error) => {
@@ -758,7 +757,7 @@ impl AlertWorker for ZtfAlertWorker {
     )]
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send + Debug,
+        object_id: &str,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -795,7 +794,7 @@ impl AlertWorker for ZtfAlertWorker {
     )]
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send + Debug,
+        object_id: &str,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
@@ -814,7 +813,7 @@ impl AlertWorker for ZtfAlertWorker {
             }
         };
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id.into() }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
         Ok(())
     }

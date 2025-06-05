@@ -1,7 +1,7 @@
 use boom::{
     alert::AlertWorker,
     conf,
-    filter::{FilterWorker, LsstFilterWorker},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::testing::{
         drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
         remove_test_lsst_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
@@ -103,7 +103,7 @@ async fn test_process_lsst_alert() {
     assert!(alert.is_some());
     let alert = alert.unwrap();
     assert_eq!(alert.get_i64("_id").unwrap(), candid);
-    assert_eq!(alert.get_i64("objectId").unwrap(), object_id);
+    assert_eq!(alert.get_str("objectId").unwrap(), &object_id);
     let candidate = alert.get_document("candidate").unwrap();
     assert_eq!(candidate.get_f64("ra").unwrap(), ra);
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);
@@ -124,7 +124,7 @@ async fn test_process_lsst_alert() {
 
     // check that the aux collection was inserted
     let aux_collection_name = "LSST_alerts_aux";
-    let filter_aux = doc! {"_id": object_id};
+    let filter_aux = doc! {"_id": &object_id};
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
         .find_one(filter_aux.clone())
@@ -133,7 +133,7 @@ async fn test_process_lsst_alert() {
 
     assert!(aux.is_some());
     let aux = aux.unwrap();
-    assert_eq!(aux.get_i64("_id").unwrap(), object_id);
+    assert_eq!(aux.get_str("_id").unwrap(), &object_id);
     // check that we have the arrays prv_candidates, prv_nondetections and fp_hists
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert_eq!(prv_candidates.len(), 3);
@@ -160,13 +160,16 @@ async fn test_filter_lsst_alert() {
     let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
+    remove_test_lsst_filter(filter_id).await.unwrap();
     assert!(result.is_ok());
+
     let alerts_output = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
-    assert_eq!(alert.object_id, format!("{}", object_id));
+    assert_eq!(&alert.object_id, &object_id);
     assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
+
     let filter_passed = alert
         .filters
         .iter()
@@ -174,5 +177,11 @@ async fn test_filter_lsst_alert() {
         .unwrap();
     assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
 
-    remove_test_lsst_filter(filter_id).await.unwrap();
+    let classifications = &alert.classifications;
+    assert_eq!(classifications.len(), 0);
+
+    // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let encoded = alert_to_avro_bytes(&alert, &schema);
+    assert!(encoded.is_ok())
 }
