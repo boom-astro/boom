@@ -426,86 +426,24 @@ impl ZtfAlertWorker {
         Ok(alert)
     }
 
-    async fn get_lsst_matches(
-        &self,
-        ra: f64,
-        dec: f64,
-        dec_range: (f64, f64),
-        radius_rad: f64,
-    ) -> Result<Vec<i64>, AlertError> {
-        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
-            let result = self
-                .lsst_alert_aux_collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": radius_rad,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_i64("_id")?;
-                    vec![object_id]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with LSST: {}", e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(matches)
-    }
-
-    async fn get_decam_matches(
-        &self,
-        ra: f64,
-        dec: f64,
-        dec_range: (f64, f64),
-        radius_rad: f64,
-    ) -> Result<Vec<String>, AlertError> {
-        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
-            let result = self
-                .decam_alert_aux_collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": radius_rad,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_str("_id")?.to_string();
-                    vec![object_id]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with DECam: {}", e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(matches)
-    }
-
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
         let lsst_matches = self
-            .get_lsst_matches(ra, dec, lsst::LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS)
+            .get_matches(
+                ra,
+                dec,
+                lsst::LSST_DEC_RANGE,
+                ZTF_LSST_XMATCH_RADIUS,
+                &self.lsst_alert_aux_collection,
+            )
             .await?;
         let decam_matches = self
-            .get_decam_matches(ra, dec, decam::DECAM_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS)
+            .get_matches(
+                ra,
+                dec,
+                decam::DECAM_DEC_RANGE,
+                ZTF_DECAM_XMATCH_RADIUS,
+                &self.decam_alert_aux_collection,
+            )
             .await?;
 
         Ok(doc! {
@@ -565,7 +503,7 @@ impl AlertWorker for ZtfAlertWorker {
 
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -580,7 +518,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         let start = std::time::Instant::now();
         let alert_aux_doc = doc! {
-            "_id": object_id.into(),
+            "_id": object_id,
             "prv_candidates": prv_candidates_doc,
             "prv_nondetections": prv_nondetections_doc,
             "fp_hists": fp_hist_doc,
@@ -613,7 +551,7 @@ impl AlertWorker for ZtfAlertWorker {
 
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
@@ -635,7 +573,7 @@ impl AlertWorker for ZtfAlertWorker {
         };
 
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id.into() }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
 
         trace!("Updating alert_aux: {:?}", start.elapsed());

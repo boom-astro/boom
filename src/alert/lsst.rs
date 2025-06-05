@@ -38,7 +38,8 @@ pub struct DiaSource {
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    pub object_id: Option<i64>,
+    #[serde(deserialize_with = "deserialize_objid_option")]
+    pub object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
     pub ss_object_id: Option<i64>,
@@ -229,7 +230,8 @@ impl TryFrom<DiaSource> for Candidate {
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    pub object_id: i64,
+    #[serde(deserialize_with = "deserialize_objid")]
+    pub object_id: String,
     /// Right ascension coordinate of the position of the object at time radecMjdTai.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -459,7 +461,8 @@ pub struct DiaForcedSource {
     pub dia_forced_source_id: i64,
     /// Id of the DiaObject that this DiaForcedSource was associated with.
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    pub object_id: i64,
+    #[serde(deserialize_with = "deserialize_objid")]
+    pub object_id: String,
     /// Right ascension coordinate of the position of the DiaObject at time radecMjdTai.
     pub ra: f64,
     /// Declination coordinate of the position of the DiaObject at time radecMjdTai.
@@ -565,6 +568,24 @@ pub struct LsstAlert {
     #[serde(rename = "cutoutTemplate")]
     #[serde(with = "apache_avro::serde_avro_bytes_opt")]
     pub cutout_template: Option<Vec<u8>>,
+}
+
+// Deserialize helper functions
+fn deserialize_objid<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // it's an i64 in the avro but we want to have it as a string
+    let objid: i64 = <i64 as Deserialize>::deserialize(deserializer)?;
+    Ok(objid.to_string())
+}
+
+fn deserialize_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
+    Ok(objid.map(|i| i.to_string()))
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
@@ -713,7 +734,7 @@ impl AlertWorker for LsstAlertWorker {
 
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -728,7 +749,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let start = std::time::Instant::now();
         let alert_aux_doc = doc! {
-            "_id": object_id.into(),
+            "_id": object_id,
             "prv_candidates": prv_candidates_doc,
             "prv_nondetections": prv_nondetections_doc,
             "fp_hists": fp_hist_doc,
@@ -760,7 +781,7 @@ impl AlertWorker for LsstAlertWorker {
 
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
@@ -781,7 +802,7 @@ impl AlertWorker for LsstAlertWorker {
         };
 
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id.into() }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
 
         trace!("Updating alert_aux: {:?}", start.elapsed());
@@ -805,6 +826,7 @@ impl AlertWorker for LsstAlertWorker {
             .candidate
             .dia_source
             .object_id
+            .clone()
             .ok_or(AlertError::MissingObjectId)?;
         let ra = alert.candidate.dia_source.ra;
         let dec = alert.candidate.dia_source.dec;
@@ -881,7 +903,7 @@ impl AlertWorker for LsstAlertWorker {
         if !alert_aux_exists {
             let result = self
                 .insert_aux(
-                    object_id,
+                    &object_id,
                     ra,
                     dec,
                     &prv_candidates_doc,
@@ -893,7 +915,7 @@ impl AlertWorker for LsstAlertWorker {
                 .await;
             if let Err(AlertError::AlertAuxExists) = result {
                 self.update_aux(
-                    object_id,
+                    &object_id,
                     &prv_candidates_doc,
                     &prv_nondetections_doc,
                     &fp_hist_doc,
@@ -906,7 +928,7 @@ impl AlertWorker for LsstAlertWorker {
             }
         } else {
             self.update_aux(
-                object_id,
+                &object_id,
                 &prv_candidates_doc,
                 &prv_nondetections_doc,
                 &fp_hist_doc,

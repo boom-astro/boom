@@ -97,22 +97,11 @@ pub async fn drop_alert_from_collections(
             .delete_one(filter.clone())
             .await?;
 
-        // 1. if the stream name is ZTF we read the object id as a string and drop the aux entry
-        // 2. otherwise we consider it an i64 and drop the aux entry
-        match stream_name {
-            "LSST" => {
-                let object_id = alert.get_i64("objectId")?;
-                db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
-                    .delete_one(doc! {"_id": object_id})
-                    .await?;
-            }
-            _ => {
-                let object_id = alert.get_str("objectId")?;
-                db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
-                    .delete_one(doc! {"_id": object_id})
-                    .await?;
-            }
-        }
+        // delete the object from the aux collection
+        let object_id = alert.get_str("objectId")?;
+        db.collection::<mongodb::bson::Document>(&alert_aux_collection_name)
+            .delete_one(doc! {"_id": object_id})
+            .await?;
     }
 
     Ok(())
@@ -126,9 +115,7 @@ pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>>
       "group_id": 41,
       "filter_id": filter_id,
       "catalog": "ZTF_alerts",
-      "permissions": [
-        1
-      ],
+      "permissions": [1],
       "active": true,
       "active_fid": "v2e0fs",
       "fv": [
@@ -268,7 +255,7 @@ pub trait AlertRandomizer {
     fn validate_dec(dec: f64) -> bool {
         dec >= -90.0 && dec <= 90.0
     }
-    async fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>);
+    async fn get(self) -> (i64, String, f64, f64, Vec<u8>);
 
     fn randomize_i64() -> i64 {
         rand::rng().random_range(0..i64::MAX)
@@ -768,7 +755,7 @@ impl AlertRandomizer for LsstAlertRandomizer {
         self
     }
 
-    async fn get(mut self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
+    async fn get(mut self) -> (i64, String, f64, f64, Vec<u8>) {
         let mut candid = self.candid;
         let mut object_id = self.object_id;
         let mut ra = self.ra;
@@ -866,7 +853,7 @@ impl AlertRandomizer for LsstAlertRandomizer {
 
         (
             candid.unwrap(),
-            object_id.unwrap(),
+            object_id.unwrap().to_string(),
             ra.unwrap(),
             dec.unwrap(),
             new_payload,

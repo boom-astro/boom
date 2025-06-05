@@ -4,7 +4,10 @@ use crate::{
     utils::{db::CreateIndexError, spatial::XmatchError},
 };
 use apache_avro::{from_avro_datum, Reader, Schema};
-use mongodb::bson::Document;
+use mongodb::{
+    bson::{doc, Document},
+    Collection,
+};
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize};
 use std::collections::HashMap;
@@ -278,7 +281,7 @@ pub trait AlertWorker {
     fn output_queue_name(&self) -> String;
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -289,13 +292,49 @@ pub trait AlertWorker {
     ) -> Result<(), AlertError>;
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError>;
+    async fn get_matches(
+        &self,
+        ra: f64,
+        dec: f64,
+        dec_range: (f64, f64),
+        radius_rad: f64,
+        collection: &Collection<Document>,
+    ) -> Result<Vec<String>, AlertError> {
+        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
+            let result = collection
+                .find_one(doc! {
+                    "coordinates.radec_geojson": {
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": radius_rad,
+                    },
+                })
+                .projection(doc! {
+                    "_id": 1
+                })
+                .await;
+            match result {
+                Ok(Some(doc)) => {
+                    let object_id = doc.get_str("_id")?;
+                    vec![object_id.to_string()]
+                }
+                Ok(None) => vec![],
+                Err(e) => {
+                    error!("Error cross-matching with LSST: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+        Ok(matches)
+    }
     async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError>;
 }
 
