@@ -2,12 +2,10 @@ use crate::models::{query_models::*, response};
 use actix_web::{HttpResponse, get, web};
 use futures::TryStreamExt;
 use mongodb::{
-    Client, Collection, IndexModel,
+    Collection, Database, IndexModel,
     bson::{Document, doc},
 };
 use std::collections::HashMap;
-
-const DB_NAME: &str = "boom";
 
 // builds find options for mongo query
 pub fn build_options(
@@ -62,7 +60,7 @@ pub fn build_cone_search_filter(
 }
 
 pub async fn get_catalog_names(
-    db: mongodb::Database,
+    db: web::Data<Database>,
 ) -> Result<Vec<String>, mongodb::error::Error> {
     // get collection names in alphabetical order
     let collection_names = match db.list_collection_names().await {
@@ -79,7 +77,7 @@ pub async fn get_catalog_names(
 }
 
 pub async fn get_catalog_info(
-    db: mongodb::Database,
+    db: web::Data<Database>,
     catalogs: Vec<String>,
 ) -> Result<Vec<Document>, mongodb::error::Error> {
     let mut data = Vec::new();
@@ -98,7 +96,7 @@ pub async fn get_catalog_info(
 }
 
 pub async fn get_index_info(
-    db: mongodb::Database,
+    db: web::Data<Database>,
     catalogs: Vec<String>,
 ) -> Result<Vec<Vec<IndexModel>>, mongodb::error::Error> {
     let mut out_data = Vec::new();
@@ -117,7 +115,7 @@ pub async fn get_index_info(
     return Ok(out_data);
 }
 
-pub async fn get_db_info(db: mongodb::Database) -> Result<Document, mongodb::error::Error> {
+pub async fn get_db_info(db: web::Data<Database>) -> Result<Document, mongodb::error::Error> {
     let data = match db.run_command(doc! { "dbstats": 1 }).await {
         Ok(d) => d,
         Err(e) => return Err(e),
@@ -158,8 +156,7 @@ pub async fn get_collection_sample(
 }
 
 #[get("/query/info")]
-pub async fn get_info(client: web::Data<Client>, body: web::Json<InfoQueryBody>) -> HttpResponse {
-    let db = client.database(DB_NAME);
+pub async fn get_info(db: web::Data<Database>, body: web::Json<InfoQueryBody>) -> HttpResponse {
     let command = match body.command.clone() {
         Some(c) => c,
         None => {
@@ -227,14 +224,13 @@ pub async fn get_info(client: web::Data<Client>, body: web::Json<InfoQueryBody>)
 }
 
 #[get("/query/sample")]
-pub async fn sample(client: web::Data<Client>, body: web::Json<QueryBody>) -> HttpResponse {
+pub async fn sample(db: web::Data<Database>, body: web::Json<QueryBody>) -> HttpResponse {
     let this_query = body.query.clone().unwrap_or_default();
     let catalog = match this_query.catalog {
         Some(c) => c,
         None => return response::bad_request("catalog name required for sample"),
     };
-
-    let collection: Collection<Document> = client.database(DB_NAME).collection(&catalog);
+    let collection: Collection<Document> = db.collection(&catalog);
     let size = this_query.size.unwrap_or(1);
     let docs = match get_collection_sample(collection, size).await {
         Ok(d) => d,
@@ -249,16 +245,13 @@ pub async fn sample(client: web::Data<Client>, body: web::Json<QueryBody>) -> Ht
 }
 
 #[get("/query/count_documents")]
-pub async fn count_documents(
-    client: web::Data<Client>,
-    body: web::Json<QueryBody>,
-) -> HttpResponse {
+pub async fn count_documents(db: web::Data<Database>, body: web::Json<QueryBody>) -> HttpResponse {
     let this_query = body.query.clone().unwrap_or_default();
     let catalog = match this_query.catalog {
         Some(c) => c,
         None => return response::bad_request("catalog name required for count_documents"),
     };
-    let collection: Collection<Document> = client.database(DB_NAME).collection(&catalog);
+    let collection: Collection<Document> = db.collection(&catalog);
     let filter = this_query.filter.unwrap_or(doc! {});
     let doc_count = collection.count_documents(filter).await;
     match doc_count {
@@ -275,7 +268,7 @@ pub async fn count_documents(
 }
 
 #[get("/query/find")]
-pub async fn find(client: web::Data<Client>, body: web::Json<QueryBody>) -> HttpResponse {
+pub async fn find(db: web::Data<Database>, body: web::Json<QueryBody>) -> HttpResponse {
     let this_query = body.query.clone().unwrap_or_default();
     let filter = match this_query.filter {
         Some(f) => f,
@@ -293,7 +286,7 @@ pub async fn find(client: web::Data<Client>, body: web::Json<QueryBody>) -> Http
         this_query.projection,
         body.kwargs.clone().unwrap_or_default(),
     );
-    let collection: Collection<Document> = client.database(DB_NAME).collection(&catalog);
+    let collection: Collection<Document> = db.collection(&catalog);
     let cursor = match collection.find(filter).with_options(find_options).await {
         Ok(c) => c,
         Err(e) => {
@@ -314,10 +307,7 @@ pub async fn find(client: web::Data<Client>, body: web::Json<QueryBody>) -> Http
 }
 
 #[get("/query/cone_search")]
-pub async fn cone_search(
-    client: web::Data<Client>,
-    body: web::Json<ConeSearchBody>,
-) -> HttpResponse {
+pub async fn cone_search(db: web::Data<Database>, body: web::Json<ConeSearchBody>) -> HttpResponse {
     let this_body = body.clone();
     let radius = match this_body.radius {
         Some(r) => r,
@@ -346,7 +336,7 @@ pub async fn cone_search(
         }
     };
 
-    let collection: Collection<Document> = client.database(DB_NAME).collection(&catalog);
+    let collection: Collection<Document> = db.collection(&catalog);
 
     let projection = catalog_details.projection;
     let input_filter = catalog_details.filter.unwrap_or(doc! {});

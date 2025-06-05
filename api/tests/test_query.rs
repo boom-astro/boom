@@ -1,38 +1,38 @@
-use actix_web::{
-    test::{self, TestRequest},
-    web,
-};
+use actix_web::web;
 #[cfg(test)]
 use boom_api::{
     api::{query, query::build_options},
+    conf::AppConfig,
     models::query_models::{QueryKwargs, Unit},
 };
 use mongodb::{
-    Client,
+    Client, Database,
     bson::{Document, doc},
     options::FindOptions,
 };
 
 // TODO: put in config
-const DB_NAME: &str = "boom";
 const CATALOG_NAME: &str = "ZTF";
 
-// TODO: get info for client from the config file
-pub async fn get_web_client() -> web::Data<Client> {
-    let user = "mongoadmin";
-    let pass = "mongoadminsecret";
-    let uri = std::env::var("MONGODB_URI")
-        .unwrap_or_else(|_| format!("mongodb://{user}:{pass}@localhost:27017").into());
+pub async fn get_db() -> web::Data<Database> {
+    // Read config from the root of the project
+    // TODO: Perhaps we should have a special config for tests?
+    let config = AppConfig::default().database;
+    let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
+        format!(
+            "mongodb://{}:{}@{}:{}",
+            config.username, config.password, config.host, config.port
+        )
+    });
     let client = Client::with_uri_str(uri).await.expect("failed to connect");
-    web::Data::new(client)
+    let db = client.database(&config.name);
+    web::Data::new(db)
 }
 
 // returns mongodb collection
 pub async fn get_database_collection() -> mongodb::Collection<Document> {
-    let client = get_web_client().await;
-    let collection = client
-        .database(DB_NAME)
-        .collection(&format!("{}_alerts", CATALOG_NAME));
+    let db = get_db().await;
+    let collection = db.collection(&format!("{}_alerts", CATALOG_NAME));
     collection
 }
 
@@ -130,42 +130,38 @@ fn test_build_cone_search_filter() {
 
 #[actix_rt::test]
 async fn test_get_catalog_names() {
-    let client = get_web_client().await;
-    let _ = query::get_catalog_names(client.database(DB_NAME)).await;
+    let db = get_db().await;
+    let _ = query::get_catalog_names(db).await;
 }
 
 #[actix_rt::test]
 async fn test_get_catalog_info() {
-    let client = get_web_client().await;
-    let catalog_names = query::get_catalog_names(client.database(DB_NAME))
-        .await
-        .unwrap();
+    let db = get_db().await;
+    let catalog_names = query::get_catalog_names(db.clone()).await.unwrap();
     let catalog_name = if catalog_names.len() > 0 {
         vec![catalog_names[0].clone()]
     } else {
         return;
     };
-    let _ = query::get_catalog_info(client.database(DB_NAME), catalog_name);
+    let _ = query::get_catalog_info(db, catalog_name);
 }
 
 #[actix_rt::test]
 async fn test_get_index_info() {
-    let client = get_web_client().await;
-    let catalog_names = query::get_catalog_names(client.database(DB_NAME))
-        .await
-        .unwrap();
+    let db = get_db().await;
+    let catalog_names = query::get_catalog_names(db.clone()).await.unwrap();
     let catalog_name = if catalog_names.len() > 0 {
         vec![catalog_names[0].clone()]
     } else {
         return;
     };
-    let _ = query::get_index_info(client.database(DB_NAME), catalog_name);
+    let _ = query::get_index_info(db, catalog_name);
 }
 
 #[actix_rt::test]
 async fn test_get_db_info() {
-    let client = get_web_client().await;
-    let _ = query::get_db_info(client.database(DB_NAME)).await;
+    let db = get_db().await;
+    let _ = query::get_db_info(db).await;
 }
 
 #[actix_rt::test]

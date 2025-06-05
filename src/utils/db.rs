@@ -7,6 +7,8 @@ use mongodb::{
 use serde::Serialize;
 use tracing::instrument;
 
+use crate::utils::enums::Survey;
+
 #[derive(thiserror::Error, Debug)]
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
@@ -59,7 +61,7 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
 // the required indexes on the alerts and alerts_aux collections
 #[instrument(skip(db), fields(database = db.name()), err)]
 pub async fn initialize_survey_indexes(
-    survey: &str,
+    survey: &Survey,
     db: &Database,
 ) -> Result<(), CreateIndexError> {
     let alerts_collection_name = format!("{}_alerts", survey);

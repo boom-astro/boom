@@ -1,4 +1,0 @@
-numpy
-tensorflow==2.13
-tf2onnx
-onnx

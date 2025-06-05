@@ -2,20 +2,17 @@ use crate::models::response;
 use actix_web::{HttpResponse, get, web};
 use futures::TryStreamExt;
 use mongodb::{
-    Client, Collection,
+    Collection, Database,
     bson::{Document, doc},
 };
 
-const DB_NAME: &str = "boom";
-
 #[get("/alerts/{survey_name}/get_object/{object_id}")]
 pub async fn get_object(
-    client: web::Data<Client>,
+    db: web::Data<Database>,
     path: web::Path<(String, String)>,
 ) -> HttpResponse {
     let (survey_name, object_id) = path.into_inner();
     let survey_name = survey_name.to_uppercase(); // (TEMP) to match with "ZTF"
-    let db = client.database(DB_NAME);
     let alerts_collection: Collection<Document> = db.collection(&format!("{}_alerts", survey_name));
     let aux_collection: Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey_name));
