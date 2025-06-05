@@ -66,8 +66,8 @@ impl Filter for LsstFilter {
                                         "$lt": [
                                             {
                                                 "$subtract": [
-                                                    "$candidate.mjd",
-                                                    "$$x.mjd"
+                                                    "$candidate.jd",
+                                                    "$$x.jd"
                                                 ]
                                             },
                                             365
@@ -75,8 +75,8 @@ impl Filter for LsstFilter {
                                     },
                                     { // only datapoints up to (and including) current alert
                                         "$lte": [
-                                            "$$x.mjd",
-                                            "$candidate.mjd"
+                                            "$$x.jd",
+                                            "$candidate.jd"
                                         ]
                                     }
                                 ]
@@ -89,9 +89,9 @@ impl Filter for LsstFilter {
 
         let filter_pipeline = filter_obj
             .get("pipeline")
-            .ok_or(FilterError::FilterNotFound)?
+            .ok_or(FilterError::InvalidFilterPipeline)?
             .as_str()
-            .ok_or(FilterError::FilterNotFound)?;
+            .ok_or(FilterError::InvalidFilterPipeline)?;
 
         let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
         let filter_pipeline = filter_pipeline
@@ -321,7 +321,8 @@ impl FilterWorker for LsstFilterWorker {
             jd,
             ra,
             dec,
-            filters: filter_results, // assuming you have filter results to attach
+            filters: filter_results,
+            classifications: Vec::new(), // LSST does not have classifications in the alerts, yet!
             photometry,
             cutout_science,
             cutout_template,

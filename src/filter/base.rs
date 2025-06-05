@@ -36,6 +36,17 @@ const ALERT_SCHEMA: &str = r#"
                 ]
             }
         }},
+        {"name": "classifications", "type": {
+            "type": "array",
+            "items": {
+                "type": "record",
+                "name": "Classification",
+                "fields": [
+                    {"name": "classifier", "type": "string"},
+                    {"name": "score", "type": "double"}
+                ]
+            }
+        }},
         {"name": "photometry", "type": {
             "type": "array",
             "items": {
@@ -125,6 +136,12 @@ pub struct Photometry {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Classification {
+    pub classifier: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResults {
     pub filter_id: i32,
     pub passed_at: f64, // timestamp in seconds
@@ -140,6 +157,7 @@ pub struct Alert {
     pub ra: f64,
     pub dec: f64,
     pub filters: Vec<FilterResults>,
+    pub classifications: Vec<Classification>,
     pub photometry: Vec<Photometry>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
     pub cutout_science: Vec<u8>,
