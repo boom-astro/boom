@@ -167,7 +167,7 @@ impl AlertWorker for DecamAlertWorker {
 
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         ra: f64,
         dec: f64,
         _prv_candidates_doc: &Vec<Document>,
@@ -182,7 +182,7 @@ impl AlertWorker for DecamAlertWorker {
 
         let start = std::time::Instant::now();
         let alert_aux_doc = doc! {
-            "_id": object_id.into(),
+            "_id": object_id,
             "fp_hists": fp_hist_doc,
             "cross_matches": xmatches,
             "aliases": survey_matches,
@@ -213,7 +213,7 @@ impl AlertWorker for DecamAlertWorker {
 
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         _prv_candidates_doc: &Vec<Document>,
         _prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
@@ -233,7 +233,7 @@ impl AlertWorker for DecamAlertWorker {
         };
 
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id.into() }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
 
         trace!("Updating alert_aux: {:?}", start.elapsed());
