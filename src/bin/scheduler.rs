@@ -25,7 +25,7 @@ struct Cli {
     config: Option<String>,
 }
 
-#[instrument(skip_all)]
+#[instrument(skip_all, fields(survey = %args.survey))]
 async fn run(args: Cli) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
