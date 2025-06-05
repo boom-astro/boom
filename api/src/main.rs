@@ -1,7 +1,7 @@
 use boom_api::api;
 use boom_api::conf::AppConfig;
 
-use actix_web::{App, HttpServer, web};
+use actix_web::{App, HttpServer, middleware::Logger, web};
 use mongodb::{Client, Database};
 
 #[actix_web::main]
@@ -18,6 +18,9 @@ async fn main() -> std::io::Result<()> {
     let client = Client::with_uri_str(uri).await.expect("failed to connect");
     let database: Database = client.database(&config.name);
 
+    // Initialize logging
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(database.clone()))
@@ -29,6 +32,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::alerts::get_object)
             .service(api::filters::post_filter)
             .service(api::filters::add_filter_version)
+            .wrap(Logger::default())
     })
     .bind(("0.0.0.0", 4000))?
     .run()
