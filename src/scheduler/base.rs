@@ -1,5 +1,5 @@
 use crate::{
-    alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
+    alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
     utils::{
@@ -175,6 +175,7 @@ impl Worker {
                 let run = match survey_name {
                     Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
                     Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
+                    Survey::Decam => run_alert_worker::<DecamAlertWorker>,
                 };
                 if let Err(error) = run(id, receiver, &config_path) {
                     error!(error = %error, "failed to run alert worker");
@@ -184,6 +185,13 @@ impl Worker {
                 let run = match survey_name {
                     Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
                     Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
+                    _ => {
+                        error!(
+                            "Filter worker not implemented for survey: {:?}",
+                            survey_name
+                        );
+                        return;
+                    }
                 };
                 if let Err(error) = run(id, receiver, &config_path) {
                     error!(error = %error, "failed to run filter worker");
@@ -192,9 +200,8 @@ impl Worker {
             WorkerType::ML => thread::spawn(move || {
                 let run = match survey_name {
                     Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
-                    // we don't have an ML worker for LSST yet
-                    Survey::Lsst => {
-                        error!("LSST ML worker not implemented");
+                    _ => {
+                        error!("ML worker not implemented for survey: {:?}", survey_name);
                         return;
                     }
                 };
