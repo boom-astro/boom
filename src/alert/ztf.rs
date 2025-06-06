@@ -19,7 +19,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::{fmt::Debug, io::Read};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -451,6 +451,11 @@ where
     Ok(cutout.map(|cutout| cutout.stamp_data))
 }
 
+enum AlertInsertResult {
+    Inserted,
+    AlreadyExists,
+}
+
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
@@ -603,10 +608,6 @@ impl ZtfAlertWorker {
         Ok(())
     }
 
-    // TODO: Is AlertExists a true error? If not, then how/where do we want to
-    // report it? Maybe it would work for the return type to be a status enum
-    // instead of unit, so we would have, e.g., Ok(Success), Ok(AlertExists),
-    // and Err(AlertError::...)
     #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
     async fn format_and_insert_alert(
         &self,
@@ -616,7 +617,7 @@ impl ZtfAlertWorker {
         dec: f64,
         candidate_doc: &Document,
         now: f64,
-    ) -> Result<(), AlertError> {
+    ) -> Result<AlertInsertResult, AlertError> {
         let alert_doc = doc! {
             "_id": candid,
             "objectId": object_id,
@@ -626,16 +627,18 @@ impl ZtfAlertWorker {
             "updated_at": now,
         };
 
-        self.alert_collection
+        let insert_result = self
+            .alert_collection
             .insert_one(alert_doc)
             .await
-            .map_err(|e| match *e.kind {
+            .map(|_| AlertInsertResult::Inserted)
+            .or_else(|error| match *error.kind {
                 mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
                     write_error,
-                )) if write_error.code == 11000 => AlertError::AlertExists,
-                _ => e.into(),
+                )) if write_error.code == 11000 => Ok(AlertInsertResult::AlreadyExists),
+                _ => Err(error),
             })?;
-        Ok(())
+        Ok(insert_result)
     }
 
     #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
@@ -836,9 +839,18 @@ impl AlertWorker for ZtfAlertWorker {
 
         let candidate_doc = mongify(&alert.candidate);
 
-        self.format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
+        let insert_result = self
+            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
             .await
             .inspect_err(as_error!())?;
+        match insert_result {
+            AlertInsertResult::AlreadyExists => {
+                warn!(?candid, ?object_id, "alert already exists, skipping");
+                return Ok(candid);
+            }
+            _ => (),
+        }
+
         self.format_and_insert_cutout(
             candid,
             alert.cutout_science,

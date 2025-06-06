@@ -90,7 +90,7 @@ async fn run(args: Cli) {
         async {
             loop {
                 info!("heartbeat");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
         .instrument(info_span!("heartbeat task")),
