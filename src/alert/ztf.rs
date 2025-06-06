@@ -1,6 +1,8 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertInsertResult, AlertWorker, AlertWorkerError, SchemaRegistryError},
+        base::{
+            AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistryError,
+        },
         lsst,
     },
     conf,
@@ -613,7 +615,7 @@ impl ZtfAlertWorker {
         dec: f64,
         candidate_doc: &Document,
         now: f64,
-    ) -> Result<AlertInsertResult, AlertError> {
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let alert_doc = doc! {
             "_id": candid,
             "objectId": object_id,
@@ -623,18 +625,18 @@ impl ZtfAlertWorker {
             "updated_at": now,
         };
 
-        let insert_result = self
+        let status = self
             .alert_collection
             .insert_one(alert_doc)
             .await
-            .map(|_| AlertInsertResult::Inserted)
+            .map(|_| ProcessAlertStatus::Added(candid))
             .or_else(|error| match *error.kind {
                 mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
                     write_error,
-                )) if write_error.code == 11000 => Ok(AlertInsertResult::AlreadyExists),
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
                 _ => Err(error),
             })?;
-        Ok(insert_result)
+        Ok(status)
     }
 
     #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
@@ -820,7 +822,10 @@ impl AlertWorker for ZtfAlertWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
+    async fn process_alert(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let mut alert = self
             .alert_from_avro_bytes(avro_bytes)
@@ -837,16 +842,12 @@ impl AlertWorker for ZtfAlertWorker {
 
         let candidate_doc = mongify(&alert.candidate);
 
-        let insert_result = self
+        let status = self
             .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
             .await
             .inspect_err(as_error!())?;
-        match insert_result {
-            AlertInsertResult::AlreadyExists => {
-                warn!(?candid, ?object_id, "alert already exists, skipping");
-                return Ok(candid);
-            }
-            _ => (),
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
 
         self.format_and_insert_cutout(
@@ -911,6 +912,6 @@ impl AlertWorker for ZtfAlertWorker {
             .inspect_err(as_error!())?;
         }
 
-        Ok(candid)
+        Ok(status)
     }
 }
