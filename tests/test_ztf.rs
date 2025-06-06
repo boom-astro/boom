@@ -162,10 +162,9 @@ async fn test_process_ztf_alert() {
     assert!(result.is_ok(), "{:?}", result);
     assert_eq!(result.unwrap(), candid);
 
-    // now that it has been inserted in the database, calling process alert should return an error
+    // Attempting to insert the error again is a no-op, not an error:
     let result = alert_worker.process_alert(&bytes_content).await;
-
-    assert!(result.is_err());
+    assert!(result.is_ok());
 
     // let's query the database to check if the alert was inserted
     let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
