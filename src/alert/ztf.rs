@@ -1,6 +1,6 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
+        base::{AlertError, AlertInsertResult, AlertWorker, AlertWorkerError, SchemaRegistryError},
         lsst,
     },
     conf,
@@ -451,11 +451,6 @@ where
     Ok(cutout.map(|cutout| cutout.stamp_data))
 }
 
-enum AlertInsertResult {
-    Inserted,
-    AlreadyExists,
-}
-
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
@@ -516,6 +511,7 @@ impl ZtfAlertWorker {
         Ok(alert)
     }
 
+    #[instrument(skip_all, err)]
     async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<String>, AlertError> {
         let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
             let result = self
@@ -751,6 +747,8 @@ impl AlertWorker for ZtfAlertWorker {
     #[instrument(
         skip(
             self,
+            ra,
+            dec,
             prv_candidates_doc,
             prv_nondetections_doc,
             fp_hist_doc,

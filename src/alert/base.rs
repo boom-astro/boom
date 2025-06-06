@@ -70,6 +70,11 @@ pub enum AlertError {
     MagicBytesError,
 }
 
+pub(crate) enum AlertInsertResult {
+    Inserted,
+    AlreadyExists,
+}
+
 #[derive(Clone, Debug)]
 pub struct SchemaRegistry {
     client: reqwest::Client,
@@ -78,6 +83,7 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    #[instrument]
     pub fn new(url: &str) -> Self {
         let client = reqwest::Client::new();
         let cache = HashMap::new();
@@ -88,21 +94,30 @@ impl SchemaRegistry {
         }
     }
 
+    #[instrument(skip(self), err)]
     async fn get_subjects(&self) -> Result<Vec<String>, SchemaRegistryError> {
         let response = self
             .client
             .get(&format!("{}/subjects", &self.url))
             .send()
-            .await?;
+            .await
+            .inspect_err(as_error!("GET request failed for subjects"))?;
 
-        let response = response.json::<Vec<String>>().await?;
+        let response = response
+            .json::<Vec<String>>()
+            .await
+            .inspect_err(as_error!("failed to get subjects as JSON"))?;
 
         Ok(response)
     }
 
+    #[instrument(skip(self), err)]
     async fn get_versions(&self, subject: &str) -> Result<Vec<u32>, SchemaRegistryError> {
         // first we check if the subject exists
-        let subjects = self.get_subjects().await?;
+        let subjects = self
+            .get_subjects()
+            .await
+            .inspect_err(as_error!("failed to get subjects"))?;
         if !subjects.contains(&subject.to_string()) {
             return Err(SchemaRegistryError::InvalidSubject);
         }
@@ -111,9 +126,13 @@ impl SchemaRegistry {
             .client
             .get(&format!("{}/subjects/{}/versions", &self.url, subject))
             .send()
-            .await?;
+            .await
+            .inspect_err(as_error!("GET request failed for versions"))?;
 
-        let response = response.json::<Vec<u32>>().await?;
+        let response = response
+            .json::<Vec<u32>>()
+            .await
+            .inspect_err(as_error!("failed to get versions as JSON"))?;
 
         Ok(response)
     }
@@ -123,7 +142,10 @@ impl SchemaRegistry {
         subject: &str,
         version: u32,
     ) -> Result<Schema, SchemaRegistryError> {
-        let versions = self.get_versions(subject).await?;
+        let versions = self
+            .get_versions(subject)
+            .await
+            .inspect_err(as_error!("failed to get versions"))?;
         if !versions.contains(&version) {
             return Err(SchemaRegistryError::InvalidVersion);
         }
@@ -135,18 +157,24 @@ impl SchemaRegistry {
                 &self.url, subject, version
             ))
             .send()
-            .await?;
+            .await
+            .inspect_err(as_error!("GET request failed for version"))?;
 
-        let response = response.json::<serde_json::Value>().await?;
+        let response = response
+            .json::<serde_json::Value>()
+            .await
+            .inspect_err(as_error!("failed to get version as JSON"))?;
 
         let schema_str = response["schema"]
             .as_str()
             .ok_or(SchemaRegistryError::InvalidResponse)?;
 
-        let schema = Schema::parse_str(schema_str)?;
+        let schema =
+            Schema::parse_str(schema_str).inspect_err(as_error!("failed to parse schema"))?;
         Ok(schema)
     }
 
+    #[instrument(skip(self), err)]
     pub async fn get_schema(
         &mut self,
         subject: &str,
