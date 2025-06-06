@@ -3,17 +3,8 @@ use std::{
     fmt,
     sync::{Arc, Mutex},
 };
-use tracing::warn;
-
-// spawns a thread which listens for interrupt signal. Sets flag to true upon signal interruption
-pub async fn sig_int_handler(flag: Arc<Mutex<bool>>) {
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        warn!("Received interrupt signal. Finishing up...");
-        let mut flag = flag.try_lock().unwrap();
-        *flag = true;
-    });
-}
+use tokio::sync::mpsc::{error::TryRecvError, Receiver};
+use tracing::{info, instrument, warn};
 
 // checks if a flag is set to true and, if so, exits the program
 pub fn check_exit(flag: Arc<Mutex<bool>>) {
@@ -24,20 +15,6 @@ pub fn check_exit(flag: Arc<Mutex<bool>>) {
             }
         }
         _ => {}
-    }
-}
-
-// checks returns value of flag
-pub fn check_flag(flag: Arc<Mutex<bool>>) -> bool {
-    match flag.try_lock() {
-        Ok(x) => {
-            if *x {
-                true
-            } else {
-                false
-            }
-        }
-        _ => false,
     }
 }
 
@@ -90,12 +67,24 @@ pub enum WorkerCmd {
 
 impl fmt::Display for WorkerCmd {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let enum_str;
-        match self {
-            WorkerCmd::TERM => {
-                enum_str = "TERM";
-            }
-        }
+        let enum_str = match self {
+            WorkerCmd::TERM => "TERM",
+        };
         write!(f, "{}", enum_str)
+    }
+}
+
+#[instrument(skip_all)]
+pub(crate) fn should_terminate(receiver: &mut Receiver<WorkerCmd>) -> bool {
+    match receiver.try_recv() {
+        Ok(WorkerCmd::TERM) => {
+            info!("received termination command");
+            true
+        }
+        Err(TryRecvError::Disconnected) => {
+            warn!("disconnected from worker command sender");
+            true
+        }
+        Err(TryRecvError::Empty) => false,
     }
 }

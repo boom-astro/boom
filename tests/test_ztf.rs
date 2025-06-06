@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -158,14 +158,12 @@ async fn test_process_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
-    let result = alert_worker.process_alert(&bytes_content).await;
-    assert!(result.is_ok(), "{:?}", result);
-    assert_eq!(result.unwrap(), candid);
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    // now that it has been inserted in the database, calling process alert should return an error
-    let result = alert_worker.process_alert(&bytes_content).await;
-
-    assert!(result.is_err());
+    // Attempting to insert the error again is a no-op, not an error:
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
     let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
@@ -403,9 +401,8 @@ async fn test_ml_ztf_alert() {
         .rand_object_id()
         .get()
         .await;
-    let result = alert_worker.process_alert(&bytes_content).await;
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), candid);
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     let ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = ml_worker.process_alerts(&[candid]).await;
@@ -452,9 +449,8 @@ async fn test_filter_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
-    let result = alert_worker.process_alert(&bytes_content).await;
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), candid);
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     // then run the ML worker to get the classifications
     let ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();

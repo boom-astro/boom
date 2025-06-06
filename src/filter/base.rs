@@ -1,3 +1,8 @@
+use crate::{
+    conf,
+    utils::worker::{should_terminate, WorkerCmd},
+};
+
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
@@ -7,10 +12,7 @@ use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use std::num::NonZero;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, trace, warn};
-
-use crate::{conf, utils::worker::WorkerCmd};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
@@ -201,11 +203,11 @@ pub async fn send_alert_to_kafka(
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-    id: &str,
+    key: &str,
 ) -> Result<(), FilterWorkerError> {
     let encoded = alert_to_avro_bytes(alert, schema)?;
 
-    let record = FutureRecord::to(&topic).key(id).payload(&encoded);
+    let record = FutureRecord::to(&topic).key(key).payload(&encoded);
 
     producer
         .send(record, std::time::Duration::from_secs(0))
@@ -360,20 +362,20 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
+#[instrument(skip_all, err)]
 pub async fn run_filter_worker<T: FilterWorker>(
-    id: String,
+    key: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
+    debug!(?config_path);
+
     let config = conf::load_config(config_path)?;
 
     let mut filter_worker = T::new(config_path).await?;
 
     if !filter_worker.has_filters() {
-        info!(
-            "No filters available for filter worker {} to process alerts",
-            &id
-        );
+        info!("no filters available for processing");
         return Ok(());
     }
 
@@ -386,29 +388,23 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let producer = create_producer().await?;
     let schema = load_alert_schema()?;
 
-    let command_interval: i64 = 500;
+    let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
     loop {
         if command_check_countdown == 0 {
-            match receiver.try_recv() {
-                Ok(WorkerCmd::TERM) => {
-                    info!("filterworker {} received termination command", &id);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("filter worker {} receiver disconnected, terminating", &id);
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    command_check_countdown = command_interval;
-                }
+            if should_terminate(&mut receiver) {
+                break;
+            } else {
+                command_check_countdown = command_interval + 1;
             }
         }
+        command_check_countdown -= 1;
         // if the queue is empty, wait for a bit and continue the loop
         let queue_len: i64 = con.llen(&input_queue).await?;
         if queue_len == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            command_check_countdown = 0;
             continue;
         }
 
@@ -425,15 +421,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         let alerts_output = filter_worker.process_alerts(&alerts).await?;
+        command_check_countdown -= nb_alerts - 1; // As if iterated this many times
+
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key).await?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
                 &alert.candid,
                 &output_topic
             );
         }
-        command_check_countdown -= nb_alerts as i64;
     }
 
     Ok(())

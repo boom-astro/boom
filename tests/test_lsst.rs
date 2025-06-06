@@ -1,5 +1,5 @@
 use boom::{
-    alert::AlertWorker,
+    alert::{AlertWorker, ProcessAlertStatus},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::testing::{
@@ -80,13 +80,12 @@ async fn test_process_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
-    let result = alert_worker.process_alert(&bytes_content).await.unwrap();
-    assert_eq!(result, candid);
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    // now that it has been inserted in the database, calling process alert should return an error
-    let result = alert_worker.process_alert(&bytes_content).await;
-
-    assert!(result.is_err());
+    // Attempting to insert the error again is a no-op, not an error:
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
     let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
@@ -152,8 +151,8 @@ async fn test_filter_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) = LsstAlertRandomizer::default().get().await;
-    let result = alert_worker.process_alert(&bytes_content).await.unwrap();
-    assert_eq!(result, candid);
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     let filter_id = insert_test_lsst_filter().await.unwrap();
 

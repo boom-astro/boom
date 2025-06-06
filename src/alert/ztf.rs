@@ -1,12 +1,15 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
+        base::{
+            AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistryError,
+        },
         lsst,
     },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
         db::{cutout2bsonbinary, get_coordinates, mongify},
+        o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
 };
@@ -17,8 +20,8 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::io::Read;
-use tracing::{error, trace};
+use std::{fmt::Debug, io::Read};
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -28,6 +31,7 @@ pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts"
 pub const LSST_DEC_LIMIT: f64 = 33.5;
 pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
 
+#[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
     let mut i = 0u64;
     let mut buf = [0u8; 1];
@@ -50,6 +54,7 @@ fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> 
     Ok(i)
 }
 
+#[instrument(skip_all, err)]
 pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     let z = decode_variable(reader)?;
     if z & 0x1 == 0 {
@@ -59,14 +64,16 @@ pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     }
 }
 
+#[instrument(skip_all, err)]
 fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     Ok(zag_i64(reader)?)
 }
 
+#[instrument(skip_all, err)]
 pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
     // First, we extract the schema from the avro bytes
     let cursor = std::io::Cursor::new(avro_bytes);
-    let reader = Reader::new(cursor)?;
+    let reader = Reader::new(cursor).inspect_err(as_error!())?;
     let schema = reader.writer_schema();
 
     // Then, we look for the index of the start of the data
@@ -76,27 +83,27 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
 
     // Four bytes, ASCII 'O', 'b', 'j', followed by 1
     let mut buf = [0; 4];
-    cursor.read_exact(&mut buf)?;
+    cursor.read_exact(&mut buf).inspect_err(as_error!())?;
     if buf != [b'O', b'b', b'j', 1u8] {
         return Err(SchemaRegistryError::MagicBytesError);
     }
 
     // Then there is the file metadata, including the schema
     let meta_schema = Schema::map(Schema::Bytes);
-    from_avro_datum(&meta_schema, &mut cursor, None)?;
+    from_avro_datum(&meta_schema, &mut cursor, None).inspect_err(as_error!())?;
 
     // Then the 16-byte, randomly-generated sync marker for this file.
     let mut buf = [0; 16];
-    cursor.read_exact(&mut buf)?;
+    cursor.read_exact(&mut buf).inspect_err(as_error!())?;
 
     // each avro record is preceded by:
     // 1. a variable-length integer, the number of records in the block
     // 2. a variable-length integer, the number of bytes in the block
-    let nb_records = decode_long(&mut cursor)?;
+    let nb_records = decode_long(&mut cursor).inspect_err(as_error!())?;
     if nb_records != 1 {
         return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
     }
-    let _ = decode_long(&mut cursor)?;
+    let _ = decode_long(&mut cursor).inspect_err(as_error!())?;
 
     // we now have the start index of the data
     let start_idx = cursor.position();
@@ -459,6 +466,7 @@ pub struct ZtfAlertWorker {
 }
 
 impl ZtfAlertWorker {
+    #[instrument(skip_all, err)]
     pub async fn alert_from_avro_bytes(
         self: &mut Self,
         avro_bytes: &[u8],
@@ -467,7 +475,8 @@ impl ZtfAlertWorker {
         let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
             (Some(schema), Some(start_idx)) => (schema, start_idx),
             _ => {
-                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
                 self.cached_schema = Some(schema);
                 self.cached_start_idx = Some(startidx);
                 (self.cached_schema.as_ref().unwrap(), startidx)
@@ -480,24 +489,31 @@ impl ZtfAlertWorker {
         // as it could be that the schema has changed
         let value = match value {
             Ok(value) => value,
-            Err(e) => {
-                error!("Error deserializing avro message with cached schema: {}", e);
-                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
+            Err(error) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "Error deserializing avro message with cached schema"
+                );
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
 
                 // if it's not an error this time, cache the new schema
                 // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)?;
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
+                    .inspect_err(as_error!())?;
                 self.cached_schema = Some(schema);
                 self.cached_start_idx = Some(startidx);
                 value
             }
         };
 
-        let alert: ZtfAlert = from_value::<ZtfAlert>(&value)?;
+        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
 
         Ok(alert)
     }
 
+    #[instrument(skip_all, err)]
     async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<String>, AlertError> {
         let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
             let result = self
@@ -518,8 +534,8 @@ impl ZtfAlertWorker {
                     vec![object_id.to_string()]
                 }
                 Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with LSST: {}", e);
+                Err(error) => {
+                    log_error!(WARN, error, "error cross-matching with LSST");
                     vec![]
                 }
             }
@@ -529,6 +545,7 @@ impl ZtfAlertWorker {
         Ok(lsst_matches)
     }
 
+    #[instrument(skip(self), err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
         let lsst_matches = self.get_lsst_matches(ra, dec).await?;
 
@@ -536,18 +553,165 @@ impl ZtfAlertWorker {
             "LSST": lsst_matches,
         })
     }
+
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            xmatches,
+            survey_matches
+        ),
+        err
+    )]
+    async fn insert_alert_aux(
+        &self,
+        object_id: String,
+        ra: f64,
+        dec: f64,
+        prv_candidates_doc: &Vec<Document>,
+        prv_nondetections_doc: &Vec<Document>,
+        fp_hist_doc: &Vec<Document>,
+        xmatches: Document,
+        survey_matches: &Option<Document>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let alert_aux_doc = doc! {
+            "_id": object_id,
+            "prv_candidates": prv_candidates_doc,
+            "prv_nondetections": prv_nondetections_doc,
+            "fp_hists": fp_hist_doc,
+            "cross_matches": xmatches,
+            "aliases": survey_matches,
+            "created_at": now,
+            "updated_at": now,
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [ra - 180.0, dec],
+                },
+            },
+        };
+
+        self.alert_aux_collection
+            .insert_one(alert_aux_doc)
+            .await
+            .map_err(|e| match *e.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
+                _ => e.into(),
+            })?;
+        Ok(())
+    }
+
+    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
+    async fn format_and_insert_alert(
+        &self,
+        candid: i64,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        candidate_doc: &Document,
+        now: f64,
+    ) -> Result<ProcessAlertStatus, AlertError> {
+        let alert_doc = doc! {
+            "_id": candid,
+            "objectId": object_id,
+            "candidate": candidate_doc,
+            "coordinates": get_coordinates(ra, dec),
+            "created_at": now,
+            "updated_at": now,
+        };
+
+        let status = self
+            .alert_collection
+            .insert_one(alert_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
+    }
+
+    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
+    async fn format_and_insert_cutout(
+        &self,
+        candid: i64,
+        cutout_science: Option<Vec<u8>>,
+        cutout_template: Option<Vec<u8>>,
+        cutout_difference: Option<Vec<u8>>,
+    ) -> Result<(), AlertError> {
+        let cutout_doc = doc! {
+            "_id": &candid,
+            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
+            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
+            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
+        };
+
+        self.alert_cutout_collection.insert_one(cutout_doc).await?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
+        let alert_aux_exists = self
+            .alert_aux_collection
+            .count_documents(doc! { "_id": object_id })
+            .await?
+            > 0;
+        Ok(alert_aux_exists)
+    }
+
+    #[instrument(skip_all)]
+    fn format_prv_candidates_and_fp_hist(
+        &self,
+        prv_candidates: Option<Vec<PrvCandidate>>,
+        candidate_doc: Document,
+        fp_hist: Option<Vec<ForcedPhot>>,
+    ) -> (Vec<Document>, Vec<Document>, Vec<Document>) {
+        // we split the prv_candidates into detections and non-detections
+        let mut prv_candidates_doc = vec![];
+        let mut prv_nondetections_doc = vec![];
+
+        for prv_candidate in prv_candidates.unwrap_or(vec![]) {
+            if prv_candidate.magpsf.is_some() {
+                prv_candidates_doc.push(mongify(&prv_candidate));
+            } else {
+                prv_nondetections_doc.push(mongify(&prv_candidate));
+            }
+        }
+        prv_candidates_doc.push(candidate_doc);
+
+        let fp_hist_doc = fp_hist
+            .unwrap_or(vec![])
+            .into_iter()
+            .map(|x| mongify(&x))
+            .collect::<Vec<_>>();
+        (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc)
+    }
 }
 
 #[async_trait::async_trait]
 impl AlertWorker for ZtfAlertWorker {
     type ObjectId = String;
 
+    #[instrument(err)]
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
-        let config_file = conf::load_config(&config_path)?;
+        let config_file =
+            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)?;
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+            .inspect_err(as_error!("failed to load xmatch config"))?;
 
-        let db: mongodb::Database = conf::build_db(&config_file).await?;
+        let db: mongodb::Database = conf::build_db(&config_file)
+            .await
+            .inspect_err(as_error!("failed to create mongo client"))?;
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
@@ -582,6 +746,18 @@ impl AlertWorker for ZtfAlertWorker {
         format!("{}_alerts_classifier_queue", self.stream_name)
     }
 
+    #[instrument(
+        skip(
+            self,
+            ra,
+            dec,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            survey_matches
+        ),
+        err
+    )]
     async fn insert_aux(
         self: &mut Self,
         object_id: &str,
@@ -593,43 +769,32 @@ impl AlertWorker for ZtfAlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
         let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-        trace!("Xmatch took: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-        let alert_aux_doc = doc! {
-            "_id": object_id,
-            "prv_candidates": prv_candidates_doc,
-            "prv_nondetections": prv_nondetections_doc,
-            "fp_hists": fp_hist_doc,
-            "cross_matches": xmatches,
-            "aliases": survey_matches,
-            "created_at": now,
-            "updated_at": now,
-            "coordinates": {
-                "radec_geojson": {
-                    "type": "Point",
-                    "coordinates": [ra - 180.0, dec],
-                },
-            },
-        };
-
-        self.alert_aux_collection
-            .insert_one(alert_aux_doc)
-            .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
-                _ => e.into(),
-            })?;
-
-        trace!("Inserting alert_aux: {:?}", start.elapsed());
-
+        self.insert_alert_aux(
+            object_id.into(),
+            ra,
+            dec,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            xmatches,
+            survey_matches,
+            now,
+        )
+        .await?;
         Ok(())
     }
 
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            survey_matches
+        ),
+        err
+    )]
     async fn update_aux(
         self: &mut Self,
         object_id: &str,
@@ -639,8 +804,6 @@ impl AlertWorker for ZtfAlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
-
         let update_doc = doc! {
             "$addToSet": {
                 "prv_candidates": { "$each": prv_candidates_doc },
@@ -652,26 +815,22 @@ impl AlertWorker for ZtfAlertWorker {
                 "aliases": survey_matches,
             }
         };
-
         self.alert_aux_collection
             .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
-
-        trace!("Updating alert_aux: {:?}", start.elapsed());
-
         Ok(())
     }
 
-    async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
+    #[instrument(skip_all, err)]
+    async fn process_alert(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-
-        let start = std::time::Instant::now();
-
-        let mut alert = self.alert_from_avro_bytes(avro_bytes).await?;
-
-        trace!("Decoding alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
+        let mut alert = self
+            .alert_from_avro_bytes(avro_bytes)
+            .await
+            .inspect_err(as_error!())?;
 
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
@@ -683,78 +842,34 @@ impl AlertWorker for ZtfAlertWorker {
 
         let candidate_doc = mongify(&alert.candidate);
 
-        let alert_doc = doc! {
-            "_id": &candid,
-            "objectId": &object_id,
-            "candidate": &candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        self.alert_collection
-            .insert_one(alert_doc)
+        let status = self
+            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
             .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertExists,
-                _ => e.into(),
-            })?;
-
-        trace!("Formatting & Inserting alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(alert.cutout_science.ok_or(AlertError::MissingCutout)?),
-            "cutoutTemplate": cutout2bsonbinary(alert.cutout_template.ok_or(AlertError::MissingCutout)?),
-            "cutoutDifference": cutout2bsonbinary(alert.cutout_difference.ok_or(AlertError::MissingCutout)?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-
-        trace!("Formatting & Inserting cutout: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let alert_aux_exists = self
-            .alert_aux_collection
-            .count_documents(doc! { "_id": &object_id })
-            .await?
-            > 0;
-
-        trace!("Checking if alert_aux exists: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        // we split the prv_candidates into detections and non-detections
-        let mut prv_candidates_doc = vec![];
-        let mut prv_nondetections_doc = vec![];
-
-        for prv_candidate in prv_candidates.unwrap_or(vec![]) {
-            if prv_candidate.magpsf.is_some() {
-                prv_candidates_doc.push(mongify(&prv_candidate));
-            } else {
-                prv_nondetections_doc.push(mongify(&prv_candidate));
-            }
+            .inspect_err(as_error!())?;
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
-        prv_candidates_doc.push(candidate_doc);
 
-        let fp_hist_doc = fp_hist
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
+        self.format_and_insert_cutout(
+            candid,
+            alert.cutout_science,
+            alert.cutout_template,
+            alert.cutout_difference,
+        )
+        .await
+        .inspect_err(as_error!())?;
+        let alert_aux_exists = self
+            .check_alert_aux_exists(&object_id)
+            .await
+            .inspect_err(as_error!())?;
 
-        trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
+        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) =
+            self.format_prv_candidates_and_fp_hist(prv_candidates, candidate_doc, fp_hist);
 
-        let start = std::time::Instant::now();
-        let survey_matches = Some(self.get_survey_matches(ra, dec).await?);
-        trace!(
-            "Xmatching ZTF alert with other surveys: {:?}",
-            start.elapsed()
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
         );
 
         if !alert_aux_exists {
@@ -779,9 +894,10 @@ impl AlertWorker for ZtfAlertWorker {
                     &survey_matches,
                     now,
                 )
-                .await?;
+                .await
+                .inspect_err(as_error!())?;
             } else {
-                result?;
+                result.inspect_err(as_error!())?;
             }
         } else {
             self.update_aux(
@@ -792,9 +908,10 @@ impl AlertWorker for ZtfAlertWorker {
                 &survey_matches,
                 now,
             )
-            .await?;
+            .await
+            .inspect_err(as_error!())?;
         }
 
-        Ok(candid)
+        Ok(status)
     }
 }

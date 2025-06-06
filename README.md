@@ -19,7 +19,6 @@ BOOM runs on macOS and Linux. You'll need:
 
 - `Docker` and `docker compose`: used to run the database, cache/task queue, and `Kafka`;
 - `Rust` (a systems programming language) `>= 1.55.0`;
-- `Python` (a high-level programming language) `>= 3.10`: we recommend using `uv` to create a virtual environment with the required Python dependencies.
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
 - If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
@@ -30,14 +29,12 @@ BOOM runs on macOS and Linux. You'll need:
 
 - Docker: On macOS we recommend using [Docker Desktop](https://www.docker.com/products/docker-desktop) to install docker. You can download it from the website, and follow the installation instructions. The website will ask you to "choose a plan", but really you just need to create an account and stick with the free tier that offers all of the features you will ever need. Once installed, you can verify the installation by running `docker --version` in your terminal, and `docker compose version` to check that docker compose is installed as well.
 - Rust: You can either use [rustup](https://www.rust-lang.org/tools/install) to install Rust, or you can use [Homebrew](https://brew.sh/) to install it. If you choose the latter, you can run `brew install rust` in your terminal. We recommend using rustup, as it allows you to easily switch between different versions of Rust, and to keep your Rust installation up to date. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
-- Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `brew`, `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
 - System packages are essential for compiling and linking some Rust crates. All those used by BOOM should come with macOS by default, but if you get any errors when compiling it you can try to install them again with Homebrew: `brew install openssl@3 cyrus-sasl gnu-tar`.
 
 #### Linux
 
 - Docker: You can either install Docker Desktop (same instructions as for macOS), or you can just install Docker Engine. The latter is more lightweight. You can follow the [official installation instructions](https://docs.docker.com/engine/install/) for your specific Linux distribution. If you only installed Docker Engine, you'll want to also install [docker compose](https://docs.docker.com/compose/install/). Once installed, you can verify the installation by running `docker --version` in your terminal, and `docker compose version` to check that docker compose is installed as well.
 - Rust: You can use [rustup](https://www.rust-lang.org/tools/install) to install Rust. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
-- Python: We strongly recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage your python installation and virtual environments. You can install it with `pip`, or using the [install script](https://docs.astral.sh/uv/getting-started/installation/#install-script). We recommend the later. Once installed, you can verify the installation by running `uv --version` in your terminal.
 - `wget` and `tar`: Most Linux distributions come with `wget` and `tar` pre-installed. If not, you can install them with your package manager.
 - System packages are essential for compiling and linking some Rust crates. On linux, you can install them with your package manager. For example with `apt` on Ubuntu or Debian-based systems, you can run:
   ```bash
@@ -146,6 +143,20 @@ When you stop the scheduler, it will attempt to gracefully stop all the workers 
 This is still a work in progress, so you might see some error handling taking place in the logs.
 
 **In the next version of the README, we'll provide the user with example scripts to read the output of BOOM (i.e. the alerts that passed the filters) from `Kafka` topics. For now, alerts are send back to `Redis`/`valkey` if they pass any filters.**
+
+## Logging
+
+The logging level is controlled with the `RUST_LOG` environment variable, which can be set to either "trace", "debug", "info", "warn", "error", or "off". For example, to see DEBUG messages, set `RUST_LOG=debug`. The default logging level is INFO.
+
+`RUST_LOG` supports more advanced directives described in the [`tracing_subscriber` docs](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html). A particularly useful feature is setting the level for different crates. This makes it possible to disable events from external crates like `ort` that would otherwise be mixed in with those from boom, e.g., `RUST_LOG=info,ort=off`.
+
+Span events can be added to the log by setting the `RUST_LOG_SPAN_EVENTS` environment variable to one or more of the following [span lifecycle options](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/struct.Layer.html#method.with_span_events): "new", "enter", "exit", "close", "active", "full", or "none", where multiple values are separated by a comma. For example, to see events for when spans open and close, set `RUST_LOG_SPAN_EVENTS=new,close`. "close" is notable because it creates events with execution time information, which may be useful for profiling.
+
+As a more complete example, the following sets the logging level to DEBUG, disables logs from the `ort` crate, and enables "new" and "close" span events while running the scheduler:
+
+```bash
+RUST_LOG=debug,ort=off RUST_LOG_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+```
 
 ## Tests
 

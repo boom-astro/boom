@@ -1,15 +1,18 @@
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
-    utils::{db::CreateIndexError, spatial::XmatchError},
+    utils::{
+        o11y::{as_error, log_error, WARN},
+        spatial::XmatchError,
+        worker::should_terminate,
+    },
 };
 use apache_avro::Schema;
 use mongodb::bson::Document;
 use redis::AsyncCommands;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, instrument};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
@@ -45,8 +48,6 @@ pub enum AlertError {
     SchemaRegistryError(#[from] SchemaRegistryError),
     #[error("error from xmatch")]
     Xmatch(#[from] XmatchError),
-    #[error("alert already exists")]
-    AlertExists,
     #[error("alert aux already exists")]
     AlertAuxExists,
     #[error("missing object_id")]
@@ -67,6 +68,12 @@ pub enum AlertError {
     MagicBytesError,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ProcessAlertStatus {
+    Added(i64),
+    Exists(i64),
+}
+
 #[derive(Clone, Debug)]
 pub struct SchemaRegistry {
     client: reqwest::Client,
@@ -75,6 +82,7 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    #[instrument]
     pub fn new(url: &str) -> Self {
         let client = reqwest::Client::new();
         let cache = HashMap::new();
@@ -85,21 +93,30 @@ impl SchemaRegistry {
         }
     }
 
+    #[instrument(skip(self), err)]
     async fn get_subjects(&self) -> Result<Vec<String>, SchemaRegistryError> {
         let response = self
             .client
             .get(&format!("{}/subjects", &self.url))
             .send()
-            .await?;
+            .await
+            .inspect_err(as_error!("GET request failed for subjects"))?;
 
-        let response = response.json::<Vec<String>>().await?;
+        let response = response
+            .json::<Vec<String>>()
+            .await
+            .inspect_err(as_error!("failed to get subjects as JSON"))?;
 
         Ok(response)
     }
 
+    #[instrument(skip(self), err)]
     async fn get_versions(&self, subject: &str) -> Result<Vec<u32>, SchemaRegistryError> {
         // first we check if the subject exists
-        let subjects = self.get_subjects().await?;
+        let subjects = self
+            .get_subjects()
+            .await
+            .inspect_err(as_error!("failed to get subjects"))?;
         if !subjects.contains(&subject.to_string()) {
             return Err(SchemaRegistryError::InvalidSubject);
         }
@@ -108,9 +125,13 @@ impl SchemaRegistry {
             .client
             .get(&format!("{}/subjects/{}/versions", &self.url, subject))
             .send()
-            .await?;
+            .await
+            .inspect_err(as_error!("GET request failed for versions"))?;
 
-        let response = response.json::<Vec<u32>>().await?;
+        let response = response
+            .json::<Vec<u32>>()
+            .await
+            .inspect_err(as_error!("failed to get versions as JSON"))?;
 
         Ok(response)
     }
@@ -120,7 +141,10 @@ impl SchemaRegistry {
         subject: &str,
         version: u32,
     ) -> Result<Schema, SchemaRegistryError> {
-        let versions = self.get_versions(subject).await?;
+        let versions = self
+            .get_versions(subject)
+            .await
+            .inspect_err(as_error!("failed to get versions"))?;
         if !versions.contains(&version) {
             return Err(SchemaRegistryError::InvalidVersion);
         }
@@ -132,18 +156,24 @@ impl SchemaRegistry {
                 &self.url, subject, version
             ))
             .send()
-            .await?;
+            .await
+            .inspect_err(as_error!("GET request failed for version"))?;
 
-        let response = response.json::<serde_json::Value>().await?;
+        let response = response
+            .json::<serde_json::Value>()
+            .await
+            .inspect_err(as_error!("failed to get version as JSON"))?;
 
         let schema_str = response["schema"]
             .as_str()
             .ok_or(SchemaRegistryError::InvalidResponse)?;
 
-        let schema = Schema::parse_str(schema_str)?;
+        let schema =
+            Schema::parse_str(schema_str).inspect_err(as_error!("failed to parse schema"))?;
         Ok(schema)
     }
 
+    #[instrument(skip(self), err)]
     pub async fn get_schema(
         &mut self,
         subject: &str,
@@ -162,8 +192,6 @@ impl SchemaRegistry {
 pub enum AlertWorkerError {
     #[error("failed to load config")]
     LoadConfigError(#[from] conf::BoomConfigError),
-    #[error("failed to create index")]
-    CreateIndexError(#[from] CreateIndexError),
     #[error("error from redis")]
     Redis(#[from] redis::RedisError),
     #[error("failed to get avro bytes from the alert queue")]
@@ -199,16 +227,31 @@ pub trait AlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError>;
-    async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError>;
+    async fn process_alert(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<ProcessAlertStatus, AlertError>;
 }
 
+fn report_progress(start: &std::time::Instant, stream: &str, count: u64, message: &str) {
+    let elapsed = start.elapsed().as_secs();
+    info!(
+        stream,
+        count,
+        elapsed,
+        average_rate = count as f64 / elapsed as f64,
+        "{}",
+        message,
+    );
+}
 #[tokio::main]
+#[instrument(skip_all, err)]
 pub async fn run_alert_worker<T: AlertWorker>(
-    id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), AlertWorkerError> {
-    let config = conf::load_config(config_path)?;
+    debug!(?config_path);
+    let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
 
     let mut alert_processor = T::new(config_path).await?;
     let stream_name = alert_processor.stream_name();
@@ -217,9 +260,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let temp_queue_name = format!("{}_temp", input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
-    let mut con = conf::build_redis(&config).await?;
+    let mut con = conf::build_redis(&config)
+        .await
+        .inspect_err(as_error!("failed to create redis client"))?;
 
-    let command_interval: i64 = 500;
+    let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
     let mut count = 0;
 
@@ -227,25 +272,20 @@ pub async fn run_alert_worker<T: AlertWorker>(
     loop {
         // check for command from threadpool
         if command_check_countdown == 0 {
-            match receiver.try_recv() {
-                Ok(WorkerCmd::TERM) => {
-                    info!("alert worker {} received termination command", id);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("alert worker {} receiver disconnected, terminating", id);
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    command_check_countdown = command_interval;
-                }
+            if should_terminate(&mut receiver) {
+                break;
+            } else {
+                command_check_countdown = command_interval + 1;
             }
         }
+        command_check_countdown -= 1;
         // retrieve candids from redis
-        let Some(mut value): Option<Vec<Vec<u8>>> =
-            con.rpoplpush(&input_queue_name, &temp_queue_name).await?
+        let Some(mut value): Option<Vec<Vec<u8>>> = con
+            .rpoplpush(&input_queue_name, &temp_queue_name)
+            .await
+            .inspect_err(as_error!("failed to pop from input queue"))?
         else {
-            info!("ALERT WORKER {}: Queue is empty", id);
+            info!("queue is empty");
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             command_check_countdown = 0;
             continue;
@@ -256,44 +296,38 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         let result = alert_processor.process_alert(&avro_bytes).await;
         match result {
-            Ok(candid) => {
+            Ok(ProcessAlertStatus::Added(candid)) => {
                 // queue the candid for processing by the classifier
                 con.lpush::<&str, i64, isize>(&output_queue_name, candid)
-                    .await?;
+                    .await
+                    .inspect_err(as_error!("failed to push to output queue"))?;
                 con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    .await?;
+                    .await
+                    .inspect_err(as_error!("failed to remove new alert from temp queue"))?;
             }
-            Err(error) => match error {
-                AlertError::AlertExists => {
-                    trace!("Alert already exists");
-                    con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                        .await?;
-                }
-                _ => {
-                    warn!(error = %error, "Error processing alert, skipping");
-                    // TODO: Handle alerts that we could not parse from avro
-                    // so we don't re-push them to the queue
-                    // con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
-                    //     .await
-                    //     .map_err(AlertWorkerError::PushAlertError)?;
-                    // con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    //     .await
-                    //     .map_err(AlertWorkerError::RemoveAlertError)?;
-                }
-            },
+            Ok(ProcessAlertStatus::Exists(candid)) => {
+                debug!(?candid, "alert already exists");
+                con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
+                    .await
+                    .inspect_err(as_error!("failed to remove existing alert from temp queue"))?;
+            }
+            Err(error) => {
+                log_error!(WARN, error, "error processing alert, skipping");
+                // TODO: Handle alerts that we could not parse from avro
+                // so we don't re-push them to the queue
+                // con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
+                //     .await
+                //     .map_err(AlertWorkerError::PushAlertError)?;
+                // con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
+                //     .await
+                //     .map_err(AlertWorkerError::RemoveAlertError)?;
+            }
         }
-        if count % 1000 == 0 {
-            let elapsed = start.elapsed().as_secs();
-            info!(
-                "\nProcessed {} {} alerts in {} seconds, avg: {:.4} alerts/s\n",
-                count,
-                stream_name,
-                elapsed,
-                count as f64 / elapsed as f64
-            );
+        if count > 0 && count % 1000 == 0 {
+            report_progress(&start, &stream_name, count, "progress");
         }
         count += 1;
-        command_check_countdown -= 1;
     }
+    report_progress(&start, &stream_name, count, "summary");
     Ok(())
 }

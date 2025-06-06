@@ -1,9 +1,9 @@
+use crate::{conf, utils::o11y::as_error};
+
 use flare::spatial::great_circle_distance;
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
-use tracing::warn;
-
-use crate::conf;
+use tracing::{instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum XmatchError {
@@ -21,6 +21,7 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
+#[instrument(skip(xmatch_configs), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
     dec: f64,
@@ -104,7 +105,10 @@ pub async fn xmatch(
 
     let collection: mongodb::Collection<mongodb::bson::Document> =
         db.collection(&xmatch_configs[0].catalog);
-    let mut cursor = collection.aggregate(x_matches_pipeline).await?;
+    let mut cursor = collection
+        .aggregate(x_matches_pipeline)
+        .await
+        .inspect_err(as_error!("failed to aggregate"))?;
 
     let mut xmatch_docs = doc! {};
     // pre add the catalogs + empty vec to the xmatch_docs
@@ -114,9 +118,13 @@ pub async fn xmatch(
     }
 
     while let Some(result) = cursor.next().await {
-        let doc = result?;
-        let catalog = doc.get_str("catalog")?;
-        let matches = doc.get_array("matches")?;
+        let doc = result.inspect_err(as_error!("failed to get next document"))?;
+        let catalog = doc
+            .get_str("catalog")
+            .inspect_err(as_error!("failed to get catalog"))?;
+        let matches = doc
+            .get_array("matches")
+            .inspect_err(as_error!("failed to get matches"))?;
 
         let xmatch_config = xmatch_configs
             .iter()
@@ -143,15 +151,15 @@ pub async fn xmatch(
                     .as_document()
                     .ok_or(XmatchError::AsDocumentError)?;
                 let Ok(xmatch_ra) = xmatch_doc.get_f64("ra") else {
-                    warn!("No ra in xmatch doc");
+                    warn!("no ra in xmatch doc");
                     continue;
                 };
                 let Ok(xmatch_dec) = xmatch_doc.get_f64("dec") else {
-                    warn!("No dec in xmatch doc");
+                    warn!("no dec in xmatch doc");
                     continue;
                 };
                 let Ok(doc_z) = xmatch_doc.get_f64(&distance_key) else {
-                    warn!("No z in xmatch doc");
+                    warn!("no z in xmatch doc");
                     continue;
                 };
 
