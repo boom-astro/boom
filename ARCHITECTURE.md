@@ -32,7 +32,7 @@ We only slightly modified the `Alert` struct to add methods to create an alert f
 
 ### Dealing with Rust structs and MongoDB BSON documents:
 
-We could in theory just query` MongoDB` in a way that allows us to get Rust structs out of it, and also do the same when writing to the database.
+We could in theory just query `MongoDB` in a way that allows us to get Rust structs out of it, and also do the same when writing to the database.
 However under the hood the `mongodb` crate just serializes back and forth, and since Rust structs can't just "remove" their fields that are null (in a way, they need to enforce a schema), we would end up with a lot of null fields in the database.
 To avoid this, we use the `bson` crate to serialize the Rust structs to BSON documents, sanitize them (remove the null fields and such), and then write them to the database.
 When querying the DB, both bson documents or Rust structs can be returned, it depends on the use case.
