@@ -63,6 +63,16 @@ BOOM runs on macOS and Linux. You'll need:
     cargo build --release
     ```
 
+### API
+
+To run the API server in development mode,
+first ensure `cargo-watch` is installed (`cargo install cargo-watch`),
+then call:
+
+```sh
+make api-dev
+```
+
 ## Running BOOM:
 
 ### Alert Production (not required for production use)

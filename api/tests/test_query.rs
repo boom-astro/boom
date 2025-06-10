@@ -2,31 +2,20 @@ use actix_web::web;
 #[cfg(test)]
 use boom_api::{
     api::{query, query::build_options},
-    conf::AppConfig,
+    db::get_default_db,
     models::query_models::{QueryKwargs, Unit},
 };
 use mongodb::{
-    Client, Database,
+    Database,
     bson::{Document, doc},
     options::FindOptions,
 };
 
-// TODO: put in config
+// TODO: Put in config
 const CATALOG_NAME: &str = "ZTF";
 
 pub async fn get_db() -> web::Data<Database> {
-    // Read config from the root of the project
-    // TODO: Perhaps we should have a special config for tests?
-    let config = AppConfig::default().database;
-    let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
-        format!(
-            "mongodb://{}:{}@{}:{}",
-            config.username, config.password, config.host, config.port
-        )
-    });
-    let client = Client::with_uri_str(uri).await.expect("failed to connect");
-    let db = client.database(&config.name);
-    web::Data::new(db)
+    web::Data::new(get_default_db().await)
 }
 
 // returns mongodb collection
@@ -44,8 +33,6 @@ pub fn check_find_options_equal(a: FindOptions, b: FindOptions) -> bool {
     }
     return true;
 }
-
-// UNIT TESTS
 
 #[actix_rt::test]
 async fn test_build_options() {
