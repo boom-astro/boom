@@ -7,6 +7,11 @@ database:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+auth:
+  secret_key: "1234"
+  token_expiration: 0 # in seconds, 0 to disable
+  admin_username: admin
+  admin_password: adminsecret
 redis:
   host: localhost
   port: 6379
