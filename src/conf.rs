@@ -1,9 +1,11 @@
+use crate::utils::o11y::as_error;
+
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
 use config::File;
 use std::path::Path;
-use tracing::error;
+use tracing::{error, instrument};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
@@ -19,6 +21,7 @@ pub enum BoomConfigError {
     MissingKeyError,
 }
 
+#[instrument(err)]
 pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
     let path = Path::new(filepath);
 
@@ -32,6 +35,7 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
     Ok(conf)
 }
 
+#[instrument(skip(conf), err)]
 pub fn build_xmatch_configs(
     conf: &Config,
     stream_name: &str,
@@ -54,6 +58,7 @@ pub fn build_xmatch_configs(
     Ok(catalog_xmatch_configs)
 }
 
+#[instrument(skip_all, err)]
 pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigError> {
     let db_conf = conf.get_table("database")?;
 
@@ -167,6 +172,7 @@ pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigErro
     Ok(db)
 }
 
+#[instrument(skip_all, err)]
 pub async fn build_redis(
     conf: &Config,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
@@ -184,9 +190,13 @@ pub async fn build_redis(
 
     let uri = format!("redis://{}:{}/", host, port);
 
-    let client_redis = redis::Client::open(uri)?;
+    let client_redis =
+        redis::Client::open(uri).inspect_err(as_error!("failed to connect to redis"))?;
 
-    let con = client_redis.get_multiplexed_async_connection().await?;
+    let con = client_redis
+        .get_multiplexed_async_connection()
+        .await
+        .inspect_err(as_error!("failed to get multiplexed connection"))?;
 
     Ok(con)
 }
@@ -224,6 +234,7 @@ impl CatalogXmatchConfig {
     }
 
     // based on the code in the main function, create a from_config function
+    #[instrument(skip_all, err)]
     pub fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
 

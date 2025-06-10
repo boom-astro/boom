@@ -2,18 +2,15 @@ use boom::{
     conf,
     scheduler::{get_num_workers, ThreadPool},
     utils::{
-        db::initialize_survey_indexes,
-        enums::Survey,
-        worker::{check_flag, sig_int_handler, WorkerType},
+        db::initialize_survey_indexes, enums::Survey, o11y::build_subscriber, worker::WorkerType,
     },
 };
+
+use std::time::Duration;
+
 use clap::Parser;
-use std::{
-    sync::{Arc, Mutex},
-    thread,
-};
-use tracing::{info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tokio::sync::oneshot;
+use tracing::{info, info_span, instrument, warn, Instrument};
 
 #[derive(Parser)]
 struct Cli {
@@ -28,109 +25,92 @@ struct Cli {
     config: Option<String>,
 }
 
-#[tokio::main]
-async fn main() {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    let args = Cli::parse();
-
-    let survey = args.survey;
-    info!("Starting scheduler for {:?} alert processing", &survey);
-
-    if !args.config.is_some() {
-        warn!("No config file provided, using config.yaml");
-    }
-    let config_path = match args.config {
-        Some(path) => path,
-        None => "config.yaml".to_string(),
-    };
-    let config_file = match conf::load_config(&config_path) {
-        Ok(config) => config,
-        Err(e) => {
-            warn!("could not load config file: {}", e);
-            std::process::exit(1);
-        }
-    };
+#[instrument(skip_all, fields(survey = %args.survey))]
+async fn run(args: Cli) {
+    let default_config_path = "config.yaml".to_string();
+    let config_path = args.config.unwrap_or_else(|| {
+        warn!("no config file provided, using {}", default_config_path);
+        default_config_path
+    });
+    let config = conf::load_config(&config_path).expect("could not load config file");
 
     // get num workers from config file
-    let n_alert = match get_num_workers(config_file.to_owned(), &survey, "alert") {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("could not retrieve number of alert workers: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let n_ml = match get_num_workers(config_file.to_owned(), &survey, "ml") {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("could not retrieve number of ml workers: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let n_filter = match get_num_workers(config_file.to_owned(), &survey, "filter") {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("could not retrieve number of filter workers: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let n_alert = get_num_workers(&config, &args.survey, "alert")
+        .expect("could not retrieve number of alert workers");
+    let n_ml = get_num_workers(&config, &args.survey, "ml")
+        .expect("could not retrieve number of ml workers");
+    let n_filter = get_num_workers(&config, &args.survey, "filter")
+        .expect("could not retrieve number of filter workers");
 
     // initialize the indexes for the survey
-    let db: mongodb::Database = match conf::build_db(&config_file).await {
-        Ok(db) => db,
-        Err(e) => {
-            warn!("could not connect to database: {}", e);
-            std::process::exit(1);
-        }
-    };
-    match initialize_survey_indexes(&survey, &db).await {
-        Ok(_) => info!("initialized indexes for {}", survey),
-        Err(e) => {
-            warn!("could not initialize indexes for {}: {}", survey, e);
-            std::process::exit(1);
-        }
-    }
+    let db: mongodb::Database = conf::build_db(&config)
+        .await
+        .expect("could not create mongodb client");
+    initialize_survey_indexes(&args.survey, &db)
+        .await
+        .expect("could not initialize indexes");
 
-    // setup signal handler thread
-    let interrupt = Arc::new(Mutex::new(false));
-    sig_int_handler(Arc::clone(&interrupt)).await;
+    // Spawn sigint handler task
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(
+        async {
+            info!("wating for ctrl-c");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to listen for ctrl-c event");
+            info!("received ctrl-c, sending shutdown signal");
+            shutdown_tx
+                .send(())
+                .expect("failed to send shutdown signal, receiver disconnected");
+        }
+        .instrument(info_span!("sigint handler")),
+    );
 
-    info!("creating alert, ml, and filter workers...");
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
-        survey.clone(),
+        args.survey.clone(),
         config_path.clone(),
     );
     let ml_pool = ThreadPool::new(
         WorkerType::ML,
         n_ml as usize,
-        survey.clone(),
+        args.survey.clone(),
         config_path.clone(),
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        survey.clone(),
-        config_path.clone(),
+        args.survey,
+        config_path,
     );
-    info!("created workers");
 
-    loop {
-        info!("heart beat (MAIN)");
-        let exit = check_flag(Arc::clone(&interrupt));
-        if exit {
-            warn!("killed thread(s)");
-            drop(alert_pool);
-            drop(ml_pool);
-            drop(filter_pool);
-            break;
+    // All that's left is to wait for sigint:
+    let heartbeat_handle = tokio::spawn(
+        async {
+            loop {
+                info!("heartbeat");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
         }
-        thread::sleep(std::time::Duration::from_secs(1));
-    }
-    std::process::exit(0);
+        .instrument(info_span!("heartbeat task")),
+    );
+    let _ = shutdown_rx
+        .await
+        .expect("failed to await shutdown signal, sender disconnected");
+
+    // Shut down:
+    info!("shutting down");
+    heartbeat_handle.abort();
+    drop(alert_pool);
+    drop(ml_pool);
+    drop(filter_pool);
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Cli::parse();
+    let subscriber = build_subscriber().expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+    run(args).await;
 }

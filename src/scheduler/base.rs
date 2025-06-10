@@ -4,13 +4,14 @@ use crate::{
     ml::{run_ml_worker, ZtfMLWorker},
     utils::{
         enums::Survey,
+        o11y::{as_error, INFO},
         worker::{WorkerCmd, WorkerType},
     },
 };
 use std::thread;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, instrument, span, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
@@ -19,8 +20,9 @@ pub enum SchedulerError {
 }
 
 // get num worker from config file, by stream name and worker type
+#[instrument(skip(conf), err)]
 pub fn get_num_workers(
-    conf: config::Config,
+    conf: &config::Config,
     survey_name: &Survey,
     worker_type: &str,
 ) -> Result<i64, SchedulerError> {
@@ -72,12 +74,14 @@ impl ThreadPool {
     /// size: number of workers initially inside of threadpool
     /// survey_name: source stream. e.g. 'ZTF'
     /// config_path: path to config file
+    #[instrument(skip(config_path))]
     pub fn new(
         worker_type: WorkerType,
         size: usize,
         survey_name: Survey,
         config_path: String,
     ) -> Self {
+        debug!(?config_path);
         let mut thread_pool = ThreadPool {
             worker_type,
             survey_name,
@@ -91,30 +95,41 @@ impl ThreadPool {
     }
 
     /// Send a termination signal to each worker thread.
+    #[instrument(skip(self))]
     async fn terminate(&self) {
         for worker in &self.workers {
-            info!(
-                "sending termination signal to worker {} (type: {})",
-                &worker.id, &self.worker_type
-            );
-            if let Err(error) = worker.terminate().await {
+            let handle = worker
+                .handle
+                .as_ref()
+                .expect("handle already consumed, but that should be impossible");
+            let tid = handle.thread().id();
+            info!(?tid, "sending termination signal");
+            worker.terminate().await.unwrap_or_else(|_| {
                 warn!(
-                    error = %error,
-                    "failed to send termination signal to worker {}",
-                    &worker.id
+                    ?tid,
+                    "failed to send termination signal (thread likely already terminated)"
                 );
-            }
+            });
         }
     }
 
     /// Join all worker threads in the pool.
+    #[instrument(skip(self))]
     fn join(&mut self) {
         for worker in &mut self.workers {
-            if let Some(thread) = worker.thread.take() {
-                match thread.join() {
-                    Ok(_) => info!("successfully shut down worker {}", &worker.id),
-                    Err(error) => {
-                        error!(error = ?error, "failed to shut down worker {}", &worker.id)
+            if let Some(handle) = worker.handle.take() {
+                let tid = handle.thread().id();
+                match handle.join() {
+                    Ok(_) => info!(?tid, "successfully shut down worker"),
+                    Err(_) => {
+                        // NOTE: `JoinHandle::join` produces an error if the
+                        // thread panicked. The error value contains the panic
+                        // message, but recovering that message is not
+                        // straightforward because the error type is opaque.
+                        // But, if logging/tracing is enabled for the thread,
+                        // then the message will be recorded anyway and we don't
+                        // need to worry about capturing it here.
+                        warn!(?tid, "worker panicked")
                     }
                 }
             }
@@ -122,12 +137,10 @@ impl ThreadPool {
     }
 
     /// Add a new worker to the thread pool
+    #[instrument(skip(self))]
     fn add_worker(&mut self) {
-        let id = uuid::Uuid::new_v4().to_string();
-        info!("adding worker with id {}", id);
         self.workers.push(Worker::new(
             self.worker_type,
-            id.clone(),
             self.survey_name.clone(),
             self.config_path.clone(),
         ));
@@ -148,8 +161,8 @@ impl Drop for ThreadPool {
 /// controlled completely by a threadpool and has a listening channel through
 /// which it listens for commands from it.
 pub struct Worker {
-    id: String,
-    thread: Option<thread::JoinHandle<()>>,
+    // Needs to be Option because JoinHandle::join() consumes the handle.
+    handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<WorkerCmd>,
 }
 
@@ -161,52 +174,56 @@ impl Worker {
     /// receiver: receiver by which the owning threadpool communicates with the worker
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
-    fn new(
-        worker_type: WorkerType,
-        id: String,
-        survey_name: Survey,
-        config_path: String,
-    ) -> Worker {
-        let id_copy = id.clone();
+    #[instrument]
+    fn new(worker_type: WorkerType, survey_name: Survey, config_path: String) -> Worker {
         let (sender, receiver) = mpsc::channel(1);
-        let thread = match worker_type {
-            // TODO: Spawn a new worker thread when one dies? (A supervisor or something like that?)
+        let handle = match worker_type {
             WorkerType::Alert => thread::spawn(move || {
-                let run = match survey_name {
-                    Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
-                    Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
-                };
-                if let Err(error) = run(id, receiver, &config_path) {
-                    error!(error = %error, "failed to run alert worker");
-                }
+                let tid = std::thread::current().id();
+                span!(INFO, "alert worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting alert worker");
+                    debug!(?config_path);
+                    let run = match survey_name {
+                        Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
+                        Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
+                    };
+                    run(receiver, &config_path).unwrap_or_else(as_error!("alert worker failed"));
+                })
             }),
             WorkerType::Filter => thread::spawn(move || {
-                let run = match survey_name {
-                    Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
-                    Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
-                };
-                if let Err(error) = run(id, receiver, &config_path) {
-                    error!(error = %error, "failed to run filter worker");
-                }
+                let tid = std::thread::current().id();
+                span!(INFO, "filter worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting filter worker");
+                    debug!(?config_path);
+                    let run = match survey_name {
+                        Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
+                        Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
+                    };
+                    let key = uuid::Uuid::new_v4().to_string();
+                    run(key, receiver, &config_path)
+                        .unwrap_or_else(as_error!("filter worker failed"));
+                })
             }),
             WorkerType::ML => thread::spawn(move || {
-                let run = match survey_name {
-                    Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
-                    // we don't have an ML worker for LSST yet
-                    Survey::Lsst => {
-                        error!("LSST ML worker not implemented");
-                        return;
-                    }
-                };
-                if let Err(error) = run(id, receiver, &config_path) {
-                    error!(error = %error, "failed to run ml worker");
-                }
+                let tid = std::thread::current().id();
+                span!(INFO, "ml worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting ml worker");
+                    debug!(?config_path);
+                    let run = match survey_name {
+                        Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
+                        // we don't have an ML worker for LSST yet
+                        Survey::Lsst => {
+                            error!("LSST ML worker not implemented");
+                            return;
+                        }
+                    };
+                    run(receiver, &config_path).unwrap_or_else(as_error!("ml worker failed"));
+                })
             }),
         };
 
         Worker {
-            id: id_copy,
-            thread: Some(thread),
+            handle: Some(handle),
             sender,
         }
     }
