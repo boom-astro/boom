@@ -56,7 +56,7 @@ This provides structured context that helps make events easier to understand.
 
 As for deciding *what* to instrument, we should consider instrumenting 1) anything that helps provide context for events (particularly ERROR events) and/or 2) anything that we're interested in profiling for performance.
 
-* Subscribers can be configured to consume "span close" events, which include execution time details (see RUST_LOG_SPAN_EVENTS in the readme).
+* Subscribers can be configured to consume "span close" events, which include execution time details (see BOOM_SPAN_EVENTS in the readme).
 
 * The `tracing_flame` crate uses spans to generate flamegraphs.
 

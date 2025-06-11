@@ -150,12 +150,14 @@ The logging level is controlled with the `RUST_LOG` environment variable, which 
 
 `RUST_LOG` supports more advanced directives described in the [`tracing_subscriber` docs](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html). A particularly useful feature is setting the level for different crates. This makes it possible to disable events from external crates like `ort` that would otherwise be mixed in with those from boom, e.g., `RUST_LOG=info,ort=off`.
 
-Span events can be added to the log by setting the `RUST_LOG_SPAN_EVENTS` environment variable to one or more of the following [span lifecycle options](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/struct.Layer.html#method.with_span_events): "new", "enter", "exit", "close", "active", "full", or "none", where multiple values are separated by a comma. For example, to see events for when spans open and close, set `RUST_LOG_SPAN_EVENTS=new,close`. "close" is notable because it creates events with execution time information, which may be useful for profiling.
+Span events can be added to the log by setting the `BOOM_SPAN_EVENTS` environment variable to one or more of the following [span lifecycle options](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/struct.Layer.html#method.with_span_events): "new", "enter", "exit", "close", "active", "full", or "none", where multiple values are separated by a comma.
+For example, to see events for when spans open and close, set `BOOM_SPAN_EVENTS=new,close`.
+"close" is notable because it creates events with execution time information, which may be useful for profiling.
 
 As a more complete example, the following sets the logging level to DEBUG, disables logs from the `ort` crate, and enables "new" and "close" span events while running the scheduler:
 
 ```bash
-RUST_LOG=debug,ort=off RUST_LOG_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+RUST_LOG=debug,ort=off BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
 ```
 
 ## Contributing

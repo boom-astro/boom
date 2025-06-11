@@ -212,25 +212,22 @@ pub fn build_subscriber(
         .with_file(true)
         .with_line_number(true);
 
-    if let Some(kind) = std::env::var("RUST_LOG_SPAN_EVENTS")
-        .ok()
-        .and_then(|string| {
-            string
-                .split(',')
-                .map(|part| match part.trim().to_lowercase().as_str() {
-                    "new" => Some(FmtSpan::NEW),
-                    "enter" => Some(FmtSpan::ENTER),
-                    "exit" => Some(FmtSpan::EXIT),
-                    "close" => Some(FmtSpan::CLOSE),
-                    "none" => Some(FmtSpan::NONE),
-                    "active" => Some(FmtSpan::ACTIVE),
-                    "full" => Some(FmtSpan::FULL),
-                    _ => None,
-                })
-                .flatten()
-                .reduce(|lhs, rhs| lhs | rhs)
-        })
-    {
+    if let Some(kind) = std::env::var("BOOM_SPAN_EVENTS").ok().and_then(|string| {
+        string
+            .split(',')
+            .map(|part| match part.trim().to_lowercase().as_str() {
+                "new" => Some(FmtSpan::NEW),
+                "enter" => Some(FmtSpan::ENTER),
+                "exit" => Some(FmtSpan::EXIT),
+                "close" => Some(FmtSpan::CLOSE),
+                "none" => Some(FmtSpan::NONE),
+                "active" => Some(FmtSpan::ACTIVE),
+                "full" => Some(FmtSpan::FULL),
+                _ => None,
+            })
+            .flatten()
+            .reduce(|lhs, rhs| lhs | rhs)
+    }) {
         fmt_layer = fmt_layer.with_span_events(kind);
     }
 
