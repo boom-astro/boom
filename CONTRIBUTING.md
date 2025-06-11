@@ -95,8 +95,8 @@ Boom supports generating a flame graph to visualize performance bottlenecks:
    cargo install inferno
    ```
 
-2. Run boom with the `BOOM_FLAME_FILE` environment variable. This instructs boom
-   to generate a flame graph and save the output at the given path:
+2. Run boom with the `BOOM_FLAME_FILE` environment variable.
+   This instructs boom to generate a flame graph and save the output at the given path:
    ```bash
    BOOM_FLAME_FILE=./tracing.folded cargo run --bin scheduler -- ztf
    ```
