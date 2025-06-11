@@ -6,6 +6,7 @@
 use std::iter::successors;
 
 use tracing::Subscriber;
+use tracing_flame::FlameLayer;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
 
 /// Iterate over the `Display` representations of the sources of the given error
@@ -198,10 +199,14 @@ pub use as_error;
 pub enum BuildSubscriberError {
     #[error("failed to parse filtering directive")]
     Parse(#[from] tracing_subscriber::filter::ParseError),
+    #[error("failed to build flame layer")]
+    Flame(#[from] tracing_flame::Error),
 }
 
 /// Build a tracing subscriber.
-pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
+pub fn build_subscriber(
+) -> Result<(Box<dyn Subscriber + Send + Sync>, Box<dyn std::any::Any>), BuildSubscriberError> {
+    // TODO: Is there a cleaner way to write this? It's getting complicated.
     let mut fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_file(true)
@@ -230,5 +235,17 @@ pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
     }
 
     let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
-    Ok(tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter)))
+
+    let subscriber = tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter));
+
+    if let Ok(flame_file) = std::env::var("BOOM_FLAME_FILE") {
+        let (flame_layer, guard) = FlameLayer::with_file(flame_file)?;
+        Ok((Box::new(subscriber.with(flame_layer)), Box::new(guard)))
+    } else {
+        struct NoopGuard;
+        impl Drop for NoopGuard {
+            fn drop(&mut self) {}
+        }
+        Ok((Box::new(subscriber), Box::new(NoopGuard)))
+    }
 }
