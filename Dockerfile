@@ -5,10 +5,6 @@ WORKDIR /app
 # Copy the Cargo.toml and Cargo.lock files
 COPY Cargo.toml Cargo.lock ./
 
-# Build dependencies (this will be cached if Cargo.toml and Cargo.lock don't change)
-# TODO: This doesn't work without a lib or bin section in Cargo.toml
-# RUN cargo build --release --target x86_64-unknown-linux-gnu
-
 RUN apt-get update && \
     apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev && \
     apt-get autoremove && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
