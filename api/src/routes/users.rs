@@ -4,8 +4,9 @@ use futures::stream::StreamExt;
 use mongodb::{Collection, Database, bson::doc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use utoipa::ToSchema;
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, ToSchema)]
 pub struct UserPost {
     pub username: String,
     pub email: String,
@@ -20,6 +21,16 @@ pub struct UserInsert {
     pub password: String, // This will be hashed before insertion
 }
 
+#[utoipa::path(
+    post,
+    path = "/users",
+    request_body = UserPost,
+    responses(
+        (status = 200, description = "User created successfully", body = User),
+        (status = 409, description = "User already exists"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/users")]
 pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> HttpResponse {
     let user_collection: Collection<UserInsert> = db.collection("users");
@@ -60,13 +71,21 @@ pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> Ht
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct User {
     pub id: String,
     pub username: String,
     pub email: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/users",
+    responses(
+        (status = 200, description = "Users retrieved successfully", body = [User]),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/users")]
 pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     let user_collection: Collection<User> = db.collection("users");
@@ -92,6 +111,15 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/users/{user_id}",
+    responses(
+        (status = 200, description = "User deleted successfully"),
+        (status = 404, description = "User not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[delete("/users/{user_id}")]
 pub async fn delete_user(db: web::Data<Database>, path: web::Path<String>) -> HttpResponse {
     // TODO: Ensure the caller is authorized to delete this user

@@ -2,8 +2,8 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::{App, test, web};
-    use boom_api::api;
     use boom_api::db::get_default_db;
+    use boom_api::routes;
     use mongodb::Database;
 
     /// Test GET /users
@@ -14,7 +14,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
-                .service(api::users::get_users),
+                .service(routes::users::get_users),
         )
         .await;
 
@@ -40,8 +40,8 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
-                .service(api::users::post_user)
-                .service(api::users::delete_user),
+                .service(routes::users::post_user)
+                .service(routes::users::delete_user),
         )
         .await;
 
