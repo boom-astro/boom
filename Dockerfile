@@ -25,12 +25,6 @@ WORKDIR /app
 # Copy the built executable from the builder stage
 COPY --from=builder /app/target/release/boom-api /app/boom-api
 
-# Copy the config file
-# TODO: This should probably be set some other way, e.g., all configuration
-# should be done via environmental variables set by Docker Compose or
-# Kubernetes
-COPY config.yaml /usr/local/etc/config.yaml
-
 # Expose the port your application listens on
 EXPOSE 4000
 
@@ -45,12 +39,6 @@ WORKDIR /app
 
 # Copy the built executable from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler
-
-# Copy the config file
-# TODO: This should probably be set some other way, e.g., all configuration
-# should be done via environmental variables set by Docker Compose or
-# Kubernetes
-COPY config.yaml /usr/local/etc/config.yaml
 
 # Set the entrypoint
 CMD ["/app/scheduler"]
