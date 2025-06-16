@@ -1,5 +1,5 @@
 use boom::{
-    alert::AlertWorker,
+    alert::{AlertWorker, ProcessAlertStatus},
     conf,
     utils::testing::{
         decam_alert_worker, drop_alert_from_collections, AlertRandomizer, DecamAlertRandomizer,
@@ -40,12 +40,11 @@ async fn test_process_decam_alert() {
     let (candid, object_id, ra, dec, bytes_content) = DecamAlertRandomizer::default().get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok(), "{:?}", result);
-    assert_eq!(result.unwrap(), candid);
+    assert_eq!(result.unwrap(), ProcessAlertStatus::Added(candid));
 
-    // now that it has been inserted in the database, calling process alert should return an error
-    let result = alert_worker.process_alert(&bytes_content).await;
-
-    assert!(result.is_err());
+    // Attempting to insert the error again is a no-op, not an error:
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
     let config = conf::load_config(TEST_CONFIG_FILE).unwrap();

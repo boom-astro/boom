@@ -1,10 +1,12 @@
 use crate::{
     alert::base::{
         deserialize_mjd, get_schema_and_startidx, AlertError, AlertWorker, AlertWorkerError,
+        ProcessAlertStatus,
     },
     conf,
     utils::{
         db::{cutout2bsonbinary, get_coordinates, mongify},
+        o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
 };
@@ -13,7 +15,7 @@ use apache_avro::{from_avro_datum, Schema};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
-use tracing::{error, trace};
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
 pub const DECAM_DEC_RANGE: (f64, f64) = (-20.0, 20.0);
@@ -85,6 +87,7 @@ pub struct DecamAlertWorker {
 }
 
 impl DecamAlertWorker {
+    #[instrument(skip_all, err)]
     pub async fn alert_from_avro_bytes(
         self: &mut Self,
         avro_bytes: &[u8],
@@ -93,7 +96,8 @@ impl DecamAlertWorker {
         let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
             (Some(schema), Some(start_idx)) => (schema, start_idx),
             _ => {
-                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
                 self.cached_schema = Some(schema);
                 self.cached_start_idx = Some(startidx);
                 (self.cached_schema.as_ref().unwrap(), startidx)
@@ -106,29 +110,136 @@ impl DecamAlertWorker {
         // as it could be that the schema has changed
         let value = match value {
             Ok(value) => value,
-            Err(e) => {
-                error!("Error deserializing avro message with cached schema: {}", e);
-                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
+            Err(error) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "Error deserializing avro message with cached schema"
+                );
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
 
                 // if it's not an error this time, cache the new schema
                 // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)?;
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
+                    .inspect_err(as_error!())?;
                 self.cached_schema = Some(schema);
                 self.cached_start_idx = Some(startidx);
                 value
             }
         };
 
-        let alert: DecamAlert = from_value::<DecamAlert>(&value)?;
+        let alert: DecamAlert = from_value::<DecamAlert>(&value).inspect_err(as_error!())?;
 
         Ok(alert)
+    }
+
+    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
+    async fn format_and_insert_alert(
+        &self,
+        candid: i64,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        candidate_doc: &Document,
+        now: f64,
+    ) -> Result<ProcessAlertStatus, AlertError> {
+        let alert_doc = doc! {
+            "_id": candid,
+            "objectId": object_id,
+            "candidate": candidate_doc,
+            "coordinates": get_coordinates(ra, dec),
+            "created_at": now,
+            "updated_at": now,
+        };
+
+        let status = self
+            .alert_collection
+            .insert_one(alert_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
+    }
+
+    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
+    async fn format_and_insert_cutout(
+        &self,
+        candid: i64,
+        cutout_science: Vec<u8>,
+        cutout_template: Vec<u8>,
+        cutout_difference: Vec<u8>,
+    ) -> Result<(), AlertError> {
+        let cutout_doc = doc! {
+            "_id": &candid,
+            "cutoutScience": cutout2bsonbinary(cutout_science),
+            "cutoutTemplate": cutout2bsonbinary(cutout_template),
+            "cutoutDifference": cutout2bsonbinary(cutout_difference),
+        };
+
+        self.alert_cutout_collection.insert_one(cutout_doc).await?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
+        let alert_aux_exists = self
+            .alert_aux_collection
+            .count_documents(doc! { "_id": object_id })
+            .await?
+            > 0;
+        Ok(alert_aux_exists)
+    }
+
+    #[instrument(skip_all)]
+    fn format_fp_hist(&self, fp_hist: Vec<FpHist>) -> Vec<Document> {
+        fp_hist.into_iter().map(|x| mongify(&x)).collect::<Vec<_>>()
+    }
+
+    #[instrument(skip(self, fp_hist_doc, xmatches,), err)]
+    async fn insert_alert_aux(
+        &self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        fp_hist_doc: &Vec<Document>,
+        xmatches: Document,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let alert_aux_doc = doc! {
+            "_id": object_id,
+            "fp_hists": fp_hist_doc,
+            "cross_matches": xmatches,
+            "created_at": now,
+            "updated_at": now,
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [ra - 180.0, dec],
+                },
+            }
+        };
+
+        self.alert_aux_collection
+            .insert_one(alert_aux_doc)
+            .await
+            .map_err(|e| match *e.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
+                _ => e.into(),
+            })?;
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl AlertWorker for DecamAlertWorker {
-    type ObjectId = String;
-
     async fn new(config_path: &str) -> Result<DecamAlertWorker, AlertWorkerError> {
         let config_file = conf::load_config(&config_path)?;
 
@@ -165,6 +276,18 @@ impl AlertWorker for DecamAlertWorker {
         format!("{}_alerts_filter_queue", self.stream_name)
     }
 
+    #[instrument(
+        skip(
+            self,
+            ra,
+            dec,
+            _prv_candidates_doc,
+            _prv_nondetections_doc,
+            fp_hist_doc,
+            _survey_matches
+        ),
+        err
+    )]
     async fn insert_aux(
         self: &mut Self,
         object_id: &str,
@@ -173,41 +296,12 @@ impl AlertWorker for DecamAlertWorker {
         _prv_candidates_doc: &Vec<Document>,
         _prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
+        _survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
         let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-        trace!("Xmatch took: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-        let alert_aux_doc = doc! {
-            "_id": object_id,
-            "fp_hists": fp_hist_doc,
-            "cross_matches": xmatches,
-            "aliases": survey_matches,
-            "created_at": now,
-            "updated_at": now,
-            "coordinates": {
-                "radec_geojson": {
-                    "type": "Point",
-                    "coordinates": [ra - 180.0, dec],
-                },
-            }
-        };
-
-        self.alert_aux_collection
-            .insert_one(alert_aux_doc)
-            .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
-                _ => e.into(),
-            })?;
-
-        trace!("Inserting alert_aux: {:?}", start.elapsed());
-
+        self.insert_alert_aux(object_id.into(), ra, dec, fp_hist_doc, xmatches, now)
+            .await?;
         Ok(())
     }
 
@@ -220,8 +314,6 @@ impl AlertWorker for DecamAlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
-
         let update_doc = doc! {
             "$addToSet": {
                 "fp_hists": { "$each": fp_hist_doc }
@@ -236,21 +328,18 @@ impl AlertWorker for DecamAlertWorker {
             .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
 
-        trace!("Updating alert_aux: {:?}", start.elapsed());
-
         Ok(())
     }
 
-    async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
+    async fn process_alert(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-
-        let start = std::time::Instant::now();
-
-        let alert = self.alert_from_avro_bytes(avro_bytes).await?;
-
-        trace!("Decoding alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
+        let alert = self
+            .alert_from_avro_bytes(avro_bytes)
+            .await
+            .inspect_err(as_error!())?;
 
         let fp_hist = alert.fp_hists;
 
@@ -261,55 +350,28 @@ impl AlertWorker for DecamAlertWorker {
 
         let candidate_doc = mongify(&alert.candidate);
 
-        let alert_doc = doc! {
-            "_id": &candid,
-            "objectId": &object_id,
-            "candidate": &candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        self.alert_collection
-            .insert_one(alert_doc)
+        let status = self
+            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
             .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertExists,
-                _ => e.into(),
-            })?;
+            .inspect_err(as_error!())?;
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
+        }
 
-        trace!("Formatting & Inserting alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(alert.cutout_science),
-            "cutoutTemplate": cutout2bsonbinary(alert.cutout_template),
-            "cutoutDifference": cutout2bsonbinary(alert.cutout_difference),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-
-        trace!("Formatting & Inserting cutout: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
+        self.format_and_insert_cutout(
+            candid,
+            alert.cutout_science,
+            alert.cutout_template,
+            alert.cutout_difference,
+        )
+        .await
+        .inspect_err(as_error!())?;
         let alert_aux_exists = self
-            .alert_aux_collection
-            .count_documents(doc! { "_id": &object_id })
-            .await?
-            > 0;
+            .check_alert_aux_exists(&object_id)
+            .await
+            .inspect_err(as_error!())?;
 
-        trace!("Checking if alert_aux exists: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let fp_hist_doc = fp_hist.into_iter().map(|x| mongify(&x)).collect::<Vec<_>>();
-
-        trace!("Formatting fp_hist: {:?}", start.elapsed());
+        let fp_hist_doc = self.format_fp_hist(fp_hist);
 
         if !alert_aux_exists {
             let result = self
@@ -333,7 +395,8 @@ impl AlertWorker for DecamAlertWorker {
                     &None,
                     now,
                 )
-                .await?;
+                .await
+                .inspect_err(as_error!())?;
             } else {
                 result?;
             }
@@ -346,9 +409,10 @@ impl AlertWorker for DecamAlertWorker {
                 &None,
                 now,
             )
-            .await?;
+            .await
+            .inspect_err(as_error!())?;
         }
 
-        Ok(candid)
+        Ok(status)
     }
 }
