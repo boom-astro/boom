@@ -58,6 +58,7 @@ pub async fn get_db_info(db: web::Data<mongodb::Database>) -> HttpResponse {
         routes::filters::post_filter,
         routes::filters::add_filter_version,
         routes::queries::post_count_query,
+        routes::queries::post_estimated_count_query,
         routes::queries::post_find_query,
         routes::queries::post_cone_search_query,
     )
@@ -92,6 +93,7 @@ async fn main() -> std::io::Result<()> {
             .service(routes::queries::post_find_query)
             .service(routes::queries::post_cone_search_query)
             .service(routes::queries::post_count_query)
+            .service(routes::queries::post_estimated_count_query)
             .wrap(Logger::default())
     })
     .bind(("0.0.0.0", 4000))?

@@ -57,6 +57,44 @@ pub async fn post_count_query(
     response::ok("success", serde_json::to_value(count).unwrap())
 }
 
+#[derive(serde::Deserialize, Clone, ToSchema)]
+struct EstimatedCountQuery {
+    catalog_name: String,
+}
+
+/// Run a count query
+#[utoipa::path(
+    post,
+    path = "/queries/estimated-count",
+    request_body = EstimatedCountQuery,
+    responses(
+        (status = 200, description = "Approximately count documents in the catalog", body = serde_json::Value),
+        (status = 404, description = "Catalog does not exist"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+#[post("/queries/estimated-count")]
+pub async fn post_estimated_count_query(
+    db: web::Data<Database>,
+    web::Json(query): web::Json<EstimatedCountQuery>,
+) -> HttpResponse {
+    let catalog_name = query.catalog_name.trim();
+    if !catalog_exists(&db, &catalog_name).await {
+        return response::not_found(&format!("Catalog {} does not exist", catalog_name));
+    }
+    let collection_name = catalog_name.to_string();
+    // Get the collection
+    let collection = db.collection::<mongodb::bson::Document>(&collection_name);
+    let count = match collection.estimated_document_count().await {
+        Ok(c) => c,
+        Err(e) => {
+            return response::internal_error(&format!("Error counting documents: {:?}", e));
+        }
+    };
+    // Return the count
+    response::ok("success", serde_json::to_value(count).unwrap())
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
 struct FindQuery {
     catalog_name: String,
