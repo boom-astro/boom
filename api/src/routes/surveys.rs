@@ -45,7 +45,7 @@ fn bson_docs_to_json_values(
 /// in a way that is useful for a frontend to display object-level information.
 #[utoipa::path(
     get,
-    path = "/objects/{object_id/surveys/{survey_name}",
+    path = "/surveys/{survey_name}/objects/{object_id}",
     params(
         ("survey_name" = String, Path, description = "Name of the survey (e.g., 'ZTF')"),
         ("object_id" = String, Path, description = "ID of the object to retrieve"),
@@ -56,12 +56,12 @@ fn bson_docs_to_json_values(
         (status = 500, description = "Internal server error")
     )
 )]
-#[get("/objects/{object_id}/surveys/{survey_name}")]
+#[get("/surveys/{survey_name}/objects/{object_id}")]
 pub async fn get_object(
     db: web::Data<Database>,
     path: web::Path<(String, String)>,
 ) -> HttpResponse {
-    let (object_id, survey_name) = path.into_inner();
+    let (survey_name, object_id) = path.into_inner();
     let survey_name = survey_name.to_uppercase(); // All alert collections are uppercase
     let alerts_collection: Collection<Document> = db.collection(&format!("{}_alerts", survey_name));
     let cutout_collection: Collection<Document> =
