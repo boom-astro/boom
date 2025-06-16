@@ -62,7 +62,7 @@ struct EstimatedCountQuery {
     catalog_name: String,
 }
 
-/// Run a count query
+/// Run an estimated count query
 #[utoipa::path(
     post,
     path = "/queries/estimated-count",
