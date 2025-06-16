@@ -2,6 +2,7 @@ use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
+        db::cutout2bsonbinary,
         o11y::{as_error, log_error, WARN},
         spatial::XmatchError,
         worker::should_terminate,
@@ -330,6 +331,25 @@ pub trait AlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError>;
+    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
+    async fn format_and_insert_cutouts(
+        &self,
+        candid: i64,
+        cutout_science: Vec<u8>,
+        cutout_template: Vec<u8>,
+        cutout_difference: Vec<u8>,
+        collection: &Collection<Document>,
+    ) -> Result<(), AlertError> {
+        let cutout_doc = doc! {
+            "_id": &candid,
+            "cutoutScience": cutout2bsonbinary(cutout_science),
+            "cutoutTemplate": cutout2bsonbinary(cutout_template),
+            "cutoutDifference": cutout2bsonbinary(cutout_difference),
+        };
+
+        collection.insert_one(cutout_doc).await?;
+        Ok(())
+    }
     #[instrument(skip_all, err)]
     async fn get_matches(
         &self,

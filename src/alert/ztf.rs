@@ -6,7 +6,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::{get_coordinates, mongify},
         o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
@@ -354,25 +354,29 @@ pub struct ZtfAlert {
         rename = "cutoutScience",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_science: Option<Vec<u8>>,
+    pub cutout_science: Vec<u8>,
     #[serde(
         rename = "cutoutTemplate",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_template: Option<Vec<u8>>,
+    pub cutout_template: Vec<u8>,
     #[serde(
         rename = "cutoutDifference",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_difference: Option<Vec<u8>>,
+    pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let cutout: Option<Cutout> = Option::deserialize(deserializer)?;
-    Ok(cutout.map(|cutout| cutout.stamp_data))
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout.stamp_data),
+    }
 }
 
 pub struct ZtfAlertWorker {
@@ -546,25 +550,6 @@ impl ZtfAlertWorker {
                 _ => Err(error),
             })?;
         Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-        Ok(())
     }
 
     #[instrument(skip(self), err)]
@@ -761,11 +746,12 @@ impl AlertWorker for ZtfAlertWorker {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;

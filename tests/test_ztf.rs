@@ -77,9 +77,9 @@ async fn test_alert_from_avro_bytes() {
     assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
 
     // validate the cutouts
-    assert_eq!(alert.cutout_science.clone().unwrap().len(), 13107);
-    assert_eq!(alert.cutout_template.clone().unwrap().len(), 12410);
-    assert_eq!(alert.cutout_difference.clone().unwrap().len(), 14878);
+    assert_eq!(alert.cutout_science.len(), 13107);
+    assert_eq!(alert.cutout_template.len(), 12410);
+    assert_eq!(alert.cutout_difference.len(), 14878);
 
     let prv_candidates = alert.prv_candidates.take();
     let fp_hist = alert.fp_hists.take();

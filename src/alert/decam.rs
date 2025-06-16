@@ -5,7 +5,7 @@ use crate::{
     },
     conf,
     utils::{
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::{get_coordinates, mongify},
         o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
@@ -165,25 +165,6 @@ impl DecamAlertWorker {
                 _ => Err(error),
             })?;
         Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Vec<u8>,
-        cutout_template: Vec<u8>,
-        cutout_difference: Vec<u8>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-        Ok(())
     }
 
     #[instrument(skip(self), err)]
@@ -358,11 +339,12 @@ impl AlertWorker for DecamAlertWorker {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;

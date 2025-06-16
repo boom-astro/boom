@@ -3,7 +3,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::{get_coordinates, mongify},
         o11y::as_error,
         spatial::xmatch,
     },
@@ -561,14 +561,14 @@ pub struct LsstAlert {
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_difference: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_difference: Vec<u8>,
     #[serde(rename = "cutoutScience")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_science: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_template: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_template: Vec<u8>,
 }
 
 // Deserialize helper functions
@@ -587,6 +587,18 @@ where
 {
     let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
     Ok(objid.map(|i| i.to_string()))
+}
+
+pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cutout: Option<Vec<u8>> = apache_avro::serde_avro_bytes_opt::deserialize(deserializer)?;
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout),
+    }
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
@@ -768,25 +780,6 @@ impl LsstAlertWorker {
                 _ => Err(error),
             })?;
         Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-        Ok(())
     }
 
     #[instrument(skip(self), err)]
@@ -979,11 +972,12 @@ impl AlertWorker for LsstAlertWorker {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;
