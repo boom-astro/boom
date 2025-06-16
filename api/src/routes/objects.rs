@@ -41,11 +41,11 @@ fn bson_docs_to_json_values(
 }
 
 /// Fetch an object from a given survey's alert stream
-/// Ultimately, this endpoint should format the object nicely, in a way that is useful
+/// Ultimately, this endpoint should format the object nicely,
 /// in a way that is useful for a frontend to display object-level information.
 #[utoipa::path(
     get,
-    path = "/alerts/{survey_name}/object/{object_id}",
+    path = "/objects/{object_id/surveys/{survey_name}",
     params(
         ("survey_name" = String, Path, description = "Name of the survey (e.g., 'ZTF')"),
         ("object_id" = String, Path, description = "ID of the object to retrieve"),
@@ -56,12 +56,12 @@ fn bson_docs_to_json_values(
         (status = 500, description = "Internal server error")
     )
 )]
-#[get("/alerts/{survey_name}/object/{object_id}")]
+#[get("/objects/{object_id}/surveys/{survey_name}")]
 pub async fn get_object(
     db: web::Data<Database>,
     path: web::Path<(String, String)>,
 ) -> HttpResponse {
-    let (survey_name, object_id) = path.into_inner();
+    let (object_id, survey_name) = path.into_inner();
     let survey_name = survey_name.to_uppercase(); // All alert collections are uppercase
     let alerts_collection: Collection<Document> = db.collection(&format!("{}_alerts", survey_name));
     let cutout_collection: Collection<Document> =
