@@ -41,6 +41,7 @@ fn bson_docs_to_json_values(
 }
 
 /// Fetch an object from a given survey's alert stream
+///
 /// Ultimately, this endpoint should format the object nicely,
 /// in a way that is useful for a frontend to display object-level information.
 #[utoipa::path(
