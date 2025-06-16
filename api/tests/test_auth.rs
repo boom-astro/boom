@@ -12,7 +12,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_post_auth() {
         let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await;
+        let auth_app_data = get_default_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -66,7 +66,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_auth_middleware() {
         let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await;
+        let auth_app_data = get_default_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

@@ -69,7 +69,7 @@ struct ApiDoc;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let database = get_db().await;
-    let auth = get_auth(&database).await;
+    let auth = get_auth(&database).await.unwrap();
 
     // Initialize logging
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));

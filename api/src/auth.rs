@@ -7,7 +7,6 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, deco
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
-/// Our claims struct, it needs to derive `Serialize` and/or `Deserialize`
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     sub: String,
@@ -27,7 +26,7 @@ pub struct AuthProvider {
 }
 
 impl AuthProvider {
-    pub async fn new(config: AuthConfig, db: &mongodb::Database) -> Self {
+    pub async fn new(config: AuthConfig, db: &mongodb::Database) -> Result<Self, std::io::Error> {
         let encoding_key = EncodingKey::from_secret(config.secret_key.as_bytes());
         let decoding_key = DecodingKey::from_secret(config.secret_key.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
@@ -35,11 +34,11 @@ impl AuthProvider {
 
         let users_collection: mongodb::Collection<User> = db.collection("users");
 
-        // always create the admin user if it doesn't exist
-        // using the admin_username from the config and admin_password
+        // always create the admin user if it doesn't exist,
+        // if it does exist, check that the password matches
         let admin_username = config.admin_username.clone();
         let admin_password = config.admin_password.clone();
-        // first check if the admin user already exists
+
         match users_collection
             .find_one(doc! { "username": &admin_username })
             .await
@@ -47,11 +46,10 @@ impl AuthProvider {
             Ok(Some(admin_user)) => {
                 // Admin user already exists, check that the password matches
                 if !bcrypt::verify(&config.admin_password, &admin_user.password).unwrap_or(false) {
-                    eprintln!(
-                        "Warning: Admin user already exists but the password does not match the configured admin password."
-                    );
-                } else {
-                    println!("Admin user already exists.");
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "Admin user already exists, but password does not match with the one in the config",
+                    ));
                 }
             }
             Ok(None) => {
@@ -70,16 +68,23 @@ impl AuthProvider {
                         println!("Admin user created successfully.");
                     }
                     Err(e) => {
-                        eprintln!("Failed to create admin user: {}", e);
+                        // eprintln!("Failed to create admin user: {}", e);
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Failed to create admin user: {}", e),
+                        ));
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Failed to check for admin user: {}", e);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to check for admin user: {}", e),
+                ));
             }
         }
 
-        AuthProvider {
+        Ok(AuthProvider {
             encoding_key,
             decoding_key,
             validation,
@@ -87,7 +92,7 @@ impl AuthProvider {
             token_expiration: config.token_expiration,
             admin_username,
             admin_password,
-        }
+        })
     }
 
     pub async fn create_token(&self, user: &User) -> Result<String, jsonwebtoken::errors::Error> {
@@ -152,12 +157,12 @@ impl AuthProvider {
     }
 }
 
-pub async fn get_auth(db: &mongodb::Database) -> AuthProvider {
+pub async fn get_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
     let config = AppConfig::from_default_path().auth;
     AuthProvider::new(config, db).await
 }
 
-pub async fn get_default_auth(db: &mongodb::Database) -> AuthProvider {
+pub async fn get_default_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
     let config = AppConfig::default().auth;
     AuthProvider::new(config, db).await
 }
