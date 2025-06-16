@@ -1,45 +1,8 @@
-use actix_web::body::MessageBody;
-use actix_web::dev::{ServiceRequest, ServiceResponse};
-use actix_web::middleware::{Next, from_fn};
-use actix_web::{App, Error, HttpResponse, HttpServer, get, middleware::Logger, web};
+use actix_web::middleware::from_fn;
+use actix_web::{App, HttpResponse, HttpServer, get, middleware::Logger, web};
 use boom_api::api;
-use boom_api::auth::{AuthProvider, get_auth};
+use boom_api::auth::{auth_middleware, get_auth};
 use boom_api::db::get_db;
-
-async fn auth_middleware(
-    req: ServiceRequest,
-    next: Next<impl MessageBody>,
-) -> Result<ServiceResponse<impl MessageBody>, Error> {
-    let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
-        Some(data) => data,
-        None => {
-            return Err(actix_web::error::ErrorInternalServerError(
-                "Unable to authenticate user",
-            ));
-        }
-    };
-    match req.headers().get("Authorization") {
-        Some(auth_header) if auth_header.to_str().unwrap_or("").starts_with("Bearer ") => {
-            let token = auth_header.to_str().unwrap()[7..].trim();
-            match auth_app_data.validate_token(token).await {
-                Ok(user_id) => {
-                    println!("Valid token for user ID: {}", user_id);
-                }
-                Err(e) => {
-                    println!("Invalid token: {}", e);
-                    return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
-                }
-            }
-        }
-        _ => {
-            println!("No valid Authorization header");
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Missing or invalid Authorization header",
-            ));
-        }
-    }
-    next.call(req).await
-}
 
 #[get("/")]
 pub async fn get_health() -> HttpResponse {
