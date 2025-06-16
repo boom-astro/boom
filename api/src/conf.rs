@@ -13,7 +13,7 @@ impl Default for AuthConfig {
             secret_key: "1234".to_string(),
             token_expiration: 0,
             admin_username: "admin".to_string(),
-            admin_password: "admin".to_string(),
+            admin_password: "adminsecret".to_string(),
         }
     }
 }

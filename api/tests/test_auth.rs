@@ -4,7 +4,7 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
     use boom_api::api;
-    use boom_api::auth::{auth_middleware, get_auth};
+    use boom_api::auth::{auth_middleware, get_default_auth};
     use boom_api::db::get_default_db;
     use mongodb::Database;
 
@@ -12,19 +12,13 @@ mod tests {
     #[actix_rt::test]
     async fn test_post_auth() {
         let database: Database = get_default_db().await;
-        let auth_app_data = get_auth(&database).await;
+        let auth_app_data = get_default_auth(&database).await;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .service(api::users::post_user)
-                .service(api::auth::post_auth)
-                .service(
-                    // we add an endpoint that requires auth to test the middleware
-                    actix_web::web::scope("/auth-required")
-                        .wrap(from_fn(auth_middleware))
-                        .service(api::users::get_users),
-                ),
+                .service(api::auth::post_auth),
         )
         .await;
 
@@ -64,6 +58,51 @@ mod tests {
         assert_eq!(resp["status"], "success");
 
         // the response is a jwt token
+        let token = resp["token"].as_str().expect("token should be a string");
+        assert!(!token.is_empty(), "Token should not be empty");
+    }
+
+    /// Test POST /auth
+    #[actix_rt::test]
+    async fn test_auth_middleware() {
+        let database: Database = get_default_db().await;
+        let auth_app_data = get_default_auth(&database).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .service(api::users::post_user)
+                .service(api::auth::post_auth)
+                .service(
+                    // we add an endpoint that requires auth to test the middleware
+                    actix_web::web::scope("/auth-required")
+                        .wrap(from_fn(auth_middleware))
+                        .service(api::users::get_users),
+                ),
+        )
+        .await;
+
+        // On initialization, the auth provider creates an admin user
+        let (admin_username, admin_password) = auth_app_data.get_admin_credentials();
+
+        // Now try to authenticate with the admin user, to retrieve a JWT token
+        let req = test::TestRequest::post()
+            .uri("/auth")
+            .set_json(&serde_json::json!({
+                "username": admin_username,
+                "password": admin_password
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = test::read_body(resp).await;
+        let body_str = String::from_utf8_lossy(&body);
+        let resp: serde_json::Value =
+            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        assert_eq!(resp["status"], "success");
+
         let token = resp["token"].as_str().expect("token should be a string");
 
         // Now try to access a protected endpoint with the token

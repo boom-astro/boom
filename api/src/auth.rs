@@ -22,6 +22,8 @@ pub struct AuthProvider {
     validation: Validation,
     users_collection: mongodb::Collection<User>,
     token_expiration: usize,
+    admin_username: String,
+    admin_password: String,
 }
 
 impl AuthProvider {
@@ -36,18 +38,25 @@ impl AuthProvider {
         // always create the admin user if it doesn't exist
         // using the admin_username from the config and admin_password
         let admin_username = config.admin_username.clone();
+        let admin_password = config.admin_password.clone();
         // first check if the admin user already exists
         match users_collection
             .find_one(doc! { "username": &admin_username })
             .await
         {
-            Ok(Some(_)) => {
-                // Admin user already exists
+            Ok(Some(admin_user)) => {
+                // Admin user already exists, check that the password matches
+                if !bcrypt::verify(&config.admin_password, &admin_user.password).unwrap_or(false) {
+                    eprintln!(
+                        "Warning: Admin user already exists but the password does not match the configured admin password."
+                    );
+                } else {
+                    println!("Admin user already exists.");
+                }
             }
             Ok(None) => {
                 // Admin user does not exist, create it
                 let user_id = uuid::Uuid::new_v4().to_string();
-                let admin_password = config.admin_password.clone();
                 let hashed_admin_password = bcrypt::hash(&admin_password, bcrypt::DEFAULT_COST)
                     .expect("failed to hash admin password");
                 let admin_user = User {
@@ -76,6 +85,8 @@ impl AuthProvider {
             validation,
             users_collection,
             token_expiration: config.token_expiration,
+            admin_username,
+            admin_password,
         }
     }
 
@@ -135,10 +146,19 @@ impl AuthProvider {
             ))
         }
     }
+
+    pub fn get_admin_credentials(&self) -> (String, String) {
+        (self.admin_username.clone(), self.admin_password.clone())
+    }
 }
 
 pub async fn get_auth(db: &mongodb::Database) -> AuthProvider {
     let config = AppConfig::from_default_path().auth;
+    AuthProvider::new(config, db).await
+}
+
+pub async fn get_default_auth(db: &mongodb::Database) -> AuthProvider {
+    let config = AppConfig::default().auth;
     AuthProvider::new(config, db).await
 }
 
