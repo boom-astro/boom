@@ -10,7 +10,14 @@ async fn auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
-    let auth_app_data: &web::Data<AuthProvider> = req.app_data().unwrap();
+    let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
+        Some(data) => data,
+        None => {
+            return Err(actix_web::error::ErrorInternalServerError(
+                "Unable to authenticate user",
+            ));
+        }
+    };
     match req.headers().get("Authorization") {
         Some(auth_header) if auth_header.to_str().unwrap_or("").starts_with("Bearer ") => {
             let token = auth_header.to_str().unwrap()[7..].trim();
