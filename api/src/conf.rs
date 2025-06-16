@@ -70,9 +70,15 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
         .build()
         .expect("a config.yaml file should exist");
 
+    // Load API configuration
+    let api_conf = config
+        .get_table("api")
+        .expect("an api table should exist in the config file");
+
     // Load Auth configuration
-    let auth_conf = config
-        .get_table("auth")
+    let auth_conf = api_conf
+        .get("auth")
+        .and_then(|auth| auth.clone().into_table().ok())
         .expect("an auth table should exist in the config file");
     let secret_key = match auth_conf.get("secret_key") {
         Some(secret_key) => secret_key
