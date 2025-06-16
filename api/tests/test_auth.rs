@@ -55,8 +55,6 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
-        // debug print output
-        println!("Response: {:?}", resp);
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = test::read_body(resp).await;
