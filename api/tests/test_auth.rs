@@ -3,9 +3,9 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
-    use boom_api::api;
     use boom_api::auth::{auth_middleware, get_default_auth};
     use boom_api::db::get_default_db;
+    use boom_api::routes;
     use mongodb::Database;
 
     /// Test POST /auth
@@ -17,8 +17,8 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
-                .service(api::users::post_user)
-                .service(api::auth::post_auth),
+                .service(routes::users::post_user)
+                .service(routes::auth::post_auth),
         )
         .await;
 
@@ -71,13 +71,13 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
-                .service(api::users::post_user)
-                .service(api::auth::post_auth)
+                .service(routes::users::post_user)
+                .service(routes::auth::post_auth)
                 .service(
                     // we add an endpoint that requires auth to test the middleware
                     actix_web::web::scope("/auth-required")
                         .wrap(from_fn(auth_middleware))
-                        .service(api::users::get_users),
+                        .service(routes::users::get_users),
                 ),
         )
         .await;

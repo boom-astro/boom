@@ -4,6 +4,10 @@ use crate::conf::{AppConfig, DatabaseConfig};
 use mongodb::bson::doc;
 use mongodb::{Client, Database};
 
+/// Protected names for operational data collections, which should not be used
+/// for analytical data catalogs
+pub const PROTECTED_COLLECTION_NAMES: [&str; 2] = ["users", "filters"];
+
 async fn db_from_config(config: DatabaseConfig) -> Database {
     let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
         format!(

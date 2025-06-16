@@ -16,6 +16,13 @@ impl ApiResponseBody {
             data,
         }
     }
+    pub fn not_found(message: &str) -> Self {
+        Self {
+            status: "error".to_string(),
+            message: message.to_string(),
+            data: serde_json::Value::Null,
+        }
+    }
     pub fn internal_error(error_message: &str) -> Self {
         Self {
             status: "error".to_string(),
@@ -35,6 +42,10 @@ impl ApiResponseBody {
 // builds an HttpResponse with an ApiResponseBody
 pub fn ok(message: &str, data: serde_json::Value) -> HttpResponse {
     HttpResponse::Ok().json(ApiResponseBody::ok(message, data))
+}
+
+pub fn not_found(message: &str) -> HttpResponse {
+    HttpResponse::NotFound().json(ApiResponseBody::not_found(message))
 }
 
 pub fn internal_error(message: &str) -> HttpResponse {
