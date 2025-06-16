@@ -155,8 +155,15 @@ pub async fn auth_middleware(
         }
     };
     match req.headers().get("Authorization") {
-        Some(auth_header) if auth_header.to_str().unwrap_or("").starts_with("Bearer ") => {
-            let token = auth_header.to_str().unwrap()[7..].trim();
+        Some(auth_header) => {
+            let token = match auth_header.to_str() {
+                Ok(token) if token.starts_with("Bearer ") => token[7..].trim(),
+                _ => {
+                    return Err(actix_web::error::ErrorUnauthorized(
+                        "Invalid Authorization header",
+                    ));
+                }
+            };
             match auth_app_data.validate_token(token).await {
                 Err(_) => {
                     return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
