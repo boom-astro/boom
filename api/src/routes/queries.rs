@@ -16,7 +16,7 @@ use utoipa::{PartialSchema, ToSchema};
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct CountQuery {
     catalog_name: String,
-    filter: Option<serde_json::Value>,
+    filter: serde_json::Value,
 }
 
 /// Run a count query
@@ -43,7 +43,7 @@ pub async fn post_count_query(
     // Get the collection
     let collection = db.collection::<mongodb::bson::Document>(&collection_name);
     // Count documents with optional filter
-    let filter = match parse_optional_filter(&query.filter) {
+    let filter = match parse_filter(&query.filter) {
         Ok(f) => f,
         Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
     };
