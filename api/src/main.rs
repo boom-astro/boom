@@ -51,7 +51,7 @@ pub async fn get_db_info(db: web::Data<mongodb::Database>) -> HttpResponse {
         routes::users::post_user,
         routes::users::get_users,
         routes::users::delete_user,
-        routes::objects::get_latest_alert_for_object,
+        routes::objects::get_object,
         routes::catalogs::post_catalog_count_query,
         routes::catalogs::post_catalog_find_query,
         routes::catalogs::post_catalog_cone_search_query,
@@ -80,7 +80,7 @@ async fn main() -> std::io::Result<()> {
             .service(Scalar::with_url("/docs", api_doc.clone()))
             .service(get_health)
             .service(get_db_info)
-            .service(routes::objects::get_latest_alert_for_object)
+            .service(routes::objects::get_object)
             .service(routes::filters::post_filter)
             .service(routes::filters::add_filter_version)
             .service(routes::users::post_user)

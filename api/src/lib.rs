@@ -1,3 +1,4 @@
+pub mod bodies;
 pub mod conf;
 pub mod db;
 pub mod models;
