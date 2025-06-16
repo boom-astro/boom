@@ -9,10 +9,10 @@ database:
   srv: false
 api:
   auth:
-    secret_key: "1234"
-    token_expiration: 0 # in seconds, 0 to disable
-    admin_username: admin
-    admin_password: adminsecret
+    secret_key: "1234" # Secret key for JWT authentication, change it to a strong secret
+    token_expiration: 0 # jwt token expiration in seconds, 0 to disable
+    admin_username: admin # Admin username for the API
+    admin_password: adminsecret # Admin password for the API
 redis:
   host: localhost
   port: 6379
