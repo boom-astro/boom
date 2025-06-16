@@ -56,10 +56,6 @@ impl AuthProvider {
                     email: "<admin_email@example.com>".to_string(),
                     password: hashed_admin_password,
                 };
-                // DEBUG print the username, password
-                println!("Creating admin user:");
-                println!("Username: {}", &admin_username);
-                println!("Password: {}", &admin_password);
                 match users_collection.insert_one(admin_user).await {
                     Ok(_) => {
                         println!("Admin user created successfully.");
@@ -162,8 +158,7 @@ pub async fn auth_middleware(
         Some(auth_header) if auth_header.to_str().unwrap_or("").starts_with("Bearer ") => {
             let token = auth_header.to_str().unwrap()[7..].trim();
             match auth_app_data.validate_token(token).await {
-                Err(e) => {
-                    println!("Invalid token: {}", e);
+                Err(_) => {
                     return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
                 }
                 _ => {}
