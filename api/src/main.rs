@@ -52,14 +52,14 @@ pub async fn get_db_info(db: web::Data<mongodb::Database>) -> HttpResponse {
         routes::users::get_users,
         routes::users::delete_user,
         routes::objects::get_object,
-        routes::catalogs::post_catalog_count_query,
-        routes::catalogs::post_catalog_find_query,
-        routes::catalogs::post_catalog_cone_search_query,
         routes::catalogs::get_catalogs,
         routes::catalogs::get_catalog_indexes,
         routes::catalogs::get_catalog_sample,
         routes::filters::post_filter,
-        routes::filters::add_filter_version
+        routes::filters::add_filter_version,
+        routes::queries::post_count_query,
+        routes::queries::post_find_query,
+        routes::queries::post_cone_search_query,
     )
 )]
 struct ApiDoc;
@@ -87,11 +87,11 @@ async fn main() -> std::io::Result<()> {
             .service(routes::users::get_users)
             .service(routes::users::delete_user)
             .service(routes::catalogs::get_catalogs)
-            .service(routes::catalogs::post_catalog_count_query)
-            .service(routes::catalogs::post_catalog_find_query)
-            .service(routes::catalogs::post_catalog_cone_search_query)
             .service(routes::catalogs::get_catalog_indexes)
             .service(routes::catalogs::get_catalog_sample)
+            .service(routes::queries::post_find_query)
+            .service(routes::queries::post_cone_search_query)
+            .service(routes::queries::post_count_query)
             .wrap(Logger::default())
     })
     .bind(("0.0.0.0", 4000))?
