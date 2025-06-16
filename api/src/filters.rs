@@ -1,3 +1,5 @@
+/// Functionality for working with filters
+
 // Deserialize helper functions
 fn _deserialize_filter(
     filter: &serde_json::Value,
@@ -21,9 +23,12 @@ fn _deserialize_filter(
     }
 }
 
+/// Parse a filter from a JSON value
 pub fn parse_filter(filter: &serde_json::Value) -> Result<mongodb::bson::Document, std::io::Error> {
     _deserialize_filter(filter)
 }
+
+/// Parse an optional filter from a JSON value
 pub fn parse_optional_filter(
     filter_opt: &Option<serde_json::Value>,
 ) -> Result<mongodb::bson::Document, std::io::Error> {

@@ -1,5 +1,5 @@
 use crate::{
-    bodies::{parse_filter, parse_optional_filter},
+    filters::{parse_filter, parse_optional_filter},
     models::response,
 };
 
