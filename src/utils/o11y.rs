@@ -3,9 +3,10 @@
 //! This module provides a collection of tools for instrumentation and logging
 //! throughout the application.
 //!
-use std::iter::successors;
+use std::{fs::File, io::BufWriter, iter::successors};
 
 use tracing::Subscriber;
+use tracing_flame::{FlameLayer, FlushGuard};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
 
 /// Iterate over the `Display` representations of the sources of the given error
@@ -198,21 +199,17 @@ pub use as_error;
 pub enum BuildSubscriberError {
     #[error("failed to parse filtering directive")]
     Parse(#[from] tracing_subscriber::filter::ParseError),
+    #[error("failed to build flame layer")]
+    Flame(#[from] tracing_flame::Error),
 }
 
-/// Build a tracing subscriber.
-pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
-    let mut fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_file(true)
-        .with_line_number(true);
-
-    if let Some(kind) = std::env::var("RUST_LOG_SPAN_EVENTS")
+fn parse_span_events(env_var: &str) -> FmtSpan {
+    std::env::var(env_var)
         .ok()
         .and_then(|string| {
             string
                 .split(',')
-                .map(|part| match part.trim().to_lowercase().as_str() {
+                .filter_map(|part| match part.trim().to_lowercase().as_str() {
                     "new" => Some(FmtSpan::NEW),
                     "enter" => Some(FmtSpan::ENTER),
                     "exit" => Some(FmtSpan::EXIT),
@@ -222,13 +219,49 @@ pub fn build_subscriber() -> Result<impl Subscriber, BuildSubscriberError> {
                     "full" => Some(FmtSpan::FULL),
                     _ => None,
                 })
-                .flatten()
                 .reduce(|lhs, rhs| lhs | rhs)
         })
-    {
-        fmt_layer = fmt_layer.with_span_events(kind);
-    }
+        .unwrap_or(FmtSpan::NONE)
+}
+
+/// Build a tracing subscriber.
+///
+/// The Ok value is a tuple containing the subscriber and an optional flush
+/// guard. The flush guard is created if the subscriber includes a flame graph
+/// layer and should be kept in scope until the program ends to ensure all of
+/// the flame graph data are flushed to it. If the subscriber does not include a
+/// flame graph layer, then the second value in the tuple is None (no flush
+/// guard).
+///
+/// The inclusion of a flame graph layer depends on the environment variable
+/// BOOM_SPAN_EVENTS. If set, a flame graph layer is added to the subscriber and
+/// the value is used as the path where the raw flame graph data are to be
+/// written. If unset, then the returned subscriber will not include a flame
+/// graph layer.
+pub fn build_subscriber() -> Result<
+    (
+        // Return a boxed subscriber because the subscriber type is different
+        // depending on whether it has a flame graph layer.
+        Box<dyn Subscriber + Send + Sync>,
+        Option<FlushGuard<BufWriter<File>>>,
+    ),
+    BuildSubscriberError,
+> {
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true)
+        .with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
 
     let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
-    Ok(tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter)))
+
+    let subscriber = tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter));
+
+    match std::env::var("BOOM_FLAME_FILE") {
+        Ok(path) => {
+            let (flame_layer, guard) = FlameLayer::with_file(path)?;
+            Ok((Box::new(subscriber.with(flame_layer)), Some(guard)))
+        }
+        Err(_) => Ok((Box::new(subscriber), None)),
+    }
 }

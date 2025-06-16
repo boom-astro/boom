@@ -49,7 +49,7 @@ pub fn get_coordinates(ra: f64, dec: f64) -> Document {
     }
 }
 
-#[instrument]
+#[instrument(skip_all)]
 pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     return mongodb::bson::Binary {
         subtype: mongodb::bson::spec::BinarySubtype::Generic,

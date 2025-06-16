@@ -66,3 +66,31 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
       KAFKA_NUM_PARTITIONS: 15
+  api:
+    image: boom/boom-api:latest
+    hostname: api
+    ports:
+      - "4000:4000"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml
+  scheduler:
+    image: boom/boom-scheduler:latest
+    hostname: scheduler
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: scheduler
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml

@@ -110,7 +110,7 @@ async fn run(args: Cli) {
 #[tokio::main]
 async fn main() {
     let args = Cli::parse();
-    let subscriber = build_subscriber().expect("failed to build subscriber");
+    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
     run(args).await;
 }

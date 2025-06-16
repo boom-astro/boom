@@ -56,7 +56,7 @@ This provides structured context that helps make events easier to understand.
 
 As for deciding *what* to instrument, we should consider instrumenting 1) anything that helps provide context for events (particularly ERROR events) and/or 2) anything that we're interested in profiling for performance.
 
-* Subscribers can be configured to consume "span close" events, which include execution time details (see RUST_LOG_SPAN_EVENTS in the readme).
+* Subscribers can be configured to consume "span close" events, which include execution time details (see BOOM_SPAN_EVENTS in the readme).
 
 * The `tracing_flame` crate uses spans to generate flamegraphs.
 
@@ -85,3 +85,27 @@ When we log an error we want as much context as possible, including the error it
 
 * Some errors occur more than once in a given function.
   `log_error`/`as_error` can be used to give each occurrence a unique event callsite and therefore a clear origin when logged, e.g., `foo().inspect_err(as_error!("an optional message for additional context"))?;`
+
+## Generating flame graphs
+
+Boom supports generating a flame graph to visualize performance bottlenecks:
+
+1. Make sure you have `inferno` installed:
+   ```bash
+   cargo install inferno
+   ```
+
+2. Run boom with the `BOOM_FLAME_FILE` environment variable.
+   This instructs boom to generate a flame graph and save the output at the given path:
+   ```bash
+   BOOM_FLAME_FILE=./tracing.folded cargo run --bin scheduler -- ztf
+   ```
+
+   Terminate boom when you're done profiling.
+
+3. Turn the raw output into an interactive SVG with `inferno-flamegraph`:
+   ```bash
+   inferno-flamegraph <tracing.folded >tracing-flamegraph.svg
+   ```
+
+   The SVG file can be viewed in your browser.
