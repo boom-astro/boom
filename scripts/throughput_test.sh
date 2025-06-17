@@ -51,9 +51,9 @@ done
 
 # Required positional args
 if [[ $# -ne 2 ]]; then
-  echo "Error: incorrect arguments"  # TODO: stderr
-  echo
-  usage  # TODO: stderr
+  echo "Error: incorrect arguments" >&2
+  echo >&2
+  usage >&2
   exit 1
 fi
 SURVEY="$1"
@@ -81,9 +81,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "Error: Unknown option: $1"  # TODO: stderr
-      echo
-      usage  # TODO: stderr
+      echo "Error: Unknown option: $1" >&2
+      echo >&2
+      usage >&2
       exit 1
       ;;
   esac
@@ -122,7 +122,7 @@ PRODUCER_OUTPUT=$(./target/debug/kafka_producer ${SURVEY} ${DATE} | tee /dev/tty
 if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
   EXPECTED_COUNT="${BASH_REMATCH[1]}"
 else
-  echo "Error: Could not detect EXPECTED_COUNT from producer output"  # TODO: stderr
+  echo "Error: Could not detect EXPECTED_COUNT from producer output" >&2
   exit 1
 fi
 
@@ -144,7 +144,7 @@ ALERT_COLLECTION_NAME=$(alert_collection_name)
 while true; do
   ELAPSED=$(($(date +%s) - START))
   if [ $ELAPSED -gt $TIMEOUT ]; then
-    echo "WARNING: Timeout limit reached, exiting"  # TODO: stderr
+    echo "WARNING: Timeout limit reached, exiting" >&2
     exit 1
   fi
 
