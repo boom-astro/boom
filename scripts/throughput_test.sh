@@ -2,44 +2,33 @@
 
 set -e
 
-# Globals:
+MONGO_CONTAINER_NAME="boom-mongo-1"  # Mongodb container name
+DB_NAME="boom"                       # Database where alerts are stored
+ALERT_COUNT_CHECK_INTERVAL=1         # How often to check alert count (sec)
 
-# Mongodb container name
-MONGO_CONTAINER_NAME="boom-mongo-1"
-
-# Database and collection where alerts are stored
-DB="boom"
-collection() {
+# Collection where alerts are stored
+collection_name() {
   echo "$(echo "${SURVEY}" | tr '[:lower:]' '[:upper:]')_alerts"
 }
-
-# How often to check whether the expected number of alerts are in DB
-POLL_INTERVAL=1
-
-# Defaults:
-
-# Default survey name and alert date
-SURVEY="ztf"
-DATE="20240617"
-
-# Maximum test duration in seconds
-TIMEOUT=300
 
 # TODO: add a usage/help message
 # * Assumes binaries are already built and available in ./target/debug.
 #   # TODO: ability to override this location
 # * Assumes docker is already running
+# * Explain that this script drops both the "boom" db and the "${SURVEY}_${DATE}_programid1" topic
 
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 <SURVEY> <DATE> [--timeout TIMEOUT]"
+  exit 1
+fi
+
+SURVEY="$1"
+DATE="$2"
+shift 2
+
+TIMEOUT=300  # Default maximum test duration in seconds
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --survey)
-      SURVEY="$2"
-      shift 2
-      ;;
-    --date)
-      DATE="$2"
-      shift 2
-      ;;
     --timeout)
       TIMEOUT="$2"
       shift 2
@@ -72,7 +61,7 @@ docker exec ${MONGO_CONTAINER_ID} mongosh \
   --username ${MONGO_USERNAME} \
   --password ${MONGO_PASSWORD} \
   --authenticationDatabase admin \
-  --eval "db.getSiblingDB('${DB}').dropDatabase()"
+  --eval "db.getSiblingDB('${DB_NAME}').dropDatabase()"
 
 # Run the producer, capture stdout
 docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
@@ -95,12 +84,14 @@ START=$(date +%s)
 ./target/debug/kafka_consumer ${SURVEY} ${DATE} &
 CONSUMER_PID=$!
 
+# TODO: would adding a short delay here make this work more consistently?
+
 # Start the scheduler
 ./target/debug/scheduler ${SURVEY} &
 SCHEDULER_PID=$!
 
 # Wait for the expected number of alerts
-COLLECTION=$(collection)
+COLLECTION_NAME=$(collection_name)
 while true; do
   ELAPSED=$(($(date +%s) - START))
   if [ $ELAPSED -gt $TIMEOUT ]; then
@@ -113,7 +104,7 @@ while true; do
     --password ${MONGO_PASSWORD} \
     --authenticationDatabase admin \
     --quiet \
-    --eval "db.getSiblingDB('${DB}').${COLLECTION}.countDocuments()"
+    --eval "db.getSiblingDB('${DB_NAME}').${COLLECTION_NAME}.countDocuments()"
   )
   if [ "$COUNT" -ge "$EXPECTED_COUNT" ]; then
     DURATION=$(($(date +%s) - START))
@@ -124,5 +115,5 @@ while true; do
     break
   fi
 
-  sleep ${POLL_INTERVAL}
+  sleep ${ALERT_COUNT_CHECK_INTERVAL}
 done
