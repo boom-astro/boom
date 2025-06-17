@@ -18,9 +18,6 @@ POLL_INTERVAL=1
 
 # Defaults:
 
-# TODO: make this a required arg, or somehow get it from stdout from the producer ("Pushed 710 alerts to the queue")
-EXPECTED_COUNT=710
-
 # Default survey name and alert date
 SURVEY="ztf"
 DATE="20240617"
@@ -35,10 +32,6 @@ TIMEOUT=300
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --count)
-      EXPECTED_COUNT="$2"
-      shift 2
-      ;;
     --survey)
       SURVEY="$2"
       shift 2
@@ -81,12 +74,20 @@ docker exec ${MONGO_CONTAINER_ID} mongosh \
   --authenticationDatabase admin \
   --eval "db.getSiblingDB('${DB}').dropDatabase()"
 
-# Run the producer
+# Run the producer, capture stdout
 docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server broker:9092 \
   --delete \
+  --if-exists \
   --topic ${SURVEY}_${DATE}_programid1
-./target/debug/kafka_producer ${SURVEY} ${DATE}
+PRODUCER_OUTPUT=$(./target/debug/kafka_producer ${SURVEY} ${DATE} | tee /dev/tty)
+if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
+  EXPECTED_COUNT="${BASH_REMATCH[1]}"
+else
+  # TODO: stderr
+  echo "Error: Could not detect EXPECTED_COUNT from producer output"
+  exit 1
+fi
 
 START=$(date +%s)
 
