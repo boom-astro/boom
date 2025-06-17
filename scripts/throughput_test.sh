@@ -3,6 +3,9 @@
 set -e
 
 # Defaults
+PRODUCER="./target/release/kafka_producer"
+CONSUMER="./target/release/kafka_consumer"
+SCHEDULER="./target/release/scheduler"
 TIMEOUT=300
 MONGO_CONTAINER_NAME="boom-mongo-1"
 ALERT_DB_NAME="boom"
@@ -29,6 +32,12 @@ help() {
   echo
   echo "Optional arguments:"
   echo "  -h, --help                    Show this help and exit"
+  echo "  --producer PATH               Path to the producer binary"
+  echo "                                (default: ${PRODUCER})"
+  echo "  --consumer PATH               Path to the consumer binary"
+  echo "                                (default: ${CONSUMER})"
+  echo "  --scheduler PATH              Path to the scheduler binary"
+  echo "                                (default: ${SCHEDULER})"
   echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
   echo "  --mongo-container-name NAME   MongoDB container name (default: ${MONGO_CONTAINER_NAME})"
   echo "  --alert-db-name NAME          MongoDB database name (default: ${ALERT_DB_NAME})"
@@ -61,7 +70,6 @@ DATE="$2"
 shift 2
 
 # Optional named args
-# TODO: ability to override the ./target/debug location
 while [[ $# -gt 0 ]]; do
   case $1 in
     --timeout)
@@ -110,7 +118,7 @@ docker exec ${MONGO_CONTAINER_ID} mongosh \
   --username ${MONGO_USERNAME} \
   --password ${MONGO_PASSWORD} \
   --authenticationDatabase admin \
-  --eval "db.getSiblingDB('${ALERT_DB_NAME}').dropDatabase()"
+  --eval "db.getSiblingDB('${ALERT_DB_NAME}').dropDatabase()" >/dev/null
 
 # Run the producer, capture stdout
 docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
@@ -118,7 +126,7 @@ docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
   --delete \
   --if-exists \
   --topic ${SURVEY}_${DATE}_programid1
-PRODUCER_OUTPUT=$(./target/debug/kafka_producer ${SURVEY} ${DATE} | tee /dev/tty)
+PRODUCER_OUTPUT=$(${PRODUCER} ${SURVEY} ${DATE} | tee /dev/tty)
 if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
   EXPECTED_COUNT="${BASH_REMATCH[1]}"
 else
@@ -129,14 +137,14 @@ fi
 START=$(date +%s)
 
 # Start the consumer
-./target/debug/kafka_consumer ${SURVEY} ${DATE} &
+${CONSUMER} ${SURVEY} ${DATE} &
 CONSUMER_PID=$!
 
 # TODO: would adding a short delay here make this work more consistently?
 # Sometimes the scheduler prints a bunch of "queue is empty" messages, as if the consumer isn't feeding the queue.
 
 # Start the scheduler
-./target/debug/scheduler ${SURVEY} &
+${SCHEDULER} ${SURVEY} &
 SCHEDULER_PID=$!
 
 # Wait for the expected number of alerts
