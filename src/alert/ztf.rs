@@ -6,7 +6,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
-        db::{get_coordinates, mongify},
+        db::mongify,
         o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
@@ -519,39 +519,6 @@ impl ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
-    async fn format_and_insert_alert(
-        &self,
-        candid: i64,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        candidate_doc: &Document,
-        now: f64,
-    ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_doc = doc! {
-            "_id": candid,
-            "objectId": object_id,
-            "candidate": candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        let status = self
-            .alert_collection
-            .insert_one(alert_doc)
-            .await
-            .map(|_| ProcessAlertStatus::Added(candid))
-            .or_else(|error| match *error.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
-                _ => Err(error),
-            })?;
-        Ok(status)
-    }
-
     #[instrument(skip(self), err)]
     async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
         let alert_aux_exists = self
@@ -739,7 +706,15 @@ impl AlertWorker for ZtfAlertWorker {
         let candidate_doc = mongify(&alert.candidate);
 
         let status = self
-            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
             .await
             .inspect_err(as_error!())?;
         if let ProcessAlertStatus::Exists(_) = status {

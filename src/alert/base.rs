@@ -2,7 +2,7 @@ use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
-        db::cutout2bsonbinary,
+        db::{cutout2bsonbinary, get_coordinates},
         o11y::{as_error, log_error, WARN},
         spatial::XmatchError,
         worker::should_terminate,
@@ -311,6 +311,38 @@ pub trait AlertWorker {
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
+    #[instrument(skip(self, ra, dec, candidate_doc, now, collection), err)]
+    async fn format_and_insert_alert(
+        &self,
+        candid: i64,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        candidate_doc: &Document,
+        now: f64,
+        collection: &mongodb::Collection<Document>,
+    ) -> Result<ProcessAlertStatus, AlertError> {
+        let alert_doc = doc! {
+            "_id": candid,
+            "objectId": object_id,
+            "candidate": candidate_doc,
+            "coordinates": get_coordinates(ra, dec),
+            "created_at": now,
+            "updated_at": now,
+        };
+
+        let status = collection
+            .insert_one(alert_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
+    }
     async fn insert_aux(
         self: &mut Self,
         object_id: &str,
