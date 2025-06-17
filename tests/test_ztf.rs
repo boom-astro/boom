@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -7,7 +7,7 @@ use boom::{
         db::mongify,
         testing::{
             drop_alert_from_collections, insert_test_ztf_filter, lsst_alert_worker,
-            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizerTrait, LsstAlertRandomizer,
+            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizer, LsstAlertRandomizer,
             ZtfAlertRandomizer, TEST_CONFIG_FILE,
         },
     },
@@ -77,9 +77,9 @@ async fn test_alert_from_avro_bytes() {
     assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
 
     // validate the cutouts
-    assert_eq!(alert.cutout_science.clone().unwrap().len(), 13107);
-    assert_eq!(alert.cutout_template.clone().unwrap().len(), 12410);
-    assert_eq!(alert.cutout_difference.clone().unwrap().len(), 14878);
+    assert_eq!(alert.cutout_science.len(), 13107);
+    assert_eq!(alert.cutout_template.len(), 12410);
+    assert_eq!(alert.cutout_difference.len(), 14878);
 
     let prv_candidates = alert.prv_candidates.take();
     let fp_hist = alert.fp_hists.take();
@@ -230,7 +230,7 @@ async fn test_process_ztf_lsst_xmatch() {
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
     let mut alert_worker = ztf_alert_worker().await;
-    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_LIMIT - 10.0);
+    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_RANGE.1 - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";
@@ -242,7 +242,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 1.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 1.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -267,7 +267,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 2. nearby LSST alert, ZTF alert should have an LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -296,7 +296,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
     let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -325,7 +325,7 @@ async fn test_process_ztf_lsst_xmatch() {
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
     let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.5 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.5 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -357,13 +357,13 @@ async fn test_process_ztf_lsst_xmatch() {
     //    unrealistically high dec that ZTF would otherwise match without this
     //    constraint:
     let (_, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default()
-        .dec(LSST_DEC_LIMIT + 10.0)
+        .dec(LSST_DEC_RANGE.1 + 10.0)
         .get()
         .await;
 
     let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker

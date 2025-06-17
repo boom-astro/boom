@@ -3,7 +3,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::mongify,
         o11y::as_error,
         spatial::xmatch,
     },
@@ -18,6 +18,8 @@ use serde_with::{serde_as, skip_serializing_none};
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "LSST";
+pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
+pub const LSST_UNCERTAINTY: f64 = 0.1; // 0.1 arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
@@ -559,14 +561,14 @@ pub struct LsstAlert {
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_difference: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_difference: Vec<u8>,
     #[serde(rename = "cutoutScience")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_science: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_template: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_template: Vec<u8>,
 }
 
 // Deserialize helper functions
@@ -585,6 +587,18 @@ where
 {
     let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
     Ok(objid.map(|i| i.to_string()))
+}
+
+pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cutout: Option<Vec<u8>> = apache_avro::serde_avro_bytes_opt::deserialize(deserializer)?;
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout),
+    }
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
@@ -735,58 +749,6 @@ impl LsstAlertWorker {
         Ok(())
     }
 
-    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
-    async fn format_and_insert_alert(
-        &self,
-        candid: i64,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        candidate_doc: &Document,
-        now: f64,
-    ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_doc = doc! {
-            "_id": candid,
-            "objectId": object_id,
-            "candidate": candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        let status = self
-            .alert_collection
-            .insert_one(alert_doc)
-            .await
-            .map(|_| ProcessAlertStatus::Added(candid))
-            .or_else(|error| match *error.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
-                _ => Err(error),
-            })?;
-        Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-        Ok(())
-    }
-
     #[instrument(skip(self), err)]
     async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
         let alert_aux_exists = self
@@ -829,8 +791,6 @@ impl LsstAlertWorker {
 
 #[async_trait::async_trait]
 impl AlertWorker for LsstAlertWorker {
-    type ObjectId = i64;
-
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
         let config_file =
@@ -972,18 +932,27 @@ impl AlertWorker for LsstAlertWorker {
         let candidate_doc = mongify(&alert.candidate);
 
         let status = self
-            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
             .await
             .inspect_err(as_error!())?;
         if let ProcessAlertStatus::Exists(_) = status {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;
