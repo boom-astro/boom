@@ -2,21 +2,58 @@
 
 set -e
 
+# Defaults
+TIMEOUT=300
+MONGO_CONTAINER_NAME="boom-mongo-1"
+ALERT_DB_NAME="boom"
+ALERT_CHECK_INTERVAL=1
+
+usage() {
+  echo "Usage: $0 <SURVEY> <DATE> [OPTIONS]"
+}
+
+help() {
+  usage
+  echo
+  echo "Runs a throughput test for the alert processing pipeline."
+  echo
+  echo "Requires kafka, valkey, and mongodb to be running via docker compose."
+  echo
+  echo "**Important:** the following will be dropped and overwritten:"
+  echo "- The kafka topic '<SURVEY>_<DATE>_programid1'"
+  echo "- The mongodb database specified by --alert-db-name"
+  echo
+  echo "Positional arguments:"
+  echo "  SURVEY                Survey name (e.g., ztf)"
+  echo "  DATE                  Date string in YYYYMMDD format (e.g., 20240617)"
+  echo
+  echo "Optional arguments:"
+  echo "  -h, --help                    Show this help and exit"
+  echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
+  echo "  --mongo-container-name NAME   MongoDB container name (default: ${MONGO_CONTAINER_NAME})"
+  echo "  --alert-db-name NAME          MongoDB database name (default: ${ALERT_DB_NAME})"
+  echo "  --alert-check-interval SEC    How often to check the alert count in seconds"
+  echo "                                (default: ${ALERT_CHECK_INTERVAL})"
+}
+
 # Collection where alerts are stored
 alert_collection_name() {
   echo "$(echo "${SURVEY}" | tr '[:lower:]' '[:upper:]')_alerts"
 }
 
-# TODO: add a usage/help message
-# * Assumes binaries are already built and available in ./target/debug.
-#   # TODO: ability to override this location
-# * Assumes docker is already running
-# * Explain that this script drops both the "boom" db and the "${SURVEY}_${DATE}_programid1" topic
+# Check for -h or --help in the arguments
+for arg in "$@"; do
+  if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+    help
+    exit
+  fi
+done
 
 # Required positional args
-if [[ $# -lt 2 ]]; then
-  # TODO: stderr
-  echo "Usage: $0 <SURVEY> <DATE> [--timeout TIMEOUT]"
+if [[ $# -ne 2 ]]; then
+  echo "Error: incorrect arguments"  # TODO: stderr
+  echo
+  usage  # TODO: stderr
   exit 1
 fi
 SURVEY="$1"
@@ -24,10 +61,7 @@ DATE="$2"
 shift 2
 
 # Optional named args
-TIMEOUT=300  # Default maximum test duration in seconds
-MONGO_CONTAINER_NAME="boom-mongo-1"  # Mongodb container name
-ALERT_DB_NAME="boom"                 # Database where alerts are stored
-ALERT_CHECK_INTERVAL=1               # How often to check alert count (sec)
+# TODO: ability to override the ./target/debug location
 while [[ $# -gt 0 ]]; do
   case $1 in
     --timeout)
@@ -47,7 +81,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "Unknown option: $1"  # TODO: stderr
+      echo "Error: Unknown option: $1"  # TODO: stderr
+      echo
+      usage  # TODO: stderr
       exit 1
       ;;
   esac
@@ -86,8 +122,7 @@ PRODUCER_OUTPUT=$(./target/debug/kafka_producer ${SURVEY} ${DATE} | tee /dev/tty
 if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
   EXPECTED_COUNT="${BASH_REMATCH[1]}"
 else
-  # TODO: stderr
-  echo "Error: Could not detect EXPECTED_COUNT from producer output"
+  echo "Error: Could not detect EXPECTED_COUNT from producer output"  # TODO: stderr
   exit 1
 fi
 
@@ -109,8 +144,7 @@ ALERT_COLLECTION_NAME=$(alert_collection_name)
 while true; do
   ELAPSED=$(($(date +%s) - START))
   if [ $ELAPSED -gt $TIMEOUT ]; then
-    # TODO: stderr
-    echo "WARNING: Timeout limit reached, exiting"
+    echo "WARNING: Timeout limit reached, exiting"  # TODO: stderr
     exit 1
   fi
 
