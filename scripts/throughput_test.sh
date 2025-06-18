@@ -3,6 +3,7 @@
 set -e
 
 # Defaults
+CONFIG="./config.yaml"
 PRODUCER="./target/release/kafka_producer"
 CONSUMER="./target/release/kafka_consumer"
 SCHEDULER="./target/release/scheduler"
@@ -35,6 +36,8 @@ help() {
   echo
   echo "Optional arguments:"
   echo "  -h, --help                    Show this help and exit"
+  echo "  --config PATH                 Path to the consumer/scheduler config file"
+  echo "                                (default: ${CONFIG})"
   echo "  --producer PATH               Path to the producer binary"
   echo "                                (default: ${PRODUCER})"
   echo "  --consumer PATH               Path to the consumer binary"
@@ -92,6 +95,10 @@ MONGO_PASSWORD="${MONGO_PASSWORD:? required environment variable is not set}"
 # Optional named args
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --config)
+      CONFIG="$2"
+      shift 2
+      ;;
     --producer)
       PRODUCER="$2"
       shift 2
@@ -202,7 +209,7 @@ while true; do
   START=$(date +%s)
 
   # Start the consumer
-  ${CONSUMER} --clear true ${SURVEY} ${DATE} &
+  ${CONSUMER} --config ${CONFIG} --clear true ${SURVEY} ${DATE} &
   CONSUMER_PID=$!
 
   sleep 1  # Short pause before checking the queue (slightly inflates execution time)
@@ -217,7 +224,7 @@ while true; do
 done
 
 # Start the scheduler
-${SCHEDULER} ${SURVEY} &
+${SCHEDULER} --config ${CONFIG} ${SURVEY} &
 SCHEDULER_PID=$!
 
 # Wait for the expected number of alerts
