@@ -50,6 +50,10 @@ help() {
   echo "  --alert-check-interval SEC    How often, in seconds, to check the alert count"
   echo "                                (default: ${ALERT_CHECK_INTERVAL})"
   echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
+  echo
+  echo "Environment variables:"
+  echo "  MONGO_USERNAME             MongoDB username"
+  echo "  MONGO_PASSWORD             MongoDB password"
 }
 
 # Name of the alert queue
@@ -80,6 +84,10 @@ fi
 SURVEY="$1"
 DATE="$2"
 shift 2
+
+# Required env vars
+MONGO_USERNAME="${MONGO_USERNAME:? required environment variable is not set}"
+MONGO_PASSWORD="${MONGO_PASSWORD:? required environment variable is not set}"
 
 # Optional named args
 while [[ $# -gt 0 ]]; do
@@ -157,7 +165,6 @@ while true; do
 done
 
 # Remove existing database
-# TODO: what's the best way to handle credentials? This is just a local test db...
 docker exec ${MONGO_CONTAINER_ID} mongosh \
   --username ${MONGO_USERNAME} \
   --password ${MONGO_PASSWORD} \
