@@ -13,6 +13,7 @@ CONSUMER_RETRIES=5
 ALERT_DB_NAME="boom"
 ALERT_CHECK_INTERVAL=1
 TIMEOUT=120
+DEBUG=false
 
 usage() {
   echo "Usage: $0 <SURVEY> <DATE> [OPTIONS]"
@@ -53,10 +54,23 @@ help() {
   echo "  --alert-check-interval SEC    How often, in seconds, to check the alert count"
   echo "                                (default: ${ALERT_CHECK_INTERVAL})"
   echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
+  echo "  --debug                       Print DEBUG log messages from this program"
   echo
   echo "Environment variables:"
   echo "  MONGO_USERNAME             MongoDB username"
   echo "  MONGO_PASSWORD             MongoDB password"
+}
+
+# Log DEBUG messages for this script
+debug() {
+  if [ "$DEBUG" = true ]; then
+    echo "DEBUG: $1" >&2
+  fi
+}
+
+# Log ERROR messages for this script
+error() {
+  echo "ERROR: $1" >&2
 }
 
 # Name of the alert queue
@@ -78,8 +92,8 @@ for arg in "$@"; do
 done
 
 # Required positional args
-if [[ $# -ne 2 ]]; then
-  echo "Error: incorrect arguments" >&2
+if [[ $# -lt 2 ]]; then
+  error "Incorrect arguments"
   echo >&2
   usage >&2
   exit 1
@@ -89,8 +103,14 @@ DATE="$2"
 shift 2
 
 # Required env vars
-MONGO_USERNAME="${MONGO_USERNAME:? required environment variable is not set}"
-MONGO_PASSWORD="${MONGO_PASSWORD:? required environment variable is not set}"
+if [[ -z "${MONGO_USERNAME}" ]]; then
+  error "The environment variable MONGO_USERNAME must be set to the MongoDB username"
+  exit 1
+fi
+if [[ -z "${MONGO_PASSWORD}" ]]; then
+  error "The environment variable MONGO_PASSWORD must be set to the MongoDB password"
+  exit 1
+fi
 
 # Optional named args
 while [[ $# -gt 0 ]]; do
@@ -135,8 +155,12 @@ while [[ $# -gt 0 ]]; do
       TIMEOUT="$2"
       shift 2
       ;;
+    --debug)
+      DEBUG=true
+      shift 1
+      ;;
     *)
-      echo "Error: Unknown option: $1" >&2
+      error "Unknown option: $1"
       echo >&2
       usage >&2
       exit 1
@@ -155,8 +179,9 @@ trap cleanup EXIT INT TERM
 MONGO_CONTAINER_ID=$(docker ps -q -f name=${MONGO_CONTAINER_NAME})
 ATTEMPT=0
 while true; do
+  debug "Pinging mongo (attempt ${ATTEMPT})"
   if [ $ATTEMPT -ge $MONGO_RETRIES ]; then
-    echo "ERROR: Could not ping mongodb, exiting" >&2
+    error "Could not ping mongodb, exiting"
     exit 1
   fi
 
@@ -172,6 +197,7 @@ while true; do
 done
 
 # Remove existing database
+debug "Removing mongodb database ${ALERT_DB_NAME}"
 docker exec ${MONGO_CONTAINER_ID} mongosh \
   --username ${MONGO_USERNAME} \
   --password ${MONGO_PASSWORD} \
@@ -179,6 +205,7 @@ docker exec ${MONGO_CONTAINER_ID} mongosh \
   --eval "db.getSiblingDB('${ALERT_DB_NAME}').dropDatabase()" >/dev/null
 
 # Delete the topic
+debug "Deleting kafka topic ${SURVEY}_${DATE}_programid1"
 docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server broker:9092 \
   --delete \
@@ -186,11 +213,13 @@ docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
   --topic ${SURVEY}_${DATE}_programid1
 
 # Run the producer, capture stdout
+debug "Running the producer"
 PRODUCER_OUTPUT=$(${PRODUCER} ${SURVEY} ${DATE} | tee /dev/tty)
 if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
   EXPECTED_COUNT="${BASH_REMATCH[1]}"
+  debug "Expected alert count is ${EXPECTED_COUNT}"
 else
-  echo "Error: Could not detect EXPECTED_COUNT from producer output" >&2
+  error "Could not determine the number of alerts produced"
   exit 1
 fi
 
@@ -201,8 +230,9 @@ fi
 ALERTS_QUEUE_NAME=$(alert_queue_name)
 ATTEMPT=0
 while true; do
+  debug "Starting the consumer (attempt ${ATTEMPT})"
   if [ $ATTEMPT -ge $CONSUMER_RETRIES ]; then
-    echo "ERROR: Consumer not reading from kafka, exiting" >&2
+    error "Consumer not reading from kafka, exiting"
     exit 1
   fi
 
@@ -217,6 +247,7 @@ while true; do
   if [ "$ALERT_QUEUE_LENGTH" -gt 0 ]; then
     break
   else
+    debug "Killing ${CONSUMER_PID}"
     kill ${CONSUMER_PID}
     wait ${CONSUMER_PID} || true
     ((ATTEMPT++))
@@ -224,6 +255,7 @@ while true; do
 done
 
 # Start the scheduler
+debug "Starting the scheduler"
 ${SCHEDULER} --config ${CONFIG} ${SURVEY} &
 SCHEDULER_PID=$!
 
@@ -232,7 +264,7 @@ ALERT_COLLECTION_NAME=$(alert_collection_name)
 while true; do
   ELAPSED=$(($(date +%s) - START))
   if [ $ELAPSED -gt $TIMEOUT ]; then
-    echo "ERROR: Timeout limit reached, exiting" >&2
+    error "Timeout limit reached, exiting"
     exit 1
   fi
 
@@ -243,12 +275,12 @@ while true; do
     --quiet \
     --eval "db.getSiblingDB('${ALERT_DB_NAME}').${ALERT_COLLECTION_NAME}.countDocuments()"
   )
+  debug "${COUNT} alerts processed in ${ELAPSED} seconds"
   if [ "$COUNT" -ge "$EXPECTED_COUNT" ]; then
-    DURATION=$(($(date +%s) - START))
     echo "Results:"
     echo "  number of alerts:        ${COUNT}"
-    echo "  processing time (sec):   ${DURATION}"
-    echo "  throughput (alerts/sec): $(echo "scale=3; ${COUNT} / ${DURATION}" | bc)"
+    echo "  processing time (sec):   ${ELAPSED}"
+    echo "  throughput (alerts/sec): $(echo "scale=3; ${COUNT} / ${ELAPSED}" | bc)"
     break
   fi
 
