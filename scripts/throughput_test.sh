@@ -7,6 +7,7 @@ PRODUCER="./target/release/kafka_producer"
 CONSUMER="./target/release/kafka_consumer"
 SCHEDULER="./target/release/scheduler"
 MONGO_CONTAINER_NAME="boom-mongo-1"
+MONGO_RETRIES=5
 CONSUMER_RETRIES=5
 ALERT_DB_NAME="boom"
 ALERT_CHECK_INTERVAL=1
@@ -41,6 +42,8 @@ help() {
   echo "  --scheduler PATH              Path to the scheduler binary"
   echo "                                (default: ${SCHEDULER})"
   echo "  --mongo-container-name NAME   MongoDB container name (default: ${MONGO_CONTAINER_NAME})"
+  echo "  --mongo-retries N             Number of times to attempt to ping mongodb"
+  echo "                                (default: ${MONGO_RETRIES})"
   echo "  --consumer-retries N          Number of times to restart the consumer when it"
   echo "                                fails to read from kafka (default: ${CONSUMER_RETRIES})"
   echo "  --alert-db-name NAME          MongoDB database name (default: ${ALERT_DB_NAME})"
@@ -97,6 +100,10 @@ while [[ $# -gt 0 ]]; do
       MONGO_CONTAINER_NAME="$2"
       shift 2
       ;;
+    --mongo-retries)
+      MONGO_RETRIES="$2"
+      shift 2
+      ;;
     --consumer-retries)
       CONSUMER_RETRIES="$2"
       shift 2
@@ -129,15 +136,27 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Make sure mongodb is available and remove existing database
+# Make sure mongodb is available
 MONGO_CONTAINER_ID=$(docker ps -q -f name=${MONGO_CONTAINER_NAME})
-# TODO: limit to a certain number of retries, then error
-until docker exec ${MONGO_CONTAINER_ID} mongosh \
-  --eval "db.adminCommand('ping')" \
-  >/dev/null 2>&1
-do
+ATTEMPT=0
+while true; do
+  if [ $ATTEMPT -ge $MONGO_RETRIES ]; then
+    echo "ERROR: Could not ping mongodb, exiting" >&2
+    exit 1
+  fi
+
+  if docker exec ${MONGO_CONTAINER_ID} mongosh \
+    --eval "db.adminCommand('ping')" \
+    >/dev/null 2>&1
+  then
+    break
+  fi
+
+  ((ATTEMPT++))
   sleep 2
 done
+
+# Remove existing database
 # TODO: what's the best way to handle credentials? This is just a local test db...
 docker exec ${MONGO_CONTAINER_ID} mongosh \
   --username ${MONGO_USERNAME} \
