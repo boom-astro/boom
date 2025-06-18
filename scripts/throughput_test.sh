@@ -6,10 +6,11 @@ set -e
 PRODUCER="./target/release/kafka_producer"
 CONSUMER="./target/release/kafka_consumer"
 SCHEDULER="./target/release/scheduler"
-TIMEOUT=300
 MONGO_CONTAINER_NAME="boom-mongo-1"
+CONSUMER_RETRIES=5
 ALERT_DB_NAME="boom"
 ALERT_CHECK_INTERVAL=1
+TIMEOUT=120
 
 usage() {
   echo "Usage: $0 <SURVEY> <DATE> [OPTIONS]"
@@ -24,6 +25,7 @@ help() {
   echo
   echo "**Important:** the following will be dropped and overwritten:"
   echo "- The kafka topic '<SURVEY>_<DATE>_programid1'"
+  echo "- The valkey queue '<SURVEY>_alerts_packets_queue' (with SURVEY in all caps)"
   echo "- The mongodb database specified by --alert-db-name"
   echo
   echo "Positional arguments:"
@@ -38,11 +40,18 @@ help() {
   echo "                                (default: ${CONSUMER})"
   echo "  --scheduler PATH              Path to the scheduler binary"
   echo "                                (default: ${SCHEDULER})"
-  echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
   echo "  --mongo-container-name NAME   MongoDB container name (default: ${MONGO_CONTAINER_NAME})"
+  echo "  --consumer-retries N          Number of times to restart the consumer when it"
+  echo "                                fails to read from kafka (default: ${CONSUMER_RETRIES})"
   echo "  --alert-db-name NAME          MongoDB database name (default: ${ALERT_DB_NAME})"
-  echo "  --alert-check-interval SEC    How often to check the alert count in seconds"
+  echo "  --alert-check-interval SEC    How often, in seconds, to check the alert count"
   echo "                                (default: ${ALERT_CHECK_INTERVAL})"
+  echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
+}
+
+# Name of the alert queue
+alert_queue_name() {
+  echo "$(echo "${SURVEY}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
 }
 
 # Collection where alerts are stored
@@ -72,12 +81,24 @@ shift 2
 # Optional named args
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --timeout)
-      TIMEOUT="$2"
+    --producer)
+      PRODUCER="$2"
+      shift 2
+      ;;
+    --consumer)
+      CONSUMER="$2"
+      shift 2
+      ;;
+    --scheduler)
+      SCHEDULER="$2"
       shift 2
       ;;
     --mongo-container-name)
       MONGO_CONTAINER_NAME="$2"
+      shift 2
+      ;;
+    --consumer-retries)
+      CONSUMER_RETRIES="$2"
       shift 2
       ;;
     --alert-db-name)
@@ -86,6 +107,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --alert-check-interval)
       ALERT_CHECK_INTERVAL="$2"
+      shift 2
+      ;;
+    --timeout)
+      TIMEOUT="$2"
       shift 2
       ;;
     *)
@@ -120,12 +145,14 @@ docker exec ${MONGO_CONTAINER_ID} mongosh \
   --authenticationDatabase admin \
   --eval "db.getSiblingDB('${ALERT_DB_NAME}').dropDatabase()" >/dev/null
 
-# Run the producer, capture stdout
+# Delete the topic
 docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server broker:9092 \
   --delete \
   --if-exists \
   --topic ${SURVEY}_${DATE}_programid1
+
+# Run the producer, capture stdout
 PRODUCER_OUTPUT=$(${PRODUCER} ${SURVEY} ${DATE} | tee /dev/tty)
 if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
   EXPECTED_COUNT="${BASH_REMATCH[1]}"
@@ -134,14 +161,34 @@ else
   exit 1
 fi
 
-START=$(date +%s)
+# TODO: Sometimes the consumer doesn't read from kafka and no amount of waiting
+# makes any difference. We need better logging to understand why this happens.
+# The workaround here is to keep restarting the consumer until we confirm it's
+# pushing alerts to the queue.
+ALERTS_QUEUE_NAME=$(alert_queue_name)
+ATTEMPT=0
+while true; do
+  if [ $ATTEMPT -ge $CONSUMER_RETRIES ]; then
+    echo "ERROR: Consumer not reading from kafka, exiting" >&2
+    exit 1
+  fi
 
-# Start the consumer
-${CONSUMER} ${SURVEY} ${DATE} &
-CONSUMER_PID=$!
+  START=$(date +%s)
 
-# TODO: would adding a short delay here make this work more consistently?
-# Sometimes the scheduler prints a bunch of "queue is empty" messages, as if the consumer isn't feeding the queue.
+  # Start the consumer
+  ${CONSUMER} --clear true ${SURVEY} ${DATE} &
+  CONSUMER_PID=$!
+
+  sleep 1  # Short pause before checking the queue (slightly inflates execution time)
+  ALERT_QUEUE_LENGTH=$(docker exec boom-valkey-1 redis-cli LLEN "${ALERTS_QUEUE_NAME}")
+  if [ "$ALERT_QUEUE_LENGTH" -gt 0 ]; then
+    break
+  else
+    kill ${CONSUMER_PID}
+    wait ${CONSUMER_PID} || true
+    ((ATTEMPT++))
+  fi
+done
 
 # Start the scheduler
 ${SCHEDULER} ${SURVEY} &
@@ -152,7 +199,7 @@ ALERT_COLLECTION_NAME=$(alert_collection_name)
 while true; do
   ELAPSED=$(($(date +%s) - START))
   if [ $ELAPSED -gt $TIMEOUT ]; then
-    echo "WARNING: Timeout limit reached, exiting" >&2
+    echo "ERROR: Timeout limit reached, exiting" >&2
     exit 1
   fi
 
