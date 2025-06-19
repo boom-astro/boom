@@ -67,6 +67,7 @@ help() {
 cleanup() {
   if [[ ${#PIDS[@]:-0} -gt 0 ]]; then
     for pid in "${PIDS[@]}"; do
+      debug "Killing ${pid}"
       kill "${pid}" 2>/dev/null || true
     done
   fi
@@ -163,8 +164,7 @@ run_producer() {
 }
 
 start_consumer() {
-  # Returns the start time of the consumer.
-  # Has the side effect of adding the consumer's pid to the global PIDS array.
+  # Returns the consumer's start time and its PID, separated by a comma.
 
   local consumer="$1"
   local config="$2"
@@ -199,7 +199,7 @@ start_consumer() {
     local length
     length="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"
     if [[ $length -gt 0 ]]; then
-      PIDS+=("${consumer_pid}")
+      debug "Consumer started (pid ${consumer_pid})"
       break
     else
       debug "Killing ${consumer_pid}"
@@ -209,19 +209,22 @@ start_consumer() {
     fi
   done
 
-  echo "${start}"
+  echo "${start},${consumer_pid}"
 }
 
 start_scheduler() {
-  # Has the side effect of adding the scheduler's pid to the global PIDS array.
+  # Returns the scheduler's PID
 
   local scheduler="$1"
   local config="$2"
   local survey="$3"
 
+  local scheduler_pid
   debug "Starting the scheduler"
   "${scheduler}" --config "${config}" "${survey}" >&2 &
-  PIDS+=($!)
+  scheduler_pid=$!
+  debug "Scheduler started (pid ${scheduler_pid})"
+  echo "${scheduler_pid}"
 }
 
 wait_for_scheduler() {
@@ -359,10 +362,12 @@ main() {
   delete_alert_topic "${SURVEY}" "${DATE}"
 
   local expected_count
-  local start
-  local values
   expected_count="$(run_producer "${PRODUCER}" "${SURVEY}" "${DATE}")"
-  start="$(
+
+  local values
+  local start
+  local consumer_pid
+  values="$(
     start_consumer \
       "${CONSUMER}" \
       "${CONFIG}" \
@@ -370,7 +375,17 @@ main() {
       "${DATE}" \
       "${CONSUMER_RETRIES}"
   )"
-  start_scheduler "${CONSUMER}" "${CONFIG}" "${SURVEY}"
+  start="${values%,*}"
+  consumer_pid="${values#*,}"
+  PIDS+=("${consumer_pid}")
+
+  local scheduler_pid
+  scheduler_pid="$(start_scheduler "${SCHEDULER}" "${CONFIG}" "${SURVEY}")"
+  PIDS+=("${scheduler_pid}")
+
+  local values
+  local count
+  local elapsed
   values="$(
     wait_for_scheduler \
       "${mongo_container_id}" \
@@ -382,13 +397,13 @@ main() {
       "${TIMEOUT}"
   )"
 
-  local count="${values%,*}"
-  local elapsed="${values#*,}"
+  count="${values%,*}"
+  elapsed="${values#*,}"
   echo "Results:"
   echo "  number of alerts:        ${count}"
   echo "  processing time (sec):   ${elapsed}"
   echo "  throughput (alerts/sec): $(echo "scale=3; ${count} / ${elapsed}" | bc)"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM ERR
 main "$@"
