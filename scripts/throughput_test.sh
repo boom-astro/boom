@@ -121,9 +121,9 @@ remove_alert_database() {
   local alert_db_name="$2"
 
   debug "Removing mongodb database ${alert_db_name}"
-  docker exec ${container_id} mongosh \
-    --username ${MONGO_USERNAME} \
-    --password ${MONGO_PASSWORD} \
+  docker exec "${container_id}" mongosh \
+    --username "${MONGO_USERNAME}" \
+    --password "${MONGO_PASSWORD}" \
     --authenticationDatabase admin \
     --eval "db.getSiblingDB('${alert_db_name}').dropDatabase()" >/dev/null
 }
@@ -150,7 +150,8 @@ run_producer() {
   local date="$3"
 
   debug "Running the producer"
-  local output="$(${producer} ${survey} ${date} | tee /dev/stderr)"
+  local output
+  output="$("${producer}" "${survey}" "${date}" | tee /dev/stderr)"
   if [[ $output =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
     local count="${BASH_REMATCH[1]}"
     debug "Expected alert count is ${count}"
@@ -178,7 +179,8 @@ start_consumer() {
   # makes any difference. We need better logging to understand why this happens.
   # The workaround here is to keep restarting the consumer until we confirm it's
   # pushing alerts to the queue.
-  local alert_queue_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
+  local alert_queue_name
+  alert_queue_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
   local attempt=0
   while true; do
     debug "Starting the consumer (attempt ${attempt})"
@@ -194,14 +196,15 @@ start_consumer() {
     consumer_pid=$!
 
     sleep 1  # Short pause before checking the queue (slightly inflates execution time)
-    local length="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"
+    local length
+    length="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"
     if [[ $length -gt 0 ]]; then
-      PIDS+=($consumer_pid)
+      PIDS+=("${consumer_pid}")
       break
     else
       debug "Killing ${consumer_pid}"
-      kill ${consumer_pid}
-      wait ${consumer_pid} || true
+      kill "${consumer_pid}"
+      wait "${consumer_pid}" || true
       ((attempt++))
     fi
   done
@@ -217,7 +220,7 @@ start_scheduler() {
   local survey="$3"
 
   debug "Starting the scheduler"
-  ${SCHEDULER} --config ${CONFIG} ${SURVEY} >&2 &
+  "${scheduler}" --config "${config}" "${survey}" >&2 &
   PIDS+=($!)
 }
 
@@ -232,7 +235,8 @@ wait_for_scheduler() {
   local check_interval="$6"
   local timeout="$7"
 
-  local alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
+  local alert_collection_name
+  alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
 
   local elapsed
   local count
@@ -243,9 +247,9 @@ wait_for_scheduler() {
       exit 1
     fi
 
-    count=$(docker exec ${mongo_container_id} mongosh \
-      --username ${MONGO_USERNAME} \
-      --password ${MONGO_PASSWORD} \
+    count=$(docker exec "${mongo_container_id}" mongosh \
+      --username "${MONGO_USERNAME}" \
+      --password "${MONGO_PASSWORD}" \
       --authenticationDatabase admin \
       --quiet \
       --eval "db.getSiblingDB('${alert_db_name}').${alert_collection_name}.countDocuments()"
@@ -256,7 +260,7 @@ wait_for_scheduler() {
       break
     fi
 
-    sleep ${check_interval}
+    sleep "${check_interval}"
   done
 }
 
@@ -348,15 +352,35 @@ main() {
     esac
   done
 
-  local mongo_container_id="$(get_mongo_container_id "${MONGO_CONTAINER_NAME}")" || exit 1
+  local mongo_container_id
+  mongo_container_id="$(get_mongo_container_id "${MONGO_CONTAINER_NAME}")"
   wait_for_mongo "${mongo_container_id}" "${MONGO_RETRIES}"
   remove_alert_database "${mongo_container_id}" "${ALERT_DB_NAME}"
   delete_alert_topic "${SURVEY}" "${DATE}"
 
-  local expected_count="$(run_producer "${PRODUCER}" "${SURVEY}" "${DATE}")" || exit 1
-  local start="$(start_consumer "${CONSUMER}" "${CONFIG}" "${SURVEY}" "${DATE}" "${CONSUMER_RETRIES}")" || exit 1
+  local expected_count
+  local start
+  local values
+  expected_count="$(run_producer "${PRODUCER}" "${SURVEY}" "${DATE}")"
+  start="$(
+    start_consumer \
+      "${CONSUMER}" \
+      "${CONFIG}" \
+      "${SURVEY}" \
+      "${DATE}" \
+      "${CONSUMER_RETRIES}"
+  )"
   start_scheduler "${CONSUMER}" "${CONFIG}" "${SURVEY}"
-  local values="$(wait_for_scheduler "${mongo_container_id}" "${ALERT_DB_NAME}" "${SURVEY}" "${start}" "${expected_count}" "${ALERT_CHECK_INTERVAL}" "${TIMEOUT}")"
+  values="$(
+    wait_for_scheduler \
+      "${mongo_container_id}" \
+      "${ALERT_DB_NAME}" \
+      "${SURVEY}" \
+      "${start}" \
+      "${expected_count}" \
+      "${ALERT_CHECK_INTERVAL}" \
+      "${TIMEOUT}"
+  )"
 
   local count="${values%,*}"
   local elapsed="${values#*,}"
