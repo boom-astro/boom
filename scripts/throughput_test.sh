@@ -1,6 +1,8 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
+
+declare -a PIDS
 
 # Defaults
 CONFIG="./config.yaml"
@@ -61,9 +63,19 @@ help() {
   echo "  MONGO_PASSWORD             MongoDB password"
 }
 
+# Clean up on exit
+cleanup() {
+  if [[ ${#PIDS[@]:-0} -gt 0 ]]; then
+    for pid in "${PIDS[@]}"; do
+      kill "${pid}" 2>/dev/null || true
+    done
+  fi
+  exit
+}
+
 # Log DEBUG messages for this script
 debug() {
-  if [ "$DEBUG" = true ]; then
+  if [[ "$DEBUG" = true ]]; then
     echo "DEBUG: $1" >&2
   fi
 }
@@ -73,216 +85,286 @@ error() {
   echo "ERROR: $1" >&2
 }
 
-# Name of the alert queue
-alert_queue_name() {
-  echo "$(echo "${SURVEY}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
+get_mongo_container_id() {
+  local container_name="$1"
+  docker ps -q -f name="${container_name}"
 }
 
-# Collection where alerts are stored
-alert_collection_name() {
-  echo "$(echo "${SURVEY}" | tr '[:lower:]' '[:upper:]')_alerts"
-}
+wait_for_mongo() {
+  local container_id="$1"
+  local retries="$2"
 
-# Check for -h or --help in the arguments
-for arg in "$@"; do
-  if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
-    help
-    exit
-  fi
-done
+  local wait_interval=2
 
-# Required positional args
-if [[ $# -lt 2 ]]; then
-  error "Incorrect arguments"
-  echo >&2
-  usage >&2
-  exit 1
-fi
-SURVEY="$1"
-DATE="$2"
-shift 2
-
-# Required env vars
-if [[ -z "${MONGO_USERNAME}" ]]; then
-  error "The environment variable MONGO_USERNAME must be set to the MongoDB username"
-  exit 1
-fi
-if [[ -z "${MONGO_PASSWORD}" ]]; then
-  error "The environment variable MONGO_PASSWORD must be set to the MongoDB password"
-  exit 1
-fi
-
-# Optional named args
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --config)
-      CONFIG="$2"
-      shift 2
-      ;;
-    --producer)
-      PRODUCER="$2"
-      shift 2
-      ;;
-    --consumer)
-      CONSUMER="$2"
-      shift 2
-      ;;
-    --scheduler)
-      SCHEDULER="$2"
-      shift 2
-      ;;
-    --mongo-container-name)
-      MONGO_CONTAINER_NAME="$2"
-      shift 2
-      ;;
-    --mongo-retries)
-      MONGO_RETRIES="$2"
-      shift 2
-      ;;
-    --consumer-retries)
-      CONSUMER_RETRIES="$2"
-      shift 2
-      ;;
-    --alert-db-name)
-      ALERT_DB_NAME="$2"
-      shift 2
-      ;;
-    --alert-check-interval)
-      ALERT_CHECK_INTERVAL="$2"
-      shift 2
-      ;;
-    --timeout)
-      TIMEOUT="$2"
-      shift 2
-      ;;
-    --debug)
-      DEBUG=true
-      shift 1
-      ;;
-    *)
-      error "Unknown option: $1"
-      echo >&2
-      usage >&2
+  local attempt=0
+  while true; do
+    debug "Pinging mongo (attempt ${attempt})"
+    if [[ $attempt -ge $retries ]]; then
+      error "Could not ping mongodb, exiting"
       exit 1
-      ;;
-  esac
-done
+    fi
 
-# Clean up on exit
-cleanup() {
-  kill ${CONSUMER_PID} ${SCHEDULER_PID} 2>/dev/null || true
-  exit
+    if docker exec "${container_id}" mongosh \
+      --eval "db.adminCommand('ping')" \
+      >/dev/null 2>&1
+    then
+      break
+    fi
+
+    ((attempt++))
+    sleep "${wait_interval}"
+  done
 }
-trap cleanup EXIT INT TERM
 
-# Make sure mongodb is available
-MONGO_CONTAINER_ID=$(docker ps -q -f name=${MONGO_CONTAINER_NAME})
-ATTEMPT=0
-while true; do
-  debug "Pinging mongo (attempt ${ATTEMPT})"
-  if [ $ATTEMPT -ge $MONGO_RETRIES ]; then
-    error "Could not ping mongodb, exiting"
-    exit 1
-  fi
+remove_alert_database() {
+  local container_id="$1"
+  local alert_db_name="$2"
 
-  if docker exec ${MONGO_CONTAINER_ID} mongosh \
-    --eval "db.adminCommand('ping')" \
-    >/dev/null 2>&1
-  then
-    break
-  fi
-
-  ((ATTEMPT++))
-  sleep 2
-done
-
-# Remove existing database
-debug "Removing mongodb database ${ALERT_DB_NAME}"
-docker exec ${MONGO_CONTAINER_ID} mongosh \
-  --username ${MONGO_USERNAME} \
-  --password ${MONGO_PASSWORD} \
-  --authenticationDatabase admin \
-  --eval "db.getSiblingDB('${ALERT_DB_NAME}').dropDatabase()" >/dev/null
-
-# Delete the topic
-debug "Deleting kafka topic ${SURVEY}_${DATE}_programid1"
-docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server broker:9092 \
-  --delete \
-  --if-exists \
-  --topic ${SURVEY}_${DATE}_programid1
-
-# Run the producer, capture stdout
-debug "Running the producer"
-PRODUCER_OUTPUT=$(${PRODUCER} ${SURVEY} ${DATE} | tee /dev/tty)
-if [[ $PRODUCER_OUTPUT =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
-  EXPECTED_COUNT="${BASH_REMATCH[1]}"
-  debug "Expected alert count is ${EXPECTED_COUNT}"
-else
-  error "Could not determine the number of alerts produced"
-  exit 1
-fi
-
-# TODO: Sometimes the consumer doesn't read from kafka and no amount of waiting
-# makes any difference. We need better logging to understand why this happens.
-# The workaround here is to keep restarting the consumer until we confirm it's
-# pushing alerts to the queue.
-ALERTS_QUEUE_NAME=$(alert_queue_name)
-ATTEMPT=0
-while true; do
-  debug "Starting the consumer (attempt ${ATTEMPT})"
-  if [ $ATTEMPT -ge $CONSUMER_RETRIES ]; then
-    error "Consumer not reading from kafka, exiting"
-    exit 1
-  fi
-
-  START=$(date +%s)
-
-  # Start the consumer
-  ${CONSUMER} --config ${CONFIG} --clear true ${SURVEY} ${DATE} &
-  CONSUMER_PID=$!
-
-  sleep 1  # Short pause before checking the queue (slightly inflates execution time)
-  ALERT_QUEUE_LENGTH=$(docker exec boom-valkey-1 redis-cli LLEN "${ALERTS_QUEUE_NAME}")
-  if [ "$ALERT_QUEUE_LENGTH" -gt 0 ]; then
-    break
-  else
-    debug "Killing ${CONSUMER_PID}"
-    kill ${CONSUMER_PID}
-    wait ${CONSUMER_PID} || true
-    ((ATTEMPT++))
-  fi
-done
-
-# Start the scheduler
-debug "Starting the scheduler"
-${SCHEDULER} --config ${CONFIG} ${SURVEY} &
-SCHEDULER_PID=$!
-
-# Wait for the expected number of alerts
-ALERT_COLLECTION_NAME=$(alert_collection_name)
-while true; do
-  ELAPSED=$(($(date +%s) - START))
-  if [ $ELAPSED -gt $TIMEOUT ]; then
-    error "Timeout limit reached, exiting"
-    exit 1
-  fi
-
-  COUNT=$(docker exec ${MONGO_CONTAINER_ID} mongosh \
+  debug "Removing mongodb database ${alert_db_name}"
+  docker exec ${container_id} mongosh \
     --username ${MONGO_USERNAME} \
     --password ${MONGO_PASSWORD} \
     --authenticationDatabase admin \
-    --quiet \
-    --eval "db.getSiblingDB('${ALERT_DB_NAME}').${ALERT_COLLECTION_NAME}.countDocuments()"
-  )
-  debug "${COUNT} alerts processed in ${ELAPSED} seconds"
-  if [ "$COUNT" -ge "$EXPECTED_COUNT" ]; then
-    echo "Results:"
-    echo "  number of alerts:        ${COUNT}"
-    echo "  processing time (sec):   ${ELAPSED}"
-    echo "  throughput (alerts/sec): $(echo "scale=3; ${COUNT} / ${ELAPSED}" | bc)"
-    break
+    --eval "db.getSiblingDB('${alert_db_name}').dropDatabase()" >/dev/null
+}
+
+delete_alert_topic() {
+  local survey="$1"
+  local date="$2"
+
+  local topic="${survey}_${date}_programid1"
+
+  debug "Deleting kafka topic ${topic}"
+  docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server broker:9092 \
+    --delete \
+    --if-exists \
+    --topic "${topic}"
+}
+
+run_producer() {
+  # Returns the expected alert count based on the producer output.
+
+  local producer="$1"
+  local survey="$2"
+  local date="$3"
+
+  debug "Running the producer"
+  local output="$(${producer} ${survey} ${date} | tee /dev/stderr)"
+  if [[ $output =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
+    local count="${BASH_REMATCH[1]}"
+    debug "Expected alert count is ${count}"
+    echo "${count}"
+  else
+    error "Could not determine the number of alerts produced"
+    exit 1
+  fi
+}
+
+start_consumer() {
+  # Returns the start time of the consumer.
+  # Has the side effect of adding the consumer's pid to the global PIDS array.
+
+  local consumer="$1"
+  local config="$2"
+  local survey="$3"
+  local date="$4"
+  local retries="$5"
+
+  local start
+  local consumer_pid
+
+  # TODO: Sometimes the consumer doesn't read from kafka and no amount of waiting
+  # makes any difference. We need better logging to understand why this happens.
+  # The workaround here is to keep restarting the consumer until we confirm it's
+  # pushing alerts to the queue.
+  local alert_queue_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
+  local attempt=0
+  while true; do
+    debug "Starting the consumer (attempt ${attempt})"
+    if [[ $attempt -ge $retries ]]; then
+      error "Consumer not reading from kafka, exiting"
+      exit 1
+    fi
+
+    start=$(date +%s)
+
+    # Start the consumer
+    "${consumer}" --config "${config}" --clear true "${survey}" "${date}" >&2 &
+    consumer_pid=$!
+
+    sleep 1  # Short pause before checking the queue (slightly inflates execution time)
+    local length="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"
+    if [[ $length -gt 0 ]]; then
+      PIDS+=($consumer_pid)
+      break
+    else
+      debug "Killing ${consumer_pid}"
+      kill ${consumer_pid}
+      wait ${consumer_pid} || true
+      ((attempt++))
+    fi
+  done
+
+  echo "${start}"
+}
+
+start_scheduler() {
+  # Has the side effect of adding the scheduler's pid to the global PIDS array.
+
+  local scheduler="$1"
+  local config="$2"
+  local survey="$3"
+
+  debug "Starting the scheduler"
+  ${SCHEDULER} --config ${CONFIG} ${SURVEY} >&2 &
+  PIDS+=($!)
+}
+
+wait_for_scheduler() {
+  # Returns the alert count and the elapsed time separated by a comma.
+
+  local mongo_container_id="$1"
+  local alert_db_name="$2"
+  local survey="$3"
+  local start="$4"
+  local expected_count="$5"
+  local check_interval="$6"
+  local timeout="$7"
+
+  local alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
+
+  local elapsed
+  local count
+  while true; do
+    elapsed=$(($(date +%s) - start))
+    if [[ $elapsed -gt $timeout ]]; then
+      error "Timeout limit reached, exiting"
+      exit 1
+    fi
+
+    count=$(docker exec ${mongo_container_id} mongosh \
+      --username ${MONGO_USERNAME} \
+      --password ${MONGO_PASSWORD} \
+      --authenticationDatabase admin \
+      --quiet \
+      --eval "db.getSiblingDB('${alert_db_name}').${alert_collection_name}.countDocuments()"
+    )
+    debug "${count} alerts processed in ${elapsed} seconds"
+    if [[ "$count" -ge "$expected_count" ]]; then
+      echo "${count},${elapsed}"
+      break
+    fi
+
+    sleep ${check_interval}
+  done
+}
+
+main() {
+  # TODO: number of iterations?
+
+  # Check for -h or --help in the arguments
+  for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+      help
+      exit
+    fi
+  done
+
+  # Required positional args
+  if [[ $# -lt 2 ]]; then
+    error "Incorrect arguments"
+    echo >&2
+    usage >&2
+    exit 1
+  fi
+  SURVEY="$1"
+  DATE="$2"
+  shift 2
+
+  # Required env vars
+  if [[ -z "${MONGO_USERNAME}" ]]; then
+    error "The environment variable MONGO_USERNAME must be set to the MongoDB username"
+    exit 1
+  fi
+  if [[ -z "${MONGO_PASSWORD}" ]]; then
+    error "The environment variable MONGO_PASSWORD must be set to the MongoDB password"
+    exit 1
   fi
 
-  sleep ${ALERT_CHECK_INTERVAL}
-done
+  # Optional named args
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --config)
+        CONFIG="$2"
+        shift 2
+        ;;
+      --producer)
+        PRODUCER="$2"
+        shift 2
+        ;;
+      --consumer)
+        CONSUMER="$2"
+        shift 2
+        ;;
+      --scheduler)
+        SCHEDULER="$2"
+        shift 2
+        ;;
+      --mongo-container-name)
+        MONGO_CONTAINER_NAME="$2"
+        shift 2
+        ;;
+      --mongo-retries)
+        MONGO_RETRIES="$2"
+        shift 2
+        ;;
+      --consumer-retries)
+        CONSUMER_RETRIES="$2"
+        shift 2
+        ;;
+      --alert-db-name)
+        ALERT_DB_NAME="$2"
+        shift 2
+        ;;
+      --alert-check-interval)
+        ALERT_CHECK_INTERVAL="$2"
+        shift 2
+        ;;
+      --timeout)
+        TIMEOUT="$2"
+        shift 2
+        ;;
+      --debug)
+        DEBUG=true
+        shift 1
+        ;;
+      *)
+        error "Unknown option: $1"
+        echo >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  local mongo_container_id="$(get_mongo_container_id "${MONGO_CONTAINER_NAME}")" || exit 1
+  wait_for_mongo "${mongo_container_id}" "${MONGO_RETRIES}"
+  remove_alert_database "${mongo_container_id}" "${ALERT_DB_NAME}"
+  delete_alert_topic "${SURVEY}" "${DATE}"
+
+  local expected_count="$(run_producer "${PRODUCER}" "${SURVEY}" "${DATE}")" || exit 1
+  local start="$(start_consumer "${CONSUMER}" "${CONFIG}" "${SURVEY}" "${DATE}" "${CONSUMER_RETRIES}")" || exit 1
+  start_scheduler "${CONSUMER}" "${CONFIG}" "${SURVEY}"
+  local values="$(wait_for_scheduler "${mongo_container_id}" "${ALERT_DB_NAME}" "${SURVEY}" "${start}" "${expected_count}" "${ALERT_CHECK_INTERVAL}" "${TIMEOUT}")"
+
+  local count="${values%,*}"
+  local elapsed="${values#*,}"
+  echo "Results:"
+  echo "  number of alerts:        ${count}"
+  echo "  processing time (sec):   ${elapsed}"
+  echo "  throughput (alerts/sec): $(echo "scale=3; ${count} / ${elapsed}" | bc)"
+}
+
+trap cleanup EXIT INT TERM
+main "$@"
