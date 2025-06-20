@@ -13,10 +13,10 @@ Each alert is processed with the following pipeline:
    However, the Rubin alert has already been sent out, so it will not have
    information about the ZTF alert.
 2. Machine learning model classification scores are added.
-3. A series of user defined filters are applied, resulting in one boolean
+3. A series of user-defined filters are applied, resulting in one boolean
    value for each. Any alert that passes through a given filter is sent
    to a dedicated Kafka output stream for that filter.
-4. The alert is save in a database for later querying and cross-matching.
+4. The alert is saved in a database for later querying and cross-matching.
 
 The implementation is as follows:
 
