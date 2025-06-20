@@ -38,9 +38,11 @@ graph LR
     subgraph BOOM services
         ZTFConsumer[ZTF Kafka consumer]
         LSSTConsumer[LSST Kafka consumer]
-        CrossMatcher["Alert worker (database insertion and cross-matching)"]
-        MLWorker[ML worker]
-        FilterWorker[Filter worker]
+        subgraph Scheduler
+            CrossMatcher["Alert worker (database insertion and cross-matching)"]
+            MLWorker[ML worker]
+            FilterWorker[Filter worker]
+        end
     end
 
     subgraph BOOM consumers
