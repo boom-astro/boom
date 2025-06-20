@@ -39,7 +39,7 @@ graph LR
         ZTFConsumer[ZTF Kafka consumer]
         LSSTConsumer[LSST Kafka consumer]
         subgraph Scheduler
-            CrossMatcher["Alert worker (database insertion and cross-matching)"]
+            AlertWorker["Alert worker (database insertion and cross-matching)"]
             MLWorker[ML worker]
             FilterWorker[Filter worker]
         end
@@ -53,10 +53,10 @@ graph LR
     LSST --> LSSTConsumer
     ZTFConsumer --> ZTFAlertQueue
     LSSTConsumer --> LSSTAlertQueue
-    ZTFAlertQueue --> CrossMatcher
-    LSSTAlertQueue --> CrossMatcher
-    CrossMatcher --> ZTFAlertQueue
-    CrossMatcher --> LSSTAlertQueue
+    ZTFAlertQueue --> AlertWorker
+    LSSTAlertQueue --> AlertWorker
+    AlertWorker --> ZTFAlertQueue
+    AlertWorker --> LSSTAlertQueue
     ZTFAlertQueue --> MLWorker
     LSSTAlertQueue --> MLWorker
     MLWorker --> ZTFAlertQueue
