@@ -1,7 +1,7 @@
 # Alert processing
 
 BOOM consumes Kafka streams of alerts from astronomical surveys
-and outputs Kafka streams for consumers like Skyportal.
+and outputs Kafka streams for consumers like SkyPortal.
 
 Each alert is processed with the following pipeline:
 
@@ -17,3 +17,54 @@ Each alert is processed with the following pipeline:
    value for each. Any alert that passes through a given filter is sent
    to a dedicated Kafka output stream for that filter.
 4. The alert is save in a database for later querying and cross-matching.
+
+The implementation is as follows:
+
+```mermaid
+graph LR
+    subgraph Kafka
+        ZTF[ZTF Kafka stream]
+        LSST[LSST Kafka stream]
+        Output1[Output Kafka stream 1]
+        Output2[Output Kafka stream 2]
+        OutputN[Output Kafka stream N]
+    end
+
+    subgraph Valkey
+        ZTFAlertQueue[ZTF alert queue]
+        LSSTAlertQueue[LSST alert queue]
+    end
+
+    subgraph BOOM services
+        ZTFConsumer[ZTF Kafka consumer]
+        LSSTConsumer[LSST Kafka consumer]
+        CrossMatcher["Alert worker (database insertion and cross-matching)"]
+        MLWorker[ML worker]
+        FilterWorker[Filter worker]
+    end
+
+    subgraph BOOM consumers
+        SkyPortal[SkyPortal]
+    end
+
+    ZTF --> ZTFConsumer
+    LSST --> LSSTConsumer
+    ZTFConsumer --> ZTFAlertQueue
+    LSSTConsumer --> LSSTAlertQueue
+    ZTFAlertQueue --> CrossMatcher
+    LSSTAlertQueue --> CrossMatcher
+    CrossMatcher --> ZTFAlertQueue
+    CrossMatcher --> LSSTAlertQueue
+    ZTFAlertQueue --> MLWorker
+    LSSTAlertQueue --> MLWorker
+    MLWorker --> ZTFAlertQueue
+    MLWorker --> LSSTAlertQueue
+    ZTFAlertQueue --> FilterWorker
+    LSSTAlertQueue --> FilterWorker
+    FilterWorker -- Pass filter --> Output1
+    FilterWorker -- Pass filter --> Output2
+    FilterWorker -- Pass filter --> OutputN
+    Output1 --> SkyPortal
+    Output2 --> SkyPortal
+    OutputN --> SkyPortal
+```
