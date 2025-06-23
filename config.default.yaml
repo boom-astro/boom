@@ -13,6 +13,7 @@ api:
     token_expiration: 0 # jwt token expiration in seconds, 0 to disable
     admin_username: admin # Admin username for the API
     admin_password: adminsecret # Admin password for the API
+    admin_email: admin@example.com # Admin email for the API
 redis:
   host: localhost
   port: 6379

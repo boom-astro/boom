@@ -58,7 +58,9 @@ mod tests {
         assert_eq!(resp["status"], "success");
 
         // the response is a jwt token
-        let token = resp["token"].as_str().expect("token should be a string");
+        let token = resp["access_token"]
+            .as_str()
+            .expect("token should be a string");
         assert!(!token.is_empty(), "Token should not be empty");
     }
 
@@ -103,7 +105,9 @@ mod tests {
             serde_json::from_str(&body_str).expect("failed to parse JSON");
         assert_eq!(resp["status"], "success");
 
-        let token = resp["token"].as_str().expect("token should be a string");
+        let token = resp["access_token"]
+            .as_str()
+            .expect("token should be a string");
 
         // Now try to access a protected endpoint with the token
         let req = test::TestRequest::get()

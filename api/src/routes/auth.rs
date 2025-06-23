@@ -19,7 +19,7 @@ pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Json<AuthPost>)
     {
         Ok(token) => HttpResponse::Ok().json(json!({
             "status": "success",
-            "token": token,
+            "access_token": token,
             "message": "authentication successful"
         })),
         Err(e) => HttpResponse::Unauthorized().body(format!("authentication failed: {}", e)),

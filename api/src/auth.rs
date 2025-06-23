@@ -38,6 +38,7 @@ impl AuthProvider {
         // if it does exist, check that the password matches
         let admin_username = config.admin_username.clone();
         let admin_password = config.admin_password.clone();
+        let admin_email = config.admin_email.clone();
 
         match users_collection
             .find_one(doc! { "username": &admin_username })
@@ -60,7 +61,7 @@ impl AuthProvider {
                 let admin_user = User {
                     id: user_id,
                     username: admin_username.clone(),
-                    email: "<admin_email@example.com>".to_string(),
+                    email: admin_email.clone(),
                     password: hashed_admin_password,
                 };
                 match users_collection.insert_one(admin_user).await {

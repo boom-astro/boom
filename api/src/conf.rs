@@ -5,6 +5,7 @@ pub struct AuthConfig {
     pub token_expiration: usize, // in seconds
     pub admin_username: String,
     pub admin_password: String,
+    pub admin_email: String,
 }
 
 impl Default for AuthConfig {
@@ -14,6 +15,7 @@ impl Default for AuthConfig {
             token_expiration: 0,
             admin_username: "admin".to_string(),
             admin_password: "adminsecret".to_string(),
+            admin_email: "admin@example.com".to_string(),
         }
     }
 }
@@ -109,11 +111,19 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
             .unwrap_or_else(|e| panic!("Invalid admin_password: {}", e)),
         None => default_config.auth.admin_password.clone(),
     };
+    let admin_email = match auth_conf.get("admin_email") {
+        Some(admin_email) => admin_email
+            .clone()
+            .into_string()
+            .unwrap_or_else(|e| panic!("Invalid admin_email: {}", e)),
+        None => default_config.auth.admin_email.clone(),
+    };
     let auth = AuthConfig {
         secret_key,
         token_expiration,
         admin_username,
         admin_password,
+        admin_email,
     };
 
     // Load DB configuration
