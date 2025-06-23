@@ -76,8 +76,12 @@ but real-time surveys will have catalogs with different data types:
 
 ## Cross-match
 
-Objects have IDs defined for a given survey.
-A cross-match relates an object's ID in one survey to its ID in another.
+A cross-match relates an object's ID in one survey to its ID in another
+based on location.
+It's possible that two distinct objects could be detected at the same location,
+due to positional uncertainty, distance, and resolution.
+BOOM cross-matches object IDs in real-time catalogs with archival catalogs
+the first time an object shows up in an alert, and only that first time.
 
 ## Filter
 
