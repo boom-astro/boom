@@ -110,3 +110,6 @@ Each filter is associated with one alert input stream
 and one alert output stream.
 Each alert output stream has its own credentials for authorization.
 These can be used, for example, to connect a Marshal like SkyPortal.
+
+Admin users are able to modify any filter in the system,
+but regular users are only able to modify filters they created.
