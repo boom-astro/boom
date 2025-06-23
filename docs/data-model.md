@@ -8,7 +8,7 @@ handled by the application and how they relate to each other.
 A survey is an astronomical observing program or campaign that systematically
 collects observations over large areas of the sky using one or more telescopes.
 These are not only equipped with cutting-edge wide field-of-view instruments
-that allow them to survey our night,
+that allow them to survey our night sky,
 but have large scale data processing capabilities to provide the astronomical
 community with a continuous real-time stream of "alerts".
 Examples include the Zwicky Transient Facility (ZTF) or the Vera C. Rubin
