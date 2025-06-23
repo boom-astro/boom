@@ -63,8 +63,15 @@ but they have a few common properties:
 ## Catalog
 
 A catalog is a dataset from a survey.
-In BOOM, a survey like ZTF will have multiple catalogs,
-one for its alerts, one for auxiliary fields, and one for its image data.
+Internally, a catalog maps one-to-one with a MongoDB collection.
+BOOM stores both archival and real-time catalogs,
+the former being static sets of objects detected by a survey.
+Archival catalogs will only contain objects,
+but real-time surveys will have catalogs with different data types:
+
+- Alerts (typically named like `{survey_name}_alerts`, with candidate ID as the unique identifier)
+- Objects (typically named like `{survey_name}_alerts_aux`)
+- Images (typically named like `{survey_name}_alerts_cutouts`)
 
 ## Cross-match
 
