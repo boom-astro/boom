@@ -17,8 +17,15 @@ Observatory's Legacy Survey of Space and Time (LSST).
 ## Object
 
 The most important entity is an object.
-This represents something out in space that has been observed.
-It can be a supernova, a binary star, etc.
+An object represents a distinct astrophysical entity that has been observed,
+such as a star, galaxy, quasar, supernova, asteroid, or other celestial body.
+Since objects are independently detected by each survey,
+they are assigned their own distinct object ID by each survey,
+based on position---when a change in brightness is detected for the first time
+at a given location, a unique `objectId` is assigned to it.
+Thereafter, measurements at the same location
+(within some positional uncertainty)
+are associated to the same `objectId`.
 
 ## Alert
 
