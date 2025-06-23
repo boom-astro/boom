@@ -73,11 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let consumer = ZtfAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
-                Some(&format!(
-                    "ztf_{}_programid{}",
-                    date.format("%Y%m%d"),
-                    program_id
-                )),
                 None,
                 None,
                 None,
@@ -93,7 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let consumer = LsstAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
-                Some(&format!("lsst_{}_programid1", date.format("%Y%m%d"))),
+                // Default topic for LSST, until we get real data
+                // TODO: let the user specify if they want to consume real or simulated data
+                Some("alerts-simulated"),
                 None,
                 None,
                 None,
