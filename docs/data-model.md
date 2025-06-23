@@ -92,6 +92,11 @@ Since surveys can produce millions of alerts per night,
 having filters in place is critical to reduce the effort of detecting
 scientifically relevant objects.
 
+Filters can make use of the cross-matching information since BOOM performs
+cross-matching before applying filters.
+Filters can also make use of light curve data from other live surveys,
+which is as far as we know not possible with any other alert broker.
+
 ### Filter permissions
 
 TODO
