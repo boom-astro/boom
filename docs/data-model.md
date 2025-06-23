@@ -29,7 +29,8 @@ are associated to the same `objectId`.
 
 ## Alert
 
-An alert is a message sent by a survey notifying any subscribers of a change
+An alert, also known as a "candidate,"
+is a message sent by a survey notifying any subscribers of a change
 in brightness of a known object or the detection of a new one.
 Most astronomical surveys rely on a system of "reference" images,
 which are stacks of multiple images of the same location in the sky.
@@ -98,10 +99,6 @@ Filters can also make use of light curve data from other live surveys,
 which is as far as we know not possible with any other alert broker.
 
 ### Filter permissions
-
-TODO
-
-## Candidate
 
 TODO
 
