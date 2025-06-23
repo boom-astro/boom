@@ -108,6 +108,8 @@ which is as far as we know not possible with any other alert broker.
 
 Each filter is associated with one alert input stream
 and one alert output stream.
+Each alert output stream has its own credentials for authorization.
+These can be used, for example, to connect a Marshal like SkyPortal.
 
 ## Group
 
