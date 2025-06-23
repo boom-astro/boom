@@ -16,7 +16,7 @@ Observatory's Legacy Survey of Space and Time (LSST).
 
 ## Object
 
-The most important entity is an object.
+The most important entity is an object (also called a "source").
 An object represents a distinct astrophysical entity that has been observed,
 such as a star, galaxy, quasar, supernova, asteroid, or other celestial body.
 Since objects are independently detected by each survey,
