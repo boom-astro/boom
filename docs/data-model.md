@@ -75,6 +75,14 @@ but live catalogs will come in sets of three with different data types:
 - Objects (typically named like `{survey_name}_alerts_aux`)
 - Images (typically named like `{survey_name}_alerts_cutouts`)
 
+## Alert input stream
+
+A live survey has one or more alert input streams to which BOOM can subscribe.
+Each alert stream contains a different
+subset of alerts and has its own access restrictions.
+For example,
+ZTF has a public stream, a partnership stream, and a Caltech-only stream.
+
 ## Cross-match
 
 A cross-match relates an object's ID in one survey to its ID in another
@@ -98,9 +106,8 @@ cross-matching before applying filters.
 Filters can also make use of light curve data from other live surveys,
 which is as far as we know not possible with any other alert broker.
 
-### Filter permissions
-
-TODO
+Each filter is associated with one alert input stream
+and one alert output stream.
 
 ## Group
 
