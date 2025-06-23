@@ -14,7 +14,6 @@ community with a continuous real-time stream of "alerts".
 Examples include the Zwicky Transient Facility (ZTF) or the Vera C. Rubin
 Observatory's Legacy Survey of Space and Time (LSST).
 
-
 ## Object
 
 The most important entity is an object.
