@@ -1,7 +1,7 @@
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{info, instrument};
 
 use crate::filter::{
     get_filter_object, run_filter, Alert, Filter, FilterError, FilterResults, FilterWorker,
@@ -15,6 +15,7 @@ pub struct LsstFilter {
 
 #[async_trait::async_trait]
 impl Filter for LsstFilter {
+    #[instrument(skip(filter_collection), err)]
     async fn build(
         filter_id: i32,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
@@ -121,6 +122,7 @@ pub struct LsstFilterWorker {
 
 #[async_trait::async_trait]
 impl FilterWorker for LsstFilterWorker {
+    #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
@@ -163,6 +165,7 @@ impl FilterWorker for LsstFilterWorker {
         !self.filters.is_empty()
     }
 
+    #[instrument(skip(self, filter_results), err)]
     async fn build_alert(
         &self,
         candid: i64,
@@ -332,6 +335,7 @@ impl FilterWorker for LsstFilterWorker {
         Ok(alert)
     }
 
+    #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
@@ -345,6 +349,7 @@ impl FilterWorker for LsstFilterWorker {
         for filter in &self.filters {
             let out_documents = run_filter(
                 candids.clone(),
+                filter.id,
                 filter.pipeline.clone(),
                 &self.alert_collection,
             )
