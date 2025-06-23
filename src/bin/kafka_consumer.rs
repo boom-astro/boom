@@ -68,6 +68,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let survey = args.survey;
 
+    // TODO: let the user specify if they want to consume real or simulated LSST data
+    let simulated = match survey {
+        Survey::Lsst => true,
+        _ => false,
+    };
+
     match survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(
@@ -88,12 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let consumer = LsstAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
-                // Default topic for LSST, until we get real data
-                // TODO: let the user specify if they want to consume real or simulated data
-                Some("alerts-simulated"),
                 None,
                 None,
                 None,
+                Some(simulated),
                 &config_path,
             );
             if clear {

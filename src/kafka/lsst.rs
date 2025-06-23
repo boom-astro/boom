@@ -23,10 +23,10 @@ impl LsstAlertConsumer {
     pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
-        topic: Option<&str>,
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
+        simulated: Option<bool>,
         config_path: &str,
     ) -> Self {
         // 45 should be divisible by n_threads
@@ -34,7 +34,11 @@ impl LsstAlertConsumer {
             panic!("Number of threads should be a factor of 45");
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let topic = topic.unwrap_or("alerts-simulated").to_string();
+        let topic = if simulated.unwrap_or(false) {
+            "alerts-simulated".to_string()
+        } else {
+            "alerts".to_string()
+        };
         let output_queue = output_queue
             .unwrap_or("LSST_alerts_packets_queue")
             .to_string();
