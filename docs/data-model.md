@@ -57,7 +57,7 @@ but they have a few common properties:
 - Declination (dec)
 - Brightness and associated error (in magnitude and/or flux-space)
 - New, reference,
-    and difference images (angular and pixel size varying per survey)
+  and difference images (angular and pixel size varying per survey)
 - Various quality flags and metadata about the associated alert
 
 ## Catalog
@@ -69,7 +69,8 @@ the former being static sets of objects detected by a survey.
 Archival catalogs will only contain objects,
 but real-time surveys will have catalogs with different data types:
 
-- Alerts (typically named like `{survey_name}_alerts`, with candidate ID as the unique identifier)
+- Alerts (typically named like `{survey_name}_alerts`,
+  with candidate ID as the unique identifier)
 - Objects (typically named like `{survey_name}_alerts_aux`)
 - Images (typically named like `{survey_name}_alerts_cutouts`)
 
