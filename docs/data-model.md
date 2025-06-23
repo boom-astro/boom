@@ -64,10 +64,10 @@ but they have a few common properties:
 
 A catalog is a dataset from a survey.
 Internally, a catalog maps one-to-one with a MongoDB collection.
-BOOM stores both archival and real-time catalogs,
+BOOM stores both _archival_ and _live_ catalogs,
 the former being static sets of objects detected by a survey.
 Archival catalogs will only contain objects,
-but real-time surveys will have catalogs with different data types:
+but live catalogs will come in sets of three with different data types:
 
 - Alerts (typically named like `{survey_name}_alerts`,
   with candidate ID as the unique identifier)
@@ -80,7 +80,7 @@ A cross-match relates an object's ID in one survey to its ID in another
 based on location.
 It's possible that two distinct objects could be detected at the same location,
 due to positional uncertainty, distance, and resolution.
-BOOM cross-matches object IDs in real-time catalogs with archival catalogs
+BOOM cross-matches object IDs in live catalogs with archival catalogs
 the first time an object shows up in an alert, and only that first time.
 
 ## Filter
