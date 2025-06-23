@@ -5,8 +5,9 @@ handled by the application and how they relate to each other.
 
 ## Survey
 
-A survey is some kind of instrument that acquires observations,
-e.g., a telescope.
+A survey is an astronomical observing program or campaign that systematically
+collects observations over large areas of the sky using one or more telescopes.
+
 
 ## Object
 
