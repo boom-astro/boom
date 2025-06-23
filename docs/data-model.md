@@ -29,18 +29,24 @@ are associated to the same `objectId`.
 
 ## Alert
 
-An alert is sent by a survey in response to some condition, e.g.,
+An alert is a message sent by a survey in response to some condition, e.g.,
 a transient in brightness,
 which may indicate an object has been detected.
 
-An alert always includes an object ID.
+An alert always includes an object ID, along with a candidate ID,
+which serves as the unique identifier for that alert.
 
 Alerts from different surveys will have different schemas,
 but they have a few common properties:
 
 - Object ID
+- Candidate ID
 - Right ascension (RA)
 - Declination (dec)
+- Brightness and associated error (in magnitude and/or flux-space)
+- New, reference,
+    and difference images (angular and pixel size varying per survey)
+- Various quality flags and metadata about the associated alert
 
 ## Catalog
 
