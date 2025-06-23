@@ -21,8 +21,6 @@ pub struct AuthProvider {
     validation: Validation,
     users_collection: mongodb::Collection<User>,
     token_expiration: usize,
-    admin_username: String,
-    admin_password: String,
 }
 
 impl AuthProvider {
@@ -34,65 +32,12 @@ impl AuthProvider {
 
         let users_collection: mongodb::Collection<User> = db.collection("users");
 
-        // always create the admin user if it doesn't exist,
-        // if it does exist, check that the password matches
-        let admin_username = config.admin_username.clone();
-        let admin_password = config.admin_password.clone();
-        let admin_email = config.admin_email.clone();
-
-        match users_collection
-            .find_one(doc! { "username": &admin_username })
-            .await
-        {
-            Ok(Some(admin_user)) => {
-                // Admin user already exists, check that the password matches
-                if !bcrypt::verify(&config.admin_password, &admin_user.password).unwrap_or(false) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "Admin user already exists, but password does not match with the one in the config",
-                    ));
-                }
-            }
-            Ok(None) => {
-                // Admin user does not exist, create it
-                let user_id = uuid::Uuid::new_v4().to_string();
-                let hashed_admin_password = bcrypt::hash(&admin_password, bcrypt::DEFAULT_COST)
-                    .expect("failed to hash admin password");
-                let admin_user = User {
-                    id: user_id,
-                    username: admin_username.clone(),
-                    email: admin_email.clone(),
-                    password: hashed_admin_password,
-                };
-                match users_collection.insert_one(admin_user).await {
-                    Ok(_) => {
-                        println!("Admin user created successfully.");
-                    }
-                    Err(e) => {
-                        // eprintln!("Failed to create admin user: {}", e);
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Failed to create admin user: {}", e),
-                        ));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to check for admin user: {}", e),
-                ));
-            }
-        }
-
         Ok(AuthProvider {
             encoding_key,
             decoding_key,
             validation,
             users_collection,
             token_expiration: config.token_expiration,
-            admin_username,
-            admin_password,
         })
     }
 
@@ -179,10 +124,6 @@ impl AuthProvider {
                 "User not found",
             ))
         }
-    }
-
-    pub fn get_admin_credentials(&self) -> (String, String) {
-        (self.admin_username.clone(), self.admin_password.clone())
     }
 }
 

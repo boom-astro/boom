@@ -4,6 +4,7 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
     use boom_api::auth::{auth_middleware, get_default_auth};
+    use boom_api::conf::AppConfig;
     use boom_api::db::get_default_db;
     use boom_api::routes;
     use mongodb::Database;
@@ -84,8 +85,12 @@ mod tests {
         )
         .await;
 
-        // On initialization, the auth provider creates an admin user
-        let (admin_username, admin_password) = auth_app_data.get_admin_credentials();
+        // On initialization of the db connection, an admin user for the API
+        // should be created if it does not exist yet, and updated if it does
+        // but the password and/or email have changed.
+        let auth_config = AppConfig::default().auth;
+        let admin_username = auth_config.admin_username;
+        let admin_password = auth_config.admin_password;
 
         // Now try to authenticate with the admin user, to retrieve a JWT token
         let req = test::TestRequest::post()
