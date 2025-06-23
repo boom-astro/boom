@@ -29,9 +29,17 @@ are associated to the same `objectId`.
 
 ## Alert
 
-An alert is a message sent by a survey in response to some condition, e.g.,
-a transient in brightness,
-which may indicate an object has been detected.
+An alert is a message sent by a survey notifying any subscribers of a change
+in brightness of a known object or the detection of a new one.
+Most astronomical surveys rely on a system of "reference" images,
+which are stacks of multiple images of the same location in the sky.
+When new images are acquired,
+a subtraction/difference between the new images and the reference image is
+computed.
+As a result, a pipeline run by the survey
+can detect differences in brightness anywhere on the
+subtraction/difference image,
+and "alert" us when a significant enough difference is measured.
 
 An alert always includes an object ID, along with a candidate ID,
 which serves as the unique identifier for that alert.
