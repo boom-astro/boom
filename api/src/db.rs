@@ -37,10 +37,21 @@ async fn init_api_admin_user(
                 .expect("failed to hash password"),
             email: email,
         };
-        users_collection
-            .insert_one(admin_user)
-            .await
-            .expect("failed to insert admin user");
+        match users_collection.insert_one(admin_user).await {
+            Ok(_) => {}
+            Err(e) => {
+                // if its a mongoDB duplicate key error, it means the user was created in another instance
+                // in another instance so we can ignore it, but we do not return Ok(())
+                // so the next block of code will update the user as needed
+                if !e.to_string().contains("E11000 duplicate key error") {
+                    eprintln!("Failed to create admin user: {}", e);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Failed to create admin user",
+                    ));
+                }
+            }
+        }
 
         return Ok(());
     }
