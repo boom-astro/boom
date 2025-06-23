@@ -1,8 +1,5 @@
 use ndarray::{Array, Dim};
-use ort::{
-    execution_providers::{CUDAExecutionProvider, CoreMLExecutionProvider},
-    session::{builder::GraphOptimizationLevel, Session},
-};
+use ort::session::{builder::GraphOptimizationLevel, Session};
 
 use crate::utils::fits::{prepare_triplet, CutoutError};
 use mongodb::bson::Document;
@@ -29,9 +26,9 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     let model = builder
         .with_execution_providers([
             #[cfg(target_os = "linux")]
-            CUDAExecutionProvider::default().build(),
+            ort::execution_providers::CUDAExecutionProvider::default().build(),
             #[cfg(target_os = "macos")]
-            CoreMLExecutionProvider::default().build(),
+            ort::execution_providers::CoreMLExecutionProvider::default().build(),
         ])?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
