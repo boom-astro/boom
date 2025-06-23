@@ -18,7 +18,7 @@ Observatory's Legacy Survey of Space and Time (LSST).
 
 The most important entity is an object (also called a "source").
 An object represents a distinct astrophysical entity that has been observed,
-such as a star, galaxy, quasar, supernova, asteroid, or other celestial body.
+Effectively, this indicates us that a new transient has been discovered (if nothing was present at that location in the reference image) or a known star is varying in brightness.
 Since objects are independently detected by each survey,
 they are assigned their own distinct object ID by each survey,
 based on position---when a change in brightness is detected for the first time
@@ -40,6 +40,10 @@ As a result, a pipeline run by the survey
 can detect differences in brightness anywhere on the
 subtraction/difference image,
 and "alert" us when a significant enough difference is measured.
+
+Essentially, each alert indicates to us that a new transient has been
+discovered (if nothing was present at that location in the reference image) or
+a known star is varying in brightness.
 
 An alert always includes an object ID, along with a candidate ID,
 which serves as the unique identifier for that alert.
