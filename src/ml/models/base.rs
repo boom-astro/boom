@@ -28,11 +28,10 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     // it will fall back to CPU execution provider
     let model = builder
         .with_execution_providers([
+            #[cfg(target_os = "linux")]
             CUDAExecutionProvider::default().build(),
+            #[cfg(target_os = "macos")]
             CoreMLExecutionProvider::default().build(),
-            // adding the coreml feature in Cargo.toml is creating some issues
-            // at compile time. Needs to be fixed so we can add this back
-            // CoreMLExecutionProvider::default().build(),
         ])?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
