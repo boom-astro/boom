@@ -102,10 +102,6 @@ which is as far as we know not possible with any other alert broker.
 
 TODO
 
-## Program
-
-TODO
-
 ## Group
 
 TODO
