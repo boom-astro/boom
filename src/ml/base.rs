@@ -40,7 +40,7 @@ pub trait MLWorker {
         &self,
         candids: &[i64], // this is a slice of candids to process
     ) -> Result<Vec<Document>, MLWorkerError>;
-    async fn process_alerts(&self, alerts: &[i64]) -> Result<Vec<String>, MLWorkerError>;
+    async fn process_alerts(&mut self, alerts: &[i64]) -> Result<Vec<String>, MLWorkerError>;
 }
 
 #[tokio::main]
@@ -50,7 +50,7 @@ pub async fn run_ml_worker<T: MLWorker>(
     config_path: &str,
 ) -> Result<(), MLWorkerError> {
     debug!(?config_path);
-    let ml_worker = T::new(config_path).await?;
+    let mut ml_worker = T::new(config_path).await?;
 
     let config = conf::load_config(config_path)?;
     let mut con = conf::build_redis(&config).await?;

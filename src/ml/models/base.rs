@@ -1,9 +1,6 @@
 use ndarray::{Array, Dim};
 use ort::{
-    execution_providers::{
-        CUDAExecutionProvider,
-        // CoreMLExecutionProvider
-    },
+    execution_providers::{CUDAExecutionProvider, CoreMLExecutionProvider},
     session::{builder::GraphOptimizationLevel, Session},
 };
 
@@ -32,6 +29,7 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     let model = builder
         .with_execution_providers([
             CUDAExecutionProvider::default().build(),
+            CoreMLExecutionProvider::default().build(),
             // adding the coreml feature in Cargo.toml is creating some issues
             // at compile time. Needs to be fixed so we can add this back
             // CoreMLExecutionProvider::default().build(),
@@ -65,7 +63,7 @@ pub trait Model {
         Ok(triplets)
     }
     fn predict(
-        &self,
+        &mut self,
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError>;
