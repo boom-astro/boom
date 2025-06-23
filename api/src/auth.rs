@@ -2,7 +2,7 @@ use crate::{conf::AppConfig, conf::AuthConfig, routes::users::User};
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
-use actix_web::{Error, web};
+use actix_web::{Error, HttpMessage, web};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -116,7 +116,35 @@ impl AuthProvider {
         Ok(claims.sub)
     }
 
-    pub async fn authenticate_user(
+    pub async fn authenticate_user(&self, token: &str) -> Result<User, std::io::Error> {
+        let user_id = self.validate_token(token).await.map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Incorrect JWT: {}", e))
+        })?;
+
+        // query the user
+        let user = self
+            .users_collection
+            .find_one(doc! {"id": &user_id})
+            .await
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Database query failed: {}", e),
+                )
+            })?;
+
+        match user {
+            Some(user) => return Ok(user),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("User with id {} not found", user_id),
+                ));
+            }
+        }
+    }
+
+    pub async fn create_token_for_user(
         &self,
         username: &str,
         password: &str,
@@ -189,11 +217,14 @@ pub async fn auth_middleware(
                     ));
                 }
             };
-            match auth_app_data.validate_token(token).await {
+            match auth_app_data.authenticate_user(token).await {
+                Ok(user) => {
+                    // inject the user in the request
+                    req.extensions_mut().insert(user);
+                }
                 Err(_) => {
                     return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
                 }
-                _ => {}
             }
         }
         _ => {

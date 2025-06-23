@@ -13,7 +13,10 @@ pub struct AuthPost {
 #[post("/auth")]
 pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Json<AuthPost>) -> HttpResponse {
     // Check if the user exists and the password matches
-    match auth.authenticate_user(&body.username, &body.password).await {
+    match auth
+        .create_token_for_user(&body.username, &body.password)
+        .await
+    {
         Ok(token) => HttpResponse::Ok().json(json!({
             "status": "success",
             "token": token,

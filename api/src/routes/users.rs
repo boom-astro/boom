@@ -13,7 +13,7 @@ pub struct UserPost {
     pub password: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, ToSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct User {
     pub id: String,
     pub username: String,
