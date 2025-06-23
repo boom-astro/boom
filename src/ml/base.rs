@@ -6,7 +6,6 @@ use crate::{
         worker::{should_terminate, WorkerCmd},
     },
 };
-
 use mongodb::bson::Document;
 use redis::AsyncCommands;
 use std::num::NonZero;

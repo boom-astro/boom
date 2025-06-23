@@ -62,7 +62,7 @@ impl MLWorker for ZtfMLWorker {
         self.output_queue.clone()
     }
 
-    #[instrument(skip(self, candids), err)]
+    #[instrument(skip_all, err)]
     async fn fetch_alerts(
         &self,
         candids: &[i64], // this is a slice of candids to process
@@ -190,7 +190,7 @@ impl MLWorker for ZtfMLWorker {
         Ok(alerts)
     }
 
-    #[instrument(skip(self, candids), err)]
+    #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, candids: &[i64]) -> Result<Vec<String>, MLWorkerError> {
         let alerts = self.fetch_alerts(&candids).await?;
 

@@ -1,8 +1,8 @@
-use ndarray::{Array, Dim};
-use ort::session::{builder::GraphOptimizationLevel, Session};
-
 use crate::utils::fits::{prepare_triplet, CutoutError};
 use mongodb::bson::Document;
+use ndarray::{Array, Dim};
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ModelError {
@@ -42,6 +42,7 @@ pub trait Model {
     where
         Self: Sized;
     fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError>;
+    #[instrument(skip_all, err)]
     fn get_triplet(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
         for i in 0..alerts.len() {
