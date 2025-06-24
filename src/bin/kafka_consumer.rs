@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 None,
                 None,
-                Some(simulated),
+                simulated,
                 &config_path,
             );
             if clear {
