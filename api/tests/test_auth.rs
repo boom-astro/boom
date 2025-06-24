@@ -85,6 +85,7 @@ mod tests {
     async fn test_auth_middleware() {
         let database: Database = get_default_db().await;
         let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_config = AppConfig::default().auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -100,31 +101,10 @@ mod tests {
         )
         .await;
 
-        let auth_config = AppConfig::default().auth;
-        let admin_username = auth_config.admin_username;
-        let admin_password = auth_config.admin_password;
-
-        // Now try to authenticate with the admin user, to retrieve a JWT token
-        let req = test::TestRequest::post()
-            .uri("/auth")
-            .set_json(&serde_json::json!({
-                "username": admin_username,
-                "password": admin_password
-            }))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
-        assert_eq!(resp["status"], "success");
-
-        let token = resp["access_token"]
-            .as_str()
-            .expect("token should be a string");
+        let token = auth_app_data
+            .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
+            .await
+            .expect("Failed to create token for admin user");
 
         // Now try to access a protected endpoint with the token
         let req = test::TestRequest::get()
