@@ -404,7 +404,7 @@ async fn test_ml_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = ml_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
 
@@ -453,7 +453,7 @@ async fn test_filter_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     // then run the ML worker to get the classifications
-    let ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = ml_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
     // the result should be a vec of String, for ZTF with the format

@@ -68,16 +68,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let survey = args.survey;
 
+    // TODO: let the user specify if they want to consume real or simulated LSST data
+    let simulated = match survey {
+        Survey::Lsst => true,
+        _ => false,
+    };
+
     match survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
-                Some(&format!(
-                    "ztf_{}_programid{}",
-                    date.format("%Y%m%d"),
-                    program_id
-                )),
                 None,
                 None,
                 None,
@@ -93,10 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let consumer = LsstAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
-                Some("alerts-simulated"),
                 None,
                 None,
                 None,
+                simulated,
                 &config_path,
             );
             if clear {
@@ -108,7 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let consumer = DecamAlertConsumer::new(
                 processes,
                 Some(max_in_queue),
-                Some(&format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)),
                 None,
                 None,
                 None,
