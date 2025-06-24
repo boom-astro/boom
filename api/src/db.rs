@@ -19,7 +19,7 @@ async fn init_api_admin_user(
     let email = auth_config.admin_email.clone();
     let password = auth_config.admin_password.clone();
     // Check if the admin user already exists
-    let existing_user = users_collection
+    let mut existing_user = users_collection
         .find_one(doc! { "username": &username })
         .await
         .expect("failed to query users collection");
@@ -32,7 +32,7 @@ async fn init_api_admin_user(
         );
         let admin_user = User {
             id: uuid::Uuid::new_v4().to_string(),
-            username: username,
+            username: username.clone(),
             password: bcrypt::hash(&password, bcrypt::DEFAULT_COST)
                 .expect("failed to hash password"),
             email: email.clone(),
@@ -44,15 +44,31 @@ async fn init_api_admin_user(
                 return Ok(());
             }
             Err(e) => {
-                // if its a mongoDB duplicate key error, it means the user was created in another instance
-                // in another instance so we can ignore it, but we do not return Ok(())
-                // so the next block of code will update the user as needed
+                // we could run into race conditions here, where multiple instances
+                // try to create the admin user at the same time, so we check for
+                // the specific error code for duplicate key errors
+                // if the user already exists we just re-fetch the existing_user
+                // and if that somehow fails, we return an error
                 if !e.to_string().contains("E11000 duplicate key error") {
                     eprintln!("Failed to create admin user: {}", e);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         "Failed to create admin user",
                     ));
+                } else {
+                    println!(
+                        "Admin user already exists, but was created in another instance. Updating the user."
+                    );
+                    existing_user = users_collection
+                        .find_one(doc! { "username": &username })
+                        .await
+                        .expect("failed to query users collection");
+                    if existing_user.is_none() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "Admin user not found after creation attempt",
+                        ));
+                    }
                 }
             }
         }
