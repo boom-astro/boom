@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    sub: String,
+    pub sub: String,
     iat: usize,
     exp: usize,
 }

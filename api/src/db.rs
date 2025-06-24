@@ -35,10 +35,14 @@ async fn init_api_admin_user(
             username: username,
             password: bcrypt::hash(&password, bcrypt::DEFAULT_COST)
                 .expect("failed to hash password"),
-            email: email,
+            email: email.clone(),
+            is_admin: true, // Set the user as an admin
         };
         match users_collection.insert_one(admin_user).await {
-            Ok(_) => {}
+            Ok(_) => {
+                println!("Admin user created successfully.");
+                return Ok(());
+            }
             Err(e) => {
                 // if its a mongoDB duplicate key error, it means the user was created in another instance
                 // in another instance so we can ignore it, but we do not return Ok(())
@@ -52,8 +56,6 @@ async fn init_api_admin_user(
                 }
             }
         }
-
-        return Ok(());
     }
 
     // if the admin user exists, check that the password matches and email matches
@@ -61,6 +63,7 @@ async fn init_api_admin_user(
     let existing_user = existing_user.unwrap();
     if !bcrypt::verify(&password, &existing_user.password).unwrap_or(false)
         || existing_user.email != email
+        || existing_user.is_admin != true
     {
         println!(
             "Admin user already exists, but password or email does not match with the one in the config. Updating the user."
@@ -72,6 +75,7 @@ async fn init_api_admin_user(
             password: bcrypt::hash(&password, bcrypt::DEFAULT_COST)
                 .expect("failed to hash password"),
             email: email,
+            is_admin: true, // Ensure the user remains an admin
         };
         users_collection
             .replace_one(doc! { "id": &existing_user.id }, updated_user)

@@ -19,6 +19,7 @@ pub struct User {
     pub username: String,
     pub email: String,
     pub password: String, // This will be hashed before insertion
+    pub is_admin: bool,   // Indicates if the user is an admin
 }
 
 #[utoipa::path(
@@ -46,16 +47,18 @@ pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> Ht
         username: body.username.clone(),
         email: body.email.clone(),
         password: hashed_password,
+        is_admin: false,
     };
 
     // Save new user to database
-    match user_collection.insert_one(user_insert).await {
+    match user_collection.insert_one(user_insert.clone()).await {
         Ok(_) => response::ok(
             "success",
             serde_json::to_value(UserGet {
                 id: user_id,
-                username: body.username.clone(),
-                email: body.email.clone(),
+                username: user_insert.username.clone(),
+                email: user_insert.email.clone(),
+                is_admin: user_insert.is_admin,
             })
             .unwrap(),
         ),
@@ -76,6 +79,7 @@ pub struct UserGet {
     pub id: String,
     pub username: String,
     pub email: String,
+    pub is_admin: bool,
 }
 
 #[utoipa::path(

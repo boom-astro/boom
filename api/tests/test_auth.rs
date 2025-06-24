@@ -7,7 +7,7 @@ mod tests {
     use boom_api::conf::AppConfig;
     use boom_api::db::get_default_db;
     use boom_api::routes;
-    use mongodb::Database;
+    use mongodb::{Database, bson::doc};
 
     /// Test POST /auth
     #[actix_rt::test]
@@ -18,34 +18,23 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
-                .service(routes::users::post_user)
                 .service(routes::auth::post_auth),
         )
         .await;
 
-        // Create a new user with a UUID username
-        let random_name = uuid::Uuid::new_v4().to_string();
+        // On initialization of the db connection, an admin user for the API
+        // should be created if it does not exist yet, and updated if it does
+        // but the password and/or email have changed.
+        let auth_config = AppConfig::default().auth;
+        let admin_username = auth_config.admin_username;
+        let admin_password = auth_config.admin_password;
 
-        let new_user = serde_json::json!({
-            "username": random_name,
-            "email":
-            format!("{}@example.com", random_name),
-            "password": "password123"
-        });
-
-        let req = test::TestRequest::post()
-            .uri("/users")
-            .set_json(&new_user)
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        // Now try to authenticate with the new user, to retrieve a JWT token
+        // Now try to authenticate with the admin user, to retrieve a JWT token
         let req = test::TestRequest::post()
             .uri("/auth")
             .set_json(&serde_json::json!({
-                "username": random_name,
-                "password": "password123"
+                "username": admin_username,
+                "password": admin_password
             }))
             .to_request();
 
@@ -58,11 +47,37 @@ mod tests {
             serde_json::from_str(&body_str).expect("failed to parse JSON");
         assert_eq!(resp["status"], "success");
 
-        // the response is a jwt token
         let token = resp["access_token"]
             .as_str()
             .expect("token should be a string");
-        assert!(!token.is_empty(), "Token should not be empty");
+
+        // assert that the token is a valid JWT
+        // (i.e. that we can decode it)
+        let claims: Result<boom_api::auth::Claims, jsonwebtoken::errors::Error> =
+            auth_app_data.decode_token(token).await;
+        assert!(
+            claims.is_ok(),
+            "Failed to decode JWT token: {:?}",
+            claims.err()
+        );
+        let user_id = claims.unwrap().sub;
+        // query the user from the database to check that it exists
+        let user = database
+            .collection::<boom_api::routes::users::User>("users")
+            .find_one(doc! { "id": user_id })
+            .await
+            .unwrap();
+
+        // check that the user exists
+        assert!(user.is_some(), "User not found in database");
+        let user = user.unwrap();
+        // check that the user has the correct username
+        assert_eq!(user.username, admin_username, "User has incorrect username");
+        // check that the user is an admin, as expected
+        assert!(user.is_admin, "User is not an admin");
+
+        // check that there is a "token_type" field in the response
+        assert_eq!(resp["token_type"], "Bearer");
     }
 
     /// Test POST /auth
@@ -85,9 +100,6 @@ mod tests {
         )
         .await;
 
-        // On initialization of the db connection, an admin user for the API
-        // should be created if it does not exist yet, and updated if it does
-        // but the password and/or email have changed.
         let auth_config = AppConfig::default().auth;
         let admin_username = auth_config.admin_username;
         let admin_password = auth_config.admin_password;
