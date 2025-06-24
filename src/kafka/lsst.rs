@@ -34,7 +34,7 @@ impl LsstAlertConsumer {
             panic!("Number of threads should be a factor of 45");
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let topic = if simulated.unwrap_or(false) {
+        let topic = if simulated.unwrap_or(true) {
             "alerts-simulated".to_string()
         } else {
             "alerts".to_string()
