@@ -2,7 +2,7 @@ use flare::phot::{limmag_to_fluxerr, mag_to_flux};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
@@ -18,6 +18,7 @@ pub struct ZtfFilter {
 
 #[async_trait::async_trait]
 impl Filter for ZtfFilter {
+    #[instrument(skip(filter_collection), err)]
     async fn build(
         filter_id: i32,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
@@ -153,6 +154,7 @@ pub struct ZtfFilterWorker {
 
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
+    #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
@@ -209,6 +211,7 @@ impl FilterWorker for ZtfFilterWorker {
         !self.filters.is_empty()
     }
 
+    #[instrument(skip(self, filter_results), err)]
     async fn build_alert(
         &self,
         candid: i64,
@@ -406,6 +409,7 @@ impl FilterWorker for ZtfFilterWorker {
         Ok(alert)
     }
 
+    #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
@@ -434,6 +438,7 @@ impl FilterWorker for ZtfFilterWorker {
                 let filter = &self.filters[*i];
                 let out_documents = run_filter(
                     candids.clone(),
+                    filter.id,
                     filter.pipeline.clone(),
                     &self.alert_collection,
                 )
