@@ -525,7 +525,6 @@ dependencies = [
  "ndarray",
  "openssl",
  "ort",
- "ort-sys",
  "rand 0.9.1",
  "rdkafka",
  "redis",
