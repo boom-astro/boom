@@ -290,9 +290,9 @@ pub struct FilterPost {
 pub async fn post_filter(
     db: web::Data<Database>,
     body: web::Json<FilterPost>,
-    user: Option<web::ReqData<User>>,
+    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let user = user.unwrap();
+    let current_user = current_user.unwrap();
     let body = body.clone();
 
     let catalog = body.catalog;
@@ -337,7 +337,7 @@ pub async fn post_filter(
         catalog,
         id: filter_id,
     };
-    let filter_bson = match build_filter_bson(database_filter.clone(), &user.id) {
+    let filter_bson = match build_filter_bson(database_filter.clone(), &current_user.id) {
         Ok(bson) => bson,
         Err(e) => {
             return HttpResponse::BadRequest()

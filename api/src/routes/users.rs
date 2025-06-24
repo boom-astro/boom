@@ -33,7 +33,15 @@ pub struct User {
     )
 )]
 #[post("/users")]
-pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> HttpResponse {
+pub async fn post_user(
+    db: web::Data<Database>,
+    body: web::Json<UserPost>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = current_user.unwrap();
+    if !current_user.is_admin {
+        return HttpResponse::Forbidden().body("Only admins can create new users");
+    }
     let user_collection: Collection<User> = db.collection("users");
 
     // Create a new user document
@@ -125,7 +133,15 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     )
 )]
 #[delete("/users/{user_id}")]
-pub async fn delete_user(db: web::Data<Database>, path: web::Path<String>) -> HttpResponse {
+pub async fn delete_user(
+    db: web::Data<Database>,
+    path: web::Path<String>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = current_user.unwrap();
+    if !current_user.is_admin {
+        return HttpResponse::Forbidden().body("Only admins can delete users");
+    }
     // TODO: Ensure the caller is authorized to delete this user
     let user_id = path.into_inner();
     let user_collection: Collection<UserGet> = db.collection("users");
