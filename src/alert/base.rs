@@ -233,6 +233,7 @@ pub trait AlertWorker {
     ) -> Result<ProcessAlertStatus, AlertError>;
 }
 
+#[instrument(skip_all)]
 fn report_progress(start: &std::time::Instant, stream: &str, count: u64, message: &str) {
     let elapsed = start.elapsed().as_secs();
     info!(
@@ -244,6 +245,58 @@ fn report_progress(start: &std::time::Instant, stream: &str, count: u64, message
         message,
     );
 }
+
+#[instrument(skip_all, err)]
+async fn retrieve_avro_bytes(
+    con: &mut redis::aio::MultiplexedConnection,
+    input_queue_name: &str,
+    temp_queue_name: &str,
+) -> Result<Option<Vec<u8>>, AlertWorkerError> {
+    let result: Option<Vec<Vec<u8>>> = con
+        .rpoplpush(&input_queue_name, &temp_queue_name)
+        .await
+        .inspect_err(as_error!("failed to pop from input queue"))?;
+
+    match result {
+        Some(mut value) => match value.remove(0) {
+            avro_bytes if !avro_bytes.is_empty() => Ok(Some(avro_bytes)),
+            _ => Err(AlertWorkerError::GetAvroBytesError),
+        },
+        None => Ok(None),
+    }
+}
+
+#[instrument(skip_all, err)]
+async fn handle_process_result(
+    con: &mut redis::aio::MultiplexedConnection,
+    temp_queue_name: &str,
+    output_queue_name: &str,
+    avro_bytes: Vec<u8>,
+    result: Result<ProcessAlertStatus, AlertError>,
+) -> Result<(), AlertWorkerError> {
+    match result {
+        Ok(ProcessAlertStatus::Added(candid)) => {
+            // queue the candid for processing by the classifier
+            con.lpush::<&str, i64, isize>(&output_queue_name, candid)
+                .await
+                .inspect_err(as_error!("failed to push to output queue"))?;
+            con.lrem::<&str, Vec<u8>, isize>(temp_queue_name, 1, avro_bytes)
+                .await
+                .inspect_err(as_error!("failed to remove new alert from temp queue"))?;
+        }
+        Ok(ProcessAlertStatus::Exists(candid)) => {
+            debug!(?candid, "alert already exists");
+            con.lrem::<&str, Vec<u8>, isize>(temp_queue_name, 1, avro_bytes)
+                .await
+                .inspect_err(as_error!("failed to remove existing alert from temp queue"))?;
+        }
+        Err(error) => {
+            log_error!(WARN, error, "error processing alert, skipping");
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 #[instrument(skip_all, err)]
 pub async fn run_alert_worker<T: AlertWorker>(
@@ -279,50 +332,33 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         }
         command_check_countdown -= 1;
-        // retrieve candids from redis
-        let Some(mut value): Option<Vec<Vec<u8>>> = con
-            .rpoplpush(&input_queue_name, &temp_queue_name)
-            .await
-            .inspect_err(as_error!("failed to pop from input queue"))?
-        else {
-            info!("queue is empty");
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            command_check_countdown = 0;
-            continue;
+
+        let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
+
+        let avro_bytes = match result {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                info!("queue is empty");
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                command_check_countdown = 0;
+                continue;
+            }
+            Err(e) => {
+                error!(?e, "failed to retrieve avro bytes");
+                continue;
+            }
         };
-        let avro_bytes = (!value.is_empty())
-            .then_some(value.remove(0))
-            .ok_or(AlertWorkerError::GetAvroBytesError)?;
 
         let result = alert_processor.process_alert(&avro_bytes).await;
-        match result {
-            Ok(ProcessAlertStatus::Added(candid)) => {
-                // queue the candid for processing by the classifier
-                con.lpush::<&str, i64, isize>(&output_queue_name, candid)
-                    .await
-                    .inspect_err(as_error!("failed to push to output queue"))?;
-                con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    .await
-                    .inspect_err(as_error!("failed to remove new alert from temp queue"))?;
-            }
-            Ok(ProcessAlertStatus::Exists(candid)) => {
-                debug!(?candid, "alert already exists");
-                con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                    .await
-                    .inspect_err(as_error!("failed to remove existing alert from temp queue"))?;
-            }
-            Err(error) => {
-                log_error!(WARN, error, "error processing alert, skipping");
-                // TODO: Handle alerts that we could not parse from avro
-                // so we don't re-push them to the queue
-                // con.lpush::<&str, Vec<u8>, isize>(&input_queue_name, avro_bytes.clone())
-                //     .await
-                //     .map_err(AlertWorkerError::PushAlertError)?;
-                // con.lrem::<&str, Vec<u8>, isize>(&temp_queue_name, 1, avro_bytes)
-                //     .await
-                //     .map_err(AlertWorkerError::RemoveAlertError)?;
-            }
-        }
+        handle_process_result(
+            &mut con,
+            &temp_queue_name,
+            &output_queue_name,
+            avro_bytes,
+            result,
+        )
+        .await
+        .inspect_err(as_error!("failed to handle process result"))?;
         if count > 0 && count % 1000 == 0 {
             report_progress(&start, &stream_name, count, "progress");
         }

@@ -8,7 +8,6 @@ use tracing::{error, info};
 const LSST_SERVER_URL: &str = "usdf-alert-stream-dev.lsst.cloud:9094";
 
 pub struct LsstAlertConsumer {
-    topic: String,
     output_queue: String,
     n_threads: usize,
     max_in_queue: usize,
@@ -17,16 +16,17 @@ pub struct LsstAlertConsumer {
     password: String,
     server: String,
     config_path: String,
+    simulated: bool,
 }
 
 impl LsstAlertConsumer {
     pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
-        topic: Option<&str>,
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server_url: Option<&str>,
+        simulated: bool,
         config_path: &str,
     ) -> Self {
         // 45 should be divisible by n_threads
@@ -34,7 +34,6 @@ impl LsstAlertConsumer {
             panic!("Number of threads should be a factor of 45");
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let topic = topic.unwrap_or("alerts-simulated").to_string();
         let output_queue = output_queue
             .unwrap_or("LSST_alerts_packets_queue")
             .to_string();
@@ -42,8 +41,8 @@ impl LsstAlertConsumer {
         let server = server_url.unwrap_or(LSST_SERVER_URL).to_string();
 
         info!(
-            "Creating AlertConsumer with {} threads, topic: {}, output_queue: {}, group_id: {}, server: {}",
-            n_threads, topic, output_queue, group_id, server
+            "Creating AlertConsumer with {} threads, output_queue: {}, group_id: {}, server: {} (simulated data: {})",
+            n_threads, output_queue, group_id, server, simulated
         );
 
         // we check that the username and password are set
@@ -60,7 +59,6 @@ impl LsstAlertConsumer {
         group_id = format!("{}-{}", username.as_ref().unwrap(), group_id);
 
         LsstAlertConsumer {
-            topic,
             output_queue,
             n_threads,
             max_in_queue,
@@ -69,6 +67,7 @@ impl LsstAlertConsumer {
             password: password.unwrap(),
             server,
             config_path: config_path.to_string(),
+            simulated,
         }
     }
 }
@@ -76,9 +75,14 @@ impl LsstAlertConsumer {
 #[async_trait::async_trait]
 impl AlertConsumer for LsstAlertConsumer {
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, None, config_path)
+        Self::new(1, None, None, None, None, true, config_path)
     }
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
+        let topic = if self.simulated {
+            "alerts-simulated".to_string()
+        } else {
+            "alerts".to_string()
+        };
         // divide the 45 LSST partitions for the n_threads that will read them
         let partitions_per_thread = 45 / self.n_threads;
         let mut partitions = vec![vec![]; self.n_threads];
@@ -89,7 +93,7 @@ impl AlertConsumer for LsstAlertConsumer {
         // spawn n_threads to consume each partitions subset
         let mut handles = vec![];
         for i in 0..self.n_threads {
-            let topic = self.topic.clone();
+            let topic = topic.clone();
             let partitions = partitions[i].clone();
             let max_in_queue = self.max_in_queue;
             let output_queue = self.output_queue.clone();

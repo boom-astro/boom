@@ -27,7 +27,6 @@ impl ZtfAlertConsumer {
     pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
-        topic: Option<&str>,
         output_queue: Option<&str>,
         group_id: Option<&str>,
         server: Option<&str>,
@@ -38,12 +37,6 @@ impl ZtfAlertConsumer {
             panic!("Number of threads should be a factor of 15");
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let topic = topic
-            .unwrap_or(&format!(
-                "ztf_{}_programid1",
-                chrono::Utc::now().format("%Y%m%d")
-            ))
-            .to_string();
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();
@@ -53,8 +46,8 @@ impl ZtfAlertConsumer {
         group_id = format!("{}-{}", "ztf", group_id);
 
         info!(
-            "Creating AlertConsumer with {} threads, topic: {}, output_queue: {}, group_id: {}, server: {}",
-            n_threads, topic, output_queue, group_id, server
+            "Creating AlertConsumer with {} threads, output_queue: {}, group_id: {}, server: {}",
+            n_threads, output_queue, group_id, server
         );
 
         ZtfAlertConsumer {
@@ -72,16 +65,7 @@ impl ZtfAlertConsumer {
 #[async_trait::async_trait]
 impl AlertConsumer for ZtfAlertConsumer {
     fn default(config_path: &str) -> Self {
-        Self::new(
-            1,
-            None,
-            None,
-            None,
-            None,
-            None,
-            ProgramId::Public,
-            config_path,
-        )
+        Self::new(1, None, None, None, None, ProgramId::Public, config_path)
     }
 
     async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {

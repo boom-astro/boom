@@ -1,14 +1,8 @@
-use ndarray::{Array, Dim};
-use ort::{
-    execution_providers::{
-        CUDAExecutionProvider,
-        // CoreMLExecutionProvider
-    },
-    session::{builder::GraphOptimizationLevel, Session},
-};
-
 use crate::utils::fits::{prepare_triplet, CutoutError};
 use mongodb::bson::Document;
+use ndarray::{Array, Dim};
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ModelError {
@@ -31,10 +25,10 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     // it will fall back to CPU execution provider
     let model = builder
         .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            // adding the coreml feature in Cargo.toml is creating some issues
-            // at compile time. Needs to be fixed so we can add this back
-            // CoreMLExecutionProvider::default().build(),
+            #[cfg(target_os = "linux")]
+            ort::execution_providers::CUDAExecutionProvider::default().build(),
+            #[cfg(target_os = "macos")]
+            ort::execution_providers::CoreMLExecutionProvider::default().build(),
         ])?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
@@ -48,6 +42,7 @@ pub trait Model {
     where
         Self: Sized;
     fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError>;
+    #[instrument(skip_all, err)]
     fn get_triplet(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
         for i in 0..alerts.len() {
@@ -65,7 +60,7 @@ pub trait Model {
         Ok(triplets)
     }
     fn predict(
-        &self,
+        &mut self,
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError>;

@@ -1,20 +1,22 @@
-use ndarray::{Array, Dim};
-use ort::{inputs, session::Session};
-
 use crate::ml::models::{load_model, Model, ModelError};
 use mongodb::bson::Document;
+use ndarray::{Array, Dim};
+use ort::{inputs, session::Session, value::TensorRef};
+use tracing::instrument;
 
 pub struct AcaiModel {
     model: Session,
 }
 
 impl Model for AcaiModel {
+    #[instrument(err)]
     fn new(path: &str) -> Result<Self, ModelError> {
         Ok(Self {
             model: load_model(&path)?,
         })
     }
 
+    #[instrument(skip_all, err)]
     fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
@@ -89,21 +91,22 @@ impl Model for AcaiModel {
         Ok(features_array)
     }
 
+    #[instrument(skip_all, err)]
     fn predict(
-        &self,
+        &mut self,
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError> {
         let model_inputs = inputs! {
-            "features" =>  metadata_features.clone(),
-            "triplets" => image_features.clone(),
-        }?;
+            "features" =>  TensorRef::from_array_view(metadata_features)?,
+            "triplets" => TensorRef::from_array_view(image_features)?,
+        };
 
         let outputs = self.model.run(model_inputs)?;
 
-        match outputs["score"].try_extract_tensor::<f32>()?.as_slice() {
-            Some(scores) => Ok(scores.to_vec()),
-            None => Err(ModelError::ModelOutputToVecError),
+        match outputs["score"].try_extract_tensor::<f32>() {
+            Ok((_, scores)) => Ok(scores.to_vec()),
+            Err(_) => Err(ModelError::ModelOutputToVecError),
         }
     }
 }

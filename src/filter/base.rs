@@ -176,6 +176,7 @@ pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
     Ok(schema)
 }
 
+#[instrument(skip(alert, schema), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
     let mut writer = Writer::new(schema, Vec::new());
     writer.append_ser(alert).inspect_err(|e| {
@@ -198,6 +199,7 @@ pub async fn create_producer() -> Result<FutureProducer, FilterWorkerError> {
     Ok(producer)
 }
 
+#[instrument(skip(alert, schema, producer), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub async fn send_alert_to_kafka(
     alert: &Alert,
     schema: &Schema,
@@ -220,6 +222,7 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
+#[instrument(skip(filter_collection), err)]
 pub async fn get_filter_object(
     filter_id: i32,
     catalog: &str,
@@ -279,8 +282,10 @@ pub async fn get_filter_object(
     Ok(filter_obj)
 }
 
+#[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
     candids: Vec<i64>,
+    filter_id: i32,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {

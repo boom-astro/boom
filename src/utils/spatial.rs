@@ -21,7 +21,7 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
-#[instrument(skip(xmatch_configs), fields(database = db.name()), err)]
+#[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
     dec: f64,

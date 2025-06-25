@@ -3,7 +3,7 @@ use crate::ml::{MLWorker, MLWorkerError};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use tracing::warn;
+use tracing::{instrument, warn};
 
 pub struct ZtfMLWorker {
     input_queue: String,
@@ -20,6 +20,7 @@ pub struct ZtfMLWorker {
 
 #[async_trait::async_trait]
 impl MLWorker for ZtfMLWorker {
+    #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, MLWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
@@ -61,6 +62,7 @@ impl MLWorker for ZtfMLWorker {
         self.output_queue.clone()
     }
 
+    #[instrument(skip_all, err)]
     async fn fetch_alerts(
         &self,
         candids: &[i64], // this is a slice of candids to process
@@ -188,7 +190,8 @@ impl MLWorker for ZtfMLWorker {
         Ok(alerts)
     }
 
-    async fn process_alerts(&self, candids: &[i64]) -> Result<Vec<String>, MLWorkerError> {
+    #[instrument(skip_all, err)]
+    async fn process_alerts(&mut self, candids: &[i64]) -> Result<Vec<String>, MLWorkerError> {
         let alerts = self.fetch_alerts(&candids).await?;
 
         if alerts.len() != candids.len() {
