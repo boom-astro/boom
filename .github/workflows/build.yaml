@@ -11,6 +11,9 @@ env:
 jobs:
   build-and-push-images:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [api, scheduler]
 
     permissions:
       contents: read
@@ -35,53 +38,31 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata (tags, labels) for API image
-        id: meta_api
+      - name: Extract metadata (tags, labels) for ${{ matrix.target }} image
+        id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.target }}
 
-      - name: Extract metadata (tags, labels) for scheduler image
-        id: meta_scheduler
-        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-scheduler
-
-      - name: Build and push API image
-        id: push_api
+      - name: Build and push ${{ matrix.target }} image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: api
+          target: ${{ matrix.target }}
           push: true
-          tags: ${{ steps.meta_api.outputs.tags }}
-          labels: ${{ steps.meta_api.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-
-      - name: Build and push scheduler image
-        id: push_scheduler
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: scheduler
-          push: true
-          tags: ${{ steps.meta_scheduler.outputs.tags }}
-          labels: ${{ steps.meta_scheduler.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache,mode=max
 
       # This step generates an artifact attestation for the image,
       # which is an unforgettable statement about where and how it was built
       # It increases supply chain security for people who consume the image.
-      - name: Generate artifact attestation for API image
+      - name: Generate artifact attestation for ${{ matrix.target }} image
         uses: actions/attest-build-provenance@v1
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}-api
-          subject-digest: ${{ steps.push_api.outputs.digest }}
-          push-to-registry: true
-
-      - name: Generate artifact attestation for scheduler image
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}-scheduler
-          subject-digest: ${{ steps.push_scheduler.outputs.digest }}
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.target }}
+          subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
