@@ -64,9 +64,8 @@ pub async fn run_ml_worker<T: MLWorker>(
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 break;
-            } else {
-                command_check_countdown = command_interval + 1;
             }
+            command_check_countdown = command_interval + 1;
         }
         command_check_countdown -= 1;
         // if the queue is empty, wait for a bit and continue the loop
@@ -90,7 +89,7 @@ pub async fn run_ml_worker<T: MLWorker>(
         }
 
         let processed_alerts = ml_worker.process_alerts(&candids).await?;
-        command_check_countdown -= nb_candids - 1; // As if iterated this many times
+        command_check_countdown = command_check_countdown.saturating_sub(nb_candids - 1); // As if iterated this many times
 
         // push that back to redis to the output queue
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
