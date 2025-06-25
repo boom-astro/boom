@@ -54,7 +54,7 @@ async fn run(args: Cli) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
         async {
-            info!("wating for ctrl-c");
+            info!("waiting for ctrl-c");
             tokio::signal::ctrl_c()
                 .await
                 .expect("failed to listen for ctrl-c event");
