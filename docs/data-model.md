@@ -93,6 +93,8 @@ It's possible that two distinct objects could be detected at the same location,
 due to positional uncertainty, distance, and resolution.
 BOOM cross-matches object IDs in live catalogs with archival catalogs
 the first time an object shows up in an alert, and only that first time.
+Cross-matching against live catalogs is done for every new alert since the
+number of objects in a live catalog is continuously increasing.
 
 ## Filter
 
