@@ -119,6 +119,12 @@ where
     }
 }
 
+// structs implementing the alert trait need: Debug, PartialEq, Clone, Deserialize, Serialize
+pub trait Alert:
+    Debug + PartialEq + Clone + serde::Deserialize<'static> + serde::Serialize
+{
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
     #[error("error from avro")]
@@ -311,6 +317,10 @@ pub trait AlertWorker {
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
+    // they need to implement the alert_from_avro_bytes function
+    // that returns a struct that implements the Alert trait
+    // do NOT implement the function here, just declare it
+    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<impl Alert, AlertError>;
     #[instrument(skip(self, ra, dec, candidate_doc, now, collection), err)]
     async fn format_and_insert_alert(
         &self,

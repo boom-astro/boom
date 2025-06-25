@@ -16,37 +16,38 @@ use rand::Rng;
 use redis::AsyncCommands;
 use std::fs;
 use std::io::Read;
-use tracing::error;
 // Utility for unit tests
 
 pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
 
+async fn test_db() -> mongodb::Database {
+    let config_file = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config_file).await.unwrap();
+    initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
+    db
+}
+
+async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db().await;
+    initialize_survey_indexes(survey, &db).await?;
+    Ok(())
+}
+
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
-        .await
-        .unwrap();
-    initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
+    init_indexes(&Survey::Ztf).await.unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
-        .await
-        .unwrap();
-    initialize_survey_indexes(&Survey::Lsst, &db).await.unwrap();
+    init_indexes(&Survey::Lsst).await.unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn decam_alert_worker() -> DecamAlertWorker {
     // initialize the DECAM indexes
-    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
-        .await
-        .unwrap();
-    initialize_survey_indexes(&Survey::Decam, &db)
-        .await
-        .unwrap();
+    init_indexes(&Survey::Decam).await.unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
@@ -107,120 +108,63 @@ pub async fn drop_alert_from_collections(
     Ok(())
 }
 
-pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>> {
-    // we randomize the filter id
-    let filter_id = rand::random::<i32>();
-    let filter_obj: mongodb::bson::Document = doc! {
-      "_id": mongodb::bson::oid::ObjectId::new(),
-      "group_id": 41,
-      "filter_id": filter_id,
-      "catalog": "ZTF_alerts",
-      "permissions": [1],
-      "active": true,
-      "active_fid": "v2e0fs",
-      "fv": [
-        {
-            "fid": "v2e0fs",
-            "pipeline": "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
-            "created_at": {
-            "$date": "2020-10-21T08:39:43.693Z"
-            }
-        }
-      ],
-      "autosave": false,
-      "update_annotations": true,
-      "created_at": {
-        "$date": "2021-02-20T08:18:28.324Z"
-      },
-      "last_modified": {
-        "$date": "2023-05-04T23:39:07.090Z"
-      }
-    };
+const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
-    let x = db
-        .collection::<mongodb::bson::Document>("filters")
-        .insert_one(filter_obj)
-        .await;
-    match x {
-        Err(e) => {
-            error!("error inserting filter obj: {}", e);
-        }
-        _ => {}
-    }
-
-    Ok(filter_id)
-}
-
-pub async fn remove_test_ztf_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove_test_filter(
+    filter_id: i32,
+    survey: &Survey,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": "ZTF_alerts"})
+        .delete_many(doc! {"filter_id": filter_id, "catalog": &format!("{}_alerts", survey)})
         .await;
 
     Ok(())
 }
 
-pub async fn insert_test_lsst_filter() -> Result<i32, Box<dyn std::error::Error>> {
-    // we randomize the filter id
+// we want to replace the 3 insert_test_..._filter functions with a single function that
+// takes the survey as argument
+pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::error::Error>> {
     let filter_id = rand::random::<i32>();
+    let catalog = format!("{}_alerts", survey);
+    let pipeline = match survey {
+        Survey::Ztf => ZTF_TEST_PIPELINE,
+        Survey::Lsst => LSST_TEST_PIPELINE,
+        Survey::Decam => DECAM_TEST_PIPELINE,
+    };
+
     let filter_obj: mongodb::bson::Document = doc! {
-      "_id": mongodb::bson::oid::ObjectId::new(),
-      "group_id": 41,
-      "filter_id": filter_id,
-      "catalog": "LSST_alerts",
-      "permissions": [
-        1
-      ],
-      "active": true,
-      "active_fid": "v2e0fs",
-      "fv": [
-        {
-            "fid": "v2e0fs",
-            "pipeline": "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
-            "created_at": {
-            "$date": "2020-10-21T08:39:43.693Z"
+        "_id": mongodb::bson::oid::ObjectId::new(),
+        "group_id": 41,
+        "filter_id": filter_id,
+        "catalog": catalog,
+        "permissions": [1],
+        "active": true,
+        "active_fid": "v2e0fs",
+        "fv": [
+            {
+                "fid": "v2e0fs",
+                "pipeline": pipeline,
+                "created_at": {"$date": "2020-10-21T08:39:43.693Z"}
             }
-        }
-      ],
-      "autosave": false,
-      "update_annotations": true,
-      "created_at": {
-        "$date": "2021-02-20T08:18:28.324Z"
-      },
-      "last_modified": {
-        "$date": "2023-05-04T23:39:07.090Z"
-      }
+        ],
+        "update_annotations": true,
+        "created_at": {"$date": "2021-02-20T08:18:28.324Z"},
+        "last_modified": {"$date": "2023-05-04T23:39:07.090Z"}
     };
 
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
-    let x = db
+    let _ = db
         .collection::<mongodb::bson::Document>("filters")
         .insert_one(filter_obj)
         .await;
-    match x {
-        Err(e) => {
-            error!("error inserting filter obj: {}", e);
-        }
-        _ => {}
-    }
 
     Ok(filter_id)
-}
-
-pub async fn remove_test_lsst_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
-    let _ = db
-        .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": "LSST_alerts"})
-        .await;
-
-    Ok(())
 }
 
 pub async fn empty_processed_alerts_queue(

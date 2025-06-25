@@ -1,9 +1,13 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf,
-    utils::testing::{
-        decam_alert_worker, drop_alert_from_collections, AlertRandomizer, DecamAlertRandomizer,
-        TEST_CONFIG_FILE,
+    filter::{alert_to_avro_bytes, load_alert_schema, DecamFilterWorker, FilterWorker},
+    utils::{
+        enums::Survey,
+        testing::{
+            decam_alert_worker, drop_alert_from_collections, insert_test_filter,
+            remove_test_filter, AlertRandomizer, DecamAlertRandomizer, TEST_CONFIG_FILE,
+        },
     },
 };
 use mongodb::bson::doc;
@@ -97,4 +101,43 @@ async fn test_process_decam_alert() {
     assert_eq!(fp_hists.len(), 61);
 
     drop_alert_from_collections(candid, "DECAM").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_decam_alert() {
+    let mut alert_worker = decam_alert_worker().await;
+
+    let (candid, object_id, _ra, _dec, bytes_content) = DecamAlertRandomizer::default().get().await;
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+    let filter_id = insert_test_filter(&Survey::Decam).await.unwrap();
+
+    let mut filter_worker = DecamFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
+
+    remove_test_filter(filter_id, &Survey::Decam).await.unwrap();
+    assert!(result.is_ok());
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, candid);
+    assert_eq!(&alert.object_id, &object_id);
+    assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
+
+    let filter_passed = alert
+        .filters
+        .iter()
+        .find(|f| f.filter_id == filter_id)
+        .unwrap();
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
+
+    let classifications = &alert.classifications;
+    assert_eq!(classifications.len(), 0);
+
+    // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let encoded = alert_to_avro_bytes(&alert, &schema);
+    assert!(encoded.is_ok())
 }

@@ -50,7 +50,9 @@ impl Filter for ZtfFilter {
         let mut pipeline = vec![
             doc! {
                 "$match": doc! {
-                    // during filter::run proper candis are inserted here
+                    "_id": doc! {
+                        "$in": [] // candids will be inserted here
+                    }
                 }
             },
             doc! {
@@ -70,6 +72,12 @@ impl Filter for ZtfFilter {
                     "cross_matches": doc! {
                         "$arrayElemAt": [
                             "$aux.cross_matches",
+                            0
+                        ]
+                    },
+                    "aliases": doc! {
+                        "$arrayElemAt": [
+                            "$aux.aliases",
                             0
                         ]
                     },

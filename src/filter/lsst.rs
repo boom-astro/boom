@@ -52,6 +52,12 @@ impl Filter for LsstFilter {
                             0
                         ]
                     },
+                    "aliases": doc! {
+                        "$arrayElemAt": [
+                            "$aux.aliases",
+                            0
+                        ]
+                    },
                     "prv_candidates": doc! {
                         "$filter": doc! {
                             "input": doc! {

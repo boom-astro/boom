@@ -2,9 +2,12 @@ use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
-    utils::testing::{
-        drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
-        remove_test_lsst_filter, AlertRandomizer, LsstAlertRandomizer, TEST_CONFIG_FILE,
+    utils::{
+        enums::Survey,
+        testing::{
+            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
+            AlertRandomizer, LsstAlertRandomizer, TEST_CONFIG_FILE,
+        },
     },
 };
 use mongodb::bson::doc;
@@ -154,12 +157,12 @@ async fn test_filter_lsst_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let filter_id = insert_test_lsst_filter().await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Lsst).await.unwrap();
 
     let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
-    remove_test_lsst_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();

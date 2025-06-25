@@ -1,6 +1,6 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus},
+        base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus},
         decam, get_schema_and_startidx, lsst,
     },
     conf,
@@ -379,6 +379,8 @@ where
     }
 }
 
+impl Alert for ZtfAlert {}
+
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
@@ -393,53 +395,6 @@ pub struct ZtfAlertWorker {
 }
 
 impl ZtfAlertWorker {
-    #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ZtfAlert, AlertError> {
-        // if the schema is not cached, get it from the avro_bytes
-        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
-            (Some(schema), Some(start_idx)) => (schema, start_idx),
-            _ => {
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                (self.cached_schema.as_ref().unwrap(), startidx)
-            }
-        };
-
-        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
-
-        // if value is an error, try recomputing the schema from the avro_bytes
-        // as it could be that the schema has changed
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                log_error!(
-                    WARN,
-                    error,
-                    "Error deserializing avro message with cached schema"
-                );
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-
-                // if it's not an error this time, cache the new schema
-                // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
-                    .inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                value
-            }
-        };
-
-        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
-
-        Ok(alert)
-    }
-
     #[instrument(skip_all, err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
         let lsst_matches = self
@@ -607,6 +562,50 @@ impl AlertWorker for ZtfAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_classifier_queue", self.stream_name)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<ZtfAlert, AlertError> {
+        // if the schema is not cached, get it from the avro_bytes
+        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
+            (Some(schema), Some(start_idx)) => (schema, start_idx),
+            _ => {
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                (self.cached_schema.as_ref().unwrap(), startidx)
+            }
+        };
+
+        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
+
+        // if value is an error, try recomputing the schema from the avro_bytes
+        // as it could be that the schema has changed
+        let value = match value {
+            Ok(value) => value,
+            Err(error) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "Error deserializing avro message with cached schema"
+                );
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+
+                // if it's not an error this time, cache the new schema
+                // otherwise return the error
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
+                    .inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                value
+            }
+        };
+
+        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
+
+        Ok(alert)
     }
 
     #[instrument(

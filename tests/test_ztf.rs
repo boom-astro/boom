@@ -5,10 +5,11 @@ use boom::{
     ml::{MLWorker, ZtfMLWorker},
     utils::{
         db::mongify,
+        enums::Survey,
         testing::{
-            drop_alert_from_collections, insert_test_ztf_filter, lsst_alert_worker,
-            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizer, LsstAlertRandomizer,
-            ZtfAlertRandomizer, TEST_CONFIG_FILE,
+            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
+            ztf_alert_worker, AlertRandomizer, LsstAlertRandomizer, ZtfAlertRandomizer,
+            TEST_CONFIG_FILE,
         },
     },
 };
@@ -463,14 +464,14 @@ async fn test_filter_ztf_alert() {
     let candid_programid_str = &ml_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
-    let filter_id = insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker
         .process_alerts(&[candid_programid_str.clone()])
         .await;
 
-    remove_test_ztf_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();

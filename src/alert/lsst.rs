@@ -1,5 +1,7 @@
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry},
+    alert::base::{
+        Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+    },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
@@ -671,6 +673,8 @@ where
     }
 }
 
+impl Alert for LsstAlert {}
+
 pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
@@ -682,30 +686,6 @@ pub struct LsstAlertWorker {
 }
 
 impl LsstAlertWorker {
-    #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<LsstAlert, AlertError> {
-        let magic = avro_bytes[0];
-        if magic != _MAGIC_BYTE {
-            Err(AlertError::MagicBytesError)?;
-        }
-        let schema_id =
-            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await?;
-
-        let mut slice = &avro_bytes[5..];
-        let value = from_avro_datum(&schema, &mut slice, None)?;
-
-        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
-
-        Ok(alert)
-    }
-
     #[instrument(
         skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, xmatches,),
         err
@@ -829,6 +809,30 @@ impl AlertWorker for LsstAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_filter_queue", self.stream_name)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<LsstAlert, AlertError> {
+        let magic = avro_bytes[0];
+        if magic != _MAGIC_BYTE {
+            Err(AlertError::MagicBytesError)?;
+        }
+        let schema_id =
+            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
+        let schema = self
+            .schema_registry
+            .get_schema("alert-packet", schema_id)
+            .await?;
+
+        let mut slice = &avro_bytes[5..];
+        let value = from_avro_datum(&schema, &mut slice, None)?;
+
+        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
+
+        Ok(alert)
     }
 
     #[instrument(
