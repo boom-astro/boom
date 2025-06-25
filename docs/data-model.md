@@ -100,10 +100,10 @@ number of objects in a live catalog is continuously increasing.
 
 Users declare filters to define what alerts they would like BOOM to pass
 through to an output stream,
-since different users are interested in different types of objects.
+as different users are interested in different types of objects.
 Since surveys can produce millions of alerts per night,
-having filters in place is critical to reduce the effort of detecting
-scientifically relevant objects.
+having filters in place is critical to make detecting
+scientifically relevant objects practical.
 
 Filters can make use of the cross-matching information since BOOM performs
 cross-matching before applying filters.
