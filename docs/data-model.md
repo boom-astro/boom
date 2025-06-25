@@ -37,7 +37,7 @@ in brightness of a known object or the detection of a new one.
 Most astronomical surveys rely on a system of "reference" images,
 which are stacks of multiple images of the same location in the sky.
 When new images are acquired,
-a subtraction/difference between the new images and the reference image is
+a subtraction/difference between each new image and the reference image is
 computed.
 As a result, a pipeline run by the survey
 can detect differences in brightness anywhere on the
