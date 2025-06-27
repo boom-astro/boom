@@ -377,7 +377,20 @@ where
     }
 }
 
-impl Alert for ZtfAlert {}
+impl Alert for ZtfAlert {
+    fn object_id(&self) -> String {
+        self.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
+}
 
 pub struct ZtfAlertWorker {
     stream_name: String,
@@ -677,13 +690,13 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
+        let candid = alert.candid();
+        let object_id = alert.object_id();
+        let ra = alert.ra();
+        let dec = alert.dec();
+
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
-
-        let candid = alert.candid;
-        let object_id = alert.object_id;
-        let ra = alert.candidate.ra;
-        let dec = alert.candidate.dec;
 
         let candidate_doc = mongify(&alert.candidate);
 

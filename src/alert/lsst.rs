@@ -40,12 +40,13 @@ pub struct DiaSource {
     /// Id of the detector where this diaSource was measured. Datatype short instead of byte because of DB concerns about unsigned bytes.
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
-    #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
+    #[serde(rename(deserialize = "diaObjectId"))]
     #[serde(deserialize_with = "deserialize_objid_option")]
-    pub object_id: Option<String>,
+    pub dia_object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
-    #[serde(rename = "ssObjectId")]
-    pub ss_object_id: Option<i64>,
+    #[serde(rename(deserialize = "ssObjectId"))]
+    #[serde(deserialize_with = "deserialize_sso_objid_option")]
+    pub ss_object_id: Option<String>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
     pub parent_dia_source_id: Option<i64>,
@@ -188,6 +189,8 @@ pub struct DiaSource {
 pub struct Candidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
+    #[serde(rename(serialize = "objectId"))]
+    pub object_id: String,
     pub magpsf: f32,
     pub sigmapsf: f32,
     pub diffmaglim: f32,
@@ -195,6 +198,7 @@ pub struct Candidate {
     pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub is_sso: bool,
 }
 
 impl TryFrom<DiaSource> for Candidate {
@@ -214,8 +218,24 @@ impl TryFrom<DiaSource> for Candidate {
 
         let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, ZP_AB);
 
+        // if object_id is defined, is_sso is false
+        // if ss_object_id is defined, is_sso is true
+        // if both are undefined or both are defined, we throw an error
+        let (object_id, is_sso) = match (
+            dia_source.dia_object_id.clone(),
+            dia_source.ss_object_id.clone(),
+        ) {
+            (Some(dia_id), None) => (dia_id, false),
+            (None, Some(ss_id)) => (format!("sso{}", ss_id), true),
+            (None, None) => return Err(AlertError::MissingObjectId),
+            (Some(dia_id), Some(ss_id)) => {
+                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
+            }
+        };
+
         Ok(Candidate {
             dia_source,
+            object_id,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -223,6 +243,7 @@ impl TryFrom<DiaSource> for Candidate {
             snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            is_sso,
         })
     }
 }
@@ -591,6 +612,17 @@ where
     Ok(objid.map(|i| i.to_string()))
 }
 
+fn deserialize_sso_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
+    match objid {
+        Some(0) | None => Ok(None),
+        Some(i) => Ok(Some(i.to_string())),
+    }
+}
+
 pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -673,7 +705,20 @@ where
     }
 }
 
-impl Alert for LsstAlert {}
+impl Alert for LsstAlert {
+    fn object_id(&self) -> String {
+        self.candidate.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.dia_source.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.dia_source.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
+}
 
 pub struct LsstAlertWorker {
     stream_name: String,
@@ -919,19 +964,14 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
+        let candid = alert.candid();
+        let object_id = alert.object_id();
+        let ra = alert.ra();
+        let dec = alert.dec();
+
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
         let prv_nondetections = alert.prv_nondetections.take();
-
-        let candid = alert.candid;
-        let object_id = alert
-            .candidate
-            .dia_source
-            .object_id
-            .clone()
-            .ok_or(AlertError::MissingObjectId)?;
-        let ra = alert.candidate.dia_source.ra;
-        let dec = alert.candidate.dia_source.dec;
 
         let candidate_doc = mongify(&alert.candidate);
 

@@ -120,9 +120,14 @@ where
 }
 
 // structs implementing the alert trait need: Debug, PartialEq, Clone, Deserialize, Serialize
+// this should be implemented for all surveys' alerts
 pub trait Alert:
     Debug + PartialEq + Clone + serde::Deserialize<'static> + serde::Serialize
 {
+    fn object_id(&self) -> String;
+    fn candid(&self) -> i64;
+    fn ra(&self) -> f64;
+    fn dec(&self) -> f64;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -163,6 +168,8 @@ pub enum AlertError {
     AlertAuxExists,
     #[error("missing object_id")]
     MissingObjectId,
+    #[error("ambiguous object_id")]
+    AmbiguousObjectId(String, String),
     #[error("missing cutout")]
     MissingCutout,
     #[error("missing psf flux")]

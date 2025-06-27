@@ -23,7 +23,7 @@ async fn test_lsst_alert_from_avro_bytes() {
         .unwrap();
 
     assert_eq!(alert.candid, candid);
-    assert_eq!(alert.candidate.dia_source.object_id.unwrap(), object_id);
+    assert_eq!(alert.candidate.object_id, object_id);
 
     assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
     assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);

@@ -18,12 +18,13 @@ async fn test_build_filter() {
 
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
-        doc! { "$match": {} },
+        doc! { "$match": { "_id": { "$in": [] }} },
         doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
         doc! {
             "$project": {
                 "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1,
                 "cross_matches": { "$arrayElemAt": ["$aux.cross_matches", 0] },
+                "aliases": { "$arrayElemAt": ["$aux.aliases", 0] },
                 "prv_candidates": {
                     "$filter": {
                         "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] },
