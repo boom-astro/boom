@@ -427,7 +427,7 @@ pub trait AlertWorker {
                 }
                 Ok(None) => vec![],
                 Err(e) => {
-                    error!("Error cross-matching with LSST: {}", e);
+                    error!("Error cross-matching with {}: {}", collection.name(), e);
                     vec![]
                 }
             }
