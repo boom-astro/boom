@@ -22,7 +22,6 @@ pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
 async fn test_db() -> mongodb::Database {
     let config_file = conf::load_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
-    initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
     db
 }
 
