@@ -2,6 +2,7 @@ use crate::auth::AuthProvider;
 use actix_web::{HttpResponse, post, web};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, skip_serializing_none};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -10,6 +11,8 @@ pub struct AuthPost {
     pub password: String,
 }
 
+#[serde_as]
+#[skip_serializing_none]
 #[derive(Deserialize, Serialize, Clone, ToSchema)]
 pub struct AuthResponse {
     pub access_token: String,
@@ -47,17 +50,17 @@ pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Json<AuthPost>)
                 token_type: "Bearer".into(),
                 expires_in,
             }),
-        // Err(e) => HttpResponse::Unauthorized().body(format!("authentication failed: {}", e)),
-        // if the error is NotFound (username or password is incorrect), return a 401
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.kind() == std::io::ErrorKind::InvalidInput
             {
+                // if the error is NotFound (username or password is incorrect), return a 401
                 HttpResponse::Unauthorized().json(FailedAuthResponse {
                     error: "invalid_client".into(),
                     error_description: "Invalid username or password".into(),
                 })
             } else {
+                // for other errors, return a 400
                 HttpResponse::BadRequest().json(FailedAuthResponse {
                     error: "invalid_request".into(),
                     error_description: format!("{}", e),

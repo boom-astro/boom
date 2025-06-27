@@ -18,6 +18,7 @@ chrono = "0.4.41"
 utoipa = { version = "5.3.1", features = ["actix_extras"] }
 utoipa-scalar = { version = "0.3", features = ["actix-web"] }
 base64 = "0.22.1"
+serde_with = "3.13.0"
 
 [dependencies.uuid]
 version = "1.16.0"
