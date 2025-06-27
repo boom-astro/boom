@@ -52,7 +52,7 @@ mod tests {
         )
         .await;
 
-        let token = auth_app_data
+        let (token, _) = auth_app_data
             .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
             .await
             .expect("Failed to create token for admin user");

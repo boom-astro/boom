@@ -41,7 +41,10 @@ impl AuthProvider {
         })
     }
 
-    pub async fn create_token(&self, user: &User) -> Result<String, jsonwebtoken::errors::Error> {
+    pub async fn create_token(
+        &self,
+        user: &User,
+    ) -> Result<(String, Option<usize>), jsonwebtoken::errors::Error> {
         let iat = chrono::Utc::now().timestamp() as usize;
         let exp = iat + self.token_expiration;
         let claims = Claims {
@@ -50,7 +53,15 @@ impl AuthProvider {
             exp,
         };
 
-        encode(&Header::default(), &claims, &self.encoding_key)
+        let token = encode(&Header::default(), &claims, &self.encoding_key)?;
+        Ok((
+            token,
+            if self.token_expiration > 0 {
+                Some(self.token_expiration)
+            } else {
+                None
+            },
+        ))
     }
 
     pub async fn decode_token(&self, token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
@@ -73,9 +84,13 @@ impl AuthProvider {
             .find_one(doc! {"id": &user_id})
             .await
             .map_err(|e| {
+                eprintln!(
+                    "Database query failed when looking for user id {}: {}",
+                    user_id, e
+                );
                 std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("Database query failed: {}", e),
+                    format!("Could not retrieve user with id {}", user_id),
                 )
             })?;
 
@@ -94,12 +109,16 @@ impl AuthProvider {
         &self,
         username: &str,
         password: &str,
-    ) -> Result<String, std::io::Error> {
+    ) -> Result<(String, Option<usize>), std::io::Error> {
         let filter = mongodb::bson::doc! { "username": username };
         let user = self.users_collection.find_one(filter).await.map_err(|e| {
+            eprint!(
+                "Database query failed when looking for user {} (when creating token): {}",
+                username, e
+            );
             std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Database query failed: {}", e),
+                format!("Could not retrieve user {}", username),
             )
         })?;
 
@@ -108,10 +127,8 @@ impl AuthProvider {
         if let Some(user) = user {
             match bcrypt::verify(&password, &user.password) {
                 Ok(true) => self.create_token(&user).await.map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Token creation failed: {}", e),
-                    )
+                    eprint!("Token creation failed: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("Token creation failed"))
                 }),
                 _ => Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
