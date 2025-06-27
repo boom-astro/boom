@@ -1,10 +1,14 @@
+use boom::{
+    kafka::{AlertConsumer, LsstAlertConsumer, ZtfAlertConsumer},
+    utils::{
+        enums::{ProgramId, Survey},
+        o11y::build_subscriber,
+    },
+};
+
 use chrono::TimeZone;
 use clap::Parser;
-use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
-
-use boom::kafka::{AlertConsumer, LsstAlertConsumer, ZtfAlertConsumer};
-use boom::utils::enums::{ProgramId, Survey};
+use tracing::instrument;
 
 #[derive(Parser)]
 struct Cli {
@@ -38,24 +42,15 @@ struct Cli {
     max_in_queue: Option<usize>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    let args = Cli::parse();
-
+#[instrument(skip_all, fields(survey = %args.survey))]
+async fn run(args: Cli) {
     let date = match args.date {
-        Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").unwrap(),
+        Some(date) => chrono::NaiveDate::parse_from_str(&date, "%Y%m%d")
+            .expect("failed to parse date string {date}"),
         None => chrono::Utc::now().date_naive().pred_opt().unwrap(),
     };
     let date = date.and_hms_opt(0, 0, 0).unwrap();
     let timestamp = chrono::Utc.from_utc_datetime(&date).timestamp();
-
-    let program_id = args.program_id;
 
     let processes = args.processes.unwrap_or(1);
     let max_in_queue = args.max_in_queue.unwrap_or(15000);
@@ -66,15 +61,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "config.yaml".to_string(),
     };
 
-    let survey = args.survey;
-
     // TODO: let the user specify if they want to consume real or simulated LSST data
-    let simulated = match survey {
+    let simulated = match args.survey {
         Survey::Lsst => true,
         _ => false,
     };
 
-    match survey {
+    match args.survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(
                 processes,
@@ -82,13 +75,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 None,
                 None,
-                program_id,
+                args.program_id,
                 &config_path,
             );
             if clear {
                 let _ = consumer.clear_output_queue();
             }
-            consumer.consume(timestamp).await?;
+            consumer.consume(timestamp).await;
         }
         Survey::Lsst => {
             let consumer = LsstAlertConsumer::new(
@@ -103,9 +96,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if clear {
                 let _ = consumer.clear_output_queue();
             }
-            consumer.consume(timestamp).await?;
+            consumer.consume(timestamp).await;
         }
     }
+}
 
-    Ok(())
+#[tokio::main]
+async fn main() {
+    let args = Cli::parse();
+    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+    run(args).await;
 }
