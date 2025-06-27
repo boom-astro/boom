@@ -45,11 +45,25 @@ mod tests {
         let body_str = String::from_utf8_lossy(&body);
         let resp: serde_json::Value =
             serde_json::from_str(&body_str).expect("failed to parse JSON");
-        assert_eq!(resp["status"], "success");
 
         let token = resp["access_token"]
             .as_str()
             .expect("token should be a string");
+
+        // there should also be an access_type field
+        assert!(resp.get("token_type").is_some());
+        assert_eq!(resp["token_type"], "Bearer");
+
+        if auth_app_data.token_expiration > 0 {
+            assert!(resp.get("expires_in").is_some());
+            let expires_in = resp["expires_in"]
+                .as_u64()
+                .expect("expires_in should be a u64");
+            assert_eq!(expires_in, auth_app_data.token_expiration as u64);
+        } else {
+            // if token_expiration is 0, expires_in should not be present
+            assert!(resp.get("expires_in").is_none());
+        }
 
         // assert that the token is a valid JWT
         // (i.e. that we can decode it)

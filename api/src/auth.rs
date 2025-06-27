@@ -20,7 +20,7 @@ pub struct AuthProvider {
     decoding_key: DecodingKey,
     validation: Validation,
     users_collection: mongodb::Collection<User>,
-    token_expiration: usize,
+    pub token_expiration: usize,
 }
 
 impl AuthProvider {
