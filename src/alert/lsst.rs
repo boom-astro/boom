@@ -1,9 +1,11 @@
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry},
+    alert::base::{
+        Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+    },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::mongify,
         o11y::as_error,
         spatial::xmatch,
     },
@@ -18,6 +20,8 @@ use serde_with::{serde_as, skip_serializing_none};
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "LSST";
+pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
+pub const LSST_UNCERTAINTY: f64 = 0.1; // 0.1 arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
@@ -559,14 +563,14 @@ pub struct LsstAlert {
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_difference: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_difference: Vec<u8>,
     #[serde(rename = "cutoutScience")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_science: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_template: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_template: Vec<u8>,
 }
 
 // Deserialize helper functions
@@ -585,6 +589,18 @@ where
 {
     let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
     Ok(objid.map(|i| i.to_string()))
+}
+
+pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cutout: Option<Vec<u8>> = apache_avro::serde_avro_bytes_opt::deserialize(deserializer)?;
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout),
+    }
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
@@ -657,6 +673,8 @@ where
     }
 }
 
+impl Alert for LsstAlert {}
+
 pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
@@ -668,30 +686,6 @@ pub struct LsstAlertWorker {
 }
 
 impl LsstAlertWorker {
-    #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<LsstAlert, AlertError> {
-        let magic = avro_bytes[0];
-        if magic != _MAGIC_BYTE {
-            Err(AlertError::MagicBytesError)?;
-        }
-        let schema_id =
-            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await?;
-
-        let mut slice = &avro_bytes[5..];
-        let value = from_avro_datum(&schema, &mut slice, None)?;
-
-        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
-
-        Ok(alert)
-    }
-
     #[instrument(
         skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, xmatches,),
         err
@@ -732,58 +726,6 @@ impl LsstAlertWorker {
                 )) if write_error.code == 11000 => AlertError::AlertAuxExists,
                 _ => e.into(),
             })?;
-        Ok(())
-    }
-
-    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
-    async fn format_and_insert_alert(
-        &self,
-        candid: i64,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        candidate_doc: &Document,
-        now: f64,
-    ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_doc = doc! {
-            "_id": candid,
-            "objectId": object_id,
-            "candidate": candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        let status = self
-            .alert_collection
-            .insert_one(alert_doc)
-            .await
-            .map(|_| ProcessAlertStatus::Added(candid))
-            .or_else(|error| match *error.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
-                _ => Err(error),
-            })?;
-        Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
         Ok(())
     }
 
@@ -829,8 +771,6 @@ impl LsstAlertWorker {
 
 #[async_trait::async_trait]
 impl AlertWorker for LsstAlertWorker {
-    type ObjectId = i64;
-
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
         let config_file =
@@ -869,6 +809,30 @@ impl AlertWorker for LsstAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_filter_queue", self.stream_name)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<LsstAlert, AlertError> {
+        let magic = avro_bytes[0];
+        if magic != _MAGIC_BYTE {
+            Err(AlertError::MagicBytesError)?;
+        }
+        let schema_id =
+            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
+        let schema = self
+            .schema_registry
+            .get_schema("alert-packet", schema_id)
+            .await?;
+
+        let mut slice = &avro_bytes[5..];
+        let value = from_avro_datum(&schema, &mut slice, None)?;
+
+        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
+
+        Ok(alert)
     }
 
     #[instrument(
@@ -972,18 +936,27 @@ impl AlertWorker for LsstAlertWorker {
         let candidate_doc = mongify(&alert.candidate);
 
         let status = self
-            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
             .await
             .inspect_err(as_error!())?;
         if let ProcessAlertStatus::Exists(_) = status {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;

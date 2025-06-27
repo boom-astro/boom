@@ -1,7 +1,8 @@
 use boom::{
     conf,
     filter::{Filter, ZtfFilter},
-    utils::testing::{insert_test_ztf_filter, remove_test_ztf_filter, TEST_CONFIG_FILE},
+    utils::enums::Survey,
+    utils::testing::{insert_test_filter, remove_test_filter, TEST_CONFIG_FILE},
 };
 use mongodb::bson::{doc, Document};
 
@@ -11,9 +12,9 @@ async fn test_build_filter() {
     let db = conf::build_db(&config).await.unwrap();
     let filter_collection = db.collection("filters");
 
-    let filter_id = insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
     let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
-    remove_test_ztf_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
 
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
@@ -49,10 +50,10 @@ async fn test_build_filter() {
 async fn test_filter_found() {
     let config = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config).await.unwrap();
-    let filter_id = insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
     let filter_collection = db.collection("filters");
     let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
-    remove_test_ztf_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
     assert!(filter_result.is_ok());
 }
 
