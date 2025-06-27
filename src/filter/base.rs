@@ -121,7 +121,6 @@ pub enum Origin {
 pub enum Survey {
     ZTF,
     LSST,
-    DECAM,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

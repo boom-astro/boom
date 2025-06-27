@@ -1,7 +1,6 @@
 use crate::{
     alert::{
-        AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_URL,
+        AlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     utils::{db::initialize_survey_indexes, enums::Survey},
@@ -43,12 +42,6 @@ pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
     init_indexes(&Survey::Lsst).await.unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
-}
-
-pub async fn decam_alert_worker() -> DecamAlertWorker {
-    // initialize the DECAM indexes
-    init_indexes(&Survey::Decam).await.unwrap();
-    DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 // drops alert collections from the database
@@ -110,7 +103,6 @@ pub async fn drop_alert_from_collections(
 
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
-const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
     filter_id: i32,
@@ -134,7 +126,6 @@ pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::err
     let pipeline = match survey {
         Survey::Ztf => ZTF_TEST_PIPELINE,
         Survey::Lsst => LSST_TEST_PIPELINE,
-        Survey::Decam => DECAM_TEST_PIPELINE,
     };
 
     let filter_obj: mongodb::bson::Document = doc! {
@@ -415,194 +406,6 @@ impl ZtfAlertRandomizer {
         // format is ZTF + 2 digits + 7 lowercase letters
         let mut rng = rand::rng();
         let mut object_id = String::from("ZTF");
-        for _ in 0..2 {
-            object_id.push(rng.random_range('0'..='9'));
-        }
-        for _ in 0..7 {
-            object_id.push(rng.random_range('a'..='z'));
-        }
-        object_id
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct DecamAlertRandomizer {
-    payload: Option<Vec<u8>>,
-    schema: Option<Schema>,
-    candid: Option<i64>,
-    object_id: Option<String>,
-    ra: Option<f64>,
-    dec: Option<f64>,
-}
-
-#[async_trait::async_trait]
-impl AlertRandomizer for DecamAlertRandomizer {
-    type ObjectId = String;
-
-    fn default() -> Self {
-        let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
-        let reader = Reader::new(&payload[..]).unwrap();
-        let schema = reader.writer_schema().clone();
-        Self {
-            payload: Some(payload),
-            schema: Some(schema),
-            candid: Some(Self::randomize_i64()),
-            object_id: Some(Self::randomize_object_id()),
-            ra: Some(Self::randomize_ra()),
-            dec: Some(Self::randomize_dec()),
-        }
-    }
-
-    fn new() -> Self {
-        Self {
-            payload: None,
-            schema: None,
-            candid: None,
-            object_id: None,
-            ra: None,
-            dec: None,
-        }
-    }
-
-    fn path(mut self, path: &str) -> Self {
-        let payload = fs::read(path).unwrap();
-        let reader = Reader::new(&payload[..]).unwrap();
-        let schema = reader.writer_schema().clone();
-        self.payload = Some(payload);
-        self.schema = Some(schema);
-        self
-    }
-
-    fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
-        self.object_id = Some(object_id.into());
-        self
-    }
-
-    fn candid(mut self, candid: i64) -> Self {
-        self.candid = Some(candid);
-        self
-    }
-
-    fn ra(mut self, ra: f64) -> Self {
-        match Self::validate_ra(ra) {
-            true => self.ra = Some(ra),
-            false => panic!("RA must be between 0 and 360"),
-        }
-        self
-    }
-    fn dec(mut self, dec: f64) -> Self {
-        match Self::validate_dec(dec) {
-            true => self.dec = Some(dec),
-            false => panic!("Dec must be between -90 and 90"),
-        }
-        self
-    }
-
-    fn rand_object_id(mut self) -> Self {
-        self.object_id = Some(Self::randomize_object_id());
-        self
-    }
-    fn rand_candid(mut self) -> Self {
-        self.candid = Some(Self::randomize_i64());
-        self
-    }
-    fn rand_ra(mut self) -> Self {
-        self.ra = Some(Self::randomize_ra());
-        self
-    }
-    fn rand_dec(mut self) -> Self {
-        self.dec = Some(Self::randomize_dec());
-        self
-    }
-
-    async fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
-        let mut candid = self.candid;
-        let mut object_id = self.object_id;
-        let mut ra = self.ra;
-        let mut dec = self.dec;
-        let (payload, schema) = match (self.payload, self.schema) {
-            (Some(payload), Some(schema)) => (payload, schema),
-            _ => {
-                let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
-                let reader = Reader::new(&payload[..]).unwrap();
-                let schema = reader.writer_schema().clone();
-                (payload, schema)
-            }
-        };
-
-        let reader = Reader::new(&payload[..]).unwrap();
-        let value = reader.into_iter().next().unwrap().unwrap();
-        let mut record = match value {
-            Value::Record(record) => record,
-            _ => {
-                panic!("Not a record");
-            }
-        };
-
-        for i in 0..record.len() {
-            let (key, value) = &mut record[i];
-            if key == "objectId" {
-                match object_id {
-                    Some(ref id) => *value = Value::String(id.clone()),
-                    None => object_id = Some(Self::value_to_string(value)),
-                }
-            } else if key == "candid" {
-                match candid {
-                    Some(id) => *value = Value::Long(id),
-                    None => candid = Some(Self::value_to_i64(value)),
-                }
-            } else if key == "candidate" {
-                let candidate_record = match value {
-                    Value::Record(record) => record,
-                    _ => {
-                        panic!("Not a record");
-                    }
-                };
-                for i in 0..candidate_record.len() {
-                    let (key, value) = &mut candidate_record[i];
-                    if key == "ra" {
-                        match ra {
-                            Some(r) => *value = Value::Double(r),
-                            None => ra = Some(Self::value_to_f64(value)),
-                        }
-                    } else if key == "dec" {
-                        match dec {
-                            Some(d) => *value = Value::Double(d),
-                            None => dec = Some(Self::value_to_f64(value)),
-                        }
-                    } else if key == "candid" {
-                        match candid {
-                            Some(c) => *value = Value::Long(c),
-                            None => candid = Some(Self::value_to_i64(value)),
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut writer = Writer::new(&schema, Vec::new());
-        let mut new_record = Record::new(writer.schema()).unwrap();
-        for (key, value) in record {
-            new_record.put(&key, value);
-        }
-
-        writer.append(new_record).unwrap();
-        let new_payload = writer.into_inner().unwrap();
-
-        (
-            candid.unwrap(),
-            object_id.unwrap(),
-            ra.unwrap(),
-            dec.unwrap(),
-            new_payload,
-        )
-    }
-}
-
-impl DecamAlertRandomizer {
-    fn randomize_object_id() -> String {
-        let mut rng = rand::rng();
-        let mut object_id = String::from("DECAM");
         for _ in 0..2 {
             object_id.push(rng.random_range('0'..='9'));
         }

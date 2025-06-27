@@ -3,7 +3,7 @@ use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-use boom::kafka::{AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, ZtfAlertConsumer};
+use boom::kafka::{AlertConsumer, LsstAlertConsumer, ZtfAlertConsumer};
 use boom::utils::enums::{ProgramId, Survey};
 
 #[derive(Parser)]
@@ -98,20 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 None,
                 simulated,
-                &config_path,
-            );
-            if clear {
-                let _ = consumer.clear_output_queue();
-            }
-            consumer.consume(timestamp).await?;
-        }
-        Survey::Decam => {
-            let consumer = DecamAlertConsumer::new(
-                processes,
-                Some(max_in_queue),
-                None,
-                None,
-                None,
                 &config_path,
             );
             if clear {
