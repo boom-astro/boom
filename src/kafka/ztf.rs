@@ -267,6 +267,7 @@ impl AlertProducer for ZtfAlertProducer {
             .set("acks", "1")
             .set("max.in.flight.requests.per.connection", "5")
             .set("retries", "3")
+            .set("debug", "broker,topic,msg")
             .create()
             .expect("Producer creation error");
 
