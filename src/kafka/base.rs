@@ -47,7 +47,8 @@ pub async fn consume_partitions(
     producer_config
         .set("bootstrap.servers", server)
         .set("security.protocol", "SASL_PLAINTEXT")
-        .set("group.id", group_id);
+        .set("group.id", group_id)
+        .set("debug", "consumer,cgrp,topic,fetch");
 
     if let (Some(username), Some(password)) = (username, password) {
         producer_config
