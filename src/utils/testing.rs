@@ -125,6 +125,12 @@ pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::err
     let pipeline = match survey {
         Survey::Ztf => ZTF_TEST_PIPELINE,
         Survey::Lsst => LSST_TEST_PIPELINE,
+        _ => {
+            return Err(Box::from(format!(
+                "Unsupported survey for test filter: {}",
+                survey
+            )));
+        }
     };
 
     let filter_obj: mongodb::bson::Document = doc! {

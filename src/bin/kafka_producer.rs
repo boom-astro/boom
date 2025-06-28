@@ -2,7 +2,7 @@ use clap::Parser;
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use boom::kafka::{AlertProducer, ZtfAlertProducer};
+use boom::kafka::{AlertProducer, DecamAlertProducer, ZtfAlertProducer};
 use boom::utils::enums::{ProgramId, Survey};
 
 #[derive(Parser)]
@@ -46,8 +46,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let producer = ZtfAlertProducer::new(date, limit, program_id, true);
             producer.produce(None).await?;
         }
+        Survey::Decam => {
+            let producer = DecamAlertProducer::new(date, limit, true);
+            producer.produce(None).await?;
+        }
         _ => {
-            error!("Only ZTF survey is supported for producing alerts from file (for now).");
+            error!("Unsupported survey for producing alerts: {}", args.survey);
             return Ok(());
         }
     }
