@@ -29,7 +29,7 @@ pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const ZTF_LSST_XMATCH_RADIUS: f64 =
-    (ZTF_UNCERTAINTY.max(lsst::LSST_UNCERTAINTY) / 3600.0_f64).to_radians(); // 2 arcseconds in radians
+    (ZTF_UNCERTAINTY.max(lsst::LSST_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
