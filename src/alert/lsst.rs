@@ -40,11 +40,11 @@ pub struct DiaSource {
     /// Id of the detector where this diaSource was measured. Datatype short instead of byte because of DB concerns about unsigned bytes.
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
-    #[serde(rename(deserialize = "diaObjectId"))]
+    #[serde(rename = "diaObjectId")]
     #[serde(deserialize_with = "deserialize_objid_option")]
     pub dia_object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
-    #[serde(rename(deserialize = "ssObjectId"))]
+    #[serde(rename = "ssObjectId")]
     #[serde(deserialize_with = "deserialize_sso_objid_option")]
     pub ss_object_id: Option<String>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
