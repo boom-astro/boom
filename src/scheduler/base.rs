@@ -211,9 +211,8 @@ impl Worker {
                     debug!(?config_path);
                     let run = match survey_name {
                         Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
-                        // we don't have an ML worker for LSST yet
-                        Survey::Lsst => {
-                            error!("LSST ML worker not implemented");
+                        _ => {
+                            error!("ML worker not implemented for survey: {:?}", survey_name);
                             return;
                         }
                     };
