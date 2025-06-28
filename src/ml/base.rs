@@ -64,35 +64,23 @@ pub async fn run_ml_worker<T: MLWorker>(
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 break;
-            } else {
-                command_check_countdown = command_interval + 1;
             }
+            command_check_countdown = command_interval;
         }
-        command_check_countdown -= 1;
-        // if the queue is empty, wait for a bit and continue the loop
-        let queue_len: i64 = con.llen(&input_queue).await?;
-        if queue_len == 0 {
+
+        let candids: Vec<i64> = con
+            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
+            .await?;
+
+        if candids.is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
         }
 
-        // get candids from redis
-        let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
-            .await?;
-
-        let nb_candids = candids.len();
-        if nb_candids == 0 {
-            // sleep for a bit if no alerts were found
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            continue;
-        }
-
         let processed_alerts = ml_worker.process_alerts(&candids).await?;
-        command_check_countdown -= nb_candids - 1; // As if iterated this many times
+        command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
-        // push that back to redis to the output queue
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await?;
     }

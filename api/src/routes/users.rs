@@ -13,12 +13,13 @@ pub struct UserPost {
     pub password: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UserInsert {
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct User {
     pub id: String,
     pub username: String,
     pub email: String,
     pub password: String, // This will be hashed before insertion
+    pub is_admin: bool,   // Indicates if the user is an admin
 }
 
 #[utoipa::path(
@@ -32,8 +33,16 @@ pub struct UserInsert {
     )
 )]
 #[post("/users")]
-pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> HttpResponse {
-    let user_collection: Collection<UserInsert> = db.collection("users");
+pub async fn post_user(
+    db: web::Data<Database>,
+    body: web::Json<UserPost>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = current_user.unwrap();
+    if !current_user.is_admin {
+        return HttpResponse::Forbidden().body("Only admins can create new users");
+    }
+    let user_collection: Collection<User> = db.collection("users");
 
     // Create a new user document
     // First, hash password
@@ -41,21 +50,23 @@ pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> Ht
     let user_id = uuid::Uuid::new_v4().to_string();
     let hashed_password =
         bcrypt::hash(&body.password, bcrypt::DEFAULT_COST).expect("failed to hash password");
-    let user_insert = UserInsert {
+    let user_insert = User {
         id: user_id.clone(),
         username: body.username.clone(),
         email: body.email.clone(),
         password: hashed_password,
+        is_admin: false,
     };
 
     // Save new user to database
-    match user_collection.insert_one(user_insert).await {
+    match user_collection.insert_one(user_insert.clone()).await {
         Ok(_) => response::ok(
             "success",
-            serde_json::to_value(User {
+            serde_json::to_value(UserGet {
                 id: user_id,
-                username: body.username.clone(),
-                email: body.email.clone(),
+                username: user_insert.username.clone(),
+                email: user_insert.email.clone(),
+                is_admin: user_insert.is_admin,
             })
             .unwrap(),
         ),
@@ -72,10 +83,11 @@ pub async fn post_user(db: web::Data<Database>, body: web::Json<UserPost>) -> Ht
 }
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
-pub struct User {
+pub struct UserGet {
     pub id: String,
     pub username: String,
     pub email: String,
+    pub is_admin: bool,
 }
 
 #[utoipa::path(
@@ -88,12 +100,12 @@ pub struct User {
 )]
 #[get("/users")]
 pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
-    let user_collection: Collection<User> = db.collection("users");
+    let user_collection: Collection<UserGet> = db.collection("users");
     let users = user_collection.find(doc! {}).await;
 
     match users {
         Ok(mut cursor) => {
-            let mut user_list = Vec::<User>::new();
+            let mut user_list = Vec::<UserGet>::new();
             while let Some(user) = cursor.next().await {
                 match user {
                     Ok(user) => {
@@ -121,10 +133,18 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     )
 )]
 #[delete("/users/{user_id}")]
-pub async fn delete_user(db: web::Data<Database>, path: web::Path<String>) -> HttpResponse {
+pub async fn delete_user(
+    db: web::Data<Database>,
+    path: web::Path<String>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = current_user.unwrap();
+    if !current_user.is_admin {
+        return HttpResponse::Forbidden().body("Only admins can delete users");
+    }
     // TODO: Ensure the caller is authorized to delete this user
     let user_id = path.into_inner();
-    let user_collection: Collection<User> = db.collection("users");
+    let user_collection: Collection<UserGet> = db.collection("users");
 
     match user_collection.delete_one(doc! { "id": &user_id }).await {
         Ok(delete_result) => {

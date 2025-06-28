@@ -1,4 +1,4 @@
-use crate::models::response;
+use crate::{models::response, routes::users::User};
 
 use actix_web::{HttpResponse, patch, post, web};
 use mongodb::{
@@ -121,7 +121,10 @@ async fn run_test_pipeline(
 }
 
 /// Takes a verified filter and builds the properly formatted bson document for the database
-fn build_filter_bson(filter: Filter) -> Result<mongodb::bson::Document, mongodb::error::Error> {
+fn build_filter_bson(
+    filter: Filter,
+    user_id: &str,
+) -> Result<mongodb::bson::Document, mongodb::error::Error> {
     // generate new object id
     let id = mongodb::bson::oid::ObjectId::new();
     let date_time = mongodb::bson::DateTime::now();
@@ -155,6 +158,7 @@ fn build_filter_bson(filter: Filter) -> Result<mongodb::bson::Document, mongodb:
         ],
         "autosave": false,
         "update_annotations": true,
+        "created_by": user_id,
         "created_at": date_time,
         "last_modified": date_time,
     };
@@ -283,7 +287,12 @@ pub struct FilterPost {
     )
 )]
 #[post("/filters")]
-pub async fn post_filter(db: web::Data<Database>, body: web::Json<FilterPost>) -> HttpResponse {
+pub async fn post_filter(
+    db: web::Data<Database>,
+    body: web::Json<FilterPost>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = current_user.unwrap();
     let body = body.clone();
 
     let catalog = body.catalog;
@@ -328,7 +337,7 @@ pub async fn post_filter(db: web::Data<Database>, body: web::Json<FilterPost>) -
         catalog,
         id: filter_id,
     };
-    let filter_bson = match build_filter_bson(database_filter.clone()) {
+    let filter_bson = match build_filter_bson(database_filter.clone(), &current_user.id) {
         Ok(bson) => bson,
         Err(e) => {
             return HttpResponse::BadRequest()
