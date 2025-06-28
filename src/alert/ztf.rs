@@ -405,7 +405,7 @@ pub struct ZtfAlertWorker {
 }
 
 impl ZtfAlertWorker {
-    #[instrument(skip_all, err)]
+    #[instrument(skip(self), err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
         let lsst_matches = self
             .get_matches(

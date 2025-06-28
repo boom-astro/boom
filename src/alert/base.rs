@@ -399,7 +399,7 @@ pub trait AlertWorker {
         collection.insert_one(cutout_doc).await?;
         Ok(())
     }
-    #[instrument(skip_all, err)]
+    #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
     async fn get_matches(
         &self,
         ra: f64,
