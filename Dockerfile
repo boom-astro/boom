@@ -40,5 +40,8 @@ WORKDIR /app
 # Copy the built executable from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 
+# Copy in ML models
+COPY data/models /app/data/models
+
 # Set the entrypoint
 CMD ["/app/scheduler"]

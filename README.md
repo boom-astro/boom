@@ -146,18 +146,25 @@ This is still a work in progress, so you might see some error handling taking pl
 
 ## Logging
 
-The logging level is controlled with the `RUST_LOG` environment variable, which can be set to either "trace", "debug", "info", "warn", "error", or "off". For example, to see DEBUG messages, set `RUST_LOG=debug`. The default logging level is INFO.
+The logging level is configured using the `RUST_LOG` environment variable, which can be set to one or more directives described in the [`tracing_subscriber` docs](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html).
+The simplest directives are "trace", "debug", "info", "warn", "error", and "off", though more advanced directives can be used to set the level for particular crates.
+An example of this is boom's default directive---what boom uses when `RUST_LOG` is not set---which is "info,ort=error".
+This directive means boom will log at the INFO level, with events from the `ort` crate specifically limited to ERROR.
 
-`RUST_LOG` supports more advanced directives described in the [`tracing_subscriber` docs](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html). A particularly useful feature is setting the level for different crates. This makes it possible to disable events from external crates like `ort` that would otherwise be mixed in with those from boom, e.g., `RUST_LOG=info,ort=off`.
+Setting `RUST_LOG` overwrites the default directive. For instance, `RUST_LOG=debug` will show all DEBUG events from all crates (including `ort`).
+If you need to change the general level while keeping `ort` events limited to ERROR, then you'll have to specify that explicitly, e.g., `RUST_LOG=debug,ort=error`.
+If you find the filtering on `ort` too restrictive, but you don't want to open it up to INFO, you can set `RUST_LOG=info,ort=warn`.
+There's nothing special about `ort` here; directives can be used to control events from any crate.
+It's just that `ort` tends to be significantly "noisier" than all of our other dependencies, so it's a useful example.
 
 Span events can be added to the log by setting the `BOOM_SPAN_EVENTS` environment variable to one or more of the following [span lifecycle options](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/struct.Layer.html#method.with_span_events): "new", "enter", "exit", "close", "active", "full", or "none", where multiple values are separated by a comma.
 For example, to see events for when spans open and close, set `BOOM_SPAN_EVENTS=new,close`.
 "close" is notable because it creates events with execution time information, which may be useful for profiling.
 
-As a more complete example, the following sets the logging level to DEBUG, disables logs from the `ort` crate, and enables "new" and "close" span events while running the scheduler:
+As a more complete example, the following sets the logging level to DEBUG, with `ort` specifically set to WARN, and enables "new" and "close" span events while running the scheduler:
 
 ```bash
-RUST_LOG=debug,ort=off BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
 ```
 
 ## Contributing

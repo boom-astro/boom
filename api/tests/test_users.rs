@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod tests {
     use actix_web::http::StatusCode;
+    use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
+    use boom_api::auth::{auth_middleware, get_default_auth};
+    use boom_api::conf::AppConfig;
     use boom_api::db::get_default_db;
     use boom_api::routes;
     use mongodb::Database;
@@ -37,13 +40,22 @@ mod tests {
     #[actix_rt::test]
     async fn test_post_and_delete_user() {
         let database: Database = get_default_db().await;
+        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_config = AppConfig::default().auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
                 .service(routes::users::post_user)
                 .service(routes::users::delete_user),
         )
         .await;
+
+        let (token, _) = auth_app_data
+            .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
+            .await
+            .expect("Failed to create token for admin user");
 
         // Create a new user with a UUID username
         let random_name = uuid::Uuid::new_v4().to_string();
@@ -57,6 +69,7 @@ mod tests {
 
         let req = test::TestRequest::post()
             .uri("/users")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&new_user)
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -72,6 +85,7 @@ mod tests {
         // Test that we can't post the same user again
         let duplicate_req = test::TestRequest::post()
             .uri("/users")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .set_json(&new_user)
             .to_request();
         let duplicate_resp = test::call_service(&app, duplicate_req).await;
@@ -80,6 +94,7 @@ mod tests {
         // Now delete this user
         let delete_req = test::TestRequest::delete()
             .uri(&format!("/users/{}", user_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let delete_resp = test::call_service(&app, delete_req).await;
         assert_eq!(delete_resp.status(), StatusCode::OK);
