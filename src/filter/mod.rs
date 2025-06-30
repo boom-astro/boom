@@ -1,4 +1,5 @@
 mod base;
+mod decam;
 mod lsst;
 mod ztf;
 
@@ -8,7 +9,8 @@ pub use base::{
 };
 use base::{
     get_filter_object, parse_programid_candid_tuple, Alert, Classification, FilterResults, Origin,
-    Photometry, Survey,
+    Photometry,
 };
+pub use decam::{DecamFilter, DecamFilterWorker};
 pub use lsst::{LsstFilter, LsstFilterWorker};
 pub use ztf::{ZtfFilter, ZtfFilterWorker};

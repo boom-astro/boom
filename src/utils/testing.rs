@@ -109,6 +109,7 @@ pub async fn drop_alert_from_collections(
 
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magap\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magap\", 2]}}}]";
 
 pub async fn remove_test_filter(
     filter_id: i32,
@@ -132,12 +133,7 @@ pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::err
     let pipeline = match survey {
         Survey::Ztf => ZTF_TEST_PIPELINE,
         Survey::Lsst => LSST_TEST_PIPELINE,
-        _ => {
-            return Err(Box::from(format!(
-                "Unsupported survey for test filter: {}",
-                survey
-            )));
-        }
+        Survey::Decam => DECAM_TEST_PIPELINE,
     };
 
     let filter_obj: mongodb::bson::Document = doc! {

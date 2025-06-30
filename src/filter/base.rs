@@ -1,5 +1,6 @@
 use crate::{
     conf,
+    utils::enums::Survey,
     utils::worker::{should_terminate, WorkerCmd},
 };
 
@@ -115,12 +116,6 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
 pub enum Origin {
     Alert,
     ForcedPhot,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum Survey {
-    ZTF,
-    LSST,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
