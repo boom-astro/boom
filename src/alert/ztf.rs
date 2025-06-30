@@ -1,7 +1,7 @@
 use crate::{
     alert::{
         base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus},
-        get_schema_and_startidx, lsst,
+        decam, get_schema_and_startidx, lsst,
     },
     conf,
     utils::{
@@ -30,6 +30,8 @@ pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts"
 
 pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_UNCERTAINTY.max(lsst::LSST_UNCERTAINTY) / 3600.0_f64).to_radians();
+pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
+    (ZTF_UNCERTAINTY.max(decam::DECAM_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
@@ -402,6 +404,7 @@ pub struct ZtfAlertWorker {
     cached_schema: Option<Schema>,
     cached_start_idx: Option<usize>,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
+    decam_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl ZtfAlertWorker {
@@ -417,8 +420,19 @@ impl ZtfAlertWorker {
             )
             .await?;
 
+        let decam_matches = self
+            .get_matches(
+                ra,
+                dec,
+                decam::DECAM_DEC_RANGE,
+                ZTF_DECAM_XMATCH_RADIUS,
+                &self.decam_alert_aux_collection,
+            )
+            .await?;
+
         Ok(doc! {
             "LSST": lsst_matches,
+            "DECAM": decam_matches,
         })
     }
 
@@ -534,6 +548,9 @@ impl AlertWorker for ZtfAlertWorker {
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&lsst::ALERT_AUX_COLLECTION);
 
+        let decam_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&decam::ALERT_AUX_COLLECTION);
+
         let worker = ZtfAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
@@ -544,6 +561,7 @@ impl AlertWorker for ZtfAlertWorker {
             cached_schema: None,
             cached_start_idx: None,
             lsst_alert_aux_collection,
+            decam_alert_aux_collection,
         };
         Ok(worker)
     }

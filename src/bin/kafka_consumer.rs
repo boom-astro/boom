@@ -105,6 +105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             consumer.consume(timestamp).await?;
         }
+        _ => {
+            tracing::error!(
+                "Survey {:?} is not supported for consuming alerts from Kafka",
+                survey
+            );
+            return Ok(());
+        }
     }
 
     Ok(())
