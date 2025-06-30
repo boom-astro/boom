@@ -18,7 +18,7 @@ Each alert is processed with the following pipeline:
    Any alert that passes through any filter is sent
    to a dedicated Kafka output stream for that alert's input stream.
 
-The implementation is as follows:
+Data flows through the system as follows:
 
 ```mermaid
 graph LR
@@ -51,16 +51,19 @@ graph LR
     end
 
     Input --> KafkaConsumer
-    KafkaConsumer --> AlertQueue
-    AlertQueue --> AlertWorker
-    AlertWorker --> MLQueue
-    AlertWorker --> AlertCollection
-    AlertWorker --> ObjectCollection
-    AlertWorker --> ImageCollection
-    MLQueue --> MLWorker
-    MLWorker --> FilterQueue
-    FilterQueue --> FilterWorker
-    FilterWorker --> Output
+    KafkaConsumer -- Alert AVRO --> AlertQueue
+    AlertQueue -- Alert AVRO --> AlertWorker
+    AlertWorker -- Candidate ID --> MLQueue
+    AlertWorker -- Alert --> AlertCollection
+    AlertWorker -- Object --> ObjectCollection
+    AlertWorker -- Images --> ImageCollection
+    MLQueue -- Candidate ID --> MLWorker
+    MLWorker -- Candidate ID --> FilterQueue
+    AlertCollection -- Alert --> MLWorker
+    MLWorker -- ML scores --> AlertCollection
+    FilterQueue -- Candidate ID --> FilterWorker
+    AlertCollection -- Enriched alert --> FilterWorker
+    FilterWorker -- Enriched alert --> Output
 ```
 
 MongoDB serves as the storage, cross-matching, and filtering engine.
