@@ -15,7 +15,7 @@ Each alert is processed with the following pipeline:
    of the object in the alert.
 3. Machine learning model classification scores are added.
 4. A set of user-defined filters are applied.
-   Any alert that passes through any filter is sent
+   Any alert that passes through at least one filter is sent
    to a dedicated Kafka output stream for that alert's input stream.
 
 Data flows through the system as follows:
