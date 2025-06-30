@@ -9,12 +9,12 @@ Each alert is processed with the following pipeline:
    Their data is split and inserted into an alert dataset,
    an object dataset, and an image dataset, named according to the survey
    with which it is associated.
-1. Cross-matches with object IDs from other data catalogs
+2. Cross-matches with object IDs from other data catalogs
    (from both live and archival surveys) are added.
    This is done based on the location (right ascension and declination)
    of the object in the alert.
-1. Machine learning model classification scores are added.
-1. A set of user-defined filters are applied.
+3. Machine learning model classification scores are added.
+4. A set of user-defined filters are applied.
    Any alert that passes through any filter is sent
    to a dedicated Kafka output stream for that alert's input stream.
 
@@ -22,51 +22,60 @@ The implementation is as follows:
 
 ```mermaid
 graph LR
+
+    Input[Input alert stream]
+
     subgraph Kafka
-        ZTF[ZTF Kafka stream]
-        LSST[LSST Kafka stream]
-        Output1[Output Kafka stream 1]
-        Output2[Output Kafka stream 2]
-        OutputN[Output Kafka stream N]
+        Output[Output alert stream]
     end
 
     subgraph Valkey
-        ZTFAlertQueue[ZTF alert queue]
-        LSSTAlertQueue[LSST alert queue]
+        AlertQueue[Alert queue]
+        MLQueue[ML queue]
+        FilterQueue[Filter queue]
+    end
+
+    subgraph MongoDB
+        AlertCollection[Alert collection]
+        ObjectCollection[Object collection]
+        ImageCollection[Image collection]
     end
 
     subgraph BOOM services
-        ZTFConsumer[ZTF Kafka consumer]
-        LSSTConsumer[LSST Kafka consumer]
+        KafkaConsumer[Kafka consumer]
         subgraph Scheduler
-            AlertWorker["Alert worker (database insertion and cross-matching)"]
+            AlertWorker[Alert worker]
             MLWorker[ML worker]
             FilterWorker[Filter worker]
         end
     end
 
-    subgraph BOOM consumers
-        SkyPortal[SkyPortal]
-    end
-
-    ZTF --> ZTFConsumer
-    LSST --> LSSTConsumer
-    ZTFConsumer --> ZTFAlertQueue
-    LSSTConsumer --> LSSTAlertQueue
-    ZTFAlertQueue --> AlertWorker
-    LSSTAlertQueue --> AlertWorker
-    AlertWorker --> ZTFAlertQueue
-    AlertWorker --> LSSTAlertQueue
-    ZTFAlertQueue --> MLWorker
-    LSSTAlertQueue --> MLWorker
-    MLWorker --> ZTFAlertQueue
-    MLWorker --> LSSTAlertQueue
-    ZTFAlertQueue --> FilterWorker
-    LSSTAlertQueue --> FilterWorker
-    FilterWorker -- Pass filter --> Output1
-    FilterWorker -- Pass filter --> Output2
-    FilterWorker -- Pass filter --> OutputN
-    Output1 --> SkyPortal
-    Output2 --> SkyPortal
-    OutputN --> SkyPortal
+    Input --> KafkaConsumer
+    KafkaConsumer --> AlertQueue
+    AlertQueue --> AlertWorker
+    AlertWorker --> MLQueue
+    AlertWorker --> AlertCollection
+    AlertWorker --> ObjectCollection
+    AlertWorker --> ImageCollection
+    MLQueue --> MLWorker
+    MLWorker --> FilterQueue
+    FilterQueue --> FilterWorker
+    FilterWorker --> Output
 ```
+
+MongoDB serves as the storage, cross-matching, and filtering engine.
+
+When scaling the system to include additional live survey input streams,
+each one will have its own:
+
+- Kafka consumer
+- Alert queue
+- Alert workers
+- ML queue
+- ML workers
+- Filter queue
+- Filter workers
+- Alert collection
+- Object collection
+- Image collection
+- Output stream
