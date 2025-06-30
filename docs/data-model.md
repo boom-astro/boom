@@ -102,12 +102,16 @@ Since surveys can produce millions of alerts per night,
 having filters in place is critical to make detecting
 scientifically relevant objects practical.
 
-Filters can make use of the cross-matching information since BOOM performs
+Filters can make use of the cross-matching information
+from other archival and live surveys' catalogs (including light curve data)
+since BOOM performs
 cross-matching before applying filters.
-Filters can also make use of light curve data from other live surveys,
-which is as far as we know not possible with any other alert broker.
+For example,
+when we are alerted about a new transient detected by ZTF,
+we are able to filter on it using the corresponding LSST data if any exists.
+To our knowledge this level of information is not available for
+real-time filtering in other brokers,
+though it may be possible for historical queries.
 
-Each filter is associated with one alert input stream
-and one alert output stream.
-Each alert output stream has its own credentials for authorization.
-These can be used, for example, to connect a Marshal like SkyPortal.
+Multiple filters are applied to each alert input stream and any that
+pass are sent to that input's corresponding output stream.
