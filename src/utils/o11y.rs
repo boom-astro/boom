@@ -253,7 +253,8 @@ pub fn build_subscriber() -> Result<
         .with_line_number(true)
         .with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
 
-    let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
+    let env_filter =
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info,ort=error"))?;
 
     let subscriber = tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter));
 
