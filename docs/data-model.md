@@ -48,14 +48,11 @@ Essentially, each alert indicates to us that a new transient has been
 discovered (if nothing was present at that location in the reference image) or
 a known star is varying in brightness.
 
-An alert always includes an object ID, along with a candidate ID,
-which serves as the unique identifier for that alert.
-
 Alerts from different surveys will have different schemas,
 but they have a few common properties:
 
 - Object ID
-- Candidate ID
+- Candidate ID (an identifier for an alert)
 - Right ascension (RA)
 - Declination (dec)
 - Brightness and associated error (in magnitude and/or flux-space)
@@ -114,6 +111,3 @@ Each filter is associated with one alert input stream
 and one alert output stream.
 Each alert output stream has its own credentials for authorization.
 These can be used, for example, to connect a Marshal like SkyPortal.
-
-Admin users are able to modify any filter in the system,
-but regular users are only able to modify filters they created.
