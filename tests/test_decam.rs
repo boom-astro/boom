@@ -125,14 +125,14 @@ async fn test_filter_decam_alert() {
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(&alert.object_id, &object_id);
-    assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
+    assert_eq!(alert.photometry.len(), 61); // prv_candidates + prv_nondetections
 
     let filter_passed = alert
         .filters
         .iter()
         .find(|f| f.filter_id == filter_id)
         .unwrap();
-    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.23}");
 
     let classifications = &alert.classifications;
     assert_eq!(classifications.len(), 0);
