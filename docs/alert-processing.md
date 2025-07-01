@@ -36,9 +36,10 @@ graph TB
     end
 
     subgraph MongoDB
-        AlertCollection[Alert collection]
-        ObjectCollection[Object collection]
-        ImageCollection[Image collection]
+        direction TB
+        AlertCollection[Alerts]
+        ObjectCollection[Objects]
+        ImageCollection[Images]
     end
 
     subgraph BOOM services
@@ -51,13 +52,13 @@ graph TB
     end
 
     Input --> KafkaConsumer
-    KafkaConsumer -- Alert AVRO --> AlertQueue
-    AlertQueue -- Alert AVRO --> AlertWorker
+    KafkaConsumer -- Alert Avro --> AlertQueue
+    AlertQueue -- Alert Avro --> AlertWorker
     AlertWorker -- Candidate ID --> MLQueue
     AlertWorker -- Alert, object, images --> MongoDB
     MLQueue -- Candidate ID --> MLWorker
     MLWorker -- Candidate ID --> FilterQueue
-    MLWorker -- ML scores --> AlertCollection
+    MLWorker -- Alert ML scores --> AlertCollection
     MongoDB -- Alert, object, images --> MLWorker
     FilterQueue -- Candidate ID --> FilterWorker
     MongoDB -- Enriched alert --> FilterWorker
