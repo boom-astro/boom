@@ -22,13 +22,13 @@ use std::fmt::Debug;
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
-pub const ZTF_UNCERTAINTY: f64 = 2.; // arcsec
+pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const ZTF_LSST_XMATCH_RADIUS: f64 =
-    (ZTF_UNCERTAINTY.max(lsst::LSST_UNCERTAINTY) / 3600.0_f64).to_radians();
+    (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
