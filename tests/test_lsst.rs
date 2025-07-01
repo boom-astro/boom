@@ -17,7 +17,7 @@ async fn test_lsst_alert_from_avro_bytes() {
     let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::default(Survey::Lsst).get().await;
+        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let alert = alert_worker
         .alert_from_avro_bytes(&bytes_content)
         .await
@@ -84,7 +84,7 @@ async fn test_process_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::default(Survey::Lsst).get().await;
+        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
@@ -156,7 +156,7 @@ async fn test_filter_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) =
-        AlertRandomizer::default(Survey::Lsst).get().await;
+        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 

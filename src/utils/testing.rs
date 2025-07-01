@@ -196,7 +196,7 @@ impl AlertRandomizer {
         }
     }
 
-    pub fn default(survey: Survey) -> Self {
+    pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
             Survey::Ztf => {
                 let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
