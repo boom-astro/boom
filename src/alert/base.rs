@@ -2,17 +2,131 @@ use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
+        db::{cutout2bsonbinary, get_coordinates},
         o11y::{as_error, log_error, WARN},
         spatial::XmatchError,
         worker::should_terminate,
     },
 };
-use apache_avro::Schema;
-use mongodb::bson::Document;
+use apache_avro::{from_avro_datum, Reader, Schema};
+use mongodb::{
+    bson::{doc, Document},
+    Collection,
+};
 use redis::AsyncCommands;
+use serde::{de::Deserializer, Deserialize};
+use std::io::Read;
 use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
+
+#[instrument(skip_all, err)]
+fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
+    let mut i = 0u64;
+    let mut buf = [0u8; 1];
+
+    let mut j = 0;
+    loop {
+        if j > 9 {
+            return Err(SchemaRegistryError::IntegerOverflow);
+        }
+        reader.read_exact(&mut buf[..])?;
+
+        i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
+        if (buf[0] >> 7) == 0 {
+            break;
+        } else {
+            j += 1;
+        }
+    }
+
+    Ok(i)
+}
+
+#[instrument(skip_all, err)]
+pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+    let z = decode_variable(reader)?;
+    if z & 0x1 == 0 {
+        Ok((z >> 1) as i64)
+    } else {
+        Ok(!(z >> 1) as i64)
+    }
+}
+
+#[instrument(skip_all, err)]
+fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+    Ok(zag_i64(reader)?)
+}
+
+#[instrument(skip_all, err)]
+pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
+    // First, we extract the schema from the avro bytes
+    let cursor = std::io::Cursor::new(avro_bytes);
+    let reader = Reader::new(cursor)?;
+    let schema = reader.writer_schema();
+
+    // Then, we look for the index of the start of the data
+    // this is based on the Apache Avro specification 1.3.2
+    // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
+    let mut cursor = std::io::Cursor::new(avro_bytes);
+
+    // Four bytes, ASCII 'O', 'b', 'j', followed by 1
+    let mut buf = [0; 4];
+    cursor.read_exact(&mut buf)?;
+    if buf != [b'O', b'b', b'j', 1u8] {
+        return Err(SchemaRegistryError::MagicBytesError);
+    }
+
+    // Then there is the file metadata, including the schema
+    let meta_schema = Schema::map(Schema::Bytes);
+    from_avro_datum(&meta_schema, &mut cursor, None)?;
+
+    // Then the 16-byte, randomly-generated sync marker for this file.
+    let mut buf = [0; 16];
+    cursor.read_exact(&mut buf)?;
+
+    // each avro record is preceded by:
+    // 1. a variable-length integer, the number of records in the block
+    // 2. a variable-length integer, the number of bytes in the block
+    let nb_records = decode_long(&mut cursor)?;
+    if nb_records != 1 {
+        return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
+    }
+    let _ = decode_long(&mut cursor)?;
+
+    // we now have the start index of the data
+    let start_idx = cursor.position();
+
+    Ok((schema.to_owned(), start_idx as usize))
+}
+
+pub fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mjd = <f64 as Deserialize>::deserialize(deserializer)?;
+    Ok(mjd + 2400000.5)
+}
+
+pub fn deserialize_mjd_option<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mjd = <Option<f64> as Deserialize>::deserialize(deserializer)?;
+    match mjd {
+        Some(mjd) => Ok(Some(mjd + 2400000.5)),
+        None => Ok(None),
+    }
+}
+
+pub trait Alert:
+    Debug + PartialEq + Clone + serde::Deserialize<'static> + serde::Serialize
+{
+    fn object_id(&self) -> String;
+    fn candid(&self) -> i64;
+    fn ra(&self) -> f64;
+    fn dec(&self) -> f64;
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
@@ -52,6 +166,8 @@ pub enum AlertError {
     AlertAuxExists,
     #[error("missing object_id")]
     MissingObjectId,
+    #[error("ambiguous object_id")]
+    AmbiguousObjectId(String, String),
     #[error("missing cutout")]
     MissingCutout,
     #[error("missing psf flux")]
@@ -200,13 +316,45 @@ pub enum AlertWorkerError {
 
 #[async_trait::async_trait]
 pub trait AlertWorker {
-    type ObjectId;
     async fn new(config_path: &str) -> Result<Self, AlertWorkerError>
     where
         Self: Sized;
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
+    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<impl Alert, AlertError>;
+    #[instrument(skip(self, ra, dec, candidate_doc, now, collection), err)]
+    async fn format_and_insert_alert(
+        &self,
+        candid: i64,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        candidate_doc: &Document,
+        now: f64,
+        collection: &mongodb::Collection<Document>,
+    ) -> Result<ProcessAlertStatus, AlertError> {
+        let alert_doc = doc! {
+            "_id": candid,
+            "objectId": object_id,
+            "candidate": candidate_doc,
+            "coordinates": get_coordinates(ra, dec),
+            "created_at": now,
+            "updated_at": now,
+        };
+
+        let status = collection
+            .insert_one(alert_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
+    }
     async fn insert_aux(
         self: &mut Self,
         object_id: &str,
@@ -227,6 +375,62 @@ pub trait AlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError>;
+    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
+    async fn format_and_insert_cutouts(
+        &self,
+        candid: i64,
+        cutout_science: Vec<u8>,
+        cutout_template: Vec<u8>,
+        cutout_difference: Vec<u8>,
+        collection: &Collection<Document>,
+    ) -> Result<(), AlertError> {
+        let cutout_doc = doc! {
+            "_id": &candid,
+            "cutoutScience": cutout2bsonbinary(cutout_science),
+            "cutoutTemplate": cutout2bsonbinary(cutout_template),
+            "cutoutDifference": cutout2bsonbinary(cutout_difference),
+        };
+
+        collection.insert_one(cutout_doc).await?;
+        Ok(())
+    }
+    #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
+    async fn get_matches(
+        &self,
+        ra: f64,
+        dec: f64,
+        dec_range: (f64, f64),
+        radius_rad: f64,
+        collection: &Collection<Document>,
+    ) -> Result<Vec<String>, AlertError> {
+        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
+            let result = collection
+                .find_one(doc! {
+                    "coordinates.radec_geojson": {
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": radius_rad,
+                    },
+                })
+                .projection(doc! {
+                    "_id": 1
+                })
+                .await;
+            match result {
+                Ok(Some(doc)) => {
+                    let object_id = doc.get_str("_id")?;
+                    vec![object_id.to_string()]
+                }
+                Ok(None) => vec![],
+                Err(e) => {
+                    error!("Error cross-matching with {}: {}", collection.name(), e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+        Ok(matches)
+    }
     async fn process_alert(
         self: &mut Self,
         avro_bytes: &[u8],

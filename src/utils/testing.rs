@@ -15,26 +15,31 @@ use rand::Rng;
 use redis::AsyncCommands;
 use std::fs;
 use std::io::Read;
-use tracing::error;
 // Utility for unit tests
 
 pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
 
+async fn test_db() -> mongodb::Database {
+    let config_file = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config_file).await.unwrap();
+    db
+}
+
+async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db().await;
+    initialize_survey_indexes(survey, &db).await?;
+    Ok(())
+}
+
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
-        .await
-        .unwrap();
-    initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
+    init_indexes(&Survey::Ztf).await.unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    let db = conf::build_db(&conf::load_config(TEST_CONFIG_FILE).unwrap())
-        .await
-        .unwrap();
-    initialize_survey_indexes(&Survey::Lsst, &db).await.unwrap();
+    init_indexes(&Survey::Lsst).await.unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
@@ -95,120 +100,61 @@ pub async fn drop_alert_from_collections(
     Ok(())
 }
 
-pub async fn insert_test_ztf_filter() -> Result<i32, Box<dyn std::error::Error>> {
-    // we randomize the filter id
-    let filter_id = rand::random::<i32>();
-    let filter_obj: mongodb::bson::Document = doc! {
-      "_id": mongodb::bson::oid::ObjectId::new(),
-      "group_id": 41,
-      "filter_id": filter_id,
-      "catalog": "ZTF_alerts",
-      "permissions": [1],
-      "active": true,
-      "active_fid": "v2e0fs",
-      "fv": [
-        {
-            "fid": "v2e0fs",
-            "pipeline": "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
-            "created_at": {
-            "$date": "2020-10-21T08:39:43.693Z"
-            }
-        }
-      ],
-      "autosave": false,
-      "update_annotations": true,
-      "created_at": {
-        "$date": "2021-02-20T08:18:28.324Z"
-      },
-      "last_modified": {
-        "$date": "2023-05-04T23:39:07.090Z"
-      }
-    };
+const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
-    let x = db
-        .collection::<mongodb::bson::Document>("filters")
-        .insert_one(filter_obj)
-        .await;
-    match x {
-        Err(e) => {
-            error!("error inserting filter obj: {}", e);
-        }
-        _ => {}
-    }
-
-    Ok(filter_id)
-}
-
-pub async fn remove_test_ztf_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove_test_filter(
+    filter_id: i32,
+    survey: &Survey,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": "ZTF_alerts"})
+        .delete_many(doc! {"filter_id": filter_id, "catalog": &format!("{}_alerts", survey)})
         .await;
 
     Ok(())
 }
 
-pub async fn insert_test_lsst_filter() -> Result<i32, Box<dyn std::error::Error>> {
-    // we randomize the filter id
+// we want to replace the 3 insert_test_..._filter functions with a single function that
+// takes the survey as argument
+pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::error::Error>> {
     let filter_id = rand::random::<i32>();
+    let catalog = format!("{}_alerts", survey);
+    let pipeline = match survey {
+        Survey::Ztf => ZTF_TEST_PIPELINE,
+        Survey::Lsst => LSST_TEST_PIPELINE,
+    };
+
     let filter_obj: mongodb::bson::Document = doc! {
-      "_id": mongodb::bson::oid::ObjectId::new(),
-      "group_id": 41,
-      "filter_id": filter_id,
-      "catalog": "LSST_alerts",
-      "permissions": [
-        1
-      ],
-      "active": true,
-      "active_fid": "v2e0fs",
-      "fv": [
-        {
-            "fid": "v2e0fs",
-            "pipeline": "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]",
-            "created_at": {
-            "$date": "2020-10-21T08:39:43.693Z"
+        "_id": mongodb::bson::oid::ObjectId::new(),
+        "group_id": 41,
+        "filter_id": filter_id,
+        "catalog": catalog,
+        "permissions": [1],
+        "active": true,
+        "active_fid": "v2e0fs",
+        "fv": [
+            {
+                "fid": "v2e0fs",
+                "pipeline": pipeline,
+                "created_at": {"$date": "2020-10-21T08:39:43.693Z"}
             }
-        }
-      ],
-      "autosave": false,
-      "update_annotations": true,
-      "created_at": {
-        "$date": "2021-02-20T08:18:28.324Z"
-      },
-      "last_modified": {
-        "$date": "2023-05-04T23:39:07.090Z"
-      }
+        ],
+        "update_annotations": true,
+        "created_at": {"$date": "2021-02-20T08:18:28.324Z"},
+        "last_modified": {"$date": "2023-05-04T23:39:07.090Z"}
     };
 
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
-    let x = db
+    let _ = db
         .collection::<mongodb::bson::Document>("filters")
         .insert_one(filter_obj)
         .await;
-    match x {
-        Err(e) => {
-            error!("error inserting filter obj: {}", e);
-        }
-        _ => {}
-    }
 
     Ok(filter_id)
-}
-
-pub async fn remove_test_lsst_filter(filter_id: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
-    let _ = db
-        .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": "LSST_alerts"})
-        .await;
-
-    Ok(())
 }
 
 pub async fn empty_processed_alerts_queue(
@@ -224,43 +170,372 @@ pub async fn empty_processed_alerts_queue(
     Ok(())
 }
 
-#[async_trait::async_trait]
-pub trait AlertRandomizerTrait {
-    fn default() -> Self;
-    fn new() -> Self;
-    fn path(self, path: &str) -> Self;
-    fn objectid(self, object_id: impl Into<Self::ObjectId>) -> Self;
-    fn candid(self, candid: i64) -> Self;
-    fn ra(self, ra: f64) -> Self;
-    fn dec(self, dec: f64) -> Self;
-    fn rand_object_id(self) -> Self;
-    fn rand_candid(self) -> Self;
-    fn rand_ra(self) -> Self;
-    fn rand_dec(self) -> Self;
-    fn validate_ra(ra: f64) -> bool {
-        ra >= 0.0 && ra <= 360.0
-    }
-    fn validate_dec(dec: f64) -> bool {
-        dec >= -90.0 && dec <= 90.0
-    }
-    async fn get(self) -> (i64, String, f64, f64, Vec<u8>);
+#[derive(Clone, Debug)]
+pub struct AlertRandomizer {
+    survey: Survey,
+    payload: Option<Vec<u8>>,
+    schema: Option<Schema>,
+    schema_registry: Option<SchemaRegistry>,
+    candid: Option<i64>,
+    object_id: Option<String>, // Use String for all, convert as needed
+    ra: Option<f64>,
+    dec: Option<f64>,
+}
 
-    fn randomize_i64() -> i64 {
-        rand::rng().random_range(0..i64::MAX)
+impl AlertRandomizer {
+    pub fn new(survey: Survey) -> Self {
+        Self {
+            survey,
+            payload: None,
+            schema: None,
+            schema_registry: None,
+            candid: None,
+            object_id: None,
+            ra: None,
+            dec: None,
+        }
     }
-    fn randomize_ra() -> f64 {
-        rand::rng().random_range(0.0..360.0)
+
+    pub fn new_randomized(survey: Survey) -> Self {
+        let (object_id, payload, schema, schema_registry) = match survey {
+            Survey::Ztf => {
+                let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+                let reader = Reader::new(&payload[..]).unwrap();
+                let schema = reader.writer_schema().clone();
+                (
+                    Some(Self::randomize_object_id(&survey)),
+                    Some(payload),
+                    Some(schema),
+                    None,
+                )
+            }
+            Survey::Lsst => {
+                let payload = fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap();
+                (
+                    Some(Self::randomize_object_id(&survey)),
+                    Some(payload),
+                    None,
+                    Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+                )
+            }
+        };
+        let candid = Some(rand::rng().random_range(0..i64::MAX));
+        let ra = Some(rand::rng().random_range(0.0..360.0));
+        let dec = Some(rand::rng().random_range(-90.0..90.0));
+        Self {
+            survey,
+            payload,
+            schema,
+            schema_registry,
+            candid,
+            object_id,
+            ra,
+            dec,
+        }
     }
-    fn randomize_dec() -> f64 {
-        rand::rng().random_range(-90.0..90.0)
+
+    pub fn path(mut self, path: &str) -> Self {
+        let payload = fs::read(path).unwrap();
+        match self.survey {
+            Survey::Lsst => self.payload = Some(payload),
+            _ => {
+                let reader = Reader::new(&payload[..]).unwrap();
+                let schema = reader.writer_schema().clone();
+                self.payload = Some(payload);
+                self.schema = Some(schema);
+            }
+        }
+        self
     }
+
+    pub fn objectid(mut self, object_id: impl Into<String>) -> Self {
+        self.object_id = Some(object_id.into());
+        self
+    }
+    pub fn candid(mut self, candid: i64) -> Self {
+        self.candid = Some(candid);
+        self
+    }
+    pub fn ra(mut self, ra: f64) -> Self {
+        self.ra = Some(ra);
+        self
+    }
+    pub fn dec(mut self, dec: f64) -> Self {
+        self.dec = Some(dec);
+        self
+    }
+    pub fn rand_object_id(mut self) -> Self {
+        self.object_id = Some(Self::randomize_object_id(&self.survey));
+        self
+    }
+    pub fn rand_candid(mut self) -> Self {
+        self.candid = Some(rand::rng().random_range(0..i64::MAX));
+        self
+    }
+    pub fn rand_ra(mut self) -> Self {
+        self.ra = Some(rand::rng().random_range(0.0..360.0));
+        self
+    }
+    pub fn rand_dec(mut self) -> Self {
+        self.dec = Some(rand::rng().random_range(-90.0..90.0));
+        self
+    }
+
+    fn randomize_object_id(survey: &Survey) -> String {
+        let mut rng = rand::rng();
+        match survey {
+            Survey::Ztf => {
+                let mut object_id = survey.to_string();
+                for _ in 0..2 {
+                    object_id.push(rng.random_range('0'..='9'));
+                }
+                for _ in 0..7 {
+                    object_id.push(rng.random_range('a'..='z'));
+                }
+                object_id
+            }
+            Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
+        }
+    }
+
+    fn update_candidate_fields(
+        candidate_record: &mut Vec<(String, Value)>,
+        ra: &mut Option<f64>,
+        dec: &mut Option<f64>,
+        candid: &mut Option<i64>,
+    ) {
+        for (key, value) in candidate_record.iter_mut() {
+            match key.as_str() {
+                "ra" => {
+                    if let Some(r) = ra {
+                        *value = Value::Double(*r);
+                    } else {
+                        *ra = Some(Self::value_to_f64(value));
+                    }
+                }
+                "dec" => {
+                    if let Some(d) = dec {
+                        *value = Value::Double(*d);
+                    } else {
+                        *dec = Some(Self::value_to_f64(value));
+                    }
+                }
+                "candid" => {
+                    if let Some(c) = candid {
+                        *value = Value::Long(*c);
+                    } else {
+                        *candid = Some(Self::value_to_i64(value));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // For LSST, similar logic for diaSource
+    fn update_diasource_fields(
+        candidate_record: &mut Vec<(String, Value)>,
+        object_id: &mut Option<String>,
+        ra: &mut Option<f64>,
+        dec: &mut Option<f64>,
+    ) {
+        for (key, value) in candidate_record.iter_mut() {
+            match key.as_str() {
+                "diaSourceId" | "diaObjectId" => {
+                    if let Some(ref id) = object_id {
+                        let id_i64 = id.parse::<i64>().unwrap();
+                        if key == "diaSourceId" {
+                            *value = Value::Long(id_i64);
+                        } else {
+                            *value = Value::Union(1_u32, Box::new(Value::Long(id_i64)));
+                        }
+                    } else {
+                        *object_id = Some(Self::value_to_i64(value).to_string());
+                    }
+                }
+                "ra" => {
+                    if let Some(r) = ra {
+                        *value = Value::Double(*r);
+                    } else {
+                        *ra = Some(Self::value_to_f64(value));
+                    }
+                }
+                "dec" => {
+                    if let Some(d) = dec {
+                        *value = Value::Double(*d);
+                    } else {
+                        *dec = Some(Self::value_to_f64(value));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
+        match self.survey {
+            Survey::Ztf => {
+                let mut candid = self.candid;
+                let mut object_id = self.object_id;
+                let mut ra = self.ra;
+                let mut dec = self.dec;
+                let (payload, schema) = match (self.payload, self.schema) {
+                    (Some(payload), Some(schema)) => (payload, schema),
+                    _ => {
+                        let payload =
+                            fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+                        let reader = Reader::new(&payload[..]).unwrap();
+                        let schema = reader.writer_schema().clone();
+                        (payload, schema)
+                    }
+                };
+                let reader = Reader::new(&payload[..]).unwrap();
+                let value = reader.into_iter().next().unwrap().unwrap();
+                let mut record = match value {
+                    Value::Record(record) => record,
+                    _ => panic!("Not a record"),
+                };
+
+                for i in 0..record.len() {
+                    let (key, value) = &mut record[i];
+                    match key.as_str() {
+                        "objectId" => {
+                            if let Some(ref id) = object_id {
+                                *value = Value::String(id.clone());
+                            } else {
+                                object_id = Some(Self::value_to_string(value));
+                            }
+                        }
+                        "candid" => {
+                            if let Some(id) = candid {
+                                *value = Value::Long(id);
+                            } else {
+                                candid = Some(Self::value_to_i64(value));
+                            }
+                        }
+                        "candidate" => {
+                            if let Value::Record(candidate_record) = value {
+                                Self::update_candidate_fields(
+                                    candidate_record,
+                                    &mut ra,
+                                    &mut dec,
+                                    &mut candid,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut writer = Writer::new(&schema, Vec::new());
+                let mut new_record = Record::new(writer.schema()).unwrap();
+                for (key, value) in record {
+                    new_record.put(&key, value);
+                }
+                writer.append(new_record).unwrap();
+                let new_payload = writer.into_inner().unwrap();
+                (
+                    candid.unwrap(),
+                    object_id.unwrap(),
+                    ra.unwrap(),
+                    dec.unwrap(),
+                    new_payload,
+                )
+            }
+            Survey::Lsst => {
+                // LSST-specific logic
+                let mut candid = self.candid;
+                let mut object_id = self.object_id;
+                let mut ra = self.ra;
+                let mut dec = self.dec;
+                let payload = match self.payload {
+                    Some(payload) => payload,
+                    None => fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap(),
+                };
+                let header = payload[0..5].to_vec();
+                let magic = header[0];
+                if magic != 0_u8 {
+                    panic!("Not a valid avro file");
+                }
+                let schema_id = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
+                let mut schema_registry = self.schema_registry.expect("Missing schema registry");
+                let schema = schema_registry
+                    .get_schema("alert-packet", schema_id)
+                    .await
+                    .unwrap();
+                let value = from_avro_datum(&schema, &mut &payload[5..], None).unwrap();
+                let mut record = match value {
+                    Value::Record(record) => record,
+                    _ => panic!("Not a record"),
+                };
+
+                for i in 0..record.len() {
+                    let (key, value) = &mut record[i];
+                    match key.as_str() {
+                        "alertId" => {
+                            if let Some(id) = candid {
+                                *value = Value::Long(id);
+                            } else {
+                                candid = Some(Self::value_to_i64(value));
+                            }
+                        }
+                        "diaSource" => {
+                            if let Value::Record(candidate_record) = value {
+                                Self::update_diasource_fields(
+                                    candidate_record,
+                                    &mut object_id,
+                                    &mut ra,
+                                    &mut dec,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut writer = Writer::new(&schema, Vec::new());
+                let mut new_record = Record::new(&schema).unwrap();
+                for (key, value) in record {
+                    new_record.put(&key, value);
+                }
+                writer.append(new_record).unwrap();
+                let new_payload = writer.into_inner().unwrap();
+
+                // Find the start idx of the data
+                let mut cursor = std::io::Cursor::new(&new_payload);
+                let mut buf = [0; 4];
+                cursor.read_exact(&mut buf).unwrap();
+                if buf != [b'O', b'b', b'j', 1u8] {
+                    panic!("Not a valid avro file");
+                }
+                let meta_schema = Schema::map(Schema::Bytes);
+                from_avro_datum(&meta_schema, &mut cursor, None).unwrap();
+                let mut buf = [0; 16];
+                cursor.read_exact(&mut buf).unwrap();
+                let mut buf: [u8; 4] = [0; 4];
+                cursor.read_exact(&mut buf).unwrap();
+                let start_idx = cursor.position();
+
+                // conform with the schema registry-like format
+                let new_payload = [&header, &new_payload[start_idx as usize..]].concat();
+
+                (
+                    candid.unwrap(),
+                    object_id.unwrap(),
+                    ra.unwrap(),
+                    dec.unwrap(),
+                    new_payload,
+                )
+            }
+        }
+    }
+
+    // Helper conversion functions (same as before)
     fn value_to_string(value: &Value) -> String {
         match value {
             Value::String(s) => s.clone(),
             _ => panic!("Not a string"),
         }
     }
-
     fn value_to_i64(value: &Value) -> i64 {
         match value {
             Value::Long(l) => *l,
@@ -276,387 +551,5 @@ pub trait AlertRandomizerTrait {
             Value::Double(d) => *d,
             _ => panic!("Not a double"),
         }
-    }
-    type ObjectId;
-}
-
-#[derive(Clone, Debug)]
-pub struct ZtfAlertRandomizer {
-    payload: Option<Vec<u8>>,
-    schema: Option<Schema>,
-    candid: Option<i64>,
-    object_id: Option<String>,
-    ra: Option<f64>,
-    dec: Option<f64>,
-}
-
-#[async_trait::async_trait]
-impl AlertRandomizerTrait for ZtfAlertRandomizer {
-    type ObjectId = String;
-
-    fn default() -> Self {
-        let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-        let reader = Reader::new(&payload[..]).unwrap();
-        let schema = reader.writer_schema().clone();
-        Self {
-            payload: Some(payload),
-            schema: Some(schema),
-            candid: Some(Self::randomize_i64()),
-            object_id: Some(Self::randomize_object_id()),
-            ra: Some(Self::randomize_ra()),
-            dec: Some(Self::randomize_dec()),
-        }
-    }
-
-    fn new() -> Self {
-        Self {
-            payload: None,
-            schema: None,
-            candid: None,
-            object_id: None,
-            ra: None,
-            dec: None,
-        }
-    }
-
-    fn path(mut self, path: &str) -> Self {
-        let payload = fs::read(path).unwrap();
-        let reader = Reader::new(&payload[..]).unwrap();
-        let schema = reader.writer_schema().clone();
-        self.payload = Some(payload);
-        self.schema = Some(schema);
-        self
-    }
-
-    fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
-        self.object_id = Some(object_id.into());
-        self
-    }
-
-    fn candid(mut self, candid: i64) -> Self {
-        self.candid = Some(candid);
-        self
-    }
-
-    fn ra(mut self, ra: f64) -> Self {
-        match Self::validate_ra(ra) {
-            true => self.ra = Some(ra),
-            false => panic!("RA must be between 0 and 360"),
-        }
-        self
-    }
-    fn dec(mut self, dec: f64) -> Self {
-        match Self::validate_dec(dec) {
-            true => self.dec = Some(dec),
-            false => panic!("Dec must be between -90 and 90"),
-        }
-        self
-    }
-
-    fn rand_object_id(mut self) -> Self {
-        self.object_id = Some(Self::randomize_object_id());
-        self
-    }
-    fn rand_candid(mut self) -> Self {
-        self.candid = Some(Self::randomize_i64());
-        self
-    }
-    fn rand_ra(mut self) -> Self {
-        self.ra = Some(Self::randomize_ra());
-        self
-    }
-    fn rand_dec(mut self) -> Self {
-        self.dec = Some(Self::randomize_dec());
-        self
-    }
-
-    async fn get(self) -> (i64, Self::ObjectId, f64, f64, Vec<u8>) {
-        let mut candid = self.candid;
-        let mut object_id = self.object_id;
-        let mut ra = self.ra;
-        let mut dec = self.dec;
-        let (payload, schema) = match (self.payload, self.schema) {
-            (Some(payload), Some(schema)) => (payload, schema),
-            _ => {
-                let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-                let reader = Reader::new(&payload[..]).unwrap();
-                let schema = reader.writer_schema().clone();
-                (payload, schema)
-            }
-        };
-
-        let reader = Reader::new(&payload[..]).unwrap();
-        let value = reader.into_iter().next().unwrap().unwrap();
-        let mut record = match value {
-            Value::Record(record) => record,
-            _ => {
-                panic!("Not a record");
-            }
-        };
-
-        for i in 0..record.len() {
-            let (key, value) = &mut record[i];
-            if key == "objectId" {
-                match object_id {
-                    Some(ref id) => *value = Value::String(id.clone()),
-                    None => object_id = Some(Self::value_to_string(value)),
-                }
-            } else if key == "candid" {
-                match candid {
-                    Some(id) => *value = Value::Long(id),
-                    None => candid = Some(Self::value_to_i64(value)),
-                }
-            } else if key == "candidate" {
-                let candidate_record = match value {
-                    Value::Record(record) => record,
-                    _ => {
-                        panic!("Not a record");
-                    }
-                };
-                for i in 0..candidate_record.len() {
-                    let (key, value) = &mut candidate_record[i];
-                    if key == "ra" {
-                        match ra {
-                            Some(r) => *value = Value::Double(r),
-                            None => ra = Some(Self::value_to_f64(value)),
-                        }
-                    } else if key == "dec" {
-                        match dec {
-                            Some(d) => *value = Value::Double(d),
-                            None => dec = Some(Self::value_to_f64(value)),
-                        }
-                    } else if key == "candid" {
-                        match candid {
-                            Some(c) => *value = Value::Long(c),
-                            None => candid = Some(Self::value_to_i64(value)),
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut writer = Writer::new(&schema, Vec::new());
-        let mut new_record = Record::new(writer.schema()).unwrap();
-        for (key, value) in record {
-            new_record.put(&key, value);
-        }
-
-        writer.append(new_record).unwrap();
-        let new_payload = writer.into_inner().unwrap();
-
-        (
-            candid.unwrap(),
-            object_id.unwrap(),
-            ra.unwrap(),
-            dec.unwrap(),
-            new_payload,
-        )
-    }
-}
-
-impl ZtfAlertRandomizer {
-    fn randomize_object_id() -> String {
-        // format is ZTF + 2 digits + 7 lowercase letters
-        let mut rng = rand::rng();
-        let mut object_id = String::from("ZTF");
-        for _ in 0..2 {
-            object_id.push(rng.random_range('0'..='9'));
-        }
-        for _ in 0..7 {
-            object_id.push(rng.random_range('a'..='z'));
-        }
-        object_id
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct LsstAlertRandomizer {
-    payload: Option<Vec<u8>>,
-    schema_registry: SchemaRegistry,
-    candid: Option<i64>,
-    object_id: Option<i64>,
-    ra: Option<f64>,
-    dec: Option<f64>,
-}
-
-#[async_trait::async_trait]
-impl AlertRandomizerTrait for LsstAlertRandomizer {
-    type ObjectId = i64;
-
-    fn default() -> Self {
-        let payload = fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap();
-        Self {
-            payload: Some(payload),
-            schema_registry: SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL),
-            candid: Some(Self::randomize_i64()),
-            object_id: Some(Self::randomize_i64()),
-            ra: Some(Self::randomize_ra()),
-            dec: Some(Self::randomize_dec()),
-        }
-    }
-
-    fn new() -> Self {
-        let payload = fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap();
-        Self {
-            payload: Some(payload),
-            schema_registry: SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL),
-            candid: None,
-            object_id: None,
-            ra: None,
-            dec: None,
-        }
-    }
-
-    fn objectid(mut self, object_id: impl Into<Self::ObjectId>) -> Self {
-        self.object_id = Some(object_id.into());
-        self
-    }
-
-    fn candid(mut self, candid: i64) -> Self {
-        self.candid = Some(candid);
-        self
-    }
-
-    fn path(mut self, path: &str) -> Self {
-        let payload = fs::read(path).unwrap();
-        self.payload = Some(payload);
-        self
-    }
-
-    fn ra(mut self, ra: f64) -> Self {
-        match Self::validate_ra(ra) {
-            true => self.ra = Some(ra),
-            false => panic!("RA must be between 0 and 360"),
-        }
-        self
-    }
-    fn dec(mut self, dec: f64) -> Self {
-        match Self::validate_dec(dec) {
-            true => self.dec = Some(dec),
-            false => panic!("Dec must be between -90 and 90"),
-        }
-        self
-    }
-
-    fn rand_object_id(mut self) -> Self {
-        self.object_id = Some(Self::randomize_i64());
-        self
-    }
-    fn rand_candid(mut self) -> Self {
-        self.candid = Some(Self::randomize_i64());
-        self
-    }
-    fn rand_ra(mut self) -> Self {
-        self.ra = Some(Self::randomize_ra());
-        self
-    }
-    fn rand_dec(mut self) -> Self {
-        self.dec = Some(Self::randomize_dec());
-        self
-    }
-
-    async fn get(mut self) -> (i64, String, f64, f64, Vec<u8>) {
-        let mut candid = self.candid;
-        let mut object_id = self.object_id;
-        let mut ra = self.ra;
-        let mut dec = self.dec;
-        let payload = self
-            .payload
-            .unwrap_or_else(|| fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap());
-
-        let header = payload[0..5].to_vec();
-
-        let magic = header[0];
-        if magic != 0_u8 {
-            panic!("Not a valid avro file");
-        }
-        let schema_id = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
-
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await
-            .unwrap();
-
-        let value = from_avro_datum(&schema, &mut &payload[5..], None).unwrap();
-        let mut record = match value {
-            Value::Record(record) => record,
-            _ => {
-                panic!("Not a record");
-            }
-        };
-        for i in 0..record.len() {
-            let (key, value) = &mut record[i];
-            if key == "alertId" {
-                match candid {
-                    Some(id) => *value = Value::Long(id),
-                    None => candid = Some(Self::value_to_i64(value)),
-                }
-            } else if key == "diaSource" {
-                let candidate_record = match value {
-                    Value::Record(record) => record,
-                    _ => {
-                        panic!("Not a record");
-                    }
-                };
-                for i in 0..candidate_record.len() {
-                    let (key, value) = &mut candidate_record[i];
-                    if key == "diaSourceId" {
-                        match object_id {
-                            Some(id) => *value = Value::Long(id),
-                            None => object_id = Some(Self::value_to_i64(value)),
-                        }
-                    } else if key == "diaObjectId" {
-                        match object_id {
-                            Some(id) => *value = Value::Union(1_u32, Box::new(Value::Long(id))),
-                            None => object_id = Some(Self::value_to_i64(value)),
-                        }
-                    } else if key == "ra" {
-                        match ra {
-                            Some(r) => *value = Value::Double(r),
-                            None => ra = Some(Self::value_to_f64(value)),
-                        }
-                    } else if key == "dec" {
-                        match dec {
-                            Some(d) => *value = Value::Double(d),
-                            None => dec = Some(Self::value_to_f64(value)),
-                        }
-                    }
-                }
-            }
-        }
-        let mut writer = Writer::new(&schema, Vec::new());
-        let mut new_record = Record::new(&schema).unwrap();
-        for (key, value) in record {
-            new_record.put(&key, value);
-        }
-        writer.append(new_record).unwrap();
-        let new_payload = writer.into_inner().unwrap();
-
-        // We find the start idx of the data
-        let mut cursor = std::io::Cursor::new(&new_payload);
-        let mut buf = [0; 4];
-        cursor.read_exact(&mut buf).unwrap();
-        if buf != [b'O', b'b', b'j', 1u8] {
-            panic!("Not a valid avro file");
-        }
-        let meta_schema = Schema::map(Schema::Bytes);
-        from_avro_datum(&meta_schema, &mut cursor, None).unwrap();
-        let mut buf = [0; 16];
-        cursor.read_exact(&mut buf).unwrap();
-        let mut buf: [u8; 4] = [0; 4];
-        cursor.read_exact(&mut buf).unwrap();
-        let start_idx = cursor.position();
-
-        // conform with the schema registry-like format
-        let new_payload = [&header, &new_payload[start_idx as usize..]].concat();
-
-        (
-            candid.unwrap(),
-            object_id.unwrap().to_string(),
-            ra.unwrap(),
-            dec.unwrap(),
-            new_payload,
-        )
     }
 }
