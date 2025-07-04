@@ -7,6 +7,13 @@ database:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+api:
+  auth:
+    secret_key: "1234" # Secret key for JWT authentication, change it to a strong secret
+    token_expiration: 0 # jwt token expiration in seconds, 0 to disable. Should NOT be 0 in production
+    admin_username: admin # Admin username for the API
+    admin_password: adminsecret # Admin password for the API
+    admin_email: admin@example.com # Admin email for the API
 redis:
   host: localhost
   port: 6379
