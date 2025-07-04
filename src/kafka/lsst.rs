@@ -4,7 +4,7 @@ use crate::{
     utils::o11y::{as_error, log_error},
 };
 use redis::AsyncCommands;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 const LSST_SERVER_URL: &str = "usdf-alert-stream-dev.lsst.cloud:9094";
 
