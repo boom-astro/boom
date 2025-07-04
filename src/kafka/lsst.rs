@@ -1,6 +1,7 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, ConsumerError},
+    utils::o11y::as_error,
 };
 use redis::AsyncCommands;
 use tracing::{error, info, instrument};
@@ -135,10 +136,16 @@ impl AlertConsumer for LsstAlertConsumer {
 
     #[instrument(skip(self))]
     async fn clear_output_queue(&self) -> Result<(), ConsumerError> {
-        let config = conf::load_config(&self.config_path)?;
-        let mut con = conf::build_redis(&config).await?;
-        let _: () = con.del(&self.output_queue).await.unwrap();
-        info!("Cleared redis queued for LSST Kafka consumer");
+        let config =
+            conf::load_config(&self.config_path).inspect_err(as_error!("failed to load config"))?;
+        let mut con = conf::build_redis(&config)
+            .await
+            .inspect_err(as_error!("failed to connect to redis"))?;
+        let _: () = con
+            .del(&self.output_queue)
+            .await
+            .inspect_err(as_error!("failed to delete queue"))?;
+        info!("Cleared redis queue for LSST Kafka consumer");
         Ok(())
     }
 }
