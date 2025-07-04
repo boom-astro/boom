@@ -1,7 +1,7 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, ConsumerError},
-    utils::o11y::as_error,
+    utils::o11y::{as_error, log_error},
 };
 use redis::AsyncCommands;
 use tracing::{error, info, instrument};
@@ -121,16 +121,17 @@ impl AlertConsumer for LsstAlertConsumer {
                     &config_path,
                 )
                 .await;
-                if let Err(e) = result {
-                    error!("Error consuming partitions: {:?}", e);
+                if let Err(error) = result {
+                    log_error!(error, "failed to consume partitions");
                 }
             });
             handles.push(handle);
         }
 
-        // sleep until all threads are done
         for handle in handles {
-            handle.await.unwrap();
+            if let Err(error) = handle.await {
+                log_error!(error, "failed to join task");
+            }
         }
     }
 

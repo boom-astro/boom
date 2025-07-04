@@ -4,7 +4,7 @@ use crate::{
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::ProgramId,
-        o11y::as_error,
+        o11y::{as_error, log_error},
     },
 };
 use indicatif::ProgressBar;
@@ -108,15 +108,17 @@ impl AlertConsumer for ZtfAlertConsumer {
                     &config_path,
                 )
                 .await;
-                if let Err(e) = result {
-                    error!("Error consuming partitions: {:?}", e);
+                if let Err(error) = result {
+                    log_error!(error, "failed to consume partitions");
                 }
             });
             handles.push(handle);
         }
 
         for handle in handles {
-            handle.await.unwrap();
+            if let Err(error) = handle.await {
+                log_error!(error, "failed to join task");
+            }
         }
     }
 
