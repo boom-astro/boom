@@ -43,29 +43,25 @@ pub async fn consume_partitions(
     config_path: &str,
 ) -> Result<(), ConsumerError> {
     debug!(?config_path);
-    let mut producer_config = ClientConfig::new();
-    producer_config
+    let mut client_config = ClientConfig::new();
+    client_config
         .set("bootstrap.servers", server)
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id)
         .set("debug", "consumer,cgrp,topic,fetch");
 
     if let (Some(username), Some(password)) = (username, password) {
-        producer_config
+        client_config
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
     } else {
-        producer_config.set("security.protocol", "PLAINTEXT");
+        client_config.set("security.protocol", "PLAINTEXT");
     }
 
-    let consumer: BaseConsumer = producer_config
+    let consumer: BaseConsumer = client_config
         .create()
         .inspect_err(as_error!("failed to create consumer"))?;
-
-    consumer
-        .subscribe(&[topic])
-        .inspect_err(as_error!("failed to subscribe to topic"))?;
 
     let mut timestamps = rdkafka::TopicPartitionList::new();
     let offset = rdkafka::Offset::Offset(timestamp);
