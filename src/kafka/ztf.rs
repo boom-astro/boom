@@ -1,15 +1,18 @@
 use crate::{
     conf,
-    kafka::base::{consume_partitions, AlertConsumer, AlertProducer},
-    utils::data::{count_files_in_dir, download_to_file},
-    utils::enums::ProgramId,
+    kafka::base::{consume_partitions, AlertConsumer, AlertProducer, ConsumerError},
+    utils::{
+        data::{count_files_in_dir, download_to_file},
+        enums::ProgramId,
+        o11y::{as_error, log_error},
+    },
 };
 use indicatif::ProgressBar;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use redis::AsyncCommands;
 use tempfile::NamedTempFile;
-use tracing::{error, info};
+use tracing::{error, info, instrument};
 
 const ZTF_SERVER_URL: &str = "localhost:9092";
 
@@ -24,6 +27,7 @@ pub struct ZtfAlertConsumer {
 }
 
 impl ZtfAlertConsumer {
+    #[instrument]
     pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
@@ -68,7 +72,8 @@ impl AlertConsumer for ZtfAlertConsumer {
         Self::new(1, None, None, None, None, ProgramId::Public, config_path)
     }
 
-    async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
+    #[instrument(skip(self))]
+    async fn consume(&self, timestamp: i64) {
         let partitions_per_thread = 15 / self.n_threads;
         let mut partitions = vec![vec![]; self.n_threads];
         for i in 0..15 {
@@ -103,25 +108,32 @@ impl AlertConsumer for ZtfAlertConsumer {
                     &config_path,
                 )
                 .await;
-                if let Err(e) = result {
-                    error!("Error consuming partitions: {:?}", e);
+                if let Err(error) = result {
+                    log_error!(error, "failed to consume partitions");
                 }
             });
             handles.push(handle);
         }
 
         for handle in handles {
-            handle.await.unwrap();
+            if let Err(error) = handle.await {
+                log_error!(error, "failed to join task");
+            }
         }
-
-        Ok(())
     }
 
-    async fn clear_output_queue(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config = conf::load_config(&self.config_path)?;
-        let mut con = conf::build_redis(&config).await?;
-        let _: () = con.del(&self.output_queue).await.unwrap();
-        info!("Cleared redis queued for ZTF Kafka consumer");
+    #[instrument(skip(self))]
+    async fn clear_output_queue(&self) -> Result<(), ConsumerError> {
+        let config =
+            conf::load_config(&self.config_path).inspect_err(as_error!("failed to load config"))?;
+        let mut con = conf::build_redis(&config)
+            .await
+            .inspect_err(as_error!("failed to connect to redis"))?;
+        let _: () = con
+            .del(&self.output_queue)
+            .await
+            .inspect_err(as_error!("failed to delete queue"))?;
+        info!("Cleared redis queue for ZTF Kafka consumer");
         Ok(())
     }
 }
@@ -267,6 +279,7 @@ impl AlertProducer for ZtfAlertProducer {
             .set("acks", "1")
             .set("max.in.flight.requests.per.connection", "5")
             .set("retries", "3")
+            .set("debug", "broker,topic,msg")
             .create()
             .expect("Producer creation error");
 
