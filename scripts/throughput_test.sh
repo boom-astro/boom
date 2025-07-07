@@ -188,7 +188,7 @@ start_consumer() {
     start=$(date +%s)
 
     # Start the consumer
-    "${consumer}" --config "${config}" --clear true "${survey}" "${date}" >&2 &
+    "${consumer}" --config "${config}" --clear "${survey}" "${date}" >&2 &
     consumer_pid=$!
 
     sleep 1  # Short pause before checking the queue (slightly inflates execution time)
