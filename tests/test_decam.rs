@@ -108,7 +108,7 @@ async fn test_filter_decam_alert() {
     let mut alert_worker = decam_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) =
-        AlertRandomizer::default(Survey::Decam).get().await;
+        AlertRandomizer::new_randomized(Survey::Decam).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
