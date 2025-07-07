@@ -21,7 +21,7 @@ use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "LSST";
 pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
-pub const LSST_UNCERTAINTY: f64 = 0.1; // 0.1 arcsec
+pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
@@ -218,7 +218,7 @@ impl TryFrom<DiaSource> for Candidate {
 
         let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, ZP_AB);
 
-        // if object_id is defined, is_sso is false
+        // if dia_object_id is defined, is_sso is false
         // if ss_object_id is defined, is_sso is true
         // if both are undefined or both are defined, we throw an error
         let (object_id, is_sso) = match (

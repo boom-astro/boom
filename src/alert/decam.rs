@@ -18,8 +18,8 @@ use mongodb::bson::{doc, Document};
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
-pub const DECAM_DEC_RANGE: (f64, f64) = (-20.0, 20.0);
-pub const DECAM_UNCERTAINTY: f64 = 0.1; // 0.1 arcsec
+pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
+pub const DECAM_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");

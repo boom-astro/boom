@@ -13,7 +13,7 @@ async fn test_decam_alert_from_avro_bytes() {
     let mut alert_worker = decam_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::default(Survey::Decam).get().await;
+        AlertRandomizer::new_randomized(Survey::Decam).get().await;
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
@@ -39,7 +39,7 @@ async fn test_process_decam_alert() {
     let mut alert_worker = decam_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::default(Survey::Decam).get().await;
+        AlertRandomizer::new_randomized(Survey::Decam).get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok(), "{:?}", result);
     assert_eq!(result.unwrap(), ProcessAlertStatus::Added(candid));
