@@ -224,6 +224,7 @@ impl AlertRandomizer {
                     Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
                 )
             }
+            _ => panic!("Unsupported survey for randomization"),
         };
         let candid = Some(rand::rng().random_range(0..i64::MAX));
         let ra = Some(rand::rng().random_range(0.0..360.0));
@@ -301,6 +302,7 @@ impl AlertRandomizer {
                 object_id
             }
             Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
+            _ => panic!("Unsupported survey for randomization"),
         }
     }
 
@@ -532,6 +534,7 @@ impl AlertRandomizer {
                     new_payload,
                 )
             }
+            _ => panic!("Unsupported survey for randomization"),
         }
     }
 
