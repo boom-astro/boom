@@ -1,9 +1,10 @@
 use crate::{
     conf,
-    kafka::base::{consume_partitions, AlertConsumer},
+    kafka::base::{consume_partitions, AlertConsumer, ConsumerError},
+    utils::o11y::{as_error, log_error},
 };
 use redis::AsyncCommands;
-use tracing::{error, info};
+use tracing::{info, instrument};
 
 const LSST_SERVER_URL: &str = "usdf-alert-stream-dev.lsst.cloud:9094";
 
@@ -20,6 +21,7 @@ pub struct LsstAlertConsumer {
 }
 
 impl LsstAlertConsumer {
+    #[instrument]
     pub fn new(
         n_threads: usize,
         max_in_queue: Option<usize>,
@@ -77,7 +79,9 @@ impl AlertConsumer for LsstAlertConsumer {
     fn default(config_path: &str) -> Self {
         Self::new(1, None, None, None, None, true, config_path)
     }
-    async fn consume(&self, timestamp: i64) -> Result<(), Box<dyn std::error::Error>> {
+
+    #[instrument(skip(self))]
+    async fn consume(&self, timestamp: i64) {
         let topic = if self.simulated {
             "alerts-simulated".to_string()
         } else {
@@ -117,25 +121,32 @@ impl AlertConsumer for LsstAlertConsumer {
                     &config_path,
                 )
                 .await;
-                if let Err(e) = result {
-                    error!("Error consuming partitions: {:?}", e);
+                if let Err(error) = result {
+                    log_error!(error, "failed to consume partitions");
                 }
             });
             handles.push(handle);
         }
 
-        // sleep until all threads are done
         for handle in handles {
-            handle.await.unwrap();
+            if let Err(error) = handle.await {
+                log_error!(error, "failed to join task");
+            }
         }
-        Ok(())
     }
 
-    async fn clear_output_queue(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config = conf::load_config(&self.config_path)?;
-        let mut con = conf::build_redis(&config).await?;
-        let _: () = con.del(&self.output_queue).await.unwrap();
-        info!("Cleared redis queued for LSST Kafka consumer");
+    #[instrument(skip(self))]
+    async fn clear_output_queue(&self) -> Result<(), ConsumerError> {
+        let config =
+            conf::load_config(&self.config_path).inspect_err(as_error!("failed to load config"))?;
+        let mut con = conf::build_redis(&config)
+            .await
+            .inspect_err(as_error!("failed to connect to redis"))?;
+        let _: () = con
+            .del(&self.output_queue)
+            .await
+            .inspect_err(as_error!("failed to delete queue"))?;
+        info!("Cleared redis queue for LSST Kafka consumer");
         Ok(())
     }
 }
