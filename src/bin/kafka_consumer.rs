@@ -99,17 +99,17 @@ async fn run(args: Cli) {
         }
         Survey::Decam => {
             let consumer = DecamAlertConsumer::new(
-                processes,
-                Some(max_in_queue),
+                args.processes,
+                Some(args.max_in_queue),
                 None,
                 None,
                 None,
-                &config_path,
+                &args.config,
             );
-            if clear {
+            if args.clear {
                 let _ = consumer.clear_output_queue();
             }
-            consumer.consume(timestamp).await?;
+            consumer.consume(timestamp).await;
         }
     }
 }
