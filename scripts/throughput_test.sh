@@ -9,7 +9,6 @@ CONFIG="./config.yaml"
 PRODUCER="./target/release/kafka_producer"
 CONSUMER="./target/release/kafka_consumer"
 SCHEDULER="./target/release/scheduler"
-MONGO_CONTAINER_NAME="boom-mongo-1"
 MONGO_RETRIES=5
 CONSUMER_RETRIES=5
 ALERT_DB_NAME="boom"
@@ -47,7 +46,6 @@ help() {
   echo "                                (default: ${CONSUMER})"
   echo "  --scheduler PATH              Path to the scheduler binary"
   echo "                                (default: ${SCHEDULER})"
-  echo "  --mongo-container-name NAME   MongoDB container name (default: ${MONGO_CONTAINER_NAME})"
   echo "  --mongo-retries N             Number of times to attempt to ping mongodb"
   echo "                                (default: ${MONGO_RETRIES})"
   echo "  --consumer-retries N          Number of times to restart the consumer when it"
@@ -92,8 +90,7 @@ get_mongo_container_id() {
 }
 
 wait_for_mongo() {
-  local container_id="$1"
-  local retries="$2"
+  local retries="$1"
 
   local wait_interval=2
 
@@ -105,7 +102,7 @@ wait_for_mongo() {
       exit 1
     fi
 
-    if docker exec "${container_id}" mongosh \
+    if docker exec boom-mongo-1 mongosh \
       --eval "db.adminCommand('ping')" \
       >/dev/null 2>&1
     then
@@ -118,11 +115,10 @@ wait_for_mongo() {
 }
 
 remove_alert_database() {
-  local container_id="$1"
-  local alert_db_name="$2"
+  local alert_db_name="$1"
 
   debug "Removing mongodb database ${alert_db_name}"
-  docker exec "${container_id}" mongosh \
+  docker exec boom-mongo-1 mongosh \
     --username "${MONGO_USERNAME}" \
     --password "${MONGO_PASSWORD}" \
     --authenticationDatabase admin \
@@ -230,13 +226,12 @@ start_scheduler() {
 wait_for_scheduler() {
   # Returns the alert count and the elapsed time separated by a comma.
 
-  local mongo_container_id="$1"
-  local alert_db_name="$2"
-  local survey="$3"
-  local start="$4"
-  local expected_count="$5"
-  local check_interval="$6"
-  local timeout="$7"
+  local alert_db_name="$1"
+  local survey="$2"
+  local start="$3"
+  local expected_count="$4"
+  local check_interval="$5"
+  local timeout="$6"
 
   local alert_collection_name
   alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
@@ -250,7 +245,7 @@ wait_for_scheduler() {
       exit 1
     fi
 
-    count=$(docker exec "${mongo_container_id}" mongosh \
+    count=$(docker exec boom-mongo-1 mongosh \
       --username "${MONGO_USERNAME}" \
       --password "${MONGO_PASSWORD}" \
       --authenticationDatabase admin \
@@ -318,10 +313,6 @@ main() {
         SCHEDULER="$2"
         shift 2
         ;;
-      --mongo-container-name)
-        MONGO_CONTAINER_NAME="$2"
-        shift 2
-        ;;
       --mongo-retries)
         MONGO_RETRIES="$2"
         shift 2
@@ -355,10 +346,8 @@ main() {
     esac
   done
 
-  local mongo_container_id
-  mongo_container_id="$(get_mongo_container_id "${MONGO_CONTAINER_NAME}")"
-  wait_for_mongo "${mongo_container_id}" "${MONGO_RETRIES}"
-  remove_alert_database "${mongo_container_id}" "${ALERT_DB_NAME}"
+  wait_for_mongo "${MONGO_RETRIES}"
+  remove_alert_database "${ALERT_DB_NAME}"
   delete_alert_topic "${SURVEY}" "${DATE}"
 
   local expected_count
@@ -388,7 +377,6 @@ main() {
   local elapsed
   values="$(
     wait_for_scheduler \
-      "${mongo_container_id}" \
       "${ALERT_DB_NAME}" \
       "${SURVEY}" \
       "${start}" \
