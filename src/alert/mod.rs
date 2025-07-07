@@ -8,4 +8,4 @@ pub use base::{
 };
 pub use decam::{DecamAlertWorker, DECAM_DEC_RANGE};
 pub use lsst::{LsstAlertWorker, LSST_DEC_RANGE, LSST_SCHEMA_REGISTRY_URL};
-pub use ztf::{ZtfAlertWorker, ZTF_LSST_XMATCH_RADIUS};
+pub use ztf::{ZtfAlertWorker, ZTF_DECAM_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS};

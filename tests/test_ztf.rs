@@ -1,5 +1,8 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS},
+    alert::{
+        AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
+        ZTF_LSST_XMATCH_RADIUS,
+    },
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
@@ -7,8 +10,8 @@ use boom::{
         db::mongify,
         enums::Survey,
         testing::{
-            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
-            ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+            decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
+            remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
@@ -19,7 +22,7 @@ async fn test_alert_from_avro_bytes() {
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::default(Survey::Ztf).get().await;
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
@@ -159,7 +162,7 @@ async fn test_process_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::default(Survey::Ztf).get().await;
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
@@ -226,13 +229,14 @@ async fn test_process_ztf_alert() {
 }
 
 #[tokio::test]
-async fn test_process_ztf_lsst_xmatch() {
+async fn test_process_ztf_alert_xmatch() {
     let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
     let mut alert_worker = ztf_alert_worker().await;
-    let ztf_alert_randomizer = AlertRandomizer::default(Survey::Ztf).dec(LSST_DEC_RANGE.1 - 10.0);
+    let ztf_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Ztf).dec(LSST_DEC_RANGE.1 - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";
@@ -242,7 +246,7 @@ async fn test_process_ztf_lsst_xmatch() {
     let mut lsst_alert_worker = lsst_alert_worker().await;
 
     // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
-    let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::default(Survey::Lsst)
+    let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::new_randomized(Survey::Lsst)
         .ra(ra)
         .dec(dec + 1.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
@@ -267,11 +271,12 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(matches.len(), 0);
 
     // 2. nearby LSST alert, ZTF alert should have an LSST alias
-    let (_, lsst_object_id, _, _, lsst_bytes_content) = AlertRandomizer::default(Survey::Lsst)
-        .ra(ra)
-        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
-        .get()
-        .await;
+    let (_, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
     lsst_alert_worker
         .process_alert(&lsst_bytes_content)
         .await
@@ -296,11 +301,12 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
 
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
-    let (_, lsst_object_id, _, _, lsst_bytes_content) = AlertRandomizer::default(Survey::Lsst)
-        .ra(ra)
-        .dec(dec + 0.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
-        .get()
-        .await;
+    let (_, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
     lsst_alert_worker
         .process_alert(&lsst_bytes_content)
         .await
@@ -325,11 +331,12 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
 
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
-    let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = AlertRandomizer::default(Survey::Lsst)
-        .ra(ra)
-        .dec(dec + 0.5 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
-        .get()
-        .await;
+    let (_, bad_lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.5 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
     lsst_alert_worker
         .process_alert(&lsst_bytes_content)
         .await
@@ -358,14 +365,15 @@ async fn test_process_ztf_lsst_xmatch() {
     //    even attempt to match. Test this by creating an LSST alert with an
     //    unrealistically high dec that ZTF would otherwise match without this
     //    constraint:
-    let (_, object_id, ra, dec, bytes_content) = AlertRandomizer::default(Survey::Ztf)
-        .dec(LSST_DEC_RANGE.1 + 10.0)
-        .get()
-        .await;
+    let (_, bad_object_id, bad_ra, bad_dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf)
+            .dec(LSST_DEC_RANGE.1 + 10.0)
+            .get()
+            .await;
 
-    let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::default(Survey::Lsst)
-        .ra(ra)
-        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+    let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::new_randomized(Survey::Lsst)
+        .ra(bad_ra)
+        .dec(bad_dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -374,10 +382,10 @@ async fn test_process_ztf_lsst_xmatch() {
         .unwrap();
 
     alert_worker.process_alert(&bytes_content).await.unwrap();
-    let filter_aux = doc! {"_id": &object_id};
+    let bad_filter_aux = doc! {"_id": &bad_object_id};
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
-        .find_one(filter_aux)
+        .find_one(bad_filter_aux)
         .await
         .unwrap()
         .unwrap();
@@ -390,6 +398,52 @@ async fn test_process_ztf_lsst_xmatch() {
         .map(|x| x.as_i64().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lsst_matches.len(), 0);
+
+    // DECAM setup (here we just verify that xmatching is done, and do not test all possible cases):
+    let ztf_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Ztf).dec(DECAM_DEC_RANGE.1 - 10.0);
+
+    let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.get().await;
+
+    println!(
+        "ZTF alert: ra = {}, dec = {} (object_id = {})",
+        ra, dec, object_id
+    );
+    let filter_aux = doc! {"_id": &object_id};
+
+    let mut decam_alert_worker = decam_alert_worker().await;
+    let (_, decam_object_id, _, _, decam_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Decam)
+            .ra(ra)
+            .dec(dec + 0.9 * ZTF_DECAM_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+
+    println!(
+        "DECAM alert: ra = {}, dec = {} (object_id = {})",
+        ra, dec, decam_object_id
+    );
+
+    decam_alert_worker
+        .process_alert(&decam_bytes_content)
+        .await
+        .unwrap();
+
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    println!("aux aliases: {:?}", aux.get_document("aliases").unwrap());
+    let matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("DECAM")
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches.get(0).unwrap().as_str().unwrap(), &decam_object_id);
 }
 
 #[tokio::test]
@@ -451,7 +505,7 @@ async fn test_filter_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) =
-        AlertRandomizer::default(Survey::Ztf).get().await;
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
