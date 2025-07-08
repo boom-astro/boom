@@ -1,64 +1,47 @@
-#!/bin/bash
-
-set -euo pipefail
+#!/usr/bin/env bash
 
 declare -a PIDS
-
-# Defaults
-CONFIG="./config.yaml"
-PRODUCER="./target/release/kafka_producer"
-CONSUMER="./target/release/kafka_consumer"
-SCHEDULER="./target/release/scheduler"
-MONGO_RETRIES=5
-CONSUMER_RETRIES=5
-ALERT_DB_NAME="boom"
-ALERT_CHECK_INTERVAL=1
-TIMEOUT=120
 DEBUG=false
 
 usage() {
-  echo "Usage: $0 <SURVEY> <DATE> [OPTIONS]"
+  echo "Usage: $0 [OPTIONS] [--] <SURVEY> <DATE>"
 }
 
 help() {
-  usage
-  echo
-  echo "Runs a throughput test for the alert processing pipeline."
-  echo
-  echo "Requires kafka, valkey, and mongodb to be running via docker compose."
-  echo
-  echo "**Important:** the following will be dropped and overwritten:"
-  echo "- The kafka topic '<SURVEY>_<DATE>_programid1'"
-  echo "- The valkey queue '<SURVEY>_alerts_packets_queue' (with SURVEY in all caps)"
-  echo "- The mongodb database specified by --alert-db-name"
-  echo
-  echo "Positional arguments:"
-  echo "  SURVEY                Survey name (e.g., ztf)"
-  echo "  DATE                  Date string in YYYYMMDD format (e.g., 20240617)"
-  echo
-  echo "Optional arguments:"
-  echo "  -h, --help                    Show this help and exit"
-  echo "  --config PATH                 Path to the consumer/scheduler config file"
-  echo "                                (default: ${CONFIG})"
-  echo "  --producer PATH               Path to the producer binary"
-  echo "                                (default: ${PRODUCER})"
-  echo "  --consumer PATH               Path to the consumer binary"
-  echo "                                (default: ${CONSUMER})"
-  echo "  --scheduler PATH              Path to the scheduler binary"
-  echo "                                (default: ${SCHEDULER})"
-  echo "  --mongo-retries N             Number of times to attempt to ping mongodb"
-  echo "                                (default: ${MONGO_RETRIES})"
-  echo "  --consumer-retries N          Number of times to restart the consumer when it"
-  echo "                                fails to read from kafka (default: ${CONSUMER_RETRIES})"
-  echo "  --alert-db-name NAME          MongoDB database name (default: ${ALERT_DB_NAME})"
-  echo "  --alert-check-interval SEC    How often, in seconds, to check the alert count"
-  echo "                                (default: ${ALERT_CHECK_INTERVAL})"
-  echo "  --timeout SEC                 Maximum test duration in seconds (default: ${TIMEOUT})"
-  echo "  --debug                       Print DEBUG log messages from this program"
-  echo
-  echo "Environment variables:"
-  echo "  MONGO_USERNAME             MongoDB username"
-  echo "  MONGO_PASSWORD             MongoDB password"
+  cat <<EOF
+Usage: $(usage)
+
+Runs a throughput test for the alert processing pipeline.
+
+Requires kafka, valkey, and mongodb to be running via docker compose.
+
+**Important:** the following will be dropped and overwritten:
+- The kafka topic '<SURVEY>_<DATE>_programid1'
+- The valkey queue '<SURVEY>_alerts_packets_queue' (with SURVEY in all caps)
+- The mongodb database specified by --alert-db-name
+
+Arguments:
+  <SURVEY>  Survey name (e.g., ztf)
+  <DATE>    Date string in YYYYMMDD format (e.g., 20240617)
+
+Options:
+      --config <PATH>         Path to the consumer/scheduler config file [default: ${1}]
+      --producer <PATH>       Path to the producer binary [default: ${2}]
+      --consumer <PATH>       Path to the consumer binary [default: ${3}]
+      --scheduler <PATH>      Path to the scheduler binary [default: ${4}]
+      --mongo-retries <N>     Number of times to attempt to ping mongodb [default: ${5}]
+      --consumer-retries <N>  Number of times to restart the consumer when it fails to read from kafka [default: ${6}]
+      --alert-db-name <NAME>  MongoDB database name [default: ${7}]
+      --alert-check-interval <SEC>
+                              How often, in seconds, to check the alert count [default: ${8}]
+      --timeout <SEC>         Maximum test duration in seconds [default: ${9}]
+      --debug                 Print DEBUG log messages from this program
+  -h, --help                  Print help
+
+Environment variables:
+  MONGO_USERNAME  MongoDB username
+  MONGO_PASSWORD  MongoDB password
+EOF
 }
 
 # Clean up on exit
@@ -69,19 +52,65 @@ cleanup() {
       kill "${pid}" 2>/dev/null || true
     done
   fi
-  exit
 }
 
 # Log DEBUG messages for this script
 debug() {
+  local message="$1"
+
   if [[ "$DEBUG" = true ]]; then
-    echo "DEBUG: $1" >&2
+    echo "DEBUG: ${message}" >&2
   fi
 }
 
 # Log ERROR messages for this script
 error() {
-  echo "ERROR: $1" >&2
+  local message="$1"
+
+  echo "ERROR: ${message}" >&2
+}
+
+# Log ERROR specifically regarding CLI args
+arg_error() {
+  local message="$1"
+
+  error "$message"
+  echo >&2
+  usage >&2
+}
+
+# Helper function to check option values
+check_option() {
+  local name="$1"
+  local value="$2"
+
+  if [[ -z $value ]]; then
+    arg_error "no value provided for option '${name}'"
+    return 1
+  fi
+  echo "$value"
+}
+
+# Helper function to check arguments
+check_argument() {
+  local name="$1"
+  local value="$2"
+
+  if [[ -z $value ]]; then
+    arg_error "argument '<${name}>' not provided"
+    return 1
+  fi
+  echo "$value"
+}
+
+# Helper function to check env vars
+check_env_var() {
+  local name="$1"
+
+  if [[ -z ${!name} ]]; then
+    error "required environment variable ${name} not set; see '--help'"
+    return 1
+  fi
 }
 
 get_mongo_container_id() {
@@ -265,86 +294,112 @@ wait_for_scheduler() {
 main() {
   # TODO: number of iterations?
 
-  # Check for -h or --help in the arguments
-  for arg in "$@"; do
-    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
-      help
-      exit
-    fi
-  done
+  # Defaults
+  local config="./config.yaml"
+  local producer="./target/release/kafka_producer"
+  local consumer="./target/release/kafka_consumer"
+  local scheduler="./target/release/scheduler"
+  local mongo_retries=5
+  local consumer_retries=5
+  local alert_db_name="boom"
+  local alert_check_interval=1
+  local timeout=120
 
-  # Required positional args
-  if [[ $# -lt 2 ]]; then
-    error "Incorrect arguments"
-    echo >&2
-    usage >&2
-    exit 1
-  fi
-  SURVEY="$1"
-  DATE="$2"
-  shift 2
-
-  # Required env vars
-  if [[ -z "${MONGO_USERNAME}" ]]; then
-    error "The environment variable MONGO_USERNAME must be set to the MongoDB username"
-    exit 1
-  fi
-  if [[ -z "${MONGO_PASSWORD}" ]]; then
-    error "The environment variable MONGO_PASSWORD must be set to the MongoDB password"
-    exit 1
-  fi
-
-  # Optional named args
-  while [[ $# -gt 0 ]]; do
+  # Options
+  while :; do
     case $1 in
+      -h|--help)
+        help \
+          "$config" \
+          "$producer" \
+          "$consumer" \
+          "$scheduler" \
+          "$mongo_retries" \
+          "$consumer_retries" \
+          "$alert_db_name" \
+          "$alert_check_interval" \
+          "$timeout"
+        exit
+        ;;
       --config)
-        CONFIG="$2"
-        shift 2
+        config="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --producer)
-        PRODUCER="$2"
-        shift 2
+        producer="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --consumer)
-        CONSUMER="$2"
-        shift 2
+        consumer="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --scheduler)
-        SCHEDULER="$2"
-        shift 2
+        scheduler="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --mongo-retries)
-        MONGO_RETRIES="$2"
-        shift 2
+        mongo_retries="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --consumer-retries)
-        CONSUMER_RETRIES="$2"
-        shift 2
+        consumer_retries="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --alert-db-name)
-        ALERT_DB_NAME="$2"
-        shift 2
+        alert_db_name="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --alert-check-interval)
-        ALERT_CHECK_INTERVAL="$2"
-        shift 2
+        alert_check_interval="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --timeout)
-        TIMEOUT="$2"
-        shift 2
+        timeout="$(check_option "$1" "$2")" || exit $?
+        shift
         ;;
       --debug)
         DEBUG=true
-        shift 1
+        ;;
+      --)  # End of options
+        shift
+        break
         ;;
       *)
-        error "Unknown option: $1"
-        echo >&2
-        usage >&2
-        exit 1
+        break
         ;;
     esac
+    shift
   done
+
+  # Arguments
+  local survey
+  survey="$(check_argument "SURVEY" "$1")" || exit $?
+  shift
+
+  local date
+  date="$(check_argument "DATE" "$1")" || exit $?
+  shift
+
+  [[ $# -eq 0 ]] || { arg_error "too many arguments provided"; exit 1; }
+
+  # Required env vars
+  check_env_var MONGO_USERNAME || exit $?
+  check_env_var MONGO_PASSWORD || exit $?
+
+  debug "
+  survey:               ${survey}
+  date:                 ${date}
+  config:               ${config}
+  producer:             ${producer}
+  consumer:             ${consumer}
+  scheduler:            ${scheduler}
+  mongo_retries:        ${mongo_retries}
+  consumer_retries:     ${consumer_retries}
+  alert_db_name:        ${alert_db_name}
+  alert_check_interval: ${alert_check_interval}
+  timeout:              ${timeout}
+  DEBUG:                ${DEBUG}"
+  exit
 
   wait_for_mongo "${MONGO_RETRIES}"
   remove_alert_database "${ALERT_DB_NAME}"
@@ -393,5 +448,5 @@ main() {
   echo "  throughput (alerts/sec): $(echo "scale=3; ${count} / ${elapsed}" | bc)"
 }
 
-trap cleanup EXIT INT TERM ERR
-main "$@"
+trap cleanup EXIT
+main "$@" || exit 1
