@@ -1,9 +1,13 @@
-use clap::Parser;
-use tracing::{error, Level};
-use tracing_subscriber::FmtSubscriber;
+use boom::{
+    kafka::{AlertProducer, ZtfAlertProducer},
+    utils::{
+        enums::{ProgramId, Survey},
+        o11y::build_subscriber,
+    },
+};
 
-use boom::kafka::{AlertProducer, ZtfAlertProducer};
-use boom::utils::enums::{ProgramId, Survey};
+use clap::Parser;
+use tracing::error;
 
 #[derive(Parser)]
 struct Cli {
@@ -25,11 +29,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
     let args = Cli::parse();
 
