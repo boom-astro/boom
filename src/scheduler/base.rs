@@ -187,7 +187,7 @@ impl Worker {
                         Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
                         Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                         _ => {
-                            error!("Alert worker not implemented for survey: {:?}", survey_name);
+                            error!("Alert worker not implemented for survey: {}", survey_name);
                             return;
                         }
                     };
