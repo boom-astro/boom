@@ -204,7 +204,13 @@ impl AlertProducer for DecamAlertProducer {
             if !path.to_str().unwrap().ends_with(".avro") {
                 continue;
             }
-            let payload = std::fs::read(path).unwrap();
+            let payload = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(e) => {
+                    log_error(format!("Failed to read file {:?}: {}", path, e));
+                    continue;
+                }
+            };
 
             let record = FutureRecord::to(&topic_name)
                 .payload(&payload)
