@@ -4,7 +4,7 @@ declare -a PIDS
 DEBUG=false
 
 usage() {
-  echo "Usage: $0 [OPTIONS] [--] <SURVEY> <DATE>"
+  echo "Usage: ${0} [OPTIONS] [--] <SURVEY> <DATE>"
 }
 
 help() {
@@ -25,16 +25,15 @@ Arguments:
   <DATE>    Date string in YYYYMMDD format (e.g., 20240617)
 
 Options:
-      --config <PATH>         Path to the consumer/scheduler config file [default: ${1}]
-      --producer <PATH>       Path to the producer binary [default: ${2}]
-      --consumer <PATH>       Path to the consumer binary [default: ${3}]
-      --scheduler <PATH>      Path to the scheduler binary [default: ${4}]
-      --mongo-retries <N>     Number of times to attempt to ping mongodb [default: ${5}]
-      --consumer-retries <N>  Number of times to restart the consumer when it fails to read from kafka [default: ${6}]
-      --alert-db-name <NAME>  MongoDB database name [default: ${7}]
+      --config <PATH>         Path to the consumer/scheduler config file [default: ${config}]
+      --producer <PATH>       Path to the producer binary [default: ${producer}]
+      --consumer <PATH>       Path to the consumer binary [default: ${consumer}]
+      --scheduler <PATH>      Path to the scheduler binary [default: ${scheduler}]
+      --consumer-retries <N>  Number of times to restart the consumer when it fails to read from kafka [default: ${consumer_retries}]
+      --alert-db-name <NAME>  MongoDB database name [default: ${alert_db_name}]
       --alert-check-interval <SEC>
-                              How often, in seconds, to check the alert count [default: ${8}]
-      --timeout <SEC>         Maximum test duration in seconds [default: ${9}]
+                              How often, in seconds, to check the alert count [default: ${alert_check_interval}]
+      --timeout <SEC>         Maximum test duration in seconds [default: ${timeout}]
       --debug                 Print DEBUG log messages from this program
   -h, --help                  Print help
 
@@ -48,7 +47,7 @@ EOF
 cleanup() {
   if [[ ${#PIDS[@]:-0} -gt 0 ]]; then
     for pid in "${PIDS[@]}"; do
-      debug "Killing ${pid}"
+      debug "killing ${pid}"
       kill "${pid}" 2>/dev/null || true
     done
   fi
@@ -56,56 +55,56 @@ cleanup() {
 
 # Log DEBUG messages for this script
 debug() {
-  local message="$1"
+  local message="${1}"
 
-  if [[ "$DEBUG" = true ]]; then
+  if [[ ${DEBUG} = true ]]; then
     echo "DEBUG: ${message}" >&2
   fi
 }
 
 # Log ERROR messages for this script
 error() {
-  local message="$1"
+  local message="${1}"
 
   echo "ERROR: ${message}" >&2
 }
 
 # Log ERROR specifically regarding CLI args
 arg_error() {
-  local message="$1"
+  local message="${1}"
 
-  error "$message"
+  error "${message}"
   echo >&2
   usage >&2
 }
 
 # Helper function to check option values
 check_option() {
-  local name="$1"
-  local value="$2"
+  local name="${1}"
+  local value="${2}"
 
-  if [[ -z $value ]]; then
+  if [[ -z ${value} ]]; then
     arg_error "no value provided for option '${name}'"
     return 1
   fi
-  echo "$value"
+  echo "${value}"
 }
 
 # Helper function to check arguments
 check_argument() {
-  local name="$1"
-  local value="$2"
+  local name="${1}"
+  local value="${2}"
 
-  if [[ -z $value ]]; then
+  if [[ -z ${value} ]]; then
     arg_error "argument '<${name}>' not provided"
     return 1
   fi
-  echo "$value"
+  echo "${value}"
 }
 
 # Helper function to check env vars
 check_env_var() {
-  local name="$1"
+  local name="${1}"
 
   if [[ -z ${!name} ]]; then
     error "required environment variable ${name} not set; see '--help'"
@@ -113,40 +112,58 @@ check_env_var() {
   fi
 }
 
-get_mongo_container_id() {
-  local container_name="$1"
-  docker ps -q -f name="${container_name}"
+# Helper function to count the number of lines in a variable
+count_lines() {
+  set -f  # Disable glob expansion
+  IFS=$'\n'  # Split on newline
+  lines=(${1})
+  echo ${#lines[@]}
 }
 
-wait_for_mongo() {
-  local retries="$1"
-
-  local wait_interval=2
-
-  local attempt=0
-  while true; do
-    debug "Pinging mongo (attempt ${attempt})"
-    if [[ $attempt -ge $retries ]]; then
-      error "Could not ping mongodb, exiting"
-      exit 1
-    fi
-
-    if docker exec boom-mongo-1 mongosh \
-      --eval "db.adminCommand('ping')" \
-      >/dev/null 2>&1
-    then
-      break
-    fi
-
-    ((attempt++))
-    sleep "${wait_interval}"
+start_containers() {
+  debug "starting containers"
+  docker compose up -d  # Idempotent
+  while [[ $(count_lines "$(docker ps --quiet --filter health=healthy)") -lt 3 ]]; do
+    debug "waiting for containers to become healthy"
+    sleep 5
   done
 }
 
-remove_alert_database() {
-  local alert_db_name="$1"
+check_for_topic() {
+  local topic="${1}"
 
-  debug "Removing mongodb database ${alert_db_name}"
+  debug "checking for topics"
+  local topics
+  topics="$(
+    docker exec \
+      boom-broker-1 \
+      /opt/kafka/bin/kafka-topics.sh \
+      --bootstrap-server broker:9092 \
+      --list \
+  )" || return 2
+  debug "found topics:
+  ${topics}"
+  [[ ${topics} =~ ${topic} ]]
+}
+
+run_producer() {
+  local producer="${1}"
+  local survey="${2}"
+  local date="${3}"
+
+  debug "running the producer"
+  "${producer}" "${survey}" "${date}"
+}
+
+count_produced_alerts() {
+  # TODO
+  :
+}
+
+remove_alert_database() {
+  local alert_db_name="${1}"
+
+  debug "removing mongodb database ${alert_db_name}"
   docker exec boom-mongo-1 mongosh \
     --username "${MONGO_USERNAME}" \
     --password "${MONGO_PASSWORD}" \
@@ -155,12 +172,12 @@ remove_alert_database() {
 }
 
 delete_alert_topic() {
-  local survey="$1"
-  local date="$2"
+  local survey="${1}"
+  local date="${2}"
 
   local topic="${survey}_${date}_programid1"
 
-  debug "Deleting kafka topic ${topic}"
+  debug "deleting kafka topic ${topic}"
   docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server broker:9092 \
     --delete \
@@ -168,34 +185,14 @@ delete_alert_topic() {
     --topic "${topic}"
 }
 
-run_producer() {
-  # Returns the expected alert count based on the producer output.
-
-  local producer="$1"
-  local survey="$2"
-  local date="$3"
-
-  debug "Running the producer"
-  local output
-  output="$("${producer}" "${survey}" "${date}" | tee /dev/stderr)"
-  if [[ $output =~ Pushed\ ([0-9]+)\ alerts\ to\ the\ queue ]]; then
-    local count="${BASH_REMATCH[1]}"
-    debug "Expected alert count is ${count}"
-    echo "${count}"
-  else
-    error "Could not determine the number of alerts produced"
-    exit 1
-  fi
-}
-
 start_consumer() {
   # Returns the consumer's start time and its PID, separated by a comma.
 
-  local consumer="$1"
-  local config="$2"
-  local survey="$3"
-  local date="$4"
-  local retries="$5"
+  local consumer="${1}"
+  local config="${2}"
+  local survey="${3}"
+  local date="${4}"
+  local retries="${5}"
 
   local start
   local consumer_pid
@@ -208,9 +205,9 @@ start_consumer() {
   alert_queue_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
   local attempt=0
   while true; do
-    debug "Starting the consumer (attempt ${attempt})"
-    if [[ $attempt -ge $retries ]]; then
-      error "Consumer not reading from kafka, exiting"
+    debug "starting the consumer (attempt ${attempt})"
+    if [[ ${attempt} -ge ${retries} ]]; then
+      error "consumer not reading from kafka, exiting"
       exit 1
     fi
 
@@ -224,10 +221,10 @@ start_consumer() {
     local length
     length="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"
     if [[ $length -gt 0 ]]; then
-      debug "Consumer started (pid ${consumer_pid})"
+      debug "consumer started (pid ${consumer_pid})"
       break
     else
-      debug "Killing ${consumer_pid}"
+      debug "killing ${consumer_pid}"
       kill "${consumer_pid}"
       wait "${consumer_pid}" || true
       ((attempt++))
@@ -240,27 +237,27 @@ start_consumer() {
 start_scheduler() {
   # Returns the scheduler's PID
 
-  local scheduler="$1"
-  local config="$2"
-  local survey="$3"
+  local scheduler="${1}"
+  local config="${2}"
+  local survey="${3}"
 
   local scheduler_pid
-  debug "Starting the scheduler"
+  debug "starting the scheduler"
   "${scheduler}" --config "${config}" "${survey}" >&2 &
-  scheduler_pid=$!
-  debug "Scheduler started (pid ${scheduler_pid})"
+  scheduler_pid="$!"
+  debug "scheduler started (pid ${scheduler_pid})"
   echo "${scheduler_pid}"
 }
 
 wait_for_scheduler() {
   # Returns the alert count and the elapsed time separated by a comma.
 
-  local alert_db_name="$1"
-  local survey="$2"
-  local start="$3"
-  local expected_count="$4"
-  local check_interval="$5"
-  local timeout="$6"
+  local alert_db_name="${1}"
+  local survey="${2}"
+  local start="${3}"
+  local expected_count="${4}"
+  local check_interval="${5}"
+  local timeout="${6}"
 
   local alert_collection_name
   alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
@@ -269,8 +266,8 @@ wait_for_scheduler() {
   local count
   while true; do
     elapsed=$(($(date +%s) - start))
-    if [[ $elapsed -gt $timeout ]]; then
-      error "Timeout limit reached, exiting"
+    if [[ ${elapsed} -gt ${timeout} ]]; then
+      error "timeout limit reached, exiting"
       exit 1
     fi
 
@@ -282,7 +279,7 @@ wait_for_scheduler() {
       --eval "db.getSiblingDB('${alert_db_name}').${alert_collection_name}.countDocuments()"
     )
     debug "${count} alerts processed in ${elapsed} seconds"
-    if [[ "$count" -ge "$expected_count" ]]; then
+    if [[ "${count}" -ge "${expected_count}" ]]; then
       echo "${count},${elapsed}"
       break
     fi
@@ -299,7 +296,6 @@ main() {
   local producer="./target/release/kafka_producer"
   local consumer="./target/release/kafka_consumer"
   local scheduler="./target/release/scheduler"
-  local mongo_retries=5
   local consumer_retries=5
   local alert_db_name="boom"
   local alert_check_interval=1
@@ -307,54 +303,41 @@ main() {
 
   # Options
   while :; do
-    case $1 in
+    case ${1} in
       -h|--help)
-        help \
-          "$config" \
-          "$producer" \
-          "$consumer" \
-          "$scheduler" \
-          "$mongo_retries" \
-          "$consumer_retries" \
-          "$alert_db_name" \
-          "$alert_check_interval" \
-          "$timeout"
+        help
         exit
         ;;
       --config)
-        config="$(check_option "$1" "$2")" || exit $?
+        config="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --producer)
-        producer="$(check_option "$1" "$2")" || exit $?
+        producer="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --consumer)
-        consumer="$(check_option "$1" "$2")" || exit $?
+        consumer="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --scheduler)
-        scheduler="$(check_option "$1" "$2")" || exit $?
-        shift
-        ;;
-      --mongo-retries)
-        mongo_retries="$(check_option "$1" "$2")" || exit $?
+        scheduler="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --consumer-retries)
-        consumer_retries="$(check_option "$1" "$2")" || exit $?
+        consumer_retries="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --alert-db-name)
-        alert_db_name="$(check_option "$1" "$2")" || exit $?
+        alert_db_name="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --alert-check-interval)
-        alert_check_interval="$(check_option "$1" "$2")" || exit $?
+        alert_check_interval="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --timeout)
-        timeout="$(check_option "$1" "$2")" || exit $?
+        timeout="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --debug)
@@ -373,40 +356,51 @@ main() {
 
   # Arguments
   local survey
-  survey="$(check_argument "SURVEY" "$1")" || exit $?
+  survey="$(check_argument "SURVEY" "${1}")" || exit "$?"
   shift
 
   local date
-  date="$(check_argument "DATE" "$1")" || exit $?
+  date="$(check_argument "DATE" "${1}")" || exit "$?"
   shift
 
   [[ $# -eq 0 ]] || { arg_error "too many arguments provided"; exit 1; }
 
   # Required env vars
-  check_env_var MONGO_USERNAME || exit $?
-  check_env_var MONGO_PASSWORD || exit $?
+  check_env_var MONGO_USERNAME || exit "$?"
+  check_env_var MONGO_PASSWORD || exit "$?"
 
-  debug "
+  debug "parsed arguments:
   survey:               ${survey}
   date:                 ${date}
   config:               ${config}
   producer:             ${producer}
   consumer:             ${consumer}
   scheduler:            ${scheduler}
-  mongo_retries:        ${mongo_retries}
   consumer_retries:     ${consumer_retries}
   alert_db_name:        ${alert_db_name}
   alert_check_interval: ${alert_check_interval}
   timeout:              ${timeout}
   DEBUG:                ${DEBUG}"
+
+  start_containers
+
+  local topic="${survey}_${date}_programid1"
+  check_for_topic "${topic}"
+  local topic_exists="$?"
+  case ${topic_exists} in
+    0) debug "topic exists";;
+    1) run_producer "${producer}" "${survey}" "${date}" || {
+      error "failed to run the producer"
+      exit "$?"
+    };;
+    *) error "failed to check topics";;
+  esac
+
+  # local expected_count="$(count_produced_alerts "${topic}")"
+
   exit
-
-  wait_for_mongo "${MONGO_RETRIES}"
   remove_alert_database "${ALERT_DB_NAME}"
-  delete_alert_topic "${SURVEY}" "${DATE}"
 
-  local expected_count
-  expected_count="$(run_producer "${PRODUCER}" "${SURVEY}" "${DATE}")"
 
   local values
   local start
@@ -442,7 +436,7 @@ main() {
 
   count="${values%,*}"
   elapsed="${values#*,}"
-  echo "Results:"
+  echo "results:"
   echo "  number of alerts:        ${count}"
   echo "  processing time (sec):   ${elapsed}"
   echo "  throughput (alerts/sec): $(echo "scale=3; ${count} / ${elapsed}" | bc)"
