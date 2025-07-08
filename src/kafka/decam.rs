@@ -207,7 +207,7 @@ impl AlertProducer for DecamAlertProducer {
             let payload = match std::fs::read(&path) {
                 Ok(data) => data,
                 Err(e) => {
-                    log_error(format!("Failed to read file {:?}: {}", path, e));
+                    error!("Failed to read file {:?}: {}", path.to_str(), e);
                     continue;
                 }
             };
