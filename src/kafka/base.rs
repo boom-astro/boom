@@ -1,14 +1,71 @@
 use crate::{conf, utils::o11y::as_error};
 
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
+use rdkafka::producer::{FutureProducer, Producer};
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace};
 
 #[async_trait::async_trait]
 pub trait AlertProducer {
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
+}
+
+pub async fn ensure_kafka_topic_partitions(
+    bootstrap_servers: &str,
+    topic_name: &str,
+    expected_nb_partitions: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    // Fetch all topics
+    let metadata = producer
+        .client()
+        .fetch_metadata(None, std::time::Duration::from_secs(5))?;
+    let existing_topics = metadata
+        .topics()
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect::<Vec<String>>();
+
+    let topic_exists = existing_topics.contains(&topic_name.to_string());
+
+    let nb_partitions = if topic_exists {
+        info!("Topic {} exists, using existing partitions", topic_name);
+        metadata
+            .topics()
+            .iter()
+            .find(|t| t.name() == topic_name)
+            .map(|t| t.partitions().len())
+            .unwrap_or(expected_nb_partitions)
+    } else {
+        info!("Topic {} does not exist, creating it", topic_name);
+        let opts = AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+        admin_client
+            .create_topics(
+                &[NewTopic::new(
+                    topic_name,
+                    expected_nb_partitions as i32,
+                    TopicReplication::Fixed(1),
+                )],
+                &opts,
+            )
+            .await
+            .map_err(|e| format!("Failed to create topic {}: {}", topic_name, e))?;
+        info!("Topic {} created successfully", topic_name);
+        expected_nb_partitions
+    };
+
+    Ok(nb_partitions)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +83,27 @@ pub trait AlertConsumer: Sized {
     fn default(config_path: &str) -> Self;
     async fn consume(&self, timestamp: i64);
     async fn clear_output_queue(&self) -> Result<(), ConsumerError>;
+}
+
+// same as ensure_kafka_topic_partitions, but do not attempt to create the topic
+// simply check that the topic exists and return the number of partitions
+pub async fn check_kafka_topic_partitions(
+    bootstrap_servers: &str,
+    topic_name: &str,
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    let metadata = consumer
+        .fetch_metadata(Some(topic_name), std::time::Duration::from_secs(5))
+        .map_err(|e| format!("Failed to fetch metadata for topic {}: {}", topic_name, e))?;
+
+    let topic_metadata = metadata.topics().iter().find(|t| t.name() == topic_name);
+    match topic_metadata.map(|t| t.partitions().len()) {
+        Some(partitions) => Ok(Some(partitions)),
+        None => Ok(None),
+    }
 }
 
 #[instrument(skip(username, password, config_path))]
