@@ -38,7 +38,6 @@ pub async fn ensure_kafka_topic_partitions(
         .collect::<Vec<String>>();
 
     let topic_exists = existing_topics.contains(&topic_name.to_string());
-    info!("Existing topics: {:?}", existing_topics);
 
     let nb_partitions = if topic_exists {
         info!("Topic {} exists, using existing partitions", topic_name);

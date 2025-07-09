@@ -354,7 +354,6 @@ impl AlertProducer for ZtfAlertProducer {
                 .await
                 .unwrap();
 
-            println!("send message to key: {}", key_string);
             current_key = (current_key + 1) % nb_partitions as u64;
 
             total_pushed += 1;
