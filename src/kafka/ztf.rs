@@ -1,6 +1,9 @@
 use crate::{
     conf,
-    kafka::base::{consume_partitions, AlertConsumer, AlertProducer, ConsumerError},
+    kafka::base::{
+        consume_partitions, ensure_kafka_topic_partitions, AlertConsumer, AlertProducer,
+        ConsumerError,
+    },
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::ProgramId,
@@ -15,6 +18,7 @@ use tempfile::NamedTempFile;
 use tracing::{error, info, instrument};
 
 const ZTF_SERVER_URL: &str = "localhost:9092";
+const ZTF_NB_PARTITIONS: usize = 15;
 
 pub struct ZtfAlertConsumer {
     output_queue: String,
@@ -37,8 +41,11 @@ impl ZtfAlertConsumer {
         program_id: ProgramId,
         config_path: &str,
     ) -> Self {
-        if 15 % n_threads != 0 {
-            panic!("Number of threads should be a factor of 15");
+        if ZTF_NB_PARTITIONS % n_threads != 0 {
+            panic!(
+                "Number of threads should be a factor of {}",
+                ZTF_NB_PARTITIONS
+            );
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
         let output_queue = output_queue
@@ -74,9 +81,9 @@ impl AlertConsumer for ZtfAlertConsumer {
 
     #[instrument(skip(self))]
     async fn consume(&self, timestamp: i64) {
-        let partitions_per_thread = 15 / self.n_threads;
+        let partitions_per_thread = ZTF_NB_PARTITIONS / self.n_threads;
         let mut partitions = vec![vec![]; self.n_threads];
-        for i in 0..15 {
+        for i in 0..ZTF_NB_PARTITIONS {
             partitions[i / partitions_per_thread].push(i as i32);
         }
 
@@ -269,7 +276,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         info!("Initializing ZTF alert kafka producer");
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", "localhost:9092")
+            .set("bootstrap.servers", ZTF_SERVER_URL)
             .set("message.timeout.ms", "5000")
             // it's best to increase batch.size if the cluster
             // is running on another machine. Locally, lower means less
@@ -282,6 +289,11 @@ impl AlertProducer for ZtfAlertProducer {
             .set("debug", "broker,topic,msg")
             .create()
             .expect("Producer creation error");
+
+        let nb_partitions =
+            ensure_kafka_topic_partitions(ZTF_SERVER_URL, &topic_name, ZTF_NB_PARTITIONS).await?;
+
+        let mut current_key = 0;
 
         let data_folder = match self.program_id {
             ProgramId::Public => format!("data/alerts/ztf/public/{}", date_str),
@@ -315,15 +327,19 @@ impl AlertProducer for ZtfAlertProducer {
             }
             let payload = std::fs::read(path).unwrap();
 
+            let key_string = current_key.to_string();
             let record = FutureRecord::to(&topic_name)
                 .payload(&payload)
-                .key("ztf")
+                .key(&key_string)
                 .timestamp(chrono::Utc::now().timestamp_millis());
 
             producer
                 .send(record, std::time::Duration::from_secs(0))
                 .await
                 .unwrap();
+
+            println!("send message to key: {}", key_string);
+            current_key = (current_key + 1) % nb_partitions as u64;
 
             total_pushed += 1;
             if self.verbose {

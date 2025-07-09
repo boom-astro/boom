@@ -1,14 +1,73 @@
 use crate::{conf, utils::o11y::as_error};
 
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
+use rdkafka::producer::{FutureProducer, Producer};
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace};
 
 #[async_trait::async_trait]
 pub trait AlertProducer {
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
+}
+
+pub async fn ensure_kafka_topic_partitions(
+    bootstrap_servers: &str,
+    topic_name: &str,
+    expected_nb_partitions: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    // Fetch all topics
+    let existing_topics = producer
+        .client()
+        .fetch_metadata(None, std::time::Duration::from_secs(5))?
+        .topics()
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect::<Vec<String>>();
+
+    let topic_exists = existing_topics.contains(&topic_name.to_string());
+    info!("Existing topics: {:?}", existing_topics);
+
+    let nb_partitions = if topic_exists {
+        info!("Topic {} exists, using existing partitions", topic_name);
+        producer
+            .client()
+            .fetch_metadata(Some(topic_name), std::time::Duration::from_secs(5))?
+            .topics()
+            .iter()
+            .find(|t| t.name() == topic_name)
+            .map(|t| t.partitions().len())
+            .unwrap_or(expected_nb_partitions)
+    } else {
+        info!("Topic {} does not exist, creating it", topic_name);
+        let opts = AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+        admin_client
+            .create_topics(
+                &[NewTopic::new(
+                    topic_name,
+                    expected_nb_partitions as i32,
+                    TopicReplication::Fixed(1),
+                )],
+                &opts,
+            )
+            .await
+            .map_err(|e| format!("Failed to create topic {}: {}", topic_name, e))?;
+        info!("Topic {} created successfully", topic_name);
+        expected_nb_partitions
+    };
+
+    Ok(nb_partitions)
 }
 
 #[derive(Debug, thiserror::Error)]
