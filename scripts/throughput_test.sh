@@ -55,7 +55,7 @@ cleanup() {
 
 # Log DEBUG messages for this script
 debug() {
-  local message="${1}"
+  local message="${1:?}"
 
   if [[ ${DEBUG} = true ]]; then
     echo "DEBUG: ${message}" >&2
@@ -64,14 +64,14 @@ debug() {
 
 # Log ERROR messages for this script
 error() {
-  local message="${1}"
+  local message="${1:?}"
 
   echo "ERROR: ${message}" >&2
 }
 
 # Log ERROR specifically regarding CLI args
 arg_error() {
-  local message="${1}"
+  local message="${1:?}"
 
   error "${message}"
   echo >&2
@@ -80,8 +80,8 @@ arg_error() {
 
 # Helper function to check option values
 check_option() {
-  local name="${1}"
-  local value="${2}"
+  local name="${1:?}"
+  local value="${2:?}"
 
   if [[ -z ${value} ]]; then
     arg_error "no value provided for option '${name}'"
@@ -92,8 +92,8 @@ check_option() {
 
 # Helper function to check arguments
 check_argument() {
-  local name="${1}"
-  local value="${2}"
+  local name="${1:?}"
+  local value="${2:?}"
 
   if [[ -z ${value} ]]; then
     arg_error "argument '<${name}>' not provided"
@@ -104,7 +104,7 @@ check_argument() {
 
 # Helper function to check env vars
 check_env_var() {
-  local name="${1}"
+  local name="${1:?}"
 
   if [[ -z ${!name} ]]; then
     error "required environment variable ${name} not set; see '--help'"
@@ -122,7 +122,7 @@ count_lines() {
 
 start_containers() {
   debug "starting containers"
-  docker compose up -d  # Idempotent
+  docker compose up -d  || return "$?"
   while [[ $(count_lines "$(docker ps --quiet --filter health=healthy)") -lt 3 ]]; do
     debug "waiting for containers to become healthy"
     sleep 5
@@ -130,13 +130,12 @@ start_containers() {
 }
 
 check_for_topic() {
-  local topic="${1}"
+  local topic="${1:?}"
 
   debug "checking for topics"
   local topics
   topics="$(
-    docker exec \
-      boom-broker-1 \
+    docker exec boom-broker-1 \
       /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server broker:9092 \
       --list \
@@ -147,17 +146,37 @@ check_for_topic() {
 }
 
 run_producer() {
-  local producer="${1}"
-  local survey="${2}"
-  local date="${3}"
+  local producer="${1:?}"
+  local survey="${2:?}"
+  local date="${3:?}"
 
   debug "running the producer"
   "${producer}" "${survey}" "${date}"
 }
 
 count_produced_alerts() {
-  # TODO
-  :
+  local topic="${1:?}"
+
+  debug "counting alerts in the topic"
+  local output
+  output="$(
+    docker exec boom-broker-1 \
+      /opt/kafka/bin/kafka-console-consumer.sh \
+      --bootstrap-server broker:9092 \
+      --topic "${topic}" \
+      --from-beginning \
+      --timeout-ms 5000 \
+      --property print.value=false 2>&1
+  )" || {
+    echo "${output}" >&2
+    return 2
+  }
+  if [[ ${output} =~ Processed\ a\ total\ of\ ([0-9]+)\ messages ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${output}" >&2
+    return 1
+  fi
 }
 
 remove_alert_database() {
@@ -382,25 +401,44 @@ main() {
   timeout:              ${timeout}
   DEBUG:                ${DEBUG}"
 
-  start_containers
+  start_containers || {
+    error "failed to start containers"
+    exit 1
+  }
 
   local topic="${survey}_${date}_programid1"
   check_for_topic "${topic}"
-  local topic_exists="$?"
-  case ${topic_exists} in
+  case "$?" in
     0) debug "topic exists";;
     1) run_producer "${producer}" "${survey}" "${date}" || {
-      error "failed to run the producer"
-      exit "$?"
-    };;
-    *) error "failed to check topics";;
+        error "failed to run the producer"
+        exit 1
+      }
+      ;;
+    *)
+      error "failed to check topics"
+      exit 1
+      ;;
   esac
 
-  # local expected_count="$(count_produced_alerts "${topic}")"
+  local expected_count
+  expected_count="$(count_produced_alerts "${topic}")"
+  case "$?" in
+    0) debug "expected alert count is ${expected_count}";;
+    1)
+      error "failed to match consumer output for counting"
+      exit 1
+      ;;
+    *)
+      error "failed to consume topic for counting"
+      exit 1
+      ;;
+  esac
 
+  debug "done"
   exit
-  remove_alert_database "${ALERT_DB_NAME}"
 
+  remove_alert_database "${ALERT_DB_NAME}"
 
   local values
   local start
