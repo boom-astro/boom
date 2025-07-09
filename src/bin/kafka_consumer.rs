@@ -97,6 +97,13 @@ async fn run(args: Cli) {
             }
             consumer.consume(timestamp).await;
         }
+        _ => {
+            tracing::error!(
+                "Survey {:?} is not supported for consuming alerts from Kafka",
+                &args.survey
+            );
+            std::process::exit(1);
+        }
     }
 }
 
