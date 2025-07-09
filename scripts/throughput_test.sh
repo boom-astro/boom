@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
 declare -a PIDS
-DEBUG=false
 
 usage() {
   echo "Usage: ${0} [OPTIONS] [--] <SURVEY> <DATE>"
@@ -25,16 +24,16 @@ Arguments:
   <DATE>    Date string in YYYYMMDD format (e.g., 20240617)
 
 Options:
-      --config <PATH>         Path to the consumer/scheduler config file [default: ${config}]
-      --producer <PATH>       Path to the producer binary [default: ${producer}]
-      --consumer <PATH>       Path to the consumer binary [default: ${consumer}]
-      --scheduler <PATH>      Path to the scheduler binary [default: ${scheduler}]
-      --consumer-retries <N>  Number of times to restart the consumer when it fails to read from kafka [default: ${consumer_retries}]
-      --alert-db-name <NAME>  MongoDB database name [default: ${alert_db_name}]
+      --producer <PATH>       Path to the producer binary
+                              [default: ${producer}]
+      --consumer <PATH>       Path to the consumer binary
+                              [default: ${consumer}]
+      --scheduler <PATH>      Path to the scheduler binary
+                              [default: ${scheduler}]
       --alert-check-interval <SEC>
-                              How often, in seconds, to check the alert count [default: ${alert_check_interval}]
+                              How often, in seconds, to check the alert count
+                              [default: ${alert_check_interval}]
       --timeout <SEC>         Maximum test duration in seconds [default: ${timeout}]
-      --debug                 Print DEBUG log messages from this program
   -h, --help                  Print help
 
 Environment variables:
@@ -47,26 +46,32 @@ EOF
 cleanup() {
   if [[ ${#PIDS[@]:-0} -gt 0 ]]; then
     for pid in "${PIDS[@]}"; do
-      debug "killing ${pid}"
+      info "killing ${pid}"
       kill "${pid}" 2>/dev/null || true
     done
   fi
 }
 
-# Log DEBUG messages for this script
-debug() {
+# Helper function for logging
+log() {
+  local prefix="${1:?}"
+  local message="${2:?}"
+
+  echo "${prefix}${message}" >&2
+}
+
+# Log INFO messages for this script
+info() {
   local message="${1:?}"
 
-  if [[ ${DEBUG} = true ]]; then
-    echo "DEBUG: ${message}" >&2
-  fi
+  log "INFO: " "${message}"
 }
 
 # Log ERROR messages for this script
 error() {
   local message="${1:?}"
 
-  echo "ERROR: ${message}" >&2
+  log "ERROR: " "${message}"
 }
 
 # Log ERROR specifically regarding CLI args
@@ -81,7 +86,7 @@ arg_error() {
 # Helper function to check option values
 check_option() {
   local name="${1:?}"
-  local value="${2:?}"
+  local value="${2}"
 
   if [[ -z ${value} ]]; then
     arg_error "no value provided for option '${name}'"
@@ -93,7 +98,7 @@ check_option() {
 # Helper function to check arguments
 check_argument() {
   local name="${1:?}"
-  local value="${2:?}"
+  local value="${2}"
 
   if [[ -z ${value} ]]; then
     arg_error "argument '<${name}>' not provided"
@@ -112,19 +117,19 @@ check_env_var() {
   fi
 }
 
-# Helper function to count the number of lines in a variable
-count_lines() {
-  set -f  # Disable glob expansion
-  IFS=$'\n'  # Split on newline
-  lines=(${1})
-  echo ${#lines[@]}
-}
-
 start_containers() {
-  debug "starting containers"
-  docker compose up -d  || return "$?"
-  while [[ $(count_lines "$(docker ps --quiet --filter health=healthy)") -lt 3 ]]; do
-    debug "waiting for containers to become healthy"
+  local expected_service_count=3
+
+  info "starting containers"
+  docker compose up -d || return 1
+
+  local healthy_count
+  while true; do
+    healthy_count="$(docker ps --quiet --filter health=healthy | wc -l)"
+    if [[ ${healthy_count} -ge ${expected_service_count} ]]; then
+      break
+    fi
+    info "waiting for containers to become healthy"
     sleep 5
   done
 }
@@ -132,16 +137,16 @@ start_containers() {
 check_for_topic() {
   local topic="${1:?}"
 
-  debug "checking for topics"
+  info "checking for topics"
   local topics
   topics="$(
     docker exec boom-broker-1 \
       /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server broker:9092 \
-      --list \
+      --list
   )" || return 2
-  debug "found topics:
-  ${topics}"
+  echo "${topics}" 2>&1
+
   [[ ${topics} =~ ${topic} ]]
 }
 
@@ -150,14 +155,14 @@ run_producer() {
   local survey="${2:?}"
   local date="${3:?}"
 
-  debug "running the producer"
+  info "running the producer"
   "${producer}" "${survey}" "${date}"
 }
 
 count_produced_alerts() {
   local topic="${1:?}"
 
-  debug "counting alerts in the topic"
+  info "counting alerts in the topic"
   local output
   output="$(
     docker exec boom-broker-1 \
@@ -171,37 +176,21 @@ count_produced_alerts() {
     echo "${output}" >&2
     return 2
   }
+  output="$(echo "${output}" | tail -n1 | tee /dev/stderr)"
   if [[ ${output} =~ Processed\ a\ total\ of\ ([0-9]+)\ messages ]]; then
     echo "${BASH_REMATCH[1]}"
   else
-    echo "${output}" >&2
     return 1
   fi
 }
 
 remove_alert_database() {
-  local alert_db_name="${1}"
-
-  debug "removing mongodb database ${alert_db_name}"
+  debug "removing alert database"
   docker exec boom-mongo-1 mongosh \
     --username "${MONGO_USERNAME}" \
     --password "${MONGO_PASSWORD}" \
     --authenticationDatabase admin \
-    --eval "db.getSiblingDB('${alert_db_name}').dropDatabase()" >/dev/null
-}
-
-delete_alert_topic() {
-  local survey="${1}"
-  local date="${2}"
-
-  local topic="${survey}_${date}_programid1"
-
-  debug "deleting kafka topic ${topic}"
-  docker exec -it boom-broker-1 /opt/kafka/bin/kafka-topics.sh \
-    --bootstrap-server broker:9092 \
-    --delete \
-    --if-exists \
-    --topic "${topic}"
+    --eval "db.getSiblingDB('boom').dropDatabase()" >/dev/null
 }
 
 start_consumer() {
@@ -311,12 +300,9 @@ main() {
   # TODO: number of iterations?
 
   # Defaults
-  local config="./config.yaml"
   local producer="./target/release/kafka_producer"
   local consumer="./target/release/kafka_consumer"
   local scheduler="./target/release/scheduler"
-  local consumer_retries=5
-  local alert_db_name="boom"
   local alert_check_interval=1
   local timeout=120
 
@@ -326,10 +312,6 @@ main() {
       -h|--help)
         help
         exit
-        ;;
-      --config)
-        config="$(check_option "${1}" "${2}")" || exit "$?"
-        shift
         ;;
       --producer)
         producer="$(check_option "${1}" "${2}")" || exit "$?"
@@ -343,14 +325,6 @@ main() {
         scheduler="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
-      --consumer-retries)
-        consumer_retries="$(check_option "${1}" "${2}")" || exit "$?"
-        shift
-        ;;
-      --alert-db-name)
-        alert_db_name="$(check_option "${1}" "${2}")" || exit "$?"
-        shift
-        ;;
       --alert-check-interval)
         alert_check_interval="$(check_option "${1}" "${2}")" || exit "$?"
         shift
@@ -359,8 +333,9 @@ main() {
         timeout="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
-      --debug)
-        DEBUG=true
+      --?*)
+        arg_error "unrecognized option '${1}'"
+        exit 1
         ;;
       --)  # End of options
         shift
@@ -388,19 +363,6 @@ main() {
   check_env_var MONGO_USERNAME || exit "$?"
   check_env_var MONGO_PASSWORD || exit "$?"
 
-  debug "parsed arguments:
-  survey:               ${survey}
-  date:                 ${date}
-  config:               ${config}
-  producer:             ${producer}
-  consumer:             ${consumer}
-  scheduler:            ${scheduler}
-  consumer_retries:     ${consumer_retries}
-  alert_db_name:        ${alert_db_name}
-  alert_check_interval: ${alert_check_interval}
-  timeout:              ${timeout}
-  DEBUG:                ${DEBUG}"
-
   start_containers || {
     error "failed to start containers"
     exit 1
@@ -409,7 +371,7 @@ main() {
   local topic="${survey}_${date}_programid1"
   check_for_topic "${topic}"
   case "$?" in
-    0) debug "topic exists";;
+    0) info "topic exists";;
     1) run_producer "${producer}" "${survey}" "${date}" || {
         error "failed to run the producer"
         exit 1
@@ -424,7 +386,7 @@ main() {
   local expected_count
   expected_count="$(count_produced_alerts "${topic}")"
   case "$?" in
-    0) debug "expected alert count is ${expected_count}";;
+    0) info "expected alert count is ${expected_count}";;
     1)
       error "failed to match consumer output for counting"
       exit 1
@@ -434,11 +396,17 @@ main() {
       exit 1
       ;;
   esac
-
-  debug "done"
+  info "done"
   exit
 
-  remove_alert_database "${ALERT_DB_NAME}"
+  # TODO: begin loop
+  remove_alert_database || {
+    error "failed to remove alert database"
+    exit 1
+  }
+
+  info "done"
+  exit
 
   local values
   local start
