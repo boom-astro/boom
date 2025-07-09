@@ -28,9 +28,10 @@ pub async fn ensure_kafka_topic_partitions(
         .create()?;
 
     // Fetch all topics
-    let existing_topics = producer
+    let metadata = producer
         .client()
-        .fetch_metadata(None, std::time::Duration::from_secs(5))?
+        .fetch_metadata(None, std::time::Duration::from_secs(5))?;
+    let existing_topics = metadata
         .topics()
         .iter()
         .map(|t| t.name().to_string())
@@ -41,9 +42,7 @@ pub async fn ensure_kafka_topic_partitions(
 
     let nb_partitions = if topic_exists {
         info!("Topic {} exists, using existing partitions", topic_name);
-        producer
-            .client()
-            .fetch_metadata(Some(topic_name), std::time::Duration::from_secs(5))?
+        metadata
             .topics()
             .iter()
             .find(|t| t.name() == topic_name)
@@ -85,6 +84,27 @@ pub trait AlertConsumer: Sized {
     fn default(config_path: &str) -> Self;
     async fn consume(&self, timestamp: i64);
     async fn clear_output_queue(&self) -> Result<(), ConsumerError>;
+}
+
+// same as ensure_kafka_topic_partitions, but do not attempt to create the topic
+// simply check that the topic exists and return the number of partitions
+pub async fn check_kafka_topic_partitions(
+    bootstrap_servers: &str,
+    topic_name: &str,
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    let metadata = consumer
+        .fetch_metadata(Some(topic_name), std::time::Duration::from_secs(5))
+        .map_err(|e| format!("Failed to fetch metadata for topic {}: {}", topic_name, e))?;
+
+    let topic_metadata = metadata.topics().iter().find(|t| t.name() == topic_name);
+    match topic_metadata.map(|t| t.partitions().len()) {
+        Some(partitions) => Ok(Some(partitions)),
+        None => Ok(None),
+    }
 }
 
 #[instrument(skip(username, password, config_path))]

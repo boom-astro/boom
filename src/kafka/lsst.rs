@@ -1,10 +1,10 @@
 use crate::{
     conf,
-    kafka::base::{consume_partitions, AlertConsumer, ConsumerError},
+    kafka::base::{check_kafka_topic_partitions, consume_partitions, AlertConsumer, ConsumerError},
     utils::o11y::{as_error, log_error},
 };
 use redis::AsyncCommands;
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 
 const LSST_SERVER_URL: &str = "usdf-alert-stream-dev.lsst.cloud:9094";
 
@@ -31,10 +31,6 @@ impl LsstAlertConsumer {
         simulated: bool,
         config_path: &str,
     ) -> Self {
-        // 45 should be divisible by n_threads
-        if 45 % n_threads != 0 {
-            panic!("Number of threads should be a factor of 45");
-        }
         let max_in_queue = max_in_queue.unwrap_or(15000);
         let output_queue = output_queue
             .unwrap_or("LSST_alerts_packets_queue")
@@ -87,11 +83,33 @@ impl AlertConsumer for LsstAlertConsumer {
         } else {
             "alerts".to_string()
         };
-        // divide the 45 LSST partitions for the n_threads that will read them
-        let partitions_per_thread = 45 / self.n_threads;
-        let mut partitions = vec![vec![]; self.n_threads];
-        for i in 0..45 {
-            partitions[i / partitions_per_thread].push(i as i32);
+
+        // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
+        // do so in a while until the topic exists
+        let mut nb_partitions = 0;
+        let mut topic_exists = false;
+        while !topic_exists {
+            match check_kafka_topic_partitions(LSST_SERVER_URL, &topic).await {
+                Ok(Some(partitions)) => {
+                    nb_partitions = partitions;
+                    topic_exists = true;
+                }
+                Ok(None) => {
+                    error!("Topic {} does not exist yet, retrying...", topic);
+                    std::thread::sleep(core::time::Duration::from_secs(5));
+                }
+                Err(e) => {
+                    error!("Error checking topic {}: {}", topic, e);
+                    return;
+                }
+            }
+        }
+
+        let n_threads = self.n_threads.clone().min(nb_partitions);
+
+        let mut partitions = vec![vec![]; n_threads];
+        for i in 0..nb_partitions {
+            partitions[i % n_threads].push(i as i32);
         }
 
         // spawn n_threads to consume each partitions subset

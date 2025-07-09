@@ -1,8 +1,8 @@
 use crate::{
     conf,
     kafka::base::{
-        consume_partitions, ensure_kafka_topic_partitions, AlertConsumer, AlertProducer,
-        ConsumerError,
+        check_kafka_topic_partitions, consume_partitions, ensure_kafka_topic_partitions,
+        AlertConsumer, AlertProducer, ConsumerError,
     },
     utils::{
         data::{count_files_in_dir, download_to_file},
@@ -41,12 +41,6 @@ impl ZtfAlertConsumer {
         program_id: ProgramId,
         config_path: &str,
     ) -> Self {
-        if ZTF_NB_PARTITIONS % n_threads != 0 {
-            panic!(
-                "Number of threads should be a factor of {}",
-                ZTF_NB_PARTITIONS
-            );
-        }
         let max_in_queue = max_in_queue.unwrap_or(15000);
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
@@ -81,15 +75,37 @@ impl AlertConsumer for ZtfAlertConsumer {
 
     #[instrument(skip(self))]
     async fn consume(&self, timestamp: i64) {
-        let partitions_per_thread = ZTF_NB_PARTITIONS / self.n_threads;
-        let mut partitions = vec![vec![]; self.n_threads];
-        for i in 0..ZTF_NB_PARTITIONS {
-            partitions[i / partitions_per_thread].push(i as i32);
-        }
-
         // ZTF uses nightly topics, and no user/pass (IP whitelisting)
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         let topic = format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id);
+
+        // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
+        // do so in a while until the topic exists
+        let mut nb_partitions = 0;
+        let mut topic_exists = false;
+        while !topic_exists {
+            match check_kafka_topic_partitions(ZTF_SERVER_URL, &topic).await {
+                Ok(Some(partitions)) => {
+                    nb_partitions = partitions;
+                    topic_exists = true;
+                }
+                Ok(None) => {
+                    error!("Topic {} does not exist yet, retrying...", topic);
+                    std::thread::sleep(core::time::Duration::from_secs(5));
+                }
+                Err(e) => {
+                    error!("Error checking topic {}: {}", topic, e);
+                    return;
+                }
+            }
+        }
+
+        let n_threads = self.n_threads.clone().min(nb_partitions);
+
+        let mut partitions = vec![vec![]; n_threads];
+        for i in 0..nb_partitions {
+            partitions[i % n_threads].push(i as i32);
+        }
 
         let mut handles = vec![];
         for i in 0..self.n_threads {
