@@ -100,9 +100,9 @@ async fn run(args: Cli) {
         _ => {
             tracing::error!(
                 "Survey {:?} is not supported for consuming alerts from Kafka",
-                survey
+                &args.survey
             );
-            return Ok(());
+            std::process::exit(1);
         }
     }
 }
