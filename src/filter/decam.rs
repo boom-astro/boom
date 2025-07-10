@@ -3,28 +3,26 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
-use crate::{
-    filter::{
-        get_filter_object, run_filter, Alert, Filter, FilterError, FilterResults, FilterWorker,
-        FilterWorkerError, Origin, Photometry,
-    },
-    utils::enums::Survey,
+use crate::filter::{
+    get_filter_object, run_filter, Alert, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, Origin, Photometry,
 };
+use crate::utils::enums::Survey;
 
-pub struct LsstFilter {
+pub struct DecamFilter {
     id: i32,
     pipeline: Vec<Document>,
 }
 
 #[async_trait::async_trait]
-impl Filter for LsstFilter {
+impl Filter for DecamFilter {
     #[instrument(skip(filter_collection), err)]
     async fn build(
         filter_id: i32,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
     ) -> Result<Self, FilterError> {
         // get filter object
-        let filter_obj = get_filter_object(filter_id, "LSST_alerts", filter_collection).await?;
+        let filter_obj = get_filter_object(filter_id, "DECAM_alerts", filter_collection).await?;
 
         // filter prefix (with permissions)
         let mut pipeline = vec![
@@ -37,7 +35,7 @@ impl Filter for LsstFilter {
             },
             doc! {
                 "$lookup": doc! {
-                    "from": format!("LSST_alerts_aux"),
+                    "from": format!("DECAM_alerts_aux"),
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -61,11 +59,11 @@ impl Filter for LsstFilter {
                             0
                         ]
                     },
-                    "prv_candidates": doc! {
+                    "fp_hists": doc! {
                         "$filter": doc! {
                             "input": doc! {
                                 "$arrayElemAt": [
-                                    "$aux.prv_candidates",
+                                    "$aux.fp_hists",
                                     0
                                 ]
                             },
@@ -113,7 +111,7 @@ impl Filter for LsstFilter {
             pipeline.push(x);
         }
 
-        let filter = LsstFilter {
+        let filter = DecamFilter {
             id: filter_id,
             pipeline: pipeline,
         };
@@ -122,39 +120,42 @@ impl Filter for LsstFilter {
     }
 }
 
-pub struct LsstFilterWorker {
+pub struct DecamFilterWorker {
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     input_queue: String,
     output_topic: String,
-    filters: Vec<LsstFilter>,
+    filters: Vec<DecamFilter>,
 }
 
 #[async_trait::async_trait]
-impl FilterWorker for LsstFilterWorker {
+impl FilterWorker for DecamFilterWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
-        let alert_collection = db.collection("LSST_alerts");
+        let alert_collection = db.collection("DECAM_alerts");
         let filter_collection = db.collection("filters");
 
-        let input_queue = "LSST_alerts_filter_queue".to_string();
-        let output_topic = "LSST_alerts_results".to_string();
+        let input_queue = "DECAM_alerts_filter_queue".to_string();
+        let output_topic = "DECAM_alerts_results".to_string();
 
         let filter_ids: Vec<i32> = filter_collection
-            .distinct("filter_id", doc! {"active": true, "catalog": "LSST_alerts"})
+            .distinct(
+                "filter_id",
+                doc! {"active": true, "catalog": "DECAM_alerts"},
+            )
             .await?
             .into_iter()
             .map(|x| x.as_i32().ok_or(FilterError::InvalidFilterId))
             .filter_map(Result::ok)
             .collect();
 
-        let mut filters: Vec<LsstFilter> = Vec::new();
+        let mut filters: Vec<DecamFilter> = Vec::new();
         for filter_id in filter_ids {
-            filters.push(LsstFilter::build(filter_id, &filter_collection).await?);
+            filters.push(DecamFilter::build(filter_id, &filter_collection).await?);
         }
 
-        Ok(LsstFilterWorker {
+        Ok(DecamFilterWorker {
             alert_collection,
             input_queue,
             output_topic,
@@ -199,7 +200,7 @@ impl FilterWorker for LsstFilterWorker {
             },
             doc! {
                 "$lookup": {
-                    "from": "LSST_alerts_aux",
+                    "from": "DECAM_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -207,7 +208,7 @@ impl FilterWorker for LsstFilterWorker {
             },
             doc! {
                 "$lookup": {
-                    "from": "LSST_alerts_cutouts",
+                    "from": "DECAM_alerts_cutouts",
                     "localField": "_id",
                     "foreignField": "_id",
                     "as": "cutouts"
@@ -219,15 +220,9 @@ impl FilterWorker for LsstFilterWorker {
                     "jd": 1,
                     "ra": 1,
                     "dec": 1,
-                    "prv_candidates": {
+                    "fp_hists": {
                         "$arrayElemAt": [
-                            "$aux.prv_candidates",
-                            0
-                        ]
-                    },
-                    "prv_nondetections": {
-                        "$arrayElemAt": [
-                            "$aux.prv_nondetections",
+                            "$aux.fp_hists",
                             0
                         ]
                     },
@@ -273,16 +268,16 @@ impl FilterWorker for LsstFilterWorker {
             .get_binary_generic("cutoutDifference")?
             .to_vec();
 
-        // let's create the array of photometry (non forced phot only for now)
+        // let's create the array of photometry (DECAM only has forced photometry)
         let mut photometry = Vec::new();
-        for doc in alert_document.get_array("prv_candidates")?.iter() {
+        for doc in alert_document.get_array("fp_hists")?.iter() {
             let doc = match doc.as_document() {
                 Some(doc) => doc,
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?;
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            let flux = doc.get_f64("forcediffimflux")?;
+            let flux_err = doc.get_f64("forcediffimfluxunc")?;
             let band = doc.get_str("band")?.to_string();
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
@@ -291,41 +286,17 @@ impl FilterWorker for LsstFilterWorker {
                 jd,
                 flux: Some(flux),
                 flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
+                band: format!("decam{}", band),
+                zero_point: 23.9, // we assume a constant zero point for DECAM
+                // zero point is not present in the alert, we assume a constant value
+                // TODO: confirm the zeropoint value for DECAM
                 origin: Origin::Alert,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
+                programid: 1, // only one stream for DECAM
+                survey: Survey::Decam,
                 ra,
                 dec,
             });
         }
-
-        // next we do the non detections
-        for doc in alert_document.get_array("prv_nondetections")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux_err = doc.get_f64("noise")?;
-            let band = doc.get_str("band")?.to_string();
-
-            photometry.push(Photometry {
-                jd,
-                flux: None, // for non-detections, flux is None
-                flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
-                origin: Origin::Alert,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
-                ra: None,
-                dec: None,
-            });
-        }
-
-        // we ignore the forced photometry for now, but will add it later
 
         let alert = Alert {
             candid,
@@ -334,7 +305,7 @@ impl FilterWorker for LsstFilterWorker {
             ra,
             dec,
             filters: filter_results,
-            classifications: Vec::new(), // LSST does not have classifications in the alerts, yet!
+            classifications: Vec::new(), // DECAM does not have classifications in the alerts, yet!
             photometry,
             cutout_science,
             cutout_template,
@@ -349,7 +320,7 @@ impl FilterWorker for LsstFilterWorker {
         let mut alerts_output = Vec::new();
 
         // unlike ZTF where we get a tuple of (programid, candid) from redis
-        // LSST has only one public stream, meaning there are no programids
+        // DECAM has only one public stream, meaning there are no programids
         // so we simply convert the array of String to Vec<i64>
         let candids: Vec<i64> = alerts.iter().map(|alert| alert.parse().unwrap()).collect();
 
@@ -371,7 +342,7 @@ impl FilterWorker for LsstFilterWorker {
                 // if we have output documents, we need to process them
                 // and create filter results for each document (which contain annotations)
                 info!(
-                    "{} alerts passed lsst filter {}",
+                    "{} alerts passed decam filter {}",
                     out_documents.len(),
                     filter.id,
                 );

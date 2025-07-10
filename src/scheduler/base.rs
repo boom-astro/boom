@@ -1,6 +1,6 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
-    filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
+    filter::{run_filter_worker, DecamFilterWorker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
     utils::{
         enums::Survey,
@@ -199,13 +199,7 @@ impl Worker {
                     let run = match survey_name {
                         Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
                         Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
-                        _ => {
-                            error!(
-                                "Filter worker not implemented for survey: {:?}",
-                                survey_name
-                            );
-                            return;
-                        }
+                        Survey::Decam => run_filter_worker::<DecamFilterWorker>,
                     };
                     let key = uuid::Uuid::new_v4().to_string();
                     run(key, receiver, &config_path)

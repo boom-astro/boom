@@ -4,9 +4,12 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
-use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
-    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
+use crate::{
+    filter::{
+        get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
+        FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
+    },
+    utils::enums::Survey,
 };
 
 #[derive(Debug)]
@@ -349,7 +352,7 @@ impl FilterWorker for ZtfFilterWorker {
                 zero_point,
                 origin: Origin::Alert,
                 programid,
-                survey: Survey::ZTF,
+                survey: Survey::Ztf,
                 ra,
                 dec,
             });
@@ -377,7 +380,7 @@ impl FilterWorker for ZtfFilterWorker {
                 zero_point,
                 origin: Origin::Alert,
                 programid,
-                survey: Survey::ZTF,
+                survey: Survey::Ztf,
                 ra: None,
                 dec: None,
             });
