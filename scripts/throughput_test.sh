@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-declare -a PIDS
-
 usage() {
   echo "Usage: ${0} [OPTIONS] [--] <SURVEY> <DATE>"
 }
@@ -33,7 +31,6 @@ Options:
       --alert-check-interval <SEC>
                               How often, in seconds, to check the alert count
                               [default: ${alert_check_interval}]
-      --timeout <SEC>         Maximum test duration in seconds [default: ${timeout}]
   -h, --help                  Print help
 
 Environment variables:
@@ -42,13 +39,25 @@ Environment variables:
 EOF
 }
 
+CLEANUP_COMMAND=":"
+
 # Clean up on exit
 cleanup() {
-  if [[ ${#PIDS[@]:-0} -gt 0 ]]; then
-    for pid in "${PIDS[@]}"; do
-      info "killing ${pid}"
-      kill "${pid}" 2>/dev/null || true
-    done
+  eval "$CLEANUP_COMMAND"
+}
+
+# Helper for stopping subprocesses
+stop() {
+  local name="${1:?}"
+  local sigspec="${2:?}"
+  local pid="${3:?}"
+
+  if ps "${pid}" >/dev/null; then
+    info "stopping ${name} (pid ${pid})"
+    kill -s "${sigspec}" "${pid}"
+    wait "${pid}"
+  else
+    info "${name} (pid ${pid}) already stopped"
   fi
 }
 
@@ -185,110 +194,55 @@ count_produced_alerts() {
 }
 
 remove_alert_database() {
-  debug "removing alert database"
+  info "removing alert database"
   docker exec boom-mongo-1 mongosh \
     --username "${MONGO_USERNAME}" \
     --password "${MONGO_PASSWORD}" \
     --authenticationDatabase admin \
-    --eval "db.getSiblingDB('boom').dropDatabase()" >/dev/null
+    --eval "db.getSiblingDB('boom').dropDatabase()"
 }
 
 start_consumer() {
-  # Returns the consumer's start time and its PID, separated by a comma.
+  local consumer="${1:?}"
+  local survey="${2:?}"
+  local date="${3:?}"
 
-  local consumer="${1}"
-  local config="${2}"
-  local survey="${3}"
-  local date="${4}"
-  local retries="${5}"
-
-  local start
-  local consumer_pid
-
-  # TODO: Sometimes the consumer doesn't read from kafka and no amount of waiting
-  # makes any difference. We need better logging to understand why this happens.
-  # The workaround here is to keep restarting the consumer until we confirm it's
-  # pushing alerts to the queue.
-  local alert_queue_name
-  alert_queue_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts_packets_queue"
-  local attempt=0
-  while true; do
-    debug "starting the consumer (attempt ${attempt})"
-    if [[ ${attempt} -ge ${retries} ]]; then
-      error "consumer not reading from kafka, exiting"
-      exit 1
-    fi
-
-    start=$(date +%s)
-
-    # Start the consumer
-    "${consumer}" --config "${config}" --clear "${survey}" "${date}" >&2 &
-    consumer_pid=$!
-
-    sleep 1  # Short pause before checking the queue (slightly inflates execution time)
-    local length
-    length="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"
-    if [[ $length -gt 0 ]]; then
-      debug "consumer started (pid ${consumer_pid})"
-      break
-    else
-      debug "killing ${consumer_pid}"
-      kill "${consumer_pid}"
-      wait "${consumer_pid}" || true
-      ((attempt++))
-    fi
-  done
-
-  echo "${start},${consumer_pid}"
+  info "starting the consumer"
+  "${consumer}" --clear "${survey}" "${date}" >&2 &
+  CLEANUP_COMMAND+="; stop 'consumer' 'SIGTERM' $!"
 }
 
 start_scheduler() {
-  # Returns the scheduler's PID
+  local scheduler="${1:?}"
+  local survey="${2:?}"
 
-  local scheduler="${1}"
-  local config="${2}"
-  local survey="${3}"
-
-  local scheduler_pid
-  debug "starting the scheduler"
-  "${scheduler}" --config "${config}" "${survey}" >&2 &
-  scheduler_pid="$!"
-  debug "scheduler started (pid ${scheduler_pid})"
-  echo "${scheduler_pid}"
+  info "starting the scheduler"
+  "${scheduler}" "${survey}" >&2 &
+  CLEANUP_COMMAND+="; stop 'scheduler' 'SIGINT' $!"
 }
 
 wait_for_scheduler() {
-  # Returns the alert count and the elapsed time separated by a comma.
+  local survey="${1:?}"
+  local start="${2:?}"
+  local expected_count="${3:?}"
+  local check_interval="${4:?}"
 
-  local alert_db_name="${1}"
-  local survey="${2}"
-  local start="${3}"
-  local expected_count="${4}"
-  local check_interval="${5}"
-  local timeout="${6}"
-
-  local alert_collection_name
-  alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
+  local alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
 
   local elapsed
   local count
   while true; do
-    elapsed=$(($(date +%s) - start))
-    if [[ ${elapsed} -gt ${timeout} ]]; then
-      error "timeout limit reached, exiting"
-      exit 1
-    fi
-
     count=$(docker exec boom-mongo-1 mongosh \
       --username "${MONGO_USERNAME}" \
       --password "${MONGO_PASSWORD}" \
       --authenticationDatabase admin \
       --quiet \
-      --eval "db.getSiblingDB('${alert_db_name}').${alert_collection_name}.countDocuments()"
+      --eval "db.getSiblingDB('boom').${alert_collection_name}.countDocuments()"
     )
-    debug "${count} alerts processed in ${elapsed} seconds"
+    elapsed=$(($(date +%s) - start))
+    info "${count} alerts processed in ${elapsed} seconds"
     if [[ "${count}" -ge "${expected_count}" ]]; then
-      echo "${count},${elapsed}"
+      echo "${count} ${elapsed}"
       break
     fi
 
@@ -304,7 +258,6 @@ main() {
   local consumer="./target/release/kafka_consumer"
   local scheduler="./target/release/scheduler"
   local alert_check_interval=1
-  local timeout=120
 
   # Options
   while :; do
@@ -327,10 +280,6 @@ main() {
         ;;
       --alert-check-interval)
         alert_check_interval="$(check_option "${1}" "${2}")" || exit "$?"
-        shift
-        ;;
-      --timeout)
-        timeout="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --?*)
@@ -396,56 +345,28 @@ main() {
       exit 1
       ;;
   esac
-  info "done"
-  exit
 
   # TODO: begin loop
   remove_alert_database || {
     error "failed to remove alert database"
     exit 1
   }
+  local start=$(date +%s)
+  start_consumer "${consumer}" "${survey}" "${date}"
+  start_scheduler "${scheduler}" "${survey}"
 
-  info "done"
-  exit
-
-  local values
-  local start
-  local consumer_pid
-  values="$(
-    start_consumer \
-      "${CONSUMER}" \
-      "${CONFIG}" \
-      "${SURVEY}" \
-      "${DATE}" \
-      "${CONSUMER_RETRIES}"
-  )"
-  start="${values%,*}"
-  consumer_pid="${values#*,}"
-  PIDS+=("${consumer_pid}")
-
-  local scheduler_pid
-  scheduler_pid="$(start_scheduler "${SCHEDULER}" "${CONFIG}" "${SURVEY}")"
-  PIDS+=("${scheduler_pid}")
-
-  local values
-  local count
-  local elapsed
-  values="$(
+  local values=($(
     wait_for_scheduler \
-      "${ALERT_DB_NAME}" \
-      "${SURVEY}" \
+      "${survey}" \
       "${start}" \
       "${expected_count}" \
-      "${ALERT_CHECK_INTERVAL}" \
-      "${TIMEOUT}"
-  )"
+      "${alert_check_interval}"
+  ))
 
-  count="${values%,*}"
-  elapsed="${values#*,}"
-  echo "results:"
-  echo "  number of alerts:        ${count}"
-  echo "  processing time (sec):   ${elapsed}"
-  echo "  throughput (alerts/sec): $(echo "scale=3; ${count} / ${elapsed}" | bc)"
+  info "results:
+  number of alerts:        ${values[0]}
+  processing time (sec):   ${values[1]}
+  throughput (alerts/sec): $(echo "scale=3; ${values[1]} / ${values[0]}" | bc)"
 }
 
 trap cleanup EXIT
