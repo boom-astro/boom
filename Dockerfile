@@ -22,6 +22,10 @@ FROM debian:bookworm-slim AS api
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsasl2-2 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy the built executable from the builder stage
 COPY --from=builder /app/target/release/boom-api /app/boom-api
 
@@ -36,6 +40,10 @@ CMD ["/app/boom-api"]
 FROM debian:bookworm-slim AS scheduler
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsasl2-2 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the built executable from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler
