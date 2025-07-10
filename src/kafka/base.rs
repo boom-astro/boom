@@ -53,6 +53,8 @@ pub async fn consume_partitions(
     let kafka_config = conf::build_kafka_config(&config, survey)
         .inspect_err(as_error!("failed to build kafka config"))?;
 
+    info!("Consuming from bootstrap server: {}", kafka_config.consumer);
+
     let mut client_config = ClientConfig::new();
     client_config
         .set("bootstrap.servers", kafka_config.consumer)
