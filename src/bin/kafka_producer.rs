@@ -25,6 +25,11 @@ struct Cli {
     program_id: ProgramId,
     #[arg(long, help = "Limit the number of alerts produced")]
     limit: Option<i64>,
+    #[arg(
+        long,
+        help = "URL of the Kafka broker to produce to, defaults to localhost:9092"
+    )]
+    server_url: String,
 }
 
 #[tokio::main]
@@ -42,9 +47,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let program_id = args.program_id;
 
+    let server_url = if args.server_url.is_empty() {
+        "localhost:9092".to_string()
+    } else {
+        args.server_url
+    };
+
     match args.survey {
         Survey::Ztf => {
-            let producer = ZtfAlertProducer::new(date, limit, program_id, true);
+            let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);
             producer.produce(None).await?;
         }
         _ => {
