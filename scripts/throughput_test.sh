@@ -8,42 +8,40 @@ help() {
   cat <<EOF
 Usage: $(usage)
 
-Runs a throughput test for the alert processing pipeline.
+Perform a boom throughput test in a *non-production* environment.
 
-Requires kafka, valkey, and mongodb to be running via docker compose.
+This utility does the following:
 
-**Important:** the following will be dropped and overwritten:
-- The kafka topic '<SURVEY>_<DATE>_programid1'
-- The valkey queue '<SURVEY>_alerts_packets_queue' (with SURVEY in all caps)
-- The mongodb database specified by --alert-db-name
+1.  Start kafka, valkey, and mongodb in docker if they aren't already running.
+2.  Run the producer to create the kafka topic for <SURVEY> and <DATE> if it
+    does not yet exist.
+3.  Count the total number of alerts in the topic.
+4.  Repeat the following test <N> times (see '--iterations'):
+    -   Drop the 'boom' database in mongodb.
+    -   Start the consumer and scheduler in the background.
+    -   Periodically count the number of alerts in 'boom' and stop the consumer
+        and scheduler when the expected number is reached.
+    -   Record the duration from when the consumer started to this point.
 
 Arguments:
   <SURVEY>  Survey name (e.g., ztf)
   <DATE>    Date string in YYYYMMDD format (e.g., 20240617)
 
 Options:
-      --producer <PATH>       Path to the producer binary
-                              [default: ${producer}]
-      --consumer <PATH>       Path to the consumer binary
-                              [default: ${consumer}]
-      --scheduler <PATH>      Path to the scheduler binary
-                              [default: ${scheduler}]
-      --alert-check-interval <SEC>
-                              How often, in seconds, to check the alert count
-                              [default: ${alert_check_interval}]
-  -h, --help                  Print help
+  -i, --iterations <N>    Repeat the test N > 0 times [default: ${iterations}]
+      --producer <PATH>   Path to the producer binary [default: ${producer}]
+      --consumer <PATH>   Path to the consumer binary [default: ${consumer}]
+      --scheduler <PATH>  Path to the scheduler binary [default: ${scheduler}]
+      --timeout <SEC>     Timeout for counting the alerts in the kafka topic
+                          (may want to increase this for dates with a large
+                          number of alerts) [default: ${timeout}]
+  -o, --output <PATH>     Append test results to the given file.
+  -h, --help              Print help
 
 Environment variables:
   MONGO_USERNAME  MongoDB username
   MONGO_PASSWORD  MongoDB password
 EOF
-}
-
-CLEANUP_COMMAND=":"
-
-# Clean up on exit
-cleanup() {
-  eval "$CLEANUP_COMMAND"
 }
 
 # Helper for stopping subprocesses
@@ -55,7 +53,9 @@ stop() {
   if ps "${pid}" >/dev/null; then
     info "stopping ${name} (pid ${pid})"
     kill -s "${sigspec}" "${pid}"
-    wait "${pid}"
+    while ps -p "${pid}" >/dev/null; do
+      sleep 1
+    done
   else
     info "${name} (pid ${pid}) already stopped"
   fi
@@ -74,6 +74,13 @@ info() {
   local message="${1:?}"
 
   log "INFO: " "${message}"
+}
+
+# Log WARN messages for this script
+warn() {
+  local message="${1:?}"
+
+  log "WARN: " "${message}"
 }
 
 # Log ERROR messages for this script
@@ -130,7 +137,10 @@ start_containers() {
   local expected_service_count=3
 
   info "starting containers"
-  docker compose up -d || return 1
+  docker compose up -d || {
+    error "failed to start containers"
+    return 1
+  }
 
   local healthy_count
   while true; do
@@ -153,7 +163,10 @@ check_for_topic() {
       /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server broker:9092 \
       --list
-  )" || return 2
+  )" || {
+    error "failed to check topics"
+    return 2
+  }
   echo "${topics}" 2>&1
 
   [[ ${topics} =~ ${topic} ]]
@@ -165,11 +178,15 @@ run_producer() {
   local date="${3:?}"
 
   info "running the producer"
-  "${producer}" "${survey}" "${date}"
+  "${producer}" "${survey}" "${date}" || {
+    error "failed to run the producer"
+    return 1
+  }
 }
 
 count_produced_alerts() {
   local topic="${1:?}"
+  local timeout="${2:?}"
 
   info "counting alerts in the topic"
   local output
@@ -179,16 +196,18 @@ count_produced_alerts() {
       --bootstrap-server broker:9092 \
       --topic "${topic}" \
       --from-beginning \
-      --timeout-ms 5000 \
+      --timeout-ms "$((timeout * 1000))" \
       --property print.value=false 2>&1
   )" || {
     echo "${output}" >&2
+    error "failed to consume topic for counting"
     return 2
   }
   output="$(echo "${output}" | tail -n1 | tee /dev/stderr)"
   if [[ ${output} =~ Processed\ a\ total\ of\ ([0-9]+)\ messages ]]; then
     echo "${BASH_REMATCH[1]}"
   else
+    error "failed to match consumer output for counting"
     return 1
   fi
 }
@@ -199,7 +218,7 @@ remove_alert_database() {
     --username "${MONGO_USERNAME}" \
     --password "${MONGO_PASSWORD}" \
     --authenticationDatabase admin \
-    --eval "db.getSiblingDB('boom').dropDatabase()"
+    --eval "db.getSiblingDB('boom').dropDatabase()" >&2
 }
 
 start_consumer() {
@@ -209,7 +228,7 @@ start_consumer() {
 
   info "starting the consumer"
   "${consumer}" --clear "${survey}" "${date}" >&2 &
-  CLEANUP_COMMAND+="; stop 'consumer' 'SIGTERM' $!"
+  echo "$!"
 }
 
 start_scheduler() {
@@ -218,14 +237,13 @@ start_scheduler() {
 
   info "starting the scheduler"
   "${scheduler}" "${survey}" >&2 &
-  CLEANUP_COMMAND+="; stop 'scheduler' 'SIGINT' $!"
+  echo "$!"
 }
 
 wait_for_scheduler() {
   local survey="${1:?}"
   local start="${2:?}"
   local expected_count="${3:?}"
-  local check_interval="${4:?}"
 
   local alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
 
@@ -238,7 +256,7 @@ wait_for_scheduler() {
       --authenticationDatabase admin \
       --quiet \
       --eval "db.getSiblingDB('boom').${alert_collection_name}.countDocuments()"
-    )
+    ) || return 1
     elapsed=$(($(date +%s) - start))
     info "${count} alerts processed in ${elapsed} seconds"
     if [[ "${count}" -ge "${expected_count}" ]]; then
@@ -246,18 +264,52 @@ wait_for_scheduler() {
       break
     fi
 
-    sleep "${check_interval}"
+    sleep 1
   done
+}
+
+test() {
+  local consumer="${1:?}"
+  local scheduler="${2:?}"
+  local survey="${3:?}"
+  local date="${4:?}"
+  local expected_count="${5:?}"
+
+  remove_alert_database || {
+    warn "failed to remove alert database"
+    return 1
+  }
+  local start="$(date +%s)"
+  local consumer_pid="$(start_consumer "${consumer}" "${survey}" "${date}")"
+  local scheduler_pid="$(start_scheduler "${scheduler}" "${survey}")"
+
+  local failed=false
+  local results
+  results="$(wait_for_scheduler "${survey}" "${start}" "${expected_count}")" || {
+    warn "failed to poll mongodb"
+    failed=true  # Don't return yet, need to clean up
+  }
+
+  stop 'consumer' 'SIGTERM' "${consumer_pid}"
+  stop 'scheduler' 'SIGINT' "${scheduler_pid}"
+
+  if "${failed}"; then
+    return 1
+  else
+    echo "${results}"
+  fi
 }
 
 main() {
   # TODO: number of iterations?
 
   # Defaults
+  local iterations=1
   local producer="./target/release/kafka_producer"
   local consumer="./target/release/kafka_consumer"
   local scheduler="./target/release/scheduler"
-  local alert_check_interval=1
+  local timeout=5
+  local output=
 
   # Options
   while :; do
@@ -265,6 +317,10 @@ main() {
       -h|--help)
         help
         exit
+        ;;
+      -i|--iterations)
+        iterations="$(check_option "${1}" "${2}")" || exit "$?"
+        shift
         ;;
       --producer)
         producer="$(check_option "${1}" "${2}")" || exit "$?"
@@ -278,8 +334,12 @@ main() {
         scheduler="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
-      --alert-check-interval)
-        alert_check_interval="$(check_option "${1}" "${2}")" || exit "$?"
+      --timeout)
+        timeout="$(check_option "${1}" "${2}")" || exit "$?"
+        shift
+        ;;
+      -o|--output)
+        output="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       --?*)
@@ -312,62 +372,57 @@ main() {
   check_env_var MONGO_USERNAME || exit "$?"
   check_env_var MONGO_PASSWORD || exit "$?"
 
-  start_containers || {
-    error "failed to start containers"
-    exit 1
-  }
+  if [[ -n ${output} ]]; then
+    rm "${output}"
+    touch "${output}"
+  fi
+
+  start_containers || exit 1
 
   local topic="${survey}_${date}_programid1"
   check_for_topic "${topic}"
   case "$?" in
     0) info "topic exists";;
-    1) run_producer "${producer}" "${survey}" "${date}" || {
-        error "failed to run the producer"
-        exit 1
-      }
-      ;;
-    *)
-      error "failed to check topics"
-      exit 1
-      ;;
+    1) run_producer "${producer}" "${survey}" "${date}" || exit 1;;
+    *) exit 1;;
   esac
 
   local expected_count
-  expected_count="$(count_produced_alerts "${topic}")"
-  case "$?" in
-    0) info "expected alert count is ${expected_count}";;
-    1)
-      error "failed to match consumer output for counting"
-      exit 1
-      ;;
-    *)
-      error "failed to consume topic for counting"
-      exit 1
-      ;;
-  esac
+  expected_count="$(count_produced_alerts "${topic}" "${timeout}")" || exit 1
+  info "expected alert count is ${expected_count}"
 
-  # TODO: begin loop
-  remove_alert_database || {
-    error "failed to remove alert database"
-    exit 1
-  }
-  local start=$(date +%s)
-  start_consumer "${consumer}" "${survey}" "${date}"
-  start_scheduler "${scheduler}" "${survey}"
+  local i=0
+  local results
+  local count
+  local elapsed
+  local rate
+  while true; do
+    i=$((i + 1))
+    if ((i > iterations)); then
+      break
+    fi
+    info "starting test ${i}"
+    results="$(
+      test \
+        "${consumer}" \
+        "${scheduler}" \
+        "${survey}" \
+        "${date}" \
+        "${expected_count}"
+    )" || continue
+    count="${results% *}"
+    elapsed="${results#* }"
+    rate="$(echo "scale=6; ${count} / ${elapsed}" | bc)"
 
-  local values=($(
-    wait_for_scheduler \
-      "${survey}" \
-      "${start}" \
-      "${expected_count}" \
-      "${alert_check_interval}"
-  ))
+    info "test ${i} results:
+    number of alerts:         ${count}
+    processing time (sec):    ${elapsed}
+    throughput (alerts/sec):  ${rate}"
 
-  info "results:
-  number of alerts:        ${values[0]}
-  processing time (sec):   ${values[1]}
-  throughput (alerts/sec): $(echo "scale=3; ${values[1]} / ${values[0]}" | bc)"
+    if [[ -n ${output} ]]; then
+      echo "${rate}" >>"${output}"
+    fi
+  done
 }
 
-trap cleanup EXIT
-main "$@" || exit 1
+main "$@"
