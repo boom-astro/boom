@@ -1,5 +1,5 @@
 use boom::{
-    kafka::{AlertProducer, ZtfAlertProducer},
+    kafka::{AlertProducer, DecamAlertProducer, ZtfAlertProducer},
     utils::{
         enums::{ProgramId, Survey},
         o11y::build_subscriber,
@@ -56,8 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);
             producer.produce(None).await?;
         }
+        Survey::Decam => {
+            let producer = DecamAlertProducer::new(date, limit, true);
+            producer.produce(None).await?;
+        }
         _ => {
-            error!("Only ZTF survey is supported for producing alerts from file (for now).");
+            error!("Unsupported survey for producing alerts: {}", args.survey);
             return Ok(());
         }
     }

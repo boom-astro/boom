@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum Survey {
     Ztf,
     Lsst,
+    Decam,
 }
 
 impl std::fmt::Display for Survey {
@@ -12,6 +13,7 @@ impl std::fmt::Display for Survey {
         match self {
             Survey::Ztf => write!(f, "ZTF"),
             Survey::Lsst => write!(f, "LSST"),
+            Survey::Decam => write!(f, "DECAM"),
         }
     }
 }
