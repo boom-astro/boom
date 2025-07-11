@@ -29,7 +29,7 @@ struct Cli {
         long,
         help = "URL of the Kafka broker to produce to, defaults to localhost:9092"
     )]
-    server_url: String,
+    server_url: Option<String>,
 }
 
 #[tokio::main]
@@ -47,11 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let program_id = args.program_id;
 
-    let server_url = if args.server_url.is_empty() {
-        "localhost:9092".to_string()
-    } else {
-        args.server_url
-    };
+    let server_url = args
+        .server_url
+        .unwrap_or_else(|| "localhost:9092".to_string());
 
     match args.survey {
         Survey::Ztf => {
