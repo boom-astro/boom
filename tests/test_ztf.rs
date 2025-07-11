@@ -477,7 +477,7 @@ async fn test_filter_ztf_alert() {
         .process_alerts(&[candid_programid_str.clone()])
         .await;
 
-    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();

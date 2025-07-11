@@ -104,14 +104,14 @@ const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
-    filter_id: i32,
+    filter_id: &str,
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": &format!("{}_alerts", survey)})
+        .delete_many(doc! {"id": filter_id, "catalog": &format!("{}_alerts", survey)})
         .await;
 
     Ok(())
@@ -119,8 +119,8 @@ pub async fn remove_test_filter(
 
 // we want to replace the 3 insert_test_..._filter functions with a single function that
 // takes the survey as argument
-pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::error::Error>> {
-    let filter_id = rand::random::<i32>();
+pub async fn insert_test_filter(survey: &Survey) -> Result<String, Box<dyn std::error::Error>> {
+    let filter_id = uuid::Uuid::new_v4().to_string();
     let catalog = format!("{}_alerts", survey);
     let pipeline = match survey {
         Survey::Ztf => ZTF_TEST_PIPELINE,
@@ -130,7 +130,7 @@ pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::err
     let filter_obj: mongodb::bson::Document = doc! {
         "_id": mongodb::bson::oid::ObjectId::new(),
         "group_id": 41,
-        "filter_id": filter_id,
+        "id": &filter_id,
         "catalog": catalog,
         "permissions": [1],
         "active": true,
