@@ -310,13 +310,16 @@ pub fn build_xmatch_configs(
     Ok(catalog_xmatch_configs)
 }
 
-pub struct KafkaConfig {
+pub struct SurveyKafkaConfig {
     pub consumer: String, // URL of the Kafka broker for the consumer (alert worker input)
     pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
 }
 
-impl KafkaConfig {
-    pub fn from_config(conf: &Config, survey: &Survey) -> Result<KafkaConfig, BoomConfigError> {
+impl SurveyKafkaConfig {
+    pub fn from_config(
+        conf: &Config,
+        survey: &Survey,
+    ) -> Result<SurveyKafkaConfig, BoomConfigError> {
         let kafka_conf = conf.get_table("kafka")?;
 
         // kafka section has a consumer and producer key
@@ -336,11 +339,14 @@ impl KafkaConfig {
             .and_then(|host| host.clone().into_string().ok())
             .unwrap_or_else(|| "localhost:9092".to_string());
 
-        Ok(KafkaConfig { consumer, producer })
+        Ok(SurveyKafkaConfig { consumer, producer })
     }
 }
 
 #[instrument(skip_all, err)]
-pub fn build_kafka_config(conf: &Config, survey: &Survey) -> Result<KafkaConfig, BoomConfigError> {
-    KafkaConfig::from_config(conf, survey)
+pub fn build_kafka_config(
+    conf: &Config,
+    survey: &Survey,
+) -> Result<SurveyKafkaConfig, BoomConfigError> {
+    SurveyKafkaConfig::from_config(conf, survey)
 }

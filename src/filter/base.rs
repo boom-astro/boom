@@ -188,7 +188,7 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
 
 // TODO, use the config file to get the kafka server
 pub async fn create_producer(
-    kafka_config: &conf::KafkaConfig,
+    kafka_config: &conf::SurveyKafkaConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &kafka_config.producer)
