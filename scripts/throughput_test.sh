@@ -305,8 +305,6 @@ test() {
 }
 
 main() {
-  # TODO: number of iterations?
-
   # Defaults
   local iterations=1
   local producer="./target/release/kafka_producer"
