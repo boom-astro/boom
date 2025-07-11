@@ -245,7 +245,8 @@ wait_for_scheduler() {
   local start="${2:?}"
   local expected_count="${3:?}"
 
-  local alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
+  local alert_collection_name
+  alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
 
   local elapsed
   local count
@@ -279,9 +280,12 @@ test() {
     warn "failed to remove alert database"
     return 1
   }
-  local start="$(date +%s)"
-  local consumer_pid="$(start_consumer "${consumer}" "${survey}" "${date}")"
-  local scheduler_pid="$(start_scheduler "${scheduler}" "${survey}")"
+  local start
+  start="$(date +%s)"
+  local consumer_pid
+  consumer_pid="$(start_consumer "${consumer}" "${survey}" "${date}")"
+  local scheduler_pid
+  scheduler_pid="$(start_scheduler "${scheduler}" "${survey}")"
 
   local failed=false
   local results
