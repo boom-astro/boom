@@ -95,7 +95,7 @@ impl AlertConsumer for LsstAlertConsumer {
                     topic_exists = true;
                 }
                 Ok(None) => {
-                    error!("Topic {} does not exist yet, retrying...", topic);
+                    info!("Topic {} does not exist yet, retrying...", topic);
                     std::thread::sleep(core::time::Duration::from_secs(5));
                 }
                 Err(e) => {
