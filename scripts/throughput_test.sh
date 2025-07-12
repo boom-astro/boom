@@ -279,7 +279,7 @@ wait_for_scheduler() {
   local decreasing=false
   while true; do
     # Count the number of alerts in the queue
-    ncurr="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")" && {
+    if ncurr="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"; then
       if ((ncurr > nprev)); then  # The queue is increasing
         if "${decreasing}"; then  # The queue just started increasing
           decreasing=false
@@ -291,9 +291,9 @@ wait_for_scheduler() {
           tmax="$(date +%s)"
         fi
       fi
-    } || {
+    else
       warn "failed to get the queue length"
-    }
+    fi
     nprev="${ncurr}"
 
     # Count the number of alerts in mongodb
@@ -461,7 +461,7 @@ main() {
         "${date}" \
         "${expected_count}"
     )" || continue
-    read count elapsed nmax tmax <<<"${results}"
+    read -r count elapsed nmax tmax <<<"${results}"
     rate="$(echo "scale=6; ${count} / ${elapsed}" | bc)"
 
     info "test ${i} results:
