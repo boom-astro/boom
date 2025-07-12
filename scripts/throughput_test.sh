@@ -59,8 +59,9 @@ Discussion:
     less than t, respectively, then the consumer was faster than the scheduler
     (r_c > r_s) and the overall throughput was limited by scheduler, i.e.,
     r = r_s. If instead n_peak is at or near zero and t_peak is approximately
-    equal to t, then the consumer was slower than the scheduler (r_c < r_s) and
-    the overall throughput was limited by the consumer, i.e., r = r_c.
+    equal to t, then the consumer was as fast or slower than the scheduler
+    (r_c < r_s) and the overall throughput was limited by the consumer, i.e.,
+    r = r_c.
 EOF
 }
 
