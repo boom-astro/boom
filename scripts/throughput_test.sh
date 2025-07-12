@@ -8,7 +8,7 @@ help() {
   cat <<EOF
 Perform a boom throughput test in a *non-production* environment
 
-Usage: $(usage)
+$(usage)
 
 Arguments:
   <SURVEY>  Survey name (e.g., ztf)
