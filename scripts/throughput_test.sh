@@ -248,7 +248,7 @@ start_consumer() {
   local date="${3:?}"
 
   info "starting the consumer"
-  ${consumer} --clear "${survey}" "${date}" >&2 &
+  eval "${consumer} --clear ${survey} ${date} >&2 &"
   echo "$!"
 }
 
@@ -257,7 +257,7 @@ start_scheduler() {
   local survey="${2:?}"
 
   info "starting the scheduler"
-  ${scheduler} "${survey}" >&2 &
+  eval "${scheduler} ${survey} >&2 &"
   echo "$!"
 }
 
@@ -423,7 +423,7 @@ main() {
   check_env_var MONGO_PASSWORD || exit "$?"
 
   if [[ -n ${output} ]]; then
-    rm "${output}"
+    rm "${output}" 2>/dev/null || true
     touch "${output}"
   fi
 
