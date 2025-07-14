@@ -1,12 +1,16 @@
 use crate::{
     conf::{self, SurveyKafkaConfig},
-    utils::o11y::{as_error, log_error},
+    utils::{
+        data::count_files_in_dir,
+        o11y::{as_error, log_error},
+    },
 };
-
+use indicatif::ProgressBar;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     error::KafkaError,
@@ -98,7 +102,7 @@ pub async fn initialize_topic(
             let opts =
                 AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
             info!(
-                "Creating topic {} with {} partitions",
+                "Creating topic {} with {} partitions...",
                 topic_name, expected_nb_partitions
             );
             admin_client
@@ -123,7 +127,117 @@ pub async fn initialize_topic(
 
 #[async_trait::async_trait]
 pub trait AlertProducer {
-    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
+    fn topic_name(&self) -> String;
+    fn data_directory(&self) -> String;
+    fn server_url(&self) -> String;
+    fn limit(&self) -> i64;
+    fn verbose(&self) -> bool {
+        false
+    }
+    async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>>;
+    fn default_nb_partitions(&self) -> usize;
+    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
+        match self.download_alerts_from_archive().await {
+            Ok(count) => count,
+            Err(e) => {
+                error!("Error downloading alerts: {}", e);
+                return Err(e);
+            }
+        };
+
+        let topic_name = topic.unwrap_or_else(|| self.topic_name());
+        let limit = self.limit();
+        let verbose = self.verbose();
+
+        info!("Initializing kafka alert producer");
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", &self.server_url())
+            .set("message.timeout.ms", "5000")
+            // it's best to increase batch.size if the cluster
+            // is running on another machine. Locally, lower means less
+            // latency, since we are not limited by network speed anyways
+            .set("batch.size", "16384")
+            .set("linger.ms", "5")
+            .set("acks", "1")
+            .set("max.in.flight.requests.per.connection", "5")
+            .set("retries", "3")
+            .set("debug", "broker,topic,msg")
+            .create()
+            .expect("Producer creation error");
+
+        let _ = initialize_topic(
+            &self.server_url(),
+            &topic_name,
+            self.default_nb_partitions(),
+        )
+        .await?;
+
+        let data_folder = self.data_directory();
+        let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
+
+        let total_size = if limit > 0 {
+            count.min(limit as usize) as u64
+        } else {
+            count as u64
+        };
+
+        let progress_bar = ProgressBar::new(total_size)
+            .with_message(format!("Pushing alerts to {}", topic_name))
+            .with_style(indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {human_pos}/{human_len} ({eta})")?);
+
+        let mut total_pushed = 0;
+        let start = std::time::Instant::now();
+        for entry in std::fs::read_dir(&data_folder)? {
+            if entry.is_err() {
+                continue;
+            }
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if !path.to_str().unwrap().ends_with(".avro") {
+                continue;
+            }
+            let payload = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Failed to read file {:?}: {}", path.to_str(), e);
+                    continue;
+                }
+            };
+
+            // we do not specify a key for the record, to let kafka distribute messages across partitions
+            // across partitions evenly with its built-in round-robin strategy
+            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
+                .payload(&payload)
+                .timestamp(chrono::Utc::now().timestamp_millis());
+
+            producer
+                .send(record, std::time::Duration::from_secs(0))
+                .await
+                .unwrap();
+
+            total_pushed += 1;
+            if verbose {
+                progress_bar.inc(1);
+            }
+
+            if limit > 0 && total_pushed >= limit {
+                info!("Reached limit of {} pushed items", limit);
+                break;
+            }
+        }
+
+        info!(
+            "Pushed {} alerts to the queue in {:?}",
+            total_pushed,
+            start.elapsed()
+        );
+
+        // close producer
+        producer.flush(std::time::Duration::from_secs(1)).unwrap();
+
+        Ok(total_pushed as i64)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

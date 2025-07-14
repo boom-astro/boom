@@ -1,15 +1,12 @@
 use crate::{
-    kafka::base::{initialize_topic, AlertConsumer, AlertProducer},
+    kafka::base::{AlertConsumer, AlertProducer},
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::{ProgramId, Survey},
     },
 };
-use indicatif::ProgressBar;
-use rdkafka::config::ClientConfig;
-use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tempfile::NamedTempFile;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 
@@ -131,8 +128,39 @@ impl ZtfAlertProducer {
             verbose,
         }
     }
+}
 
-    pub async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
+#[async_trait::async_trait]
+impl AlertProducer for ZtfAlertProducer {
+    fn topic_name(&self) -> String {
+        format!(
+            "ztf_{}_programid{}",
+            self.date.format("%Y%m%d"),
+            self.program_id
+        )
+    }
+    fn data_directory(&self) -> String {
+        match self.program_id {
+            ProgramId::Public => format!("data/alerts/ztf/public/{}", self.date.format("%Y%m%d")),
+            ProgramId::Partnership => {
+                format!("data/alerts/ztf/partnership/{}", self.date.format("%Y%m%d"))
+            }
+            ProgramId::Caltech => format!("data/alerts/ztf/caltech/{}", self.date.format("%Y%m%d")),
+        }
+    }
+    fn server_url(&self) -> String {
+        self.server_url.clone()
+    }
+    fn limit(&self) -> i64 {
+        self.limit
+    }
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
+    fn default_nb_partitions(&self) -> usize {
+        ZTF_DEFAULT_NB_PARTITIONS
+    }
+    async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
         let date_str = self.date.format("%Y%m%d").to_string();
         info!(
             "Downloading alerts for date {} (programid: {:?})",
@@ -150,7 +178,7 @@ impl ZtfAlertProducer {
                 format!("data/alerts/ztf/partnership/{}", date_str),
                 "https://ztf.uw.edu/alerts/partnership/".to_string(),
             ),
-            _ => return Err("Invalid program ID".into()),
+            _ => return Err("Unsupported program ID for ZTF alerts".into()),
         };
 
         std::fs::create_dir_all(&data_folder)?;
@@ -204,113 +232,5 @@ impl ZtfAlertProducer {
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
 
         Ok(count as i64)
-    }
-}
-
-#[async_trait::async_trait]
-impl AlertProducer for ZtfAlertProducer {
-    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
-        let date_str = self.date.format("%Y%m%d").to_string();
-        match self.download_alerts_from_archive().await {
-            Ok(count) => count,
-            Err(e) => {
-                error!("Error downloading alerts: {}", e);
-                return Err(e);
-            }
-        };
-
-        let topic_name = match topic {
-            Some(t) => t,
-            None => format!("ztf_{}_programid{}", date_str, self.program_id),
-        };
-
-        info!("Initializing ZTF alert kafka producer");
-        let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &self.server_url)
-            .set("message.timeout.ms", "5000")
-            // it's best to increase batch.size if the cluster
-            // is running on another machine. Locally, lower means less
-            // latency, since we are not limited by network speed anyways
-            .set("batch.size", "16384")
-            .set("linger.ms", "5")
-            .set("acks", "1")
-            .set("max.in.flight.requests.per.connection", "5")
-            .set("retries", "3")
-            .set("debug", "broker,topic,msg")
-            .create()
-            .expect("Producer creation error");
-
-        let _ = initialize_topic(&self.server_url, &topic_name, ZTF_DEFAULT_NB_PARTITIONS).await?;
-
-        let data_folder = match self.program_id {
-            ProgramId::Public => format!("data/alerts/ztf/public/{}", date_str),
-            ProgramId::Partnership => format!("data/alerts/ztf/partnership/{}", date_str),
-            _ => return Err("Invalid program ID".into()),
-        };
-
-        let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
-
-        let total_size = if self.limit > 0 {
-            count.min(self.limit as usize) as u64
-        } else {
-            count as u64
-        };
-
-        let progress_bar = ProgressBar::new(total_size)
-            .with_message(format!("Pushing alerts to {}", topic_name))
-            .with_style(indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {human_pos}/{human_len} ({eta})")?);
-
-        let mut total_pushed = 0;
-        let start = std::time::Instant::now();
-        for entry in std::fs::read_dir(&data_folder)? {
-            if entry.is_err() {
-                continue;
-            }
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if !path.to_str().unwrap().ends_with(".avro") {
-                continue;
-            }
-            let payload = match std::fs::read(&path) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("Failed to read file {:?}: {}", path.to_str(), e);
-                    continue;
-                }
-            };
-
-            // we do not specify a key for the record, to let kafka distribute messages across partitions
-            // across partitions evenly with its built-in round-robin strategy
-            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
-                .payload(&payload)
-                .timestamp(chrono::Utc::now().timestamp_millis());
-
-            producer
-                .send(record, std::time::Duration::from_secs(0))
-                .await
-                .unwrap();
-
-            total_pushed += 1;
-            if self.verbose {
-                progress_bar.inc(1);
-            }
-
-            if self.limit > 0 && total_pushed >= self.limit {
-                info!("Reached limit of {} pushed items", self.limit);
-                break;
-            }
-        }
-
-        info!(
-            "Pushed {} alerts to the queue in {:?}",
-            total_pushed,
-            start.elapsed()
-        );
-
-        // close producer
-        producer.flush(std::time::Duration::from_secs(1)).unwrap();
-
-        Ok(total_pushed as i64)
     }
 }

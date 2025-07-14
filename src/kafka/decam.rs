@@ -1,13 +1,10 @@
 use crate::{
     conf,
-    kafka::base::{initialize_topic, AlertConsumer, AlertProducer, ConsumerError},
+    kafka::base::{AlertConsumer, AlertProducer, ConsumerError},
     utils::{data::count_files_in_dir, enums::Survey, o11y::as_error},
 };
-use indicatif::ProgressBar;
-use rdkafka::config::ClientConfig;
-use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use redis::AsyncCommands;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 const DECAM_DEFAULT_NB_PARTITIONS: usize = 15;
 
@@ -118,99 +115,37 @@ impl DecamAlertProducer {
 
 #[async_trait::async_trait]
 impl AlertProducer for DecamAlertProducer {
-    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
-        let date_str = self.date.format("%Y%m%d").to_string();
-
-        let topic_name = match topic {
-            Some(t) => t,
-            None => format!("decam_{}_programid{}", date_str, 1),
-        };
-
-        info!("Initializing DECAM alert kafka producer");
-        let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &self.server_url)
-            .set("message.timeout.ms", "5000")
-            // it's best to increase batch.size if the cluster
-            // is running on another machine. Locally, lower means less
-            // latency, since we are not limited by network speed anyways
-            .set("batch.size", "16384")
-            .set("linger.ms", "5")
-            .set("acks", "1")
-            .set("max.in.flight.requests.per.connection", "5")
-            .set("retries", "3")
-            .create()
-            .expect("Producer creation error");
-
-        let _ =
-            initialize_topic(&self.server_url, &topic_name, DECAM_DEFAULT_NB_PARTITIONS).await?;
-
-        let data_folder = format!("data/alerts/decam/{}", date_str);
-        if !std::path::Path::new(&data_folder).exists() {
-            error!("Data folder does not exist: {}", data_folder);
-            return Err(format!("Data folder does not exist: {}", data_folder).into());
-        }
-
+    fn topic_name(&self) -> String {
+        format!("decam_{}_programid1", self.date.format("%Y%m%d"))
+    }
+    fn data_directory(&self) -> String {
+        format!("data/alerts/decam/{}", self.date.format("%Y%m%d"))
+    }
+    fn server_url(&self) -> String {
+        self.server_url.clone()
+    }
+    fn limit(&self) -> i64 {
+        self.limit
+    }
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
+    fn default_nb_partitions(&self) -> usize {
+        DECAM_DEFAULT_NB_PARTITIONS
+    }
+    async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
+        // there is no public decam archive, so we just check if the directory exists
+        let data_folder = self.data_directory();
+        info!("Checking for DECAM alerts in folder {}", data_folder);
+        std::fs::create_dir_all(&data_folder)?;
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
-
-        let total_size = if self.limit > 0 {
-            count.min(self.limit as usize) as u64
-        } else {
-            count as u64
-        };
-
-        let progress_bar = ProgressBar::new(total_size)
-            .with_message(format!("Pushing alerts to {}", topic_name))
-            .with_style(indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {human_pos}/{human_len} ({eta})")?);
-
-        let mut total_pushed = 0;
-        let start = std::time::Instant::now();
-        for entry in std::fs::read_dir(&data_folder)? {
-            if entry.is_err() {
-                continue;
-            }
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if !path.to_str().unwrap().ends_with(".avro") {
-                continue;
-            }
-            let payload = match std::fs::read(&path) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("Failed to read file {:?}: {}", path.to_str(), e);
-                    continue;
-                }
-            };
-
-            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
-                .payload(&payload)
-                .timestamp(chrono::Utc::now().timestamp_millis());
-
-            producer
-                .send(record, std::time::Duration::from_secs(0))
-                .await
-                .unwrap();
-
-            total_pushed += 1;
-            if self.verbose {
-                progress_bar.inc(1);
-            }
-
-            if self.limit > 0 && total_pushed >= self.limit {
-                info!("Reached limit of {} pushed items", self.limit);
-                break;
-            }
+        if count < 1 {
+            return Err(format!(
+                "DECAM has no public archive to download from, and no alerts found in {}",
+                data_folder
+            )
+            .into());
         }
-
-        info!(
-            "Pushed {} alerts to the queue in {:?}",
-            total_pushed,
-            start.elapsed()
-        );
-
-        // close producer
-        producer.flush(std::time::Duration::from_secs(1)).unwrap();
-
-        Ok(total_pushed as i64)
+        Ok(count as i64)
     }
 }
