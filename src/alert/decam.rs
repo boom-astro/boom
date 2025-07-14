@@ -19,7 +19,8 @@ use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
 pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
-pub const DECAM_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
+// Position uncertainty in arcsec (median FHWM from Table 1 in https://iopscience.iop.org/article/10.3847/1538-4365/ac78eb)
+pub const DECAM_POSITION_UNCERTAINTY: f64 = 1.24;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");

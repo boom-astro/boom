@@ -22,7 +22,8 @@ use std::fmt::Debug;
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
-pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.; // arcsec
+// Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
+pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");

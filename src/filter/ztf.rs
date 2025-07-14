@@ -210,6 +210,10 @@ impl FilterWorker for ZtfFilterWorker {
         })
     }
 
+    fn survey() -> Survey {
+        Survey::Ztf
+    }
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }

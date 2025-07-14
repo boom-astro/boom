@@ -162,6 +162,10 @@ impl FilterWorker for LsstFilterWorker {
         })
     }
 
+    fn survey() -> Survey {
+        Survey::Lsst
+    }
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }

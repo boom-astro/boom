@@ -10,7 +10,8 @@ use tracing_subscriber::FmtSubscriber;
 async fn test_download_from_archive() {
     let date_str = "20231118";
     let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y%m%d").unwrap();
-    let ztf_alert_producer = ZtfAlertProducer::new(date, 0, ProgramId::Public, false);
+    let ztf_alert_producer =
+        ZtfAlertProducer::new(date, 0, ProgramId::Public, "localhost:9092", false);
     let result = ztf_alert_producer.download_alerts_from_archive().await;
     assert!(result.is_ok());
     assert!(std::path::Path::new(&format!("data/alerts/ztf/public/{}", &date_str)).exists());
@@ -27,7 +28,8 @@ async fn test_produce_from_archive() {
 
     let date_str = "20240617".to_string();
     let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y%m%d").unwrap();
-    let ztf_alert_producer = ZtfAlertProducer::new(date, 0, ProgramId::Public, false);
+    let ztf_alert_producer =
+        ZtfAlertProducer::new(date, 0, ProgramId::Public, "localhost:9092", false);
 
     let topic = uuid::Uuid::new_v4().to_string();
 
