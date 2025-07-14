@@ -4,11 +4,13 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
-use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
-    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
+use crate::{
+    filter::{
+        get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
+        FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
+    },
+    utils::enums::Survey,
 };
-use crate::utils::enums::Survey;
 
 #[derive(Debug)]
 pub struct ZtfFilter {
