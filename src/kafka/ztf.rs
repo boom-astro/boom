@@ -1,21 +1,17 @@
 use crate::{
-    conf,
-    kafka::base::{
-        check_kafka_topic_partitions, consume_partitions, ensure_kafka_topic_partitions,
-        AlertConsumer, AlertProducer, ConsumerError,
-    },
+    kafka::base::{initialize_topic, AlertConsumer, AlertProducer},
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::{ProgramId, Survey},
-        o11y::{as_error, log_error},
     },
 };
 use indicatif::ProgressBar;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
-use redis::AsyncCommands;
 use tempfile::NamedTempFile;
 use tracing::{error, info, instrument};
+
+const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 
 pub struct ZtfAlertConsumer {
     output_queue: String,
@@ -67,90 +63,27 @@ impl AlertConsumer for ZtfAlertConsumer {
         Self::new(1, None, None, None, None, ProgramId::Public, config_path)
     }
 
-    #[instrument(skip(self))]
-    async fn consume(&self, timestamp: i64) {
-        // ZTF uses nightly topics, and no user/pass (IP whitelisting)
+    fn topic_name(&self, timestamp: i64) -> String {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        let topic = format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id);
-
-        // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
-        // do so in a while until the topic exists
-        let mut nb_partitions = 0;
-        let mut topic_exists = false;
-        while !topic_exists {
-            match check_kafka_topic_partitions(ZTF_SERVER_URL, &topic).await {
-                Ok(Some(partitions)) => {
-                    nb_partitions = partitions;
-                    topic_exists = true;
-                }
-                Ok(None) => {
-                    info!("Topic {} does not exist yet, retrying...", topic);
-                    std::thread::sleep(core::time::Duration::from_secs(5));
-                }
-                Err(e) => {
-                    error!("Error checking topic {}: {}", topic, e);
-                    return;
-                }
-            }
-        }
-
-        let n_threads = self.n_threads.clone().min(nb_partitions);
-
-        let mut partitions = vec![vec![]; n_threads];
-        for i in 0..nb_partitions {
-            partitions[i % n_threads].push(i as i32);
-        }
-
-        let mut handles = vec![];
-        for i in 0..self.n_threads {
-            let topic = topic.clone();
-            let partitions = partitions[i].clone();
-            let max_in_queue = self.max_in_queue;
-            let output_queue = self.output_queue.clone();
-            let group_id = self.group_id.clone();
-            let config_path = self.config_path.clone();
-            let handle = tokio::spawn(async move {
-                let result = consume_partitions(
-                    &i.to_string(),
-                    &topic,
-                    &group_id,
-                    partitions,
-                    &output_queue,
-                    max_in_queue,
-                    timestamp,
-                    None,
-                    None,
-                    &Survey::Ztf,
-                    &config_path,
-                )
-                .await;
-                if let Err(error) = result {
-                    log_error!(error, "failed to consume partitions");
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            if let Err(error) = handle.await {
-                log_error!(error, "failed to join task");
-            }
-        }
+        format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id)
     }
-
-    #[instrument(skip(self))]
-    async fn clear_output_queue(&self) -> Result<(), ConsumerError> {
-        let config =
-            conf::load_config(&self.config_path).inspect_err(as_error!("failed to load config"))?;
-        let mut con = conf::build_redis(&config)
-            .await
-            .inspect_err(as_error!("failed to connect to redis"))?;
-        let _: () = con
-            .del(&self.output_queue)
-            .await
-            .inspect_err(as_error!("failed to delete queue"))?;
-        info!("Cleared redis queue for ZTF Kafka consumer");
-        Ok(())
+    fn n_threads(&self) -> usize {
+        self.n_threads
+    }
+    fn output_queue(&self) -> String {
+        self.output_queue.clone()
+    }
+    fn max_in_queue(&self) -> usize {
+        self.max_in_queue
+    }
+    fn group_id(&self) -> String {
+        self.group_id.clone()
+    }
+    fn config_path(&self) -> String {
+        self.config_path.clone()
+    }
+    fn survey(&self) -> Survey {
+        Survey::Ztf
     }
 }
 
@@ -307,10 +240,7 @@ impl AlertProducer for ZtfAlertProducer {
             .create()
             .expect("Producer creation error");
 
-        let nb_partitions =
-            ensure_kafka_topic_partitions(ZTF_SERVER_URL, &topic_name, ZTF_NB_PARTITIONS).await?;
-
-        let mut current_key = 0;
+        let _ = initialize_topic(&self.server_url, &topic_name, ZTF_DEFAULT_NB_PARTITIONS).await?;
 
         let data_folder = match self.program_id {
             ProgramId::Public => format!("data/alerts/ztf/public/{}", date_str),
@@ -350,18 +280,16 @@ impl AlertProducer for ZtfAlertProducer {
                 }
             };
 
-            let key_string = current_key.to_string();
-            let record = FutureRecord::to(&topic_name)
+            // we do not specify a key for the record, to let kafka distribute messages across partitions
+            // across partitions evenly with its built-in round-robin strategy
+            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
                 .payload(&payload)
-                .key(&key_string)
                 .timestamp(chrono::Utc::now().timestamp_millis());
 
             producer
                 .send(record, std::time::Duration::from_secs(0))
                 .await
                 .unwrap();
-
-            current_key = (current_key + 1) % nb_partitions as u64;
 
             total_pushed += 1;
             if self.verbose {

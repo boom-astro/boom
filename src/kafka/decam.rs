@@ -1,17 +1,15 @@
 use crate::{
     conf,
-    kafka::base::{consume_partitions, AlertConsumer, AlertProducer, ConsumerError},
-    utils::{
-        data::count_files_in_dir,
-        enums::Survey,
-        o11y::{as_error, log_error},
-    },
+    kafka::base::{initialize_topic, AlertConsumer, AlertProducer, ConsumerError},
+    utils::{data::count_files_in_dir, enums::Survey, o11y::as_error},
 };
 use indicatif::ProgressBar;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use redis::AsyncCommands;
 use tracing::{error, info, instrument};
+
+const DECAM_DEFAULT_NB_PARTITIONS: usize = 15;
 
 pub struct DecamAlertConsumer {
     output_queue: String,
@@ -61,54 +59,27 @@ impl AlertConsumer for DecamAlertConsumer {
         Self::new(1, None, None, None, config_path)
     }
 
-    #[instrument(skip(self))]
-    async fn consume(&self, timestamp: i64) {
-        let partitions_per_thread = 15 / self.n_threads;
-        let mut partitions = vec![vec![]; self.n_threads];
-        for i in 0..15 {
-            partitions[i / partitions_per_thread].push(i as i32);
-        }
-
-        // DECAM will use nightly topics. Auth is not implemented yet,
-        // so we assume a Kafka cluster without authentication (such as a local one).
+    fn topic_name(&self, timestamp: i64) -> String {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        let topic = format!("decam_{}_programid{}", date.format("%Y%m%d"), 1);
-
-        let mut handles = vec![];
-        for i in 0..self.n_threads {
-            let topic = topic.clone();
-            let partitions = partitions[i].clone();
-            let max_in_queue = self.max_in_queue;
-            let output_queue = self.output_queue.clone();
-            let group_id = self.group_id.clone();
-            let config_path = self.config_path.clone();
-            let handle = tokio::spawn(async move {
-                let result = consume_partitions(
-                    &i.to_string(),
-                    &topic,
-                    &group_id,
-                    partitions,
-                    &output_queue,
-                    max_in_queue,
-                    timestamp,
-                    None,
-                    None,
-                    &Survey::Decam,
-                    &config_path,
-                )
-                .await;
-                if let Err(error) = result {
-                    log_error!(error, "failed to consume partitions");
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            if let Err(error) = handle.await {
-                log_error!(error, "failed to join task");
-            }
-        }
+        format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)
+    }
+    fn n_threads(&self) -> usize {
+        self.n_threads
+    }
+    fn max_in_queue(&self) -> usize {
+        self.max_in_queue
+    }
+    fn output_queue(&self) -> String {
+        self.output_queue.clone()
+    }
+    fn group_id(&self) -> String {
+        self.group_id.clone()
+    }
+    fn config_path(&self) -> String {
+        self.config_path.clone()
+    }
+    fn survey(&self) -> Survey {
+        Survey::Decam
     }
 
     #[instrument(skip(self))]
@@ -170,6 +141,9 @@ impl AlertProducer for DecamAlertProducer {
             .create()
             .expect("Producer creation error");
 
+        let _ =
+            initialize_topic(&self.server_url, &topic_name, DECAM_DEFAULT_NB_PARTITIONS).await?;
+
         let data_folder = format!("data/alerts/decam/{}", date_str);
         if !std::path::Path::new(&data_folder).exists() {
             error!("Data folder does not exist: {}", data_folder);
@@ -208,9 +182,8 @@ impl AlertProducer for DecamAlertProducer {
                 }
             };
 
-            let record = FutureRecord::to(&topic_name)
+            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
                 .payload(&payload)
-                .key("decam")
                 .timestamp(chrono::Utc::now().timestamp_millis());
 
             producer

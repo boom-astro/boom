@@ -8,7 +8,7 @@ use boom::{
 
 use chrono::{NaiveDate, NaiveDateTime};
 use clap::Parser;
-use tracing::instrument;
+use tracing::{error, info, instrument};
 
 #[derive(Parser)]
 struct Cli {
@@ -80,7 +80,10 @@ async fn run(args: Cli) {
             if args.clear {
                 let _ = consumer.clear_output_queue();
             }
-            consumer.consume(timestamp).await;
+            match consumer.consume(timestamp, false, None).await {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
         }
         Survey::Lsst => {
             let consumer = LsstAlertConsumer::new(
@@ -95,7 +98,10 @@ async fn run(args: Cli) {
             if args.clear {
                 let _ = consumer.clear_output_queue();
             }
-            consumer.consume(timestamp).await;
+            match consumer.consume(timestamp, false, None).await {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
         }
         Survey::Decam => {
             let consumer = DecamAlertConsumer::new(
@@ -108,7 +114,10 @@ async fn run(args: Cli) {
             if args.clear {
                 let _ = consumer.clear_output_queue();
             }
-            consumer.consume(timestamp).await;
+            match consumer.consume(timestamp, false, None).await {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
         }
     }
 }

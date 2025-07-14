@@ -1,13 +1,10 @@
 use crate::{
     conf,
-    kafka::base::{check_kafka_topic_partitions, consume_partitions, AlertConsumer, ConsumerError},
-    utils::{
-        enums::Survey,
-        o11y::{as_error, log_error},
-    },
+    kafka::base::{AlertConsumer, ConsumerError},
+    utils::{enums::Survey, o11y::as_error},
 };
 use redis::AsyncCommands;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 pub struct LsstAlertConsumer {
     output_queue: String,
@@ -74,80 +71,36 @@ impl AlertConsumer for LsstAlertConsumer {
         Self::new(1, None, None, None, None, true, config_path)
     }
 
-    #[instrument(skip(self))]
-    async fn consume(&self, timestamp: i64) {
-        let topic = if self.simulated {
+    fn topic_name(&self, _timestamp: i64) -> String {
+        if self.simulated {
             "alerts-simulated".to_string()
         } else {
             "alerts".to_string()
-        };
-
-        // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
-        // do so in a while until the topic exists
-        let mut nb_partitions = 0;
-        let mut topic_exists = false;
-        while !topic_exists {
-            match check_kafka_topic_partitions(LSST_SERVER_URL, &topic).await {
-                Ok(Some(partitions)) => {
-                    nb_partitions = partitions;
-                    topic_exists = true;
-                }
-                Ok(None) => {
-                    info!("Topic {} does not exist yet, retrying...", topic);
-                    std::thread::sleep(core::time::Duration::from_secs(5));
-                }
-                Err(e) => {
-                    error!("Error checking topic {}: {}", topic, e);
-                    return;
-                }
-            }
         }
-
-        let n_threads = self.n_threads.clone().min(nb_partitions);
-
-        let mut partitions = vec![vec![]; n_threads];
-        for i in 0..nb_partitions {
-            partitions[i % n_threads].push(i as i32);
-        }
-
-        // spawn n_threads to consume each partitions subset
-        let mut handles = vec![];
-        for i in 0..self.n_threads {
-            let topic = topic.clone();
-            let partitions = partitions[i].clone();
-            let max_in_queue = self.max_in_queue;
-            let output_queue = self.output_queue.clone();
-            let group_id = self.group_id.clone();
-            let username = self.username.clone();
-            let password = self.password.clone();
-            let config_path = self.config_path.clone();
-            let handle = tokio::spawn(async move {
-                let result = consume_partitions(
-                    &i.to_string(),
-                    &topic,
-                    &group_id,
-                    partitions,
-                    &output_queue,
-                    max_in_queue,
-                    timestamp,
-                    Some(&username),
-                    Some(&password),
-                    &Survey::Lsst,
-                    &config_path,
-                )
-                .await;
-                if let Err(error) = result {
-                    log_error!(error, "failed to consume partitions");
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            if let Err(error) = handle.await {
-                log_error!(error, "failed to join task");
-            }
-        }
+    }
+    fn n_threads(&self) -> usize {
+        self.n_threads
+    }
+    fn output_queue(&self) -> String {
+        self.output_queue.clone()
+    }
+    fn max_in_queue(&self) -> usize {
+        self.max_in_queue
+    }
+    fn group_id(&self) -> String {
+        self.group_id.clone()
+    }
+    fn config_path(&self) -> String {
+        self.config_path.clone()
+    }
+    fn survey(&self) -> Survey {
+        Survey::Lsst
+    }
+    fn username(&self) -> Option<String> {
+        Some(self.username.clone())
+    }
+    fn password(&self) -> Option<String> {
+        Some(self.password.clone())
     }
 
     #[instrument(skip(self))]

@@ -1,74 +1,129 @@
 use crate::{
-    conf,
-    utils::{enums::Survey, o11y::as_error},
+    conf::{self, SurveyKafkaConfig},
+    utils::o11y::{as_error, log_error},
 };
 
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
-use rdkafka::producer::{FutureProducer, Producer};
+use rdkafka::{
+    admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
+    error::KafkaError,
+};
 use redis::AsyncCommands;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{debug, error, info, instrument, trace, warn};
 
-#[async_trait::async_trait]
-pub trait AlertProducer {
-    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
-}
-
-pub async fn ensure_kafka_topic_partitions(
+// same as ensure_kafka_topic_partitions, but do not attempt to create the topic
+// simply check that the topic exists and return the number of partitions
+pub async fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
-    expected_nb_partitions: usize,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let producer: FutureProducer = ClientConfig::new()
+) -> Result<Option<usize>, KafkaError> {
+    let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
+    let metadata = consumer.fetch_metadata(None, std::time::Duration::from_secs(5))?;
+
+    debug!("Existing topics:");
+    for topic in metadata.topics() {
+        debug!(" - {}", topic.name());
+    }
+
+    let topic_metadata = metadata.topics().iter().find(|t| t.name() == topic_name);
+    match topic_metadata.map(|t| t.partitions().len()) {
+        Some(partitions) => Ok(Some(partitions)),
+        None => Ok(None),
+    }
+}
+
+pub async fn assign_partitions_to_consumers(
+    topic_name: &str,
+    nb_consumers: usize,
+    kafka_config: &SurveyKafkaConfig,
+) -> Result<Vec<Vec<i32>>, ConsumerError> {
+    // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
+    // do so in a while until the topic exists
+    let mut nb_partitions = 0;
+    let mut topic_exists = false;
+    while !topic_exists {
+        match check_kafka_topic_partitions(&kafka_config.consumer, &topic_name).await {
+            Ok(Some(partitions)) => {
+                nb_partitions = partitions;
+                topic_exists = true;
+            }
+            Ok(None) => {
+                info!("Topic {} does not exist yet, retrying...", &topic_name);
+                std::thread::sleep(core::time::Duration::from_secs(5));
+            }
+            Err(e) => {
+                return Err(ConsumerError::from(e));
+            }
+        }
+    }
+
+    let nb_consumers = nb_consumers.clone().min(nb_partitions);
+
+    let mut partitions = vec![vec![]; nb_consumers];
+    for i in 0..nb_partitions {
+        partitions[i % nb_consumers].push(i as i32);
+    }
+
+    Ok(partitions)
+}
+
+pub async fn initialize_topic(
+    bootstrap_servers: &str,
+    topic_name: &str,
+    expected_nb_partitions: usize,
+) -> Result<usize, KafkaError> {
     let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    // Fetch all topics
-    let metadata = producer
-        .client()
-        .fetch_metadata(None, std::time::Duration::from_secs(5))?;
-    let existing_topics = metadata
-        .topics()
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect::<Vec<String>>();
+    let nb_partitions = check_kafka_topic_partitions(bootstrap_servers, topic_name).await?;
 
-    let topic_exists = existing_topics.contains(&topic_name.to_string());
+    match nb_partitions {
+        Some(partitions) => {
+            if partitions != expected_nb_partitions {
+                warn!(
+                    "Topic {} exists but has {} partitions instead of expected {}",
+                    topic_name, partitions, expected_nb_partitions
+                );
+            }
+            return Ok(partitions);
+        }
+        None => {
+            let opts =
+                AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+            info!(
+                "Creating topic {} with {} partitions",
+                topic_name, expected_nb_partitions
+            );
+            admin_client
+                .create_topics(
+                    &[NewTopic::new(
+                        topic_name,
+                        expected_nb_partitions as i32,
+                        TopicReplication::Fixed(1),
+                    )],
+                    &opts,
+                )
+                .await?;
 
-    let nb_partitions = if topic_exists {
-        info!("Topic {} exists, using existing partitions", topic_name);
-        metadata
-            .topics()
-            .iter()
-            .find(|t| t.name() == topic_name)
-            .map(|t| t.partitions().len())
-            .unwrap_or(expected_nb_partitions)
-    } else {
-        info!("Topic {} does not exist, creating it", topic_name);
-        let opts = AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
-        admin_client
-            .create_topics(
-                &[NewTopic::new(
-                    topic_name,
-                    expected_nb_partitions as i32,
-                    TopicReplication::Fixed(1),
-                )],
-                &opts,
-            )
-            .await
-            .map_err(|e| format!("Failed to create topic {}: {}", topic_name, e))?;
-        info!("Topic {} created successfully", topic_name);
-        expected_nb_partitions
+            info!(
+                "Topic {} created successfully with {} partitions",
+                topic_name, expected_nb_partitions
+            );
+            return Ok(expected_nb_partitions);
+        }
     };
+}
 
-    Ok(nb_partitions)
+#[async_trait::async_trait]
+pub trait AlertProducer {
+    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,32 +141,91 @@ pub enum ConsumerError {
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
     fn default(config_path: &str) -> Self;
-    async fn consume(&self, timestamp: i64);
-    async fn clear_output_queue(&self) -> Result<(), ConsumerError>;
-}
+    fn topic_name(&self, timestamp: i64) -> String;
+    fn n_threads(&self) -> usize;
+    fn output_queue(&self) -> String;
+    fn max_in_queue(&self) -> usize;
+    fn group_id(&self) -> String;
+    fn username(&self) -> Option<String> {
+        None
+    }
+    fn password(&self) -> Option<String> {
+        None
+    }
+    fn config_path(&self) -> String;
+    fn survey(&self) -> crate::utils::enums::Survey;
+    #[instrument(skip(self))]
+    async fn consume(
+        &self,
+        timestamp: i64,
+        exit_on_eof: bool,
+        topic: Option<String>,
+    ) -> Result<(), ConsumerError> {
+        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
+        let config = conf::load_config(&self.config_path())?;
+        let kafka_config = conf::build_kafka_config(&config, &self.survey())?;
+        let n_threads = self.n_threads();
+        let partitions = assign_partitions_to_consumers(&topic, n_threads, &kafka_config).await?;
 
-// same as ensure_kafka_topic_partitions, but do not attempt to create the topic
-// simply check that the topic exists and return the number of partitions
-pub async fn check_kafka_topic_partitions(
-    bootstrap_servers: &str,
-    topic_name: &str,
-) -> Result<Option<usize>, Box<dyn std::error::Error>> {
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap_servers)
-        .create()?;
+        let mut handles = vec![];
+        for i in 0..n_threads {
+            let topic = topic.clone();
+            let partitions = partitions[i].clone();
+            let max_in_queue = self.max_in_queue();
+            let output_queue = self.output_queue();
+            let group_id = self.group_id();
+            let username = self.username();
+            let password = self.password();
+            let config = config.clone();
+            let kafka_config = kafka_config.clone();
+            let handle = tokio::spawn(async move {
+                let result = consume_partitions(
+                    &i.to_string(),
+                    &topic,
+                    &group_id,
+                    partitions,
+                    &output_queue,
+                    max_in_queue,
+                    timestamp,
+                    &username,
+                    &password,
+                    &config,
+                    &kafka_config,
+                    exit_on_eof,
+                )
+                .await;
+                if let Err(error) = result {
+                    log_error!(error, "failed to consume partitions");
+                }
+            });
+            handles.push(handle);
+        }
 
-    let metadata = consumer
-        .fetch_metadata(Some(topic_name), std::time::Duration::from_secs(5))
-        .map_err(|e| format!("Failed to fetch metadata for topic {}: {}", topic_name, e))?;
+        for handle in handles {
+            if let Err(error) = handle.await {
+                log_error!(error, "failed to join task");
+            }
+        }
 
-    let topic_metadata = metadata.topics().iter().find(|t| t.name() == topic_name);
-    match topic_metadata.map(|t| t.partitions().len()) {
-        Some(partitions) => Ok(Some(partitions)),
-        None => Ok(None),
+        Ok(())
+    }
+    #[instrument(skip(self))]
+    async fn clear_output_queue(&self) -> Result<(), ConsumerError> {
+        let config = conf::load_config(&self.config_path())
+            .inspect_err(as_error!("failed to load config"))?;
+        let mut con = conf::build_redis(&config)
+            .await
+            .inspect_err(as_error!("failed to connect to redis"))?;
+        let _: () = con
+            .del(&self.output_queue())
+            .await
+            .inspect_err(as_error!("failed to delete queue"))?;
+        info!("Cleared redis queue for ZTF Kafka consumer");
+        Ok(())
     }
 }
 
-#[instrument(skip(username, password, config_path))]
+#[instrument(skip(username, password, survey_config))]
 pub async fn consume_partitions(
     id: &str,
     topic: &str,
@@ -120,22 +234,15 @@ pub async fn consume_partitions(
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
-    username: Option<&str>,
-    password: Option<&str>,
-    survey: &Survey,
-    config_path: &str,
+    username: &Option<String>,
+    password: &Option<String>,
+    config: &config::Config,
+    survey_config: &SurveyKafkaConfig,
+    exit_on_eof: bool,
 ) -> Result<(), ConsumerError> {
-    debug!(?config_path);
-    let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?;
-
-    let kafka_config = conf::build_kafka_config(&config, survey)
-        .inspect_err(as_error!("failed to build kafka config"))?;
-
-    info!("Consuming from bootstrap server: {}", kafka_config.consumer);
-
     let mut client_config = ClientConfig::new();
     client_config
-        .set("bootstrap.servers", kafka_config.consumer)
+        .set("bootstrap.servers", &survey_config.consumer)
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id)
         .set("debug", "consumer,cgrp,topic,fetch");
@@ -216,7 +323,12 @@ pub async fn consume_partitions(
             }
             None => {
                 trace!("No message available");
+                if exit_on_eof {
+                    break;
+                }
             }
         }
     }
+
+    Ok(())
 }
