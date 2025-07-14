@@ -1,10 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(clap::ValueEnum, Clone, Debug, Serialize)]
+#[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Survey {
     Ztf,
     Lsst,
+    Decam,
 }
 
 impl std::fmt::Display for Survey {
@@ -12,6 +13,7 @@ impl std::fmt::Display for Survey {
         match self {
             Survey::Ztf => write!(f, "ZTF"),
             Survey::Lsst => write!(f, "LSST"),
+            Survey::Decam => write!(f, "DECAM"),
         }
     }
 }

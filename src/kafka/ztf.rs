@@ -6,7 +6,7 @@ use crate::{
     },
     utils::{
         data::{count_files_in_dir, download_to_file},
-        enums::ProgramId,
+        enums::{ProgramId, Survey},
         o11y::{as_error, log_error},
     },
 };
@@ -17,15 +17,11 @@ use redis::AsyncCommands;
 use tempfile::NamedTempFile;
 use tracing::{error, info, instrument};
 
-const ZTF_SERVER_URL: &str = "localhost:9092";
-const ZTF_NB_PARTITIONS: usize = 15;
-
 pub struct ZtfAlertConsumer {
     output_queue: String,
     n_threads: usize,
     max_in_queue: usize,
     group_id: String,
-    server: String,
     program_id: ProgramId,
     config_path: String,
 }
@@ -46,13 +42,12 @@ impl ZtfAlertConsumer {
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();
         let mut group_id = group_id.unwrap_or("example-ck").to_string();
-        let server = server.unwrap_or(ZTF_SERVER_URL).to_string();
 
         group_id = format!("{}-{}", "ztf", group_id);
 
         info!(
-            "Creating AlertConsumer with {} threads, output_queue: {}, group_id: {}, server: {}",
-            n_threads, output_queue, group_id, server
+            "Creating ZTF AlertConsumer with {} threads, output_queue: {}, group_id: {}",
+            n_threads, output_queue, group_id
         );
 
         ZtfAlertConsumer {
@@ -60,7 +55,6 @@ impl ZtfAlertConsumer {
             n_threads,
             max_in_queue,
             group_id,
-            server,
             program_id,
             config_path: config_path.to_string(),
         }
@@ -114,7 +108,6 @@ impl AlertConsumer for ZtfAlertConsumer {
             let max_in_queue = self.max_in_queue;
             let output_queue = self.output_queue.clone();
             let group_id = self.group_id.clone();
-            let server = self.server.clone();
             let config_path = self.config_path.clone();
             let handle = tokio::spawn(async move {
                 let result = consume_partitions(
@@ -125,9 +118,9 @@ impl AlertConsumer for ZtfAlertConsumer {
                     &output_queue,
                     max_in_queue,
                     timestamp,
-                    &server,
                     None,
                     None,
+                    &Survey::Ztf,
                     &config_path,
                 )
                 .await;
@@ -167,11 +160,18 @@ pub struct ZtfAlertProducer {
     limit: i64,
     partnership_archive_username: Option<String>,
     partnership_archive_password: Option<String>,
+    server_url: String,
     verbose: bool,
 }
 
 impl ZtfAlertProducer {
-    pub fn new(date: chrono::NaiveDate, limit: i64, program_id: ProgramId, verbose: bool) -> Self {
+    pub fn new(
+        date: chrono::NaiveDate,
+        limit: i64,
+        program_id: ProgramId,
+        server_url: &str,
+        verbose: bool,
+    ) -> Self {
         // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
         // and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD set as env variables
         let partnership_archive_username = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_USERNAME") {
@@ -194,6 +194,7 @@ impl ZtfAlertProducer {
             program_id,
             partnership_archive_username,
             partnership_archive_password,
+            server_url: server_url.to_string(),
             verbose,
         }
     }
@@ -292,7 +293,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         info!("Initializing ZTF alert kafka producer");
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", ZTF_SERVER_URL)
+            .set("bootstrap.servers", &self.server_url)
             .set("message.timeout.ms", "5000")
             // it's best to increase batch.size if the cluster
             // is running on another machine. Locally, lower means less
@@ -341,7 +342,13 @@ impl AlertProducer for ZtfAlertProducer {
             if !path.to_str().unwrap().ends_with(".avro") {
                 continue;
             }
-            let payload = std::fs::read(path).unwrap();
+            let payload = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Failed to read file {:?}: {}", path.to_str(), e);
+                    continue;
+                }
+            };
 
             let key_string = current_key.to_string();
             let record = FutureRecord::to(&topic_name)

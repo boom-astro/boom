@@ -186,6 +186,10 @@ impl Worker {
                     let run = match survey_name {
                         Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
                         Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
+                        _ => {
+                            error!("Alert worker not implemented for survey: {}", survey_name);
+                            return;
+                        }
                     };
                     run(receiver, &config_path).unwrap_or_else(as_error!("alert worker failed"));
                 })
@@ -198,6 +202,13 @@ impl Worker {
                     let run = match survey_name {
                         Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
                         Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
+                        _ => {
+                            error!(
+                                "Filter worker not implemented for survey: {:?}",
+                                survey_name
+                            );
+                            return;
+                        }
                     };
                     let key = uuid::Uuid::new_v4().to_string();
                     run(key, receiver, &config_path)

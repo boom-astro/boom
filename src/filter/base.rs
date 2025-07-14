@@ -1,6 +1,9 @@
 use crate::{
     conf,
-    utils::worker::{should_terminate, WorkerCmd},
+    utils::{
+        enums::Survey,
+        worker::{should_terminate, WorkerCmd},
+    },
 };
 
 use apache_avro::Schema;
@@ -118,12 +121,6 @@ pub enum Origin {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum Survey {
-    ZTF,
-    LSST,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
     pub flux: Option<f64>,
@@ -190,9 +187,11 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
 }
 
 // TODO, use the config file to get the kafka server
-pub async fn create_producer() -> Result<FutureProducer, FilterWorkerError> {
+pub async fn create_producer(
+    kafka_config: &conf::SurveyKafkaConfig,
+) -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
+        .set("bootstrap.servers", &kafka_config.producer)
         .set("message.timeout.ms", "5000")
         .create()?;
 
@@ -358,6 +357,7 @@ pub trait FilterWorker {
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
+    fn survey() -> crate::utils::enums::Survey;
     async fn build_alert(
         &self,
         candid: i64,
@@ -376,6 +376,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
     debug!(?config_path);
 
     let config = conf::load_config(config_path)?;
+    let kafka_config = conf::build_kafka_config(&config, &T::survey())
+        .inspect_err(|e| error!("Failed to build Kafka config: {}", e))?;
 
     let mut filter_worker = T::new(config_path).await?;
 
@@ -390,7 +392,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
 
-    let producer = create_producer().await?;
+    let producer = create_producer(&kafka_config).await?;
     let schema = load_alert_schema()?;
 
     let command_interval: usize = 500;
