@@ -1,115 +1,34 @@
 use crate::{
     alert::{
-        base::{
-            AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistryError,
-        },
-        lsst,
+        base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus},
+        get_schema_and_startidx, lsst,
     },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::mongify,
         o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
 };
 use apache_avro::from_value;
-use apache_avro::{from_avro_datum, Reader, Schema};
+use apache_avro::{from_avro_datum, Schema};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::{fmt::Debug, io::Read};
+use std::fmt::Debug;
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
+pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
-pub const LSST_DEC_LIMIT: f64 = 33.5;
-pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
-
-#[instrument(skip_all, err)]
-fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
-    let mut i = 0u64;
-    let mut buf = [0u8; 1];
-
-    let mut j = 0;
-    loop {
-        if j > 9 {
-            return Err(SchemaRegistryError::IntegerOverflow);
-        }
-        reader.read_exact(&mut buf[..])?;
-
-        i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
-        if (buf[0] >> 7) == 0 {
-            break;
-        } else {
-            j += 1;
-        }
-    }
-
-    Ok(i)
-}
-
-#[instrument(skip_all, err)]
-pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    let z = decode_variable(reader)?;
-    if z & 0x1 == 0 {
-        Ok((z >> 1) as i64)
-    } else {
-        Ok(!(z >> 1) as i64)
-    }
-}
-
-#[instrument(skip_all, err)]
-fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    Ok(zag_i64(reader)?)
-}
-
-#[instrument(skip_all, err)]
-pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
-    // First, we extract the schema from the avro bytes
-    let cursor = std::io::Cursor::new(avro_bytes);
-    let reader = Reader::new(cursor).inspect_err(as_error!())?;
-    let schema = reader.writer_schema();
-
-    // Then, we look for the index of the start of the data
-    // this is based on the Apache Avro specification 1.3.2
-    // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
-    let mut cursor = std::io::Cursor::new(avro_bytes);
-
-    // Four bytes, ASCII 'O', 'b', 'j', followed by 1
-    let mut buf = [0; 4];
-    cursor.read_exact(&mut buf).inspect_err(as_error!())?;
-    if buf != [b'O', b'b', b'j', 1u8] {
-        return Err(SchemaRegistryError::MagicBytesError);
-    }
-
-    // Then there is the file metadata, including the schema
-    let meta_schema = Schema::map(Schema::Bytes);
-    from_avro_datum(&meta_schema, &mut cursor, None).inspect_err(as_error!())?;
-
-    // Then the 16-byte, randomly-generated sync marker for this file.
-    let mut buf = [0; 16];
-    cursor.read_exact(&mut buf).inspect_err(as_error!())?;
-
-    // each avro record is preceded by:
-    // 1. a variable-length integer, the number of records in the block
-    // 2. a variable-length integer, the number of bytes in the block
-    let nb_records = decode_long(&mut cursor).inspect_err(as_error!())?;
-    if nb_records != 1 {
-        return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
-    }
-    let _ = decode_long(&mut cursor).inspect_err(as_error!())?;
-
-    // we now have the start index of the data
-    let start_idx = cursor.position();
-
-    Ok((schema.to_owned(), start_idx as usize))
-}
+pub const ZTF_LSST_XMATCH_RADIUS: f64 =
+    (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
@@ -432,25 +351,44 @@ pub struct ZtfAlert {
         rename = "cutoutScience",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_science: Option<Vec<u8>>,
+    pub cutout_science: Vec<u8>,
     #[serde(
         rename = "cutoutTemplate",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_template: Option<Vec<u8>>,
+    pub cutout_template: Vec<u8>,
     #[serde(
         rename = "cutoutDifference",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_difference: Option<Vec<u8>>,
+    pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let cutout: Option<Cutout> = Option::deserialize(deserializer)?;
-    Ok(cutout.map(|cutout| cutout.stamp_data))
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout.stamp_data),
+    }
+}
+
+impl Alert for ZtfAlert {
+    fn object_id(&self) -> String {
+        self.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
 }
 
 pub struct ZtfAlertWorker {
@@ -466,88 +404,17 @@ pub struct ZtfAlertWorker {
 }
 
 impl ZtfAlertWorker {
-    #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ZtfAlert, AlertError> {
-        // if the schema is not cached, get it from the avro_bytes
-        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
-            (Some(schema), Some(start_idx)) => (schema, start_idx),
-            _ => {
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                (self.cached_schema.as_ref().unwrap(), startidx)
-            }
-        };
-
-        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
-
-        // if value is an error, try recomputing the schema from the avro_bytes
-        // as it could be that the schema has changed
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                log_error!(
-                    WARN,
-                    error,
-                    "Error deserializing avro message with cached schema"
-                );
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-
-                // if it's not an error this time, cache the new schema
-                // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
-                    .inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                value
-            }
-        };
-
-        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
-
-        Ok(alert)
-    }
-
-    #[instrument(skip_all, err)]
-    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<String>, AlertError> {
-        let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
-            let result = self
-                .lsst_alert_aux_collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": LSST_XMATCH_RADIUS,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_str("_id")?;
-                    vec![object_id.to_string()]
-                }
-                Ok(None) => vec![],
-                Err(error) => {
-                    log_error!(WARN, error, "error cross-matching with LSST");
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(lsst_matches)
-    }
-
     #[instrument(skip(self), err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
-        let lsst_matches = self.get_lsst_matches(ra, dec).await?;
+        let lsst_matches = self
+            .get_matches(
+                ra,
+                dec,
+                lsst::LSST_DEC_RANGE,
+                ZTF_LSST_XMATCH_RADIUS,
+                &self.lsst_alert_aux_collection,
+            )
+            .await?;
 
         Ok(doc! {
             "LSST": lsst_matches,
@@ -606,58 +473,6 @@ impl ZtfAlertWorker {
         Ok(())
     }
 
-    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
-    async fn format_and_insert_alert(
-        &self,
-        candid: i64,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        candidate_doc: &Document,
-        now: f64,
-    ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_doc = doc! {
-            "_id": candid,
-            "objectId": object_id,
-            "candidate": candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        let status = self
-            .alert_collection
-            .insert_one(alert_doc)
-            .await
-            .map(|_| ProcessAlertStatus::Added(candid))
-            .or_else(|error| match *error.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
-                _ => Err(error),
-            })?;
-        Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-        Ok(())
-    }
-
     #[instrument(skip(self), err)]
     async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
         let alert_aux_exists = self
@@ -699,8 +514,6 @@ impl ZtfAlertWorker {
 
 #[async_trait::async_trait]
 impl AlertWorker for ZtfAlertWorker {
-    type ObjectId = String;
-
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
         let config_file =
@@ -744,6 +557,50 @@ impl AlertWorker for ZtfAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_classifier_queue", self.stream_name)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<ZtfAlert, AlertError> {
+        // if the schema is not cached, get it from the avro_bytes
+        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
+            (Some(schema), Some(start_idx)) => (schema, start_idx),
+            _ => {
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                (self.cached_schema.as_ref().unwrap(), startidx)
+            }
+        };
+
+        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
+
+        // if value is an error, try recomputing the schema from the avro_bytes
+        // as it could be that the schema has changed
+        let value = match value {
+            Ok(value) => value,
+            Err(error) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "Error deserializing avro message with cached schema"
+                );
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+
+                // if it's not an error this time, cache the new schema
+                // otherwise return the error
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
+                    .inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                value
+            }
+        };
+
+        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
+
+        Ok(alert)
     }
 
     #[instrument(
@@ -832,29 +689,38 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
+        let candid = alert.candid();
+        let object_id = alert.object_id();
+        let ra = alert.ra();
+        let dec = alert.dec();
+
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
-
-        let candid = alert.candid;
-        let object_id = alert.object_id;
-        let ra = alert.candidate.ra;
-        let dec = alert.candidate.dec;
 
         let candidate_doc = mongify(&alert.candidate);
 
         let status = self
-            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
             .await
             .inspect_err(as_error!())?;
         if let ProcessAlertStatus::Exists(_) = status {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;

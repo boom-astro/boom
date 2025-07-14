@@ -5,8 +5,9 @@ use tracing::{info, instrument};
 
 use crate::filter::{
     get_filter_object, run_filter, Alert, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, Origin, Photometry, Survey,
+    FilterWorkerError, Origin, Photometry,
 };
+use crate::utils::enums::Survey;
 
 pub struct LsstFilter {
     id: i32,
@@ -49,6 +50,12 @@ impl Filter for LsstFilter {
                     "cross_matches": doc! {
                         "$arrayElemAt": [
                             "$aux.cross_matches",
+                            0
+                        ]
+                    },
+                    "aliases": doc! {
+                        "$arrayElemAt": [
+                            "$aux.aliases",
                             0
                         ]
                     },
@@ -151,6 +158,10 @@ impl FilterWorker for LsstFilterWorker {
             output_topic,
             filters,
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Lsst
     }
 
     fn input_queue_name(&self) -> String {
@@ -286,7 +297,7 @@ impl FilterWorker for LsstFilterWorker {
                 zero_point: 8.9,
                 origin: Origin::Alert,
                 programid: 1, // only one public stream for LSST
-                survey: Survey::LSST,
+                survey: Survey::Lsst,
                 ra,
                 dec,
             });
@@ -310,7 +321,7 @@ impl FilterWorker for LsstFilterWorker {
                 zero_point: 8.9,
                 origin: Origin::Alert,
                 programid: 1, // only one public stream for LSST
-                survey: Survey::LSST,
+                survey: Survey::Lsst,
                 ra: None,
                 dec: None,
             });

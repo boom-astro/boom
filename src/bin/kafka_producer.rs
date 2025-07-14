@@ -1,5 +1,5 @@
 use boom::{
-    kafka::{AlertProducer, ZtfAlertProducer},
+    kafka::{AlertProducer, DecamAlertProducer, ZtfAlertProducer},
     utils::{
         enums::{ProgramId, Survey},
         o11y::build_subscriber,
@@ -25,6 +25,11 @@ struct Cli {
     program_id: ProgramId,
     #[arg(long, help = "Limit the number of alerts produced")]
     limit: Option<i64>,
+    #[arg(
+        long,
+        help = "URL of the Kafka broker to produce to, defaults to localhost:9092"
+    )]
+    server_url: Option<String>,
 }
 
 #[tokio::main]
@@ -42,13 +47,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let program_id = args.program_id;
 
+    let server_url = args
+        .server_url
+        .unwrap_or_else(|| "localhost:9092".to_string());
+
     match args.survey {
         Survey::Ztf => {
-            let producer = ZtfAlertProducer::new(date, limit, program_id, true);
+            let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);
+            producer.produce(None).await?;
+        }
+        Survey::Decam => {
+            let producer = DecamAlertProducer::new(date, limit, &server_url, true);
             producer.produce(None).await?;
         }
         _ => {
-            error!("Only ZTF survey is supported for producing alerts from file (for now).");
+            error!("Unsupported survey for producing alerts: {}", args.survey);
             return Ok(());
         }
     }

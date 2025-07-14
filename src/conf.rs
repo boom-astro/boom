@@ -1,4 +1,4 @@
-use crate::utils::o11y::as_error;
+use crate::utils::{enums::Survey, o11y::as_error};
 
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
@@ -33,29 +33,6 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
         .add_source(File::with_name(filepath))
         .build()?;
     Ok(conf)
-}
-
-#[instrument(skip(conf), err)]
-pub fn build_xmatch_configs(
-    conf: &Config,
-    stream_name: &str,
-) -> Result<Vec<CatalogXmatchConfig>, BoomConfigError> {
-    let crossmatches = conf.get_table("crossmatch")?;
-
-    let crossmatches_stream = match crossmatches.get(stream_name).cloned() {
-        Some(x) => x,
-        None => {
-            return Ok(Vec::new());
-        }
-    };
-    let mut catalog_xmatch_configs = Vec::new();
-
-    for crossmatch in crossmatches_stream.into_array()? {
-        let catalog_xmatch_config = CatalogXmatchConfig::from_config(crossmatch)?;
-        catalog_xmatch_configs.push(catalog_xmatch_config);
-    }
-
-    Ok(catalog_xmatch_configs)
 }
 
 #[instrument(skip_all, err)]
@@ -308,4 +285,68 @@ impl CatalogXmatchConfig {
             distance_max_near,
         ))
     }
+}
+
+#[instrument(skip(conf), err)]
+pub fn build_xmatch_configs(
+    conf: &Config,
+    stream_name: &str,
+) -> Result<Vec<CatalogXmatchConfig>, BoomConfigError> {
+    let crossmatches = conf.get_table("crossmatch")?;
+
+    let crossmatches_stream = match crossmatches.get(stream_name).cloned() {
+        Some(x) => x,
+        None => {
+            return Ok(Vec::new());
+        }
+    };
+    let mut catalog_xmatch_configs = Vec::new();
+
+    for crossmatch in crossmatches_stream.into_array()? {
+        let catalog_xmatch_config = CatalogXmatchConfig::from_config(crossmatch)?;
+        catalog_xmatch_configs.push(catalog_xmatch_config);
+    }
+
+    Ok(catalog_xmatch_configs)
+}
+
+pub struct SurveyKafkaConfig {
+    pub consumer: String, // URL of the Kafka broker for the consumer (alert worker input)
+    pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
+}
+
+impl SurveyKafkaConfig {
+    pub fn from_config(
+        conf: &Config,
+        survey: &Survey,
+    ) -> Result<SurveyKafkaConfig, BoomConfigError> {
+        let kafka_conf = conf.get_table("kafka")?;
+
+        // kafka section has a consumer and producer key
+        // consumer has a key per survey, producer is global
+
+        let consumer = kafka_conf
+            .get("consumer")
+            .cloned()
+            .unwrap_or_default()
+            .into_table()?
+            .get(&survey.to_string())
+            .and_then(|host| host.clone().into_string().ok())
+            .unwrap_or_else(|| "localhost:9092".to_string());
+
+        let producer = kafka_conf
+            .get("producer")
+            .and_then(|host| host.clone().into_string().ok())
+            .unwrap_or_else(|| "localhost:9092".to_string());
+
+        Ok(SurveyKafkaConfig { consumer, producer })
+    }
+}
+
+#[instrument(skip_all, err)]
+pub fn build_kafka_config(
+    conf: &Config,
+    survey: &Survey,
+) -> Result<SurveyKafkaConfig, BoomConfigError> {
+    SurveyKafkaConfig::from_config(conf, survey)
 }

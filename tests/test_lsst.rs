@@ -2,9 +2,12 @@ use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
-    utils::testing::{
-        drop_alert_from_collections, insert_test_lsst_filter, lsst_alert_worker,
-        remove_test_lsst_filter, AlertRandomizerTrait, LsstAlertRandomizer, TEST_CONFIG_FILE,
+    utils::{
+        enums::Survey,
+        testing::{
+            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
+            AlertRandomizer, TEST_CONFIG_FILE,
+        },
     },
 };
 use mongodb::bson::doc;
@@ -13,14 +16,15 @@ use mongodb::bson::doc;
 async fn test_lsst_alert_from_avro_bytes() {
     let mut alert_worker = lsst_alert_worker().await;
 
-    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
+    let (candid, object_id, ra, dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let alert = alert_worker
         .alert_from_avro_bytes(&bytes_content)
         .await
         .unwrap();
 
     assert_eq!(alert.candid, candid);
-    assert_eq!(alert.candidate.dia_source.object_id.unwrap(), object_id);
+    assert_eq!(alert.candidate.object_id, object_id);
 
     assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
     assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
@@ -79,7 +83,8 @@ async fn test_lsst_alert_from_avro_bytes() {
 async fn test_process_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
-    let (candid, object_id, ra, dec, bytes_content) = LsstAlertRandomizer::default().get().await;
+    let (candid, object_id, ra, dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
@@ -150,16 +155,17 @@ async fn test_process_lsst_alert() {
 async fn test_filter_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
-    let (candid, object_id, _ra, _dec, bytes_content) = LsstAlertRandomizer::default().get().await;
+    let (candid, object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let filter_id = insert_test_lsst_filter().await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Lsst).await.unwrap();
 
     let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
-    remove_test_lsst_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();

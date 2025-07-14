@@ -1,4 +1,7 @@
-use crate::{conf, utils::o11y::as_error};
+use crate::{
+    conf,
+    utils::{enums::Survey, o11y::as_error},
+};
 
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -19,6 +22,8 @@ pub enum ConsumerError {
     Kafka(#[from] rdkafka::error::KafkaError),
     #[error("error from redis")]
     Redis(#[from] redis::RedisError),
+    #[error("error from config")]
+    ConfigError(#[from] config::ConfigError),
 }
 
 #[async_trait::async_trait]
@@ -37,15 +42,22 @@ pub async fn consume_partitions(
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
-    server: &str,
     username: Option<&str>,
     password: Option<&str>,
+    survey: &Survey,
     config_path: &str,
 ) -> Result<(), ConsumerError> {
     debug!(?config_path);
+    let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?;
+
+    let kafka_config = conf::build_kafka_config(&config, survey)
+        .inspect_err(as_error!("failed to build kafka config"))?;
+
+    info!("Consuming from bootstrap server: {}", kafka_config.consumer);
+
     let mut client_config = ClientConfig::new();
     client_config
-        .set("bootstrap.servers", server)
+        .set("bootstrap.servers", kafka_config.consumer)
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id)
         .set("debug", "consumer,cgrp,topic,fetch");
@@ -79,7 +91,6 @@ pub async fn consume_partitions(
         .assign(&tpl)
         .inspect_err(as_error!("failed to assign topic partition list"))?;
 
-    let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?;
     let mut con = conf::build_redis(&config)
         .await
         .inspect_err(as_error!("failed to connect to redis"))?;

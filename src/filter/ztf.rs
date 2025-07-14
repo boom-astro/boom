@@ -6,8 +6,9 @@ use tracing::{info, instrument, warn};
 
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
-    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry, Survey,
+    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
 };
+use crate::utils::enums::Survey;
 
 #[derive(Debug)]
 pub struct ZtfFilter {
@@ -50,7 +51,9 @@ impl Filter for ZtfFilter {
         let mut pipeline = vec![
             doc! {
                 "$match": doc! {
-                    // during filter::run proper candis are inserted here
+                    "_id": doc! {
+                        "$in": [] // candids will be inserted here
+                    }
                 }
             },
             doc! {
@@ -70,6 +73,12 @@ impl Filter for ZtfFilter {
                     "cross_matches": doc! {
                         "$arrayElemAt": [
                             "$aux.cross_matches",
+                            0
+                        ]
+                    },
+                    "aliases": doc! {
+                        "$arrayElemAt": [
+                            "$aux.aliases",
                             0
                         ]
                     },
@@ -197,6 +206,10 @@ impl FilterWorker for ZtfFilterWorker {
             filters,
             filters_by_permission,
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Ztf
     }
 
     fn input_queue_name(&self) -> String {
@@ -341,7 +354,7 @@ impl FilterWorker for ZtfFilterWorker {
                 zero_point,
                 origin: Origin::Alert,
                 programid,
-                survey: Survey::ZTF,
+                survey: Survey::Ztf,
                 ra,
                 dec,
             });
@@ -369,7 +382,7 @@ impl FilterWorker for ZtfFilterWorker {
                 zero_point,
                 origin: Origin::Alert,
                 programid,
-                survey: Survey::ZTF,
+                survey: Survey::Ztf,
                 ra: None,
                 dec: None,
             });

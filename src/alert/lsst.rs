@@ -1,9 +1,11 @@
 use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry},
+    alert::base::{
+        Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+    },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::mongify,
         o11y::as_error,
         spatial::xmatch,
     },
@@ -18,6 +20,8 @@ use serde_with::{serde_as, skip_serializing_none};
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "LSST";
+pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
+pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
@@ -36,12 +40,13 @@ pub struct DiaSource {
     /// Id of the detector where this diaSource was measured. Datatype short instead of byte because of DB concerns about unsigned bytes.
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
-    #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
+    #[serde(rename = "diaObjectId")]
     #[serde(deserialize_with = "deserialize_objid_option")]
-    pub object_id: Option<String>,
+    pub dia_object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
-    pub ss_object_id: Option<i64>,
+    #[serde(deserialize_with = "deserialize_sso_objid_option")]
+    pub ss_object_id: Option<String>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
     pub parent_dia_source_id: Option<i64>,
@@ -184,6 +189,8 @@ pub struct DiaSource {
 pub struct Candidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
+    #[serde(rename(serialize = "objectId"))]
+    pub object_id: String,
     pub magpsf: f32,
     pub sigmapsf: f32,
     pub diffmaglim: f32,
@@ -191,6 +198,7 @@ pub struct Candidate {
     pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub is_sso: bool,
 }
 
 impl TryFrom<DiaSource> for Candidate {
@@ -210,8 +218,24 @@ impl TryFrom<DiaSource> for Candidate {
 
         let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, ZP_AB);
 
+        // if dia_object_id is defined, is_sso is false
+        // if ss_object_id is defined, is_sso is true
+        // if both are undefined or both are defined, we throw an error
+        let (object_id, is_sso) = match (
+            dia_source.dia_object_id.clone(),
+            dia_source.ss_object_id.clone(),
+        ) {
+            (Some(dia_id), None) => (dia_id, false),
+            (None, Some(ss_id)) => (format!("sso{}", ss_id), true),
+            (None, None) => return Err(AlertError::MissingObjectId),
+            (Some(dia_id), Some(ss_id)) => {
+                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
+            }
+        };
+
         Ok(Candidate {
             dia_source,
+            object_id,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -219,6 +243,7 @@ impl TryFrom<DiaSource> for Candidate {
             snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            is_sso,
         })
     }
 }
@@ -559,14 +584,14 @@ pub struct LsstAlert {
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_difference: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_difference: Vec<u8>,
     #[serde(rename = "cutoutScience")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_science: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_template: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_template: Vec<u8>,
 }
 
 // Deserialize helper functions
@@ -585,6 +610,29 @@ where
 {
     let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
     Ok(objid.map(|i| i.to_string()))
+}
+
+fn deserialize_sso_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
+    match objid {
+        Some(0) | None => Ok(None),
+        Some(i) => Ok(Some(i.to_string())),
+    }
+}
+
+pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cutout: Option<Vec<u8>> = apache_avro::serde_avro_bytes_opt::deserialize(deserializer)?;
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout),
+    }
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
@@ -657,6 +705,21 @@ where
     }
 }
 
+impl Alert for LsstAlert {
+    fn object_id(&self) -> String {
+        self.candidate.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.dia_source.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.dia_source.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
+}
+
 pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
@@ -668,30 +731,6 @@ pub struct LsstAlertWorker {
 }
 
 impl LsstAlertWorker {
-    #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<LsstAlert, AlertError> {
-        let magic = avro_bytes[0];
-        if magic != _MAGIC_BYTE {
-            Err(AlertError::MagicBytesError)?;
-        }
-        let schema_id =
-            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await?;
-
-        let mut slice = &avro_bytes[5..];
-        let value = from_avro_datum(&schema, &mut slice, None)?;
-
-        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
-
-        Ok(alert)
-    }
-
     #[instrument(
         skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, xmatches,),
         err
@@ -732,58 +771,6 @@ impl LsstAlertWorker {
                 )) if write_error.code == 11000 => AlertError::AlertAuxExists,
                 _ => e.into(),
             })?;
-        Ok(())
-    }
-
-    #[instrument(skip(self, ra, dec, candidate_doc, now), err)]
-    async fn format_and_insert_alert(
-        &self,
-        candid: i64,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        candidate_doc: &Document,
-        now: f64,
-    ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_doc = doc! {
-            "_id": candid,
-            "objectId": object_id,
-            "candidate": candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        let status = self
-            .alert_collection
-            .insert_one(alert_doc)
-            .await
-            .map(|_| ProcessAlertStatus::Added(candid))
-            .or_else(|error| match *error.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
-                _ => Err(error),
-            })?;
-        Ok(status)
-    }
-
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
-    async fn format_and_insert_cutout(
-        &self,
-        candid: i64,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-    ) -> Result<(), AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference.ok_or(AlertError::MissingCutout).inspect_err(as_error!())?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
         Ok(())
     }
 
@@ -829,8 +816,6 @@ impl LsstAlertWorker {
 
 #[async_trait::async_trait]
 impl AlertWorker for LsstAlertWorker {
-    type ObjectId = i64;
-
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
         let config_file =
@@ -869,6 +854,30 @@ impl AlertWorker for LsstAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_filter_queue", self.stream_name)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<LsstAlert, AlertError> {
+        let magic = avro_bytes[0];
+        if magic != _MAGIC_BYTE {
+            Err(AlertError::MagicBytesError)?;
+        }
+        let schema_id =
+            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
+        let schema = self
+            .schema_registry
+            .get_schema("alert-packet", schema_id)
+            .await?;
+
+        let mut slice = &avro_bytes[5..];
+        let value = from_avro_datum(&schema, &mut slice, None)?;
+
+        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
+
+        Ok(alert)
     }
 
     #[instrument(
@@ -955,35 +964,39 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
+        let candid = alert.candid();
+        let object_id = alert.object_id();
+        let ra = alert.ra();
+        let dec = alert.dec();
+
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
         let prv_nondetections = alert.prv_nondetections.take();
 
-        let candid = alert.candid;
-        let object_id = alert
-            .candidate
-            .dia_source
-            .object_id
-            .clone()
-            .ok_or(AlertError::MissingObjectId)?;
-        let ra = alert.candidate.dia_source.ra;
-        let dec = alert.candidate.dia_source.dec;
-
         let candidate_doc = mongify(&alert.candidate);
 
         let status = self
-            .format_and_insert_alert(candid, &object_id, ra, dec, &candidate_doc, now)
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
             .await
             .inspect_err(as_error!())?;
         if let ProcessAlertStatus::Exists(_) = status {
             return Ok(status);
         }
 
-        self.format_and_insert_cutout(
+        self.format_and_insert_cutouts(
             candid,
             alert.cutout_science,
             alert.cutout_template,
             alert.cutout_difference,
+            &self.alert_cutout_collection,
         )
         .await
         .inspect_err(as_error!())?;

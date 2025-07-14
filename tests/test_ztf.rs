@@ -1,14 +1,14 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_LIMIT, LSST_XMATCH_RADIUS},
+    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
     utils::{
         db::mongify,
+        enums::Survey,
         testing::{
-            drop_alert_from_collections, insert_test_ztf_filter, lsst_alert_worker,
-            remove_test_ztf_filter, ztf_alert_worker, AlertRandomizerTrait, LsstAlertRandomizer,
-            ZtfAlertRandomizer, TEST_CONFIG_FILE,
+            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
+            ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
@@ -18,7 +18,8 @@ use mongodb::bson::doc;
 async fn test_alert_from_avro_bytes() {
     let mut alert_worker = ztf_alert_worker().await;
 
-    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
+    let (candid, object_id, ra, dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
     let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
     assert!(alert.is_ok());
 
@@ -77,9 +78,9 @@ async fn test_alert_from_avro_bytes() {
     assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
 
     // validate the cutouts
-    assert_eq!(alert.cutout_science.clone().unwrap().len(), 13107);
-    assert_eq!(alert.cutout_template.clone().unwrap().len(), 12410);
-    assert_eq!(alert.cutout_difference.clone().unwrap().len(), 14878);
+    assert_eq!(alert.cutout_science.len(), 13107);
+    assert_eq!(alert.cutout_template.len(), 12410);
+    assert_eq!(alert.cutout_difference.len(), 14878);
 
     let prv_candidates = alert.prv_candidates.take();
     let fp_hist = alert.fp_hists.take();
@@ -157,7 +158,8 @@ async fn test_alert_from_avro_bytes() {
 async fn test_process_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
-    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
+    let (candid, object_id, ra, dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
@@ -230,7 +232,8 @@ async fn test_process_ztf_lsst_xmatch() {
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
     let mut alert_worker = ztf_alert_worker().await;
-    let ztf_alert_randomizer = ZtfAlertRandomizer::default().dec(LSST_DEC_LIMIT - 10.0);
+    let ztf_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Ztf).dec(LSST_DEC_RANGE.1 - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
     let aux_collection_name = "ZTF_alerts_aux";
@@ -240,9 +243,9 @@ async fn test_process_ztf_lsst_xmatch() {
     let mut lsst_alert_worker = lsst_alert_worker().await;
 
     // 1. LSST alert further than max radius, ZTF alert should not have an LSST alias
-    let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+    let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::new_randomized(Survey::Lsst)
         .ra(ra)
-        .dec(dec + 1.1 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 1.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -265,11 +268,12 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(matches.len(), 0);
 
     // 2. nearby LSST alert, ZTF alert should have an LSST alias
-    let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
-        .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
-        .get()
-        .await;
+    let (_, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
     lsst_alert_worker
         .process_alert(&lsst_bytes_content)
         .await
@@ -294,11 +298,12 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
 
     // 3. Closer LSST alert, ZTF alert should have a new LSST alias
-    let (_, lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
-        .ra(ra)
-        .dec(dec + 0.1 * LSST_XMATCH_RADIUS.to_degrees())
-        .get()
-        .await;
+    let (_, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.1 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
     lsst_alert_worker
         .process_alert(&lsst_bytes_content)
         .await
@@ -323,11 +328,12 @@ async fn test_process_ztf_lsst_xmatch() {
     assert_eq!(lsst_matches, vec![lsst_object_id.clone()]);
 
     // 4. Further LSST alert, ZTF alert should NOT have a new LSST alias
-    let (_, bad_lsst_object_id, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
-        .ra(ra)
-        .dec(dec + 0.5 * LSST_XMATCH_RADIUS.to_degrees())
-        .get()
-        .await;
+    let (_, bad_lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.5 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
     lsst_alert_worker
         .process_alert(&lsst_bytes_content)
         .await
@@ -356,14 +362,14 @@ async fn test_process_ztf_lsst_xmatch() {
     //    even attempt to match. Test this by creating an LSST alert with an
     //    unrealistically high dec that ZTF would otherwise match without this
     //    constraint:
-    let (_, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::default()
-        .dec(LSST_DEC_LIMIT + 10.0)
+    let (_, object_id, ra, dec, bytes_content) = AlertRandomizer::new_randomized(Survey::Ztf)
+        .dec(LSST_DEC_RANGE.1 + 10.0)
         .get()
         .await;
 
-    let (_, _, _, _, lsst_bytes_content) = LsstAlertRandomizer::default()
+    let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::new_randomized(Survey::Lsst)
         .ra(ra)
-        .dec(dec + 0.9 * LSST_XMATCH_RADIUS.to_degrees())
+        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -396,7 +402,7 @@ async fn test_ml_ztf_alert() {
 
     // we only randomize the candid and object_id here, since the ra/dec
     // are features of the models and would change the results
-    let (candid, object_id, ra, dec, bytes_content) = ZtfAlertRandomizer::new()
+    let (candid, object_id, ra, dec, bytes_content) = AlertRandomizer::new(Survey::Ztf)
         .rand_candid()
         .rand_object_id()
         .get()
@@ -448,7 +454,8 @@ async fn test_ml_ztf_alert() {
 async fn test_filter_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
-    let (candid, object_id, _ra, _dec, bytes_content) = ZtfAlertRandomizer::default().get().await;
+    let (candid, object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
@@ -463,14 +470,14 @@ async fn test_filter_ztf_alert() {
     let candid_programid_str = &ml_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
-    let filter_id = insert_test_ztf_filter().await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = filter_worker
         .process_alerts(&[candid_programid_str.clone()])
         .await;
 
-    remove_test_ztf_filter(filter_id).await.unwrap();
+    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();
