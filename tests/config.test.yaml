@@ -25,6 +25,14 @@ workers:
       n_workers: 0
     filter:
       n_workers: 1
+  DECAM:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    ml:
+      n_workers: 0
+    filter:
+      n_workers: 1
 crossmatch:
   LSST: []
   DECAM: []
