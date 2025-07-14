@@ -1,5 +1,5 @@
 use boom::{
-    kafka::{AlertConsumer, LsstAlertConsumer, ZtfAlertConsumer},
+    kafka::{AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, ZtfAlertConsumer},
     utils::{
         enums::{ProgramId, Survey},
         o11y::build_subscriber,
@@ -97,12 +97,18 @@ async fn run(args: Cli) {
             }
             consumer.consume(timestamp).await;
         }
-        _ => {
-            tracing::error!(
-                "Survey {:?} is not supported for consuming alerts from Kafka",
-                &args.survey
+        Survey::Decam => {
+            let consumer = DecamAlertConsumer::new(
+                args.processes,
+                Some(args.max_in_queue),
+                None,
+                None,
+                &args.config,
             );
-            std::process::exit(1);
+            if args.clear {
+                let _ = consumer.clear_output_queue();
+            }
+            consumer.consume(timestamp).await;
         }
     }
 }
