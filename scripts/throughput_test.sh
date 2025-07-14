@@ -438,7 +438,21 @@ main() {
   esac
 
   local expected_count
-  expected_count="$(count_produced_alerts "${topic}" "${timeout}")" || exit 1
+  # Sometimes count_produced_alerts finds the topic to be empty, so retry.
+  local i=0
+  while true; do
+    expected_count="$(count_produced_alerts "${topic}" "${timeout}")" || exit 1
+    if ((expected_count > 0)); then
+      break
+    fi
+    ((x+=1))
+    if ((i >= 3)); then
+      error "failed to count any alerts in the topic"
+      exit 1
+    fi
+    warn "topic appears to be empty; trying again"
+    sleep 3
+  done
   info "expected alert count is ${expected_count}"
 
   local i=0
@@ -449,7 +463,7 @@ main() {
   local tmax
   local rate
   while true; do
-    i=$((i + 1))
+    ((i+=1))
     if ((i > iterations)); then
       break
     fi
