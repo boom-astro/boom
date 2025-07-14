@@ -1,6 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(clap::ValueEnum, Clone, Debug, Serialize)]
+#[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Survey {
     Ztf,

@@ -1,12 +1,13 @@
 use crate::{
     conf,
     kafka::base::{consume_partitions, AlertConsumer, ConsumerError},
-    utils::o11y::{as_error, log_error},
+    utils::{
+        enums::Survey,
+        o11y::{as_error, log_error},
+    },
 };
 use redis::AsyncCommands;
 use tracing::{info, instrument};
-
-const LSST_SERVER_URL: &str = "usdf-alert-stream-dev.lsst.cloud:9094";
 
 pub struct LsstAlertConsumer {
     output_queue: String,
@@ -15,7 +16,6 @@ pub struct LsstAlertConsumer {
     group_id: String,
     username: String,
     password: String,
-    server: String,
     config_path: String,
     simulated: bool,
 }
@@ -40,11 +40,10 @@ impl LsstAlertConsumer {
             .unwrap_or("LSST_alerts_packets_queue")
             .to_string();
         let mut group_id = group_id.unwrap_or("example-ck").to_string();
-        let server = server_url.unwrap_or(LSST_SERVER_URL).to_string();
 
         info!(
-            "Creating AlertConsumer with {} threads, output_queue: {}, group_id: {}, server: {} (simulated data: {})",
-            n_threads, output_queue, group_id, server, simulated
+            "Creating LSST AlertConsumer with {} threads, output_queue: {}, group_id: {} (simulated data: {})",
+            n_threads, output_queue, group_id, simulated
         );
 
         // we check that the username and password are set
@@ -67,7 +66,6 @@ impl LsstAlertConsumer {
             group_id,
             username: username.unwrap(),
             password: password.unwrap(),
-            server,
             config_path: config_path.to_string(),
             simulated,
         }
@@ -104,7 +102,6 @@ impl AlertConsumer for LsstAlertConsumer {
             let group_id = self.group_id.clone();
             let username = self.username.clone();
             let password = self.password.clone();
-            let server = self.server.clone();
             let config_path = self.config_path.clone();
             let handle = tokio::spawn(async move {
                 let result = consume_partitions(
@@ -115,9 +112,9 @@ impl AlertConsumer for LsstAlertConsumer {
                     &output_queue,
                     max_in_queue,
                     timestamp,
-                    &server,
                     Some(&username),
                     Some(&password),
+                    &Survey::Lsst,
                     &config_path,
                 )
                 .await;

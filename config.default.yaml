@@ -17,6 +17,11 @@ api:
 redis:
   host: localhost
   port: 6379
+kafka:
+  consumer:
+    ZTF: "localhost:9092" # ZTF alert consumer
+    LSST: "usdf-alert-stream-dev.lsst.cloud:9094" # LSST alert consumer
+  producer: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
   ZTF:
     command_interval: 500
