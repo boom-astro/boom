@@ -404,11 +404,6 @@ async fn test_process_ztf_alert_xmatch() {
         AlertRandomizer::new_randomized(Survey::Ztf).dec(DECAM_DEC_RANGE.1 - 10.0);
 
     let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.get().await;
-
-    println!(
-        "ZTF alert: ra = {}, dec = {} (object_id = {})",
-        ra, dec, object_id
-    );
     let filter_aux = doc! {"_id": &object_id};
 
     let mut decam_alert_worker = decam_alert_worker().await;
@@ -418,11 +413,6 @@ async fn test_process_ztf_alert_xmatch() {
             .dec(dec + 0.9 * ZTF_DECAM_XMATCH_RADIUS.to_degrees())
             .get()
             .await;
-
-    println!(
-        "DECAM alert: ra = {}, dec = {} (object_id = {})",
-        ra, dec, decam_object_id
-    );
 
     decam_alert_worker
         .process_alert(&decam_bytes_content)
@@ -436,7 +426,6 @@ async fn test_process_ztf_alert_xmatch() {
         .await
         .unwrap()
         .unwrap();
-    println!("aux aliases: {:?}", aux.get_document("aliases").unwrap());
     let matches = aux
         .get_document("aliases")
         .unwrap()
