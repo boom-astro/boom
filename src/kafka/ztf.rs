@@ -271,7 +271,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         info!("Initializing ZTF alert kafka producer");
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", self.server_url.clone())
+            .set("bootstrap.servers", &self.server_url)
             .set("message.timeout.ms", "5000")
             // it's best to increase batch.size if the cluster
             // is running on another machine. Locally, lower means less

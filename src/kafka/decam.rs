@@ -3,6 +3,7 @@ use crate::{
     kafka::base::{consume_partitions, AlertConsumer, AlertProducer, ConsumerError},
     utils::{
         data::count_files_in_dir,
+        enums::Survey,
         o11y::{as_error, log_error},
     },
 };
@@ -12,14 +13,11 @@ use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use redis::AsyncCommands;
 use tracing::{error, info, instrument};
 
-const DECAM_SERVER_URL: &str = "localhost:9092";
-
 pub struct DecamAlertConsumer {
     output_queue: String,
     n_threads: usize,
     max_in_queue: usize,
     group_id: String,
-    server: String,
     config_path: String,
 }
 
@@ -29,25 +27,22 @@ impl DecamAlertConsumer {
         max_in_queue: Option<usize>,
         output_queue: Option<&str>,
         group_id: Option<&str>,
-        server: Option<&str>,
         config_path: &str,
     ) -> Self {
         if 15 % n_threads != 0 {
             panic!("Number of threads should be a factor of 15");
         }
         let max_in_queue = max_in_queue.unwrap_or(15000);
-
         let output_queue = output_queue
             .unwrap_or("DECAM_alerts_packets_queue")
             .to_string();
         let mut group_id = group_id.unwrap_or("example-ck").to_string();
-        let server = server.unwrap_or(DECAM_SERVER_URL).to_string();
 
         group_id = format!("{}-{}", "decam", group_id);
 
         info!(
-            "Creating AlertConsumer with {} threads, output_queue: {}, group_id: {}, server: {}",
-            n_threads, output_queue, group_id, server
+            "Creating AlertConsumer with {} threads, output_queue: {}, group_id: {}",
+            n_threads, output_queue, group_id
         );
 
         DecamAlertConsumer {
@@ -55,7 +50,6 @@ impl DecamAlertConsumer {
             n_threads,
             max_in_queue,
             group_id,
-            server,
             config_path: config_path.to_string(),
         }
     }
@@ -64,7 +58,7 @@ impl DecamAlertConsumer {
 #[async_trait::async_trait]
 impl AlertConsumer for DecamAlertConsumer {
     fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, config_path)
+        Self::new(1, None, None, None, config_path)
     }
 
     #[instrument(skip(self))]
@@ -75,7 +69,8 @@ impl AlertConsumer for DecamAlertConsumer {
             partitions[i / partitions_per_thread].push(i as i32);
         }
 
-        // DECAM uses nightly topics, and no user/pass (IP whitelisting)
+        // DECAM will use nightly topics. Auth is not implemented yet,
+        // so we assume a Kafka cluster without authentication (such as a local one).
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         let topic = format!("decam_{}_programid{}", date.format("%Y%m%d"), 1);
 
@@ -86,7 +81,6 @@ impl AlertConsumer for DecamAlertConsumer {
             let max_in_queue = self.max_in_queue;
             let output_queue = self.output_queue.clone();
             let group_id = self.group_id.clone();
-            let server = self.server.clone();
             let config_path = self.config_path.clone();
             let handle = tokio::spawn(async move {
                 let result = consume_partitions(
@@ -97,9 +91,9 @@ impl AlertConsumer for DecamAlertConsumer {
                     &output_queue,
                     max_in_queue,
                     timestamp,
-                    &server,
                     None,
                     None,
+                    &Survey::Decam,
                     &config_path,
                 )
                 .await;
@@ -136,14 +130,16 @@ impl AlertConsumer for DecamAlertConsumer {
 pub struct DecamAlertProducer {
     date: chrono::NaiveDate,
     limit: i64,
+    server_url: String,
     verbose: bool,
 }
 
 impl DecamAlertProducer {
-    pub fn new(date: chrono::NaiveDate, limit: i64, verbose: bool) -> Self {
+    pub fn new(date: chrono::NaiveDate, limit: i64, server_url: &str, verbose: bool) -> Self {
         DecamAlertProducer {
             date,
             limit,
+            server_url: server_url.to_string(),
             verbose,
         }
     }
@@ -161,7 +157,7 @@ impl AlertProducer for DecamAlertProducer {
 
         info!("Initializing DECAM alert kafka producer");
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", "localhost:9092")
+            .set("bootstrap.servers", &self.server_url)
             .set("message.timeout.ms", "5000")
             // it's best to increase batch.size if the cluster
             // is running on another machine. Locally, lower means less

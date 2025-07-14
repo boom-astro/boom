@@ -103,7 +103,6 @@ async fn run(args: Cli) {
                 Some(args.max_in_queue),
                 None,
                 None,
-                None,
                 &args.config,
             );
             if args.clear {
