@@ -42,20 +42,23 @@ async fn test_produce_and_consume_from_archive() {
 
     let timestamp = date.and_utc().timestamp();
 
-    let ztf_alert_consumer = ZtfAlertConsumer::new(
-        1,
-        None,
-        None,
-        None,
-        None,
-        ProgramId::Public,
-        TEST_CONFIG_FILE,
-    );
-
-    ztf_alert_consumer.clear_output_queue().await.unwrap();
+    let ztf_alert_consumer = ZtfAlertConsumer::new(None, Some(ProgramId::Public));
 
     ztf_alert_consumer
-        .consume(timestamp, true, Some(topic))
+        .clear_output_queue(TEST_CONFIG_FILE)
+        .await
+        .unwrap();
+
+    ztf_alert_consumer
+        .consume(
+            timestamp,
+            TEST_CONFIG_FILE,
+            true,
+            None,
+            None,
+            None,
+            Some(topic),
+        )
         .await
         .unwrap();
 }

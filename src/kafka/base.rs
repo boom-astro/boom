@@ -254,42 +254,49 @@ pub enum ConsumerError {
 
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
-    fn default(config_path: &str) -> Self;
     fn topic_name(&self, timestamp: i64) -> String;
-    fn n_threads(&self) -> usize;
     fn output_queue(&self) -> String;
-    fn max_in_queue(&self) -> usize;
-    fn group_id(&self) -> String;
     fn username(&self) -> Option<String> {
         None
     }
     fn password(&self) -> Option<String> {
         None
     }
-    fn config_path(&self) -> String;
     fn survey(&self) -> crate::utils::enums::Survey;
     #[instrument(skip(self))]
     async fn consume(
         &self,
         timestamp: i64,
+        config_path: &str,
         exit_on_eof: bool,
+        n_threads: Option<usize>,
+        max_in_queue: Option<usize>,
+        group_id: Option<String>,
         topic: Option<String>,
     ) -> Result<(), ConsumerError> {
-        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
-        let config = conf::load_config(&self.config_path())?;
+        let config = conf::load_config(config_path)?;
         let kafka_config = conf::build_kafka_config(&config, &self.survey())?;
-        let n_threads = self.n_threads();
+
+        let n_threads = n_threads.unwrap_or(1);
+        let max_in_queue = max_in_queue.unwrap_or(15000);
+        let group_id = group_id.unwrap_or_else(|| {
+            format!(
+                "boom_{}_consumer_group",
+                self.survey().to_string().to_lowercase()
+            )
+        });
+
+        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
         let partitions = assign_partitions_to_consumers(&topic, n_threads, &kafka_config).await?;
 
         let mut handles = vec![];
         for i in 0..n_threads {
             let topic = topic.clone();
             let partitions = partitions[i].clone();
-            let max_in_queue = self.max_in_queue();
-            let output_queue = self.output_queue();
-            let group_id = self.group_id();
+            let group_id = group_id.clone();
             let username = self.username();
             let password = self.password();
+            let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
             let handle = tokio::spawn(async move {
@@ -324,9 +331,9 @@ pub trait AlertConsumer: Sized {
         Ok(())
     }
     #[instrument(skip(self))]
-    async fn clear_output_queue(&self) -> Result<(), ConsumerError> {
-        let config = conf::load_config(&self.config_path())
-            .inspect_err(as_error!("failed to load config"))?;
+    async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
+        let config =
+            conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?;
         let mut con = conf::build_redis(&config)
             .await
             .inspect_err(as_error!("failed to connect to redis"))?;
@@ -334,7 +341,7 @@ pub trait AlertConsumer: Sized {
             .del(&self.output_queue())
             .await
             .inspect_err(as_error!("failed to delete queue"))?;
-        info!("Cleared redis queue for ZTF Kafka consumer");
+        info!("Cleared redis queue for Kafka consumer");
         Ok(())
     }
 }

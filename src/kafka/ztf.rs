@@ -12,72 +12,32 @@ const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 
 pub struct ZtfAlertConsumer {
     output_queue: String,
-    n_threads: usize,
-    max_in_queue: usize,
-    group_id: String,
     program_id: ProgramId,
-    config_path: String,
 }
 
 impl ZtfAlertConsumer {
     #[instrument]
-    pub fn new(
-        n_threads: usize,
-        max_in_queue: Option<usize>,
-        output_queue: Option<&str>,
-        group_id: Option<&str>,
-        server: Option<&str>,
-        program_id: ProgramId,
-        config_path: &str,
-    ) -> Self {
-        let max_in_queue = max_in_queue.unwrap_or(15000);
+    pub fn new(output_queue: Option<&str>, program_id: Option<ProgramId>) -> Self {
+        let program_id = program_id.unwrap_or(ProgramId::Public);
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();
-        let mut group_id = group_id.unwrap_or("example-ck").to_string();
-
-        group_id = format!("{}-{}", "ztf", group_id);
-
-        info!(
-            "Creating ZTF AlertConsumer with {} threads, output_queue: {}, group_id: {}",
-            n_threads, output_queue, group_id
-        );
 
         ZtfAlertConsumer {
             output_queue,
-            n_threads,
-            max_in_queue,
-            group_id,
             program_id,
-            config_path: config_path.to_string(),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl AlertConsumer for ZtfAlertConsumer {
-    fn default(config_path: &str) -> Self {
-        Self::new(1, None, None, None, None, ProgramId::Public, config_path)
-    }
-
     fn topic_name(&self, timestamp: i64) -> String {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id)
     }
-    fn n_threads(&self) -> usize {
-        self.n_threads
-    }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
-    }
-    fn max_in_queue(&self) -> usize {
-        self.max_in_queue
-    }
-    fn group_id(&self) -> String {
-        self.group_id.clone()
-    }
-    fn config_path(&self) -> String {
-        self.config_path.clone()
     }
     fn survey(&self) -> Survey {
         Survey::Ztf
