@@ -305,6 +305,7 @@ impl SchemaRegistry {
         Ok(self.cache.get(&key).unwrap())
     }
 
+    #[instrument(skip_all, err)]
     pub async fn alert_from_avro_bytes<T: Alert>(
         self: &mut Self,
         avro_bytes: &[u8],
