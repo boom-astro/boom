@@ -11,7 +11,6 @@ use crate::{
     },
 };
 
-use apache_avro::{from_avro_datum, from_value};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -25,7 +24,6 @@ pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
-const _MAGIC_BYTE: u8 = 0;
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
 #[serde_as]
@@ -722,7 +720,7 @@ impl Alert for LsstAlert {
 
 pub struct LsstAlertWorker {
     stream_name: String,
-    schema_registry: SchemaRegistry,
+    pub schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<Document>,
@@ -856,30 +854,6 @@ impl AlertWorker for LsstAlertWorker {
         format!("{}_alerts_filter_queue", self.stream_name)
     }
 
-    #[instrument(skip_all, err)]
-    async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<LsstAlert, AlertError> {
-        let magic = avro_bytes[0];
-        if magic != _MAGIC_BYTE {
-            Err(AlertError::MagicBytesError)?;
-        }
-        let schema_id =
-            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await?;
-
-        let mut slice = &avro_bytes[5..];
-        let value = from_avro_datum(&schema, &mut slice, None)?;
-
-        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
-
-        Ok(alert)
-    }
-
     #[instrument(
         skip(
             self,
@@ -959,7 +933,8 @@ impl AlertWorker for LsstAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut alert = self
+        let mut alert: LsstAlert = self
+            .schema_registry
             .alert_from_avro_bytes(avro_bytes)
             .await
             .inspect_err(as_error!())?;

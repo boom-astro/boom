@@ -8,7 +8,7 @@ use crate::{
         worker::should_terminate,
     },
 };
-use apache_avro::{from_avro_datum, Reader, Schema};
+use apache_avro::{from_avro_datum, from_value, Reader, Schema};
 use mongodb::{
     bson::{doc, Document},
     Collection,
@@ -19,6 +19,8 @@ use std::io::Read;
 use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
+
+const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
 
 #[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
@@ -120,7 +122,7 @@ where
 }
 
 pub trait Alert:
-    Debug + PartialEq + Clone + serde::Deserialize<'static> + serde::Serialize
+    Debug + PartialEq + Clone + serde::de::DeserializeOwned + serde::Serialize
 {
     fn object_id(&self) -> String;
     fn candid(&self) -> i64;
@@ -302,6 +304,87 @@ impl SchemaRegistry {
         }
         Ok(self.cache.get(&key).unwrap())
     }
+
+    pub async fn alert_from_avro_bytes<T: Alert>(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<T, AlertError> {
+        let magic = avro_bytes[0];
+        if magic != SCHEMA_REGISTRY_MAGIC_BYTE {
+            Err(AlertError::MagicBytesError)?;
+        }
+        let schema_id =
+            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
+        let schema = self.get_schema("alert-packet", schema_id).await?;
+
+        let mut slice = &avro_bytes[5..];
+        let value = from_avro_datum(&schema, &mut slice, None)?;
+
+        let alert: T = from_value::<T>(&value)?;
+
+        Ok(alert)
+    }
+}
+
+pub struct SchemaCache {
+    cached_schema: Option<Schema>,
+    cached_start_idx: Option<usize>,
+}
+
+impl SchemaCache {
+    pub fn new() -> Self {
+        SchemaCache {
+            cached_schema: None,
+            cached_start_idx: None,
+        }
+    }
+
+    #[instrument(skip_all, err)]
+    pub async fn alert_from_avro_bytes<T: Alert>(
+        &mut self,
+        avro_bytes: &[u8],
+    ) -> Result<T, AlertError> {
+        // if the schema is not cached, get it from the avro_bytes
+        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
+            (Some(schema), Some(start_idx)) => (schema, start_idx),
+            _ => {
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                (self.cached_schema.as_ref().unwrap(), startidx)
+            }
+        };
+
+        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
+
+        // if value is an error, try recomputing the schema from the avro_bytes
+        // as it could be that the schema has changed
+        let value = match value {
+            Ok(value) => value,
+            Err(error) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "Error deserializing avro message with cached schema"
+                );
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+
+                // if it's not an error this time, cache the new schema
+                // otherwise return the error
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
+                    .inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                value
+            }
+        };
+
+        let alert: T = from_value::<T>(&value).inspect_err(as_error!())?;
+
+        Ok(alert)
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -322,7 +405,6 @@ pub trait AlertWorker {
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
-    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<impl Alert, AlertError>;
     #[instrument(skip(self, ra, dec, candidate_doc, now, collection), err)]
     async fn format_and_insert_alert(
         &self,

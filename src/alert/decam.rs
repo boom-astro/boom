@@ -1,17 +1,11 @@
 use crate::{
     alert::base::{
-        deserialize_mjd, get_schema_and_startidx, Alert, AlertError, AlertWorker, AlertWorkerError,
-        ProcessAlertStatus,
+        deserialize_mjd, Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
+        SchemaCache,
     },
     conf,
-    utils::{
-        db::mongify,
-        o11y::{as_error, log_error, WARN},
-        spatial::xmatch,
-    },
+    utils::{db::mongify, o11y::as_error, spatial::xmatch},
 };
-use apache_avro::from_value;
-use apache_avro::{from_avro_datum, Schema};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -98,8 +92,7 @@ pub struct DecamAlertWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_aux_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
-    cached_schema: Option<Schema>,
-    cached_start_idx: Option<usize>,
+    pub schema_cache: SchemaCache,
 }
 
 impl DecamAlertWorker {
@@ -175,8 +168,7 @@ impl AlertWorker for DecamAlertWorker {
             alert_collection,
             alert_aux_collection,
             alert_cutout_collection,
-            cached_schema: None,
-            cached_start_idx: None,
+            schema_cache: SchemaCache::new(),
         };
         Ok(worker)
     }
@@ -191,53 +183,6 @@ impl AlertWorker for DecamAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_filter_queue", self.stream_name)
-    }
-
-    #[instrument(skip_all, err)]
-    async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<DecamAlert, AlertError> {
-        // if the schema is not cached, get it from the avro_bytes
-        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
-            (Some(schema), Some(start_idx)) => (schema, start_idx),
-            _ => {
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                (self.cached_schema.as_ref().unwrap(), startidx)
-            }
-        };
-
-        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
-
-        // if value is an error, try recomputing the schema from the avro_bytes
-        // as it could be that the schema has changed
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                log_error!(
-                    WARN,
-                    error,
-                    "Error deserializing avro message with cached schema"
-                );
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-
-                // if it's not an error this time, cache the new schema
-                // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
-                    .inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                value
-            }
-        };
-
-        let alert: DecamAlert = from_value::<DecamAlert>(&value).inspect_err(as_error!())?;
-
-        Ok(alert)
     }
 
     #[instrument(
@@ -300,7 +245,8 @@ impl AlertWorker for DecamAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let alert = self
+        let alert: DecamAlert = self
+            .schema_cache
             .alert_from_avro_bytes(avro_bytes)
             .await
             .inspect_err(as_error!())?;
