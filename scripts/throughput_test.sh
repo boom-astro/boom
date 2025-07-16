@@ -15,10 +15,17 @@ Arguments:
   <DATE>    Date string in YYYYMMDD format (e.g., 20240617)
 
 Options:
+  -p, --project <NAME>    Docker compose project name used to prefix all
+                          containers and volumes; the project can stopped later
+                          using 'docker compose -p <NAME> down' [default: ${project}]
   -i, --iterations <N>    Repeat the test N > 0 times [default: ${iterations}]
       --producer <CMD>    Base command for the producer [default: ${producer}]
       --consumer <CMD>    Base command for the consumer [default: ${consumer}]
       --scheduler <CMD>   Base command for the scheduler [default: ${scheduler}]
+      --alert-db <NAME>   Name of the destination alert mongodb database.
+                          IMPORTANT: this value *must* match the alert database
+                          name specified in config.yaml, otherwise this utility
+                          won't correctly [default: ${alert_db}]
       --timeout <SEC>     Timeout for counting the alerts in the kafka topic
                           (may want to increase this for dates with a large
                           number of alerts) [default: ${timeout}]
@@ -36,9 +43,9 @@ Discussion:
         running.
     2.  Run the producer to create the kafka topic for <SURVEY> and <DATE> if
         it does not yet exist.
-    3.  Count the total number of alerts in the topic.
+    3.  Count the total number of alerts in the topic (see '--timeout').
     4.  Repeat the following test <N> times (see '--iterations'):
-        -   Drop the 'boom' database in mongodb.
+        -   Drop the alert database in mongodb (see '--alert-db').
         -   Start the consumer and scheduler in the background.
         -   Periodically count the number of alerts in 'boom' and stop the
             consumer and scheduler when the expected number is reached.
@@ -155,17 +162,19 @@ check_env_var() {
 }
 
 start_containers() {
+  local project="${1:?}"
+
   local expected_service_count=3
 
   info "starting containers"
-  docker compose up -d || {
+  docker compose -p "${project}" up -d || {
     error "failed to start containers"
     return 1
   }
 
   local healthy_count
   while true; do
-    healthy_count="$(docker ps --quiet --filter health=healthy | wc -l)"
+    healthy_count="$(docker compose -p "${project}" ps --format "table {{.Health}}" | grep "healthy" | wc -l)"
     if [[ ${healthy_count} -ge ${expected_service_count} ]]; then
       break
     fi
@@ -175,12 +184,13 @@ start_containers() {
 }
 
 check_for_topic() {
-  local topic="${1:?}"
+  local project="${1:?}"
+  local topic="${2:?}"
 
   info "checking for topics"
   local topics
   topics="$(
-    docker exec boom-broker-1 \
+    docker exec "${project}-broker-1" \
       /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server broker:9092 \
       --list
@@ -206,13 +216,14 @@ run_producer() {
 }
 
 count_produced_alerts() {
-  local topic="${1:?}"
-  local timeout="${2:?}"
+  local project="${1:?}"
+  local topic="${2:?}"
+  local timeout="${3:?}"
 
   info "counting alerts in the topic"
   local output
   output="$(
-    docker exec boom-broker-1 \
+    docker exec "${project}-broker-1" \
       /opt/kafka/bin/kafka-console-consumer.sh \
       --bootstrap-server broker:9092 \
       --topic "${topic}" \
@@ -234,12 +245,15 @@ count_produced_alerts() {
 }
 
 remove_alert_database() {
+  local project="${1:?}"
+  local alert_db="${2:?}"
+
   info "removing alert database"
-  docker exec boom-mongo-1 mongosh \
+  docker exec "${project}-mongo-1" mongosh \
     --username "${MONGO_USERNAME}" \
     --password "${MONGO_PASSWORD}" \
     --authenticationDatabase admin \
-    --eval "db.getSiblingDB('boom').dropDatabase()" >&2
+    --eval "db.getSiblingDB('${alert_db}').dropDatabase()" >&2
 }
 
 start_consumer() {
@@ -262,9 +276,11 @@ start_scheduler() {
 }
 
 wait_for_scheduler() {
-  local survey="${1:?}"
-  local start="${2:?}"
-  local expected_count="${3:?}"
+  local project="${1:?}"
+  local survey="${2:?}"
+  local start="${3:?}"
+  local expected_count="${4:?}"
+  local alert_db="${5:?}"
 
   local alert_collection_name
   alert_collection_name="$(echo "${survey}" | tr '[:lower:]' '[:upper:]')_alerts"
@@ -280,7 +296,7 @@ wait_for_scheduler() {
   local decreasing=false
   while true; do
     # Count the number of alerts in the queue
-    if ncurr="$(docker exec boom-valkey-1 redis-cli LLEN "${alert_queue_name}")"; then
+    if ncurr="$(docker exec "${project}-valkey-1" redis-cli LLEN "${alert_queue_name}")"; then
       if ((ncurr > nprev)); then  # The queue is increasing
         if "${decreasing}"; then  # The queue just started increasing
           decreasing=false
@@ -298,12 +314,12 @@ wait_for_scheduler() {
     nprev="${ncurr}"
 
     # Count the number of alerts in mongodb
-    count="$(docker exec boom-mongo-1 mongosh \
+    count="$(docker exec "${project}-mongo-1" mongosh \
       --username "${MONGO_USERNAME}" \
       --password "${MONGO_PASSWORD}" \
       --authenticationDatabase admin \
       --quiet \
-      --eval "db.getSiblingDB('boom').${alert_collection_name}.countDocuments()"
+      --eval "db.getSiblingDB('${alert_db}').${alert_collection_name}.countDocuments()"
     )" || return 1
     elapsed=$(($(date +%s) - start))
 
@@ -318,13 +334,15 @@ wait_for_scheduler() {
 }
 
 test() {
-  local consumer="${1:?}"
-  local scheduler="${2:?}"
-  local survey="${3:?}"
-  local date="${4:?}"
-  local expected_count="${5:?}"
+  local project="${1:?}"
+  local consumer="${2:?}"
+  local scheduler="${3:?}"
+  local survey="${4:?}"
+  local date="${5:?}"
+  local expected_count="${6:?}"
+  local alert_db="${7:?}"
 
-  remove_alert_database || {
+  remove_alert_database "${project}" "${alert_db}" || {
     warn "failed to remove alert database"
     return 1
   }
@@ -337,7 +355,13 @@ test() {
 
   local failed=false
   local results
-  results="$(wait_for_scheduler "${survey}" "${start}" "${expected_count}")" || {
+  results="$(wait_for_scheduler \
+    "${project}" \
+    "${survey}" \
+    "${start}" \
+    "${expected_count}" \
+    "${alert_db}" \
+  )" || {
     warn "failed to poll mongodb"
     failed=true  # Don't return yet, need to clean up
   }
@@ -354,10 +378,12 @@ test() {
 
 main() {
   # Defaults
+  local project="boom-throughput"
   local iterations=1
   local producer="./target/release/kafka_producer"
   local consumer="./target/release/kafka_consumer"
   local scheduler="./target/release/scheduler"
+  local alert_db="boom"
   local timeout=5
   local output=
 
@@ -367,6 +393,10 @@ main() {
       -h|--help)
         help
         exit
+        ;;
+      -p|--project)
+        project="$(check_option "${1}" "${2}")" || exit "$?"
+        shift
         ;;
       -i|--iterations)
         iterations="$(check_option "${1}" "${2}")" || exit "$?"
@@ -386,6 +416,10 @@ main() {
         ;;
       --timeout)
         timeout="$(check_option "${1}" "${2}")" || exit "$?"
+        shift
+        ;;
+      --alert-db)
+        alert_db="$(check_option "${1}" "${2}")" || exit "$?"
         shift
         ;;
       -o|--output)
@@ -427,10 +461,10 @@ main() {
     touch "${output}"
   fi
 
-  start_containers || exit 1
+  start_containers "${project}" || exit 1
 
   local topic="${survey}_${date}_programid1"
-  check_for_topic "${topic}"
+  check_for_topic "${project}" "${topic}"
   case "$?" in
     0) info "topic exists";;
     1) run_producer "${producer}" "${survey}" "${date}" || exit 1;;
@@ -441,7 +475,7 @@ main() {
   # Sometimes count_produced_alerts finds the topic to be empty, so retry.
   local i=0
   while true; do
-    expected_count="$(count_produced_alerts "${topic}" "${timeout}")" || exit 1
+    expected_count="$(count_produced_alerts "${project}" "${topic}" "${timeout}")" || exit 1
     if ((expected_count > 0)); then
       break
     fi
@@ -470,11 +504,13 @@ main() {
     info "starting test ${i}"
     results="$(
       test \
+        "${project}" \
         "${consumer}" \
         "${scheduler}" \
         "${survey}" \
         "${date}" \
-        "${expected_count}"
+        "${expected_count}" \
+        "${alert_db}"
     )" || continue
     read -r count elapsed nmax tmax <<<"${results}"
     rate="$(echo "scale=6; ${count} / ${elapsed}" | bc)"
