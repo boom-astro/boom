@@ -1,5 +1,5 @@
 use crate::{
-    alert::{run_alert_worker, LsstAlertWorker, ZtfAlertWorker},
+    alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     ml::{run_ml_worker, ZtfMLWorker},
     utils::{
@@ -186,10 +186,7 @@ impl Worker {
                     let run = match survey_name {
                         Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
                         Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
-                        _ => {
-                            error!("Alert worker not implemented for survey: {}", survey_name);
-                            return;
-                        }
+                        Survey::Decam => run_alert_worker::<DecamAlertWorker>,
                     };
                     run(receiver, &config_path).unwrap_or_else(as_error!("alert worker failed"));
                 })

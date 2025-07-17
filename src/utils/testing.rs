@@ -1,6 +1,7 @@
 use crate::{
     alert::{
-        AlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_URL,
+        AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
+        LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     utils::{db::initialize_survey_indexes, enums::Survey},
@@ -41,6 +42,12 @@ pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
     init_indexes(&Survey::Lsst).await.unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn decam_alert_worker() -> DecamAlertWorker {
+    // initialize the ZTF indexes
+    init_indexes(&Survey::Decam).await.unwrap();
+    DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 // drops alert collections from the database
@@ -215,6 +222,17 @@ impl AlertRandomizer {
                     None,
                 )
             }
+            Survey::Decam => {
+                let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
+                let reader = Reader::new(&payload[..]).unwrap();
+                let schema = reader.writer_schema().clone();
+                (
+                    Some(Self::randomize_object_id(&survey)),
+                    Some(payload),
+                    Some(schema),
+                    None,
+                )
+            }
             Survey::Lsst => {
                 let payload = fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap();
                 (
@@ -291,7 +309,7 @@ impl AlertRandomizer {
     fn randomize_object_id(survey: &Survey) -> String {
         let mut rng = rand::rng();
         match survey {
-            Survey::Ztf => {
+            Survey::Ztf | Survey::Decam => {
                 let mut object_id = survey.to_string();
                 for _ in 0..2 {
                     object_id.push(rng.random_range('0'..='9'));
@@ -382,7 +400,8 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf => {
+            Survey::Ztf | Survey::Decam => {
+                // Use the same logic for ZTF/Decam, just different objectId prefix
                 let mut candid = self.candid;
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
@@ -390,8 +409,15 @@ impl AlertRandomizer {
                 let (payload, schema) = match (self.payload, self.schema) {
                     (Some(payload), Some(schema)) => (payload, schema),
                     _ => {
-                        let payload =
-                            fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+                        let payload = match self.survey {
+                            Survey::Ztf => {
+                                fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
+                            }
+                            Survey::Decam => {
+                                fs::read("tests/data/alerts/decam/alert.avro").unwrap()
+                            }
+                            _ => panic!("Unsupported survey for test payload"),
+                        };
                         let reader = Reader::new(&payload[..]).unwrap();
                         let schema = reader.writer_schema().clone();
                         (payload, schema)
