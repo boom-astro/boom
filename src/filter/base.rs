@@ -234,42 +234,58 @@ pub async fn send_alert_to_kafka(
 pub fn uses_field_in_stage(
     stage: &serde_json::Value,
     field: &str,
-    avoid_prefixes: &Option<Vec<String>>,
+    nested_level: usize,
 ) -> Result<bool, FilterError> {
-    if let Some(stage_obj) = stage.as_object() {
-        let stage_str = serde_json::to_string(stage_obj).map_err(FilterError::SerdeJson)?;
-        let field_indexes: Vec<(usize, &str)> = stage_str.match_indices(field).collect();
-        for (field_index, _) in field_indexes {
-            match avoid_prefixes {
-                Some(prefixes) => {
-                    // as soon as there is one occurence of the field that is not preceded by any of the prefixes, we return true
-                    let field_str = stage_str.to_string();
-                    for prefix in prefixes {
-                        let prefix_len = prefix.len();
-                        if (field_index as i64 - 1 - prefix_len as i64) < 0 {
-                            continue;
-                        }
-                        let prefix_idx = field_index - 1 - prefix_len;
-                        let prefix_str = &field_str[prefix_idx..field_index - 1];
-                        if prefix_str != prefix {
-                            return Ok(true);
-                        }
-                    }
-                }
-                None => return Ok(true),
+    // we consider a value is a match with field if it is:
+    // - equal to the field
+    // - equal to the field with a $ prefix
+    // - starts with the field and a dot (for nested fields)
+    // - starts with the field with a $ prefix and a dot
+    // then we found it
+    if let Some(array) = stage.as_array() {
+        for item in array {
+            if uses_field_in_stage(item, field, nested_level + 1)? {
+                return Ok(true);
             }
         }
+    } else if let Some(obj) = stage.as_object() {
+        for (key, value) in obj.iter() {
+            if key.starts_with(&format!("${}.", field)) {
+                return Ok(true);
+            } else if key.starts_with(&format!("{}.", field)) {
+                return Ok(true);
+            } else if key == field {
+                return Ok(true);
+            } else if key == &format!("${}", field) {
+                return Ok(true);
+            }
+            if uses_field_in_stage(value, field, nested_level + 1)? {
+                return Ok(true);
+            }
+        }
+    } else if let Some(stage_str) = stage.as_str() {
+        let stage_str = stage_str.trim();
+        if stage_str.starts_with(&format!("${}.", field)) {
+            return Ok(true);
+        } else if stage_str.starts_with(&format!("{}.", field)) {
+            return Ok(true);
+        } else if stage_str == field {
+            return Ok(true);
+        } else if stage_str == &format!("${}", field) {
+            return Ok(true);
+        }
     }
+
     Ok(false)
 }
 
 pub fn uses_field_in_filter(
     filter_pipeline: &[serde_json::Value],
-    field: String,
-    avoid_prefixes: Option<Vec<String>>,
+    field: &str,
 ) -> Result<(bool, usize), FilterError> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
-        if uses_field_in_stage(stage, &field, &avoid_prefixes)? {
+        let nested_level = 0;
+        if uses_field_in_stage(stage, field, nested_level)? {
             return Ok((true, i));
         }
     }
