@@ -192,11 +192,6 @@ impl Filter for ZtfFilter {
             );
         }
 
-        // next we create 2 variables
-        // 1. insert_aux_pipeline: if we need to insert the aux pipeline
-        // 2. insert_aux_index: the index where we need to insert the aux pipeline
-        // for 1, that is true if any of use_prv_candidates, use_prv_nondetections, use_cross_matches
-        // for 2, that is the lowest value of use_prv_candidates_index, use_prv_nondetections_index, or use_cross_matches_index
         let mut insert_aux_pipeline =
             use_prv_candidates || use_prv_nondetections || use_cross_matches;
 

@@ -285,8 +285,9 @@ pub fn uses_field_in_filter(
 }
 
 pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result<(), FilterError> {
-    // the pipelines have project stages that keep or reject fields
-    // but we need the objectId and _id to always be present in the output
+    // mongodb aggregation pipelines have project stages that can include or exclude fields,
+    // (not both at the same time), and unset stages that remove fields.
+    // We need the objectId and _id to always be present in the output
     // so we make sure that:
     // - project stages that are an include stages (no "field: 0") specify objectId: 1
     // - project stages that are an exclude stage (with "field: 0") do not mention objectId
