@@ -265,8 +265,6 @@ impl SchemaRegistry {
             return Err(SchemaRegistryError::InvalidVersion);
         }
 
-        println!("Versions for subject {}: {:?}", subject, versions);
-
         let response = self
             .client
             .get(&format!(

@@ -220,8 +220,7 @@ impl Filter for ZtfFilter {
         // now we loop over the base_pipeline and insert stages from the filter_pipeline
         // and when i = insert_index, we insert the aux_pipeline before the stage
         for i in 0..filter_pipeline.len() {
-            let x = mongodb::bson::to_document(&filter_pipeline[i])
-                .map_err(FilterError::InvalidFilterPipelineStage)?;
+            let x = mongodb::bson::to_document(&filter_pipeline[i])?;
 
             if insert_aux_pipeline && i == insert_aux_index {
                 pipeline.push(doc! {

@@ -94,16 +94,10 @@ pub enum FilterError {
     FilterNotFound,
     #[error("filter pipeline could not be parsed")]
     FilterPipelineError,
-    #[error("invalid filter result")]
-    InvalidFilterResult(#[source] mongodb::error::Error),
-    #[error("failed to run filter")]
-    RunFilterError(#[source] mongodb::error::Error),
     #[error("failed to deserialize filter pipeline")]
     DeserializePipelineError(#[source] serde_json::Error),
     #[error("invalid filter pipeline")]
     InvalidFilterPipeline,
-    #[error("invalid filter pipeline stage")]
-    InvalidFilterPipelineStage(#[source] mongodb::bson::ser::Error),
     #[error("invalid filter id")]
     InvalidFilterId,
 }
