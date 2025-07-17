@@ -223,11 +223,7 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
-pub fn uses_field_in_stage(
-    stage: &serde_json::Value,
-    field: &str,
-    nested_level: usize,
-) -> Result<bool, FilterError> {
+pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> Result<bool, FilterError> {
     // we consider a value is a match with field if it is:
     // - equal to the field
     // - equal to the field with a $ prefix
@@ -236,7 +232,7 @@ pub fn uses_field_in_stage(
     // then we found it
     if let Some(array) = stage.as_array() {
         for item in array {
-            if uses_field_in_stage(item, field, nested_level + 1)? {
+            if uses_field_in_stage(item, field)? {
                 return Ok(true);
             }
         }
@@ -251,7 +247,7 @@ pub fn uses_field_in_stage(
             } else if key == &format!("${}", field) {
                 return Ok(true);
             }
-            if uses_field_in_stage(value, field, nested_level + 1)? {
+            if uses_field_in_stage(value, field)? {
                 return Ok(true);
             }
         }
@@ -276,8 +272,7 @@ pub fn uses_field_in_filter(
     field: &str,
 ) -> Result<(bool, usize), FilterError> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
-        let nested_level = 0;
-        if uses_field_in_stage(stage, field, nested_level)? {
+        if uses_field_in_stage(stage, field)? {
             return Ok((true, i));
         }
     }
