@@ -18,8 +18,7 @@ use rdkafka::{
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace, warn};
 
-// same as ensure_kafka_topic_partitions, but do not attempt to create the topic
-// simply check that the topic exists and return the number of partitions
+// check that the topic exists and return the number of partitions
 pub async fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -30,10 +29,15 @@ pub async fn check_kafka_topic_partitions(
 
     let metadata = consumer.fetch_metadata(None, std::time::Duration::from_secs(5))?;
 
-    debug!("Existing topics:");
-    for topic in metadata.topics() {
-        debug!(" - {}", topic.name());
-    }
+    debug!(
+        "Existing topics: {}",
+        metadata
+            .topics()
+            .iter()
+            .map(|t| t.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     let topic_metadata = metadata.topics().iter().find(|t| t.name() == topic_name);
     match topic_metadata.map(|t| t.partitions().len()) {
@@ -48,24 +52,15 @@ pub async fn assign_partitions_to_consumers(
     kafka_config: &SurveyKafkaConfig,
 ) -> Result<Vec<Vec<i32>>, ConsumerError> {
     // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
-    // do so in a while until the topic exists
-    let mut nb_partitions = 0;
-    let mut topic_exists = false;
-    while !topic_exists {
-        match check_kafka_topic_partitions(&kafka_config.consumer, &topic_name).await {
-            Ok(Some(partitions)) => {
-                nb_partitions = partitions;
-                topic_exists = true;
-            }
-            Ok(None) => {
-                info!("Topic {} does not exist yet, retrying...", &topic_name);
-                std::thread::sleep(core::time::Duration::from_secs(5));
-            }
-            Err(e) => {
-                return Err(ConsumerError::from(e));
-            }
+    let nb_partitions = loop {
+        if let Some(nb_partitions) =
+            check_kafka_topic_partitions(&kafka_config.consumer, &topic_name).await?
+        {
+            break nb_partitions;
         }
-    }
+        info!("Topic {} does not exist yet, retrying...", &topic_name);
+        std::thread::sleep(core::time::Duration::from_secs(5));
+    };
 
     let nb_consumers = nb_consumers.clone().min(nb_partitions);
 
@@ -86,17 +81,15 @@ pub async fn initialize_topic(
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let nb_partitions = check_kafka_topic_partitions(bootstrap_servers, topic_name).await?;
-
-    match nb_partitions {
-        Some(partitions) => {
-            if partitions != expected_nb_partitions {
+    let nb_partitions = match check_kafka_topic_partitions(bootstrap_servers, topic_name).await? {
+        Some(nb_partitions) => {
+            if nb_partitions != expected_nb_partitions {
                 warn!(
                     "Topic {} exists but has {} partitions instead of expected {}",
-                    topic_name, partitions, expected_nb_partitions
+                    topic_name, nb_partitions, expected_nb_partitions
                 );
             }
-            return Ok(partitions);
+            nb_partitions
         }
         None => {
             let opts =
@@ -115,14 +108,14 @@ pub async fn initialize_topic(
                     &opts,
                 )
                 .await?;
-
             info!(
                 "Topic {} created successfully with {} partitions",
                 topic_name, expected_nb_partitions
             );
-            return Ok(expected_nb_partitions);
+            expected_nb_partitions
         }
     };
+    Ok(nb_partitions)
 }
 
 #[async_trait::async_trait]
