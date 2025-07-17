@@ -168,7 +168,7 @@ impl AlertWorker for DecamAlertWorker {
             alert_collection,
             alert_aux_collection,
             alert_cutout_collection,
-            schema_cache: SchemaCache::new(),
+            schema_cache: SchemaCache::default(),
         };
         Ok(worker)
     }

@@ -554,7 +554,7 @@ impl AlertWorker for ZtfAlertWorker {
             alert_collection,
             alert_aux_collection,
             alert_cutout_collection,
-            schema_cache: SchemaCache::new(),
+            schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
         };

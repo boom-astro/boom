@@ -333,10 +333,10 @@ pub struct SchemaCache {
 }
 
 impl SchemaCache {
-    pub fn new() -> Self {
+    pub fn new(cached_schema: Schema, cached_start_idx: usize) -> Self {
         SchemaCache {
-            cached_schema: None,
-            cached_start_idx: None,
+            cached_schema: Some(cached_schema),
+            cached_start_idx: Some(cached_start_idx),
         }
     }
 
@@ -385,6 +385,15 @@ impl SchemaCache {
         let alert: T = from_value::<T>(&value).inspect_err(as_error!())?;
 
         Ok(alert)
+    }
+}
+
+impl Default for SchemaCache {
+    fn default() -> Self {
+        SchemaCache {
+            cached_schema: None,
+            cached_start_idx: None,
+        }
     }
 }
 
