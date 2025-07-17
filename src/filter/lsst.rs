@@ -1,12 +1,13 @@
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{info, instrument};
 
 use crate::filter::{
     get_filter_object, run_filter, Alert, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, Origin, Photometry, Survey,
+    FilterWorkerError, Origin, Photometry,
 };
+use crate::utils::enums::Survey;
 
 pub struct LsstFilter {
     id: i32,
@@ -15,6 +16,7 @@ pub struct LsstFilter {
 
 #[async_trait::async_trait]
 impl Filter for LsstFilter {
+    #[instrument(skip(filter_collection), err)]
     async fn build(
         filter_id: i32,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
@@ -51,6 +53,12 @@ impl Filter for LsstFilter {
                             0
                         ]
                     },
+                    "aliases": doc! {
+                        "$arrayElemAt": [
+                            "$aux.aliases",
+                            0
+                        ]
+                    },
                     "prv_candidates": doc! {
                         "$filter": doc! {
                             "input": doc! {
@@ -66,8 +74,8 @@ impl Filter for LsstFilter {
                                         "$lt": [
                                             {
                                                 "$subtract": [
-                                                    "$candidate.mjd",
-                                                    "$$x.mjd"
+                                                    "$candidate.jd",
+                                                    "$$x.jd"
                                                 ]
                                             },
                                             365
@@ -75,8 +83,8 @@ impl Filter for LsstFilter {
                                     },
                                     { // only datapoints up to (and including) current alert
                                         "$lte": [
-                                            "$$x.mjd",
-                                            "$candidate.mjd"
+                                            "$$x.jd",
+                                            "$candidate.jd"
                                         ]
                                     }
                                 ]
@@ -89,9 +97,9 @@ impl Filter for LsstFilter {
 
         let filter_pipeline = filter_obj
             .get("pipeline")
-            .ok_or(FilterError::FilterNotFound)?
+            .ok_or(FilterError::InvalidFilterPipeline)?
             .as_str()
-            .ok_or(FilterError::FilterNotFound)?;
+            .ok_or(FilterError::InvalidFilterPipeline)?;
 
         let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
         let filter_pipeline = filter_pipeline
@@ -121,6 +129,7 @@ pub struct LsstFilterWorker {
 
 #[async_trait::async_trait]
 impl FilterWorker for LsstFilterWorker {
+    #[instrument(err)]
     async fn new(
         config_path: &str,
         filter_ids: Option<Vec<i32>>,
@@ -166,6 +175,10 @@ impl FilterWorker for LsstFilterWorker {
         })
     }
 
+    fn survey() -> Survey {
+        Survey::Lsst
+    }
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }
@@ -178,6 +191,7 @@ impl FilterWorker for LsstFilterWorker {
         !self.filters.is_empty()
     }
 
+    #[instrument(skip(self, filter_results), err)]
     async fn build_alert(
         &self,
         candid: i64,
@@ -264,7 +278,7 @@ impl FilterWorker for LsstFilterWorker {
             .await
             .ok_or(FilterWorkerError::AlertNotFound)??;
 
-        let object_id = alert_document.get_i64("objectId")?;
+        let object_id = alert_document.get_str("objectId")?.to_string();
         let jd = alert_document.get_f64("jd")?;
         let ra = alert_document.get_f64("ra")?;
         let dec = alert_document.get_f64("dec")?;
@@ -298,7 +312,7 @@ impl FilterWorker for LsstFilterWorker {
                 zero_point: 8.9,
                 origin: Origin::Alert,
                 programid: 1, // only one public stream for LSST
-                survey: Survey::LSST,
+                survey: Survey::Lsst,
                 ra,
                 dec,
             });
@@ -322,7 +336,7 @@ impl FilterWorker for LsstFilterWorker {
                 zero_point: 8.9,
                 origin: Origin::Alert,
                 programid: 1, // only one public stream for LSST
-                survey: Survey::LSST,
+                survey: Survey::Lsst,
                 ra: None,
                 dec: None,
             });
@@ -332,11 +346,12 @@ impl FilterWorker for LsstFilterWorker {
 
         let alert = Alert {
             candid,
-            object_id: format!("{}", object_id),
+            object_id,
             jd,
             ra,
             dec,
-            filters: filter_results, // assuming you have filter results to attach
+            filters: filter_results,
+            classifications: Vec::new(), // LSST does not have classifications in the alerts, yet!
             photometry,
             cutout_science,
             cutout_template,
@@ -346,6 +361,7 @@ impl FilterWorker for LsstFilterWorker {
         Ok(alert)
     }
 
+    #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
@@ -359,6 +375,7 @@ impl FilterWorker for LsstFilterWorker {
         for filter in &self.filters {
             let out_documents = run_filter(
                 candids.clone(),
+                filter.id,
                 filter.pipeline.clone(),
                 &self.alert_collection,
             )

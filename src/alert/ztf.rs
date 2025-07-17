@@ -1,109 +1,37 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistryError},
-        lsst,
+        base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus},
+        decam, get_schema_and_startidx, lsst,
     },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
+        db::mongify,
+        o11y::{as_error, log_error, WARN},
         spatial::xmatch,
     },
 };
 use apache_avro::from_value;
-use apache_avro::{from_avro_datum, Reader, Schema};
+use apache_avro::{from_avro_datum, Schema};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::io::Read;
-use tracing::{error, trace};
+use std::fmt::Debug;
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
+// Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
+pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
-pub const LSST_DEC_LIMIT: f64 = 33.5;
-pub const LSST_XMATCH_RADIUS: f64 = (2.0_f64 / 3600.0_f64).to_radians(); // 2 arcseconds in radians
-
-fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
-    let mut i = 0u64;
-    let mut buf = [0u8; 1];
-
-    let mut j = 0;
-    loop {
-        if j > 9 {
-            return Err(SchemaRegistryError::IntegerOverflow);
-        }
-        reader.read_exact(&mut buf[..])?;
-
-        i |= (u64::from(buf[0] & 0x7F)) << (j * 7);
-        if (buf[0] >> 7) == 0 {
-            break;
-        } else {
-            j += 1;
-        }
-    }
-
-    Ok(i)
-}
-
-pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    let z = decode_variable(reader)?;
-    if z & 0x1 == 0 {
-        Ok((z >> 1) as i64)
-    } else {
-        Ok(!(z >> 1) as i64)
-    }
-}
-
-fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    Ok(zag_i64(reader)?)
-}
-
-pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
-    // First, we extract the schema from the avro bytes
-    let cursor = std::io::Cursor::new(avro_bytes);
-    let reader = Reader::new(cursor)?;
-    let schema = reader.writer_schema();
-
-    // Then, we look for the index of the start of the data
-    // this is based on the Apache Avro specification 1.3.2
-    // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
-    let mut cursor = std::io::Cursor::new(avro_bytes);
-
-    // Four bytes, ASCII 'O', 'b', 'j', followed by 1
-    let mut buf = [0; 4];
-    cursor.read_exact(&mut buf)?;
-    if buf != [b'O', b'b', b'j', 1u8] {
-        return Err(SchemaRegistryError::MagicBytesError);
-    }
-
-    // Then there is the file metadata, including the schema
-    let meta_schema = Schema::map(Schema::Bytes);
-    from_avro_datum(&meta_schema, &mut cursor, None)?;
-
-    // Then the 16-byte, randomly-generated sync marker for this file.
-    let mut buf = [0; 16];
-    cursor.read_exact(&mut buf)?;
-
-    // each avro record is preceded by:
-    // 1. a variable-length integer, the number of records in the block
-    // 2. a variable-length integer, the number of bytes in the block
-    let nb_records = decode_long(&mut cursor)?;
-    if nb_records != 1 {
-        return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
-    }
-    let _ = decode_long(&mut cursor)?;
-
-    // we now have the start index of the data
-    let start_idx = cursor.position();
-
-    Ok((schema.to_owned(), start_idx as usize))
-}
-
+pub const ZTF_LSST_XMATCH_RADIUS: f64 =
+    (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
+pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
+    (ZTF_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
     #[serde(rename = "fileName")]
@@ -425,25 +353,44 @@ pub struct ZtfAlert {
         rename = "cutoutScience",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_science: Option<Vec<u8>>,
+    pub cutout_science: Vec<u8>,
     #[serde(
         rename = "cutoutTemplate",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_template: Option<Vec<u8>>,
+    pub cutout_template: Vec<u8>,
     #[serde(
         rename = "cutoutDifference",
         deserialize_with = "deserialize_cutout_as_bytes"
     )]
-    pub cutout_difference: Option<Vec<u8>>,
+    pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let cutout: Option<Cutout> = Option::deserialize(deserializer)?;
-    Ok(cutout.map(|cutout| cutout.stamp_data))
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout.stamp_data),
+    }
+}
+
+impl Alert for ZtfAlert {
+    fn object_id(&self) -> String {
+        self.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
 }
 
 pub struct ZtfAlertWorker {
@@ -456,150 +403,63 @@ pub struct ZtfAlertWorker {
     cached_schema: Option<Schema>,
     cached_start_idx: Option<usize>,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
+    decam_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl ZtfAlertWorker {
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ZtfAlert, AlertError> {
-        // if the schema is not cached, get it from the avro_bytes
-        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
-            (Some(schema), Some(start_idx)) => (schema, start_idx),
-            _ => {
-                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                (self.cached_schema.as_ref().unwrap(), startidx)
-            }
-        };
-
-        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
-
-        // if value is an error, try recomputing the schema from the avro_bytes
-        // as it could be that the schema has changed
-        let value = match value {
-            Ok(value) => value,
-            Err(e) => {
-                error!("Error deserializing avro message with cached schema: {}", e);
-                let (schema, startidx) = get_schema_and_startidx(avro_bytes)?;
-
-                // if it's not an error this time, cache the new schema
-                // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                value
-            }
-        };
-
-        let alert: ZtfAlert = from_value::<ZtfAlert>(&value)?;
-
-        Ok(alert)
-    }
-
-    async fn get_lsst_matches(&self, ra: f64, dec: f64) -> Result<Vec<i64>, AlertError> {
-        let lsst_matches = if dec <= LSST_DEC_LIMIT as f64 {
-            let result = self
-                .lsst_alert_aux_collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": LSST_XMATCH_RADIUS,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_i64("_id")?;
-                    vec![object_id]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with LSST: {}", e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(lsst_matches)
-    }
-
+    #[instrument(skip(self), err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
-        let lsst_matches = self.get_lsst_matches(ra, dec).await?;
+        let lsst_matches = self
+            .get_matches(
+                ra,
+                dec,
+                lsst::LSST_DEC_RANGE,
+                ZTF_LSST_XMATCH_RADIUS,
+                &self.lsst_alert_aux_collection,
+            )
+            .await?;
+
+        let decam_matches = self
+            .get_matches(
+                ra,
+                dec,
+                decam::DECAM_DEC_RANGE,
+                ZTF_DECAM_XMATCH_RADIUS,
+                &self.decam_alert_aux_collection,
+            )
+            .await?;
 
         Ok(doc! {
             "LSST": lsst_matches,
+            "DECAM": decam_matches,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl AlertWorker for ZtfAlertWorker {
-    type ObjectId = String;
-
-    async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
-        let config_file = conf::load_config(&config_path)?;
-
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)?;
-
-        let db: mongodb::Database = conf::build_db(&config_file).await?;
-
-        let alert_collection = db.collection(&ALERT_COLLECTION);
-        let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
-
-        let lsst_alert_aux_collection: mongodb::Collection<Document> =
-            db.collection(&lsst::ALERT_AUX_COLLECTION);
-
-        let worker = ZtfAlertWorker {
-            stream_name: STREAM_NAME.to_string(),
-            xmatch_configs,
-            db,
-            alert_collection,
-            alert_aux_collection,
-            alert_cutout_collection,
-            cached_schema: None,
-            cached_start_idx: None,
-            lsst_alert_aux_collection,
-        };
-        Ok(worker)
-    }
-
-    fn stream_name(&self) -> String {
-        self.stream_name.clone()
-    }
-
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", self.stream_name)
-    }
-
-    fn output_queue_name(&self) -> String {
-        format!("{}_alerts_classifier_queue", self.stream_name)
-    }
-
-    async fn insert_aux(
-        self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            xmatches,
+            survey_matches
+        ),
+        err
+    )]
+    async fn insert_alert_aux(
+        &self,
+        object_id: String,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
+        xmatches: Document,
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
-        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-        trace!("Xmatch took: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
         let alert_aux_doc = doc! {
-            "_id": object_id.into(),
+            "_id": object_id,
             "prv_candidates": prv_candidates_doc,
             "prv_nondetections": prv_nondetections_doc,
             "fp_hists": fp_hist_doc,
@@ -624,111 +484,26 @@ impl AlertWorker for ZtfAlertWorker {
                 )) if write_error.code == 11000 => AlertError::AlertAuxExists,
                 _ => e.into(),
             })?;
-
-        trace!("Inserting alert_aux: {:?}", start.elapsed());
-
         Ok(())
     }
 
-    async fn update_aux(
-        self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
-        prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
-
-        let update_doc = doc! {
-            "$addToSet": {
-                "prv_candidates": { "$each": prv_candidates_doc },
-                "prv_nondetections": { "$each": prv_nondetections_doc },
-                "fp_hists": { "$each": fp_hist_doc }
-            },
-            "$set": {
-                "updated_at": now,
-                "aliases": survey_matches,
-            }
-        };
-
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id.into() }, update_doc)
-            .await?;
-
-        trace!("Updating alert_aux: {:?}", start.elapsed());
-
-        Ok(())
-    }
-
-    async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
-        let now = Time::now().to_jd();
-
-        let start = std::time::Instant::now();
-
-        let mut alert = self.alert_from_avro_bytes(avro_bytes).await?;
-
-        trace!("Decoding alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let prv_candidates = alert.prv_candidates.take();
-        let fp_hist = alert.fp_hists.take();
-
-        let candid = alert.candid;
-        let object_id = alert.object_id;
-        let ra = alert.candidate.ra;
-        let dec = alert.candidate.dec;
-
-        let candidate_doc = mongify(&alert.candidate);
-
-        let alert_doc = doc! {
-            "_id": &candid,
-            "objectId": &object_id,
-            "candidate": &candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        self.alert_collection
-            .insert_one(alert_doc)
-            .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertExists,
-                _ => e.into(),
-            })?;
-
-        trace!("Formatting & Inserting alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(alert.cutout_science.ok_or(AlertError::MissingCutout)?),
-            "cutoutTemplate": cutout2bsonbinary(alert.cutout_template.ok_or(AlertError::MissingCutout)?),
-            "cutoutDifference": cutout2bsonbinary(alert.cutout_difference.ok_or(AlertError::MissingCutout)?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-
-        trace!("Formatting & Inserting cutout: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
+    #[instrument(skip(self), err)]
+    async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
         let alert_aux_exists = self
             .alert_aux_collection
-            .count_documents(doc! { "_id": &object_id })
+            .count_documents(doc! { "_id": object_id })
             .await?
             > 0;
+        Ok(alert_aux_exists)
+    }
 
-        trace!("Checking if alert_aux exists: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
+    #[instrument(skip_all)]
+    fn format_prv_candidates_and_fp_hist(
+        &self,
+        prv_candidates: Option<Vec<PrvCandidate>>,
+        candidate_doc: Document,
+        fp_hist: Option<Vec<ForcedPhot>>,
+    ) -> (Vec<Document>, Vec<Document>, Vec<Document>) {
         // we split the prv_candidates into detections and non-detections
         let mut prv_candidates_doc = vec![];
         let mut prv_nondetections_doc = vec![];
@@ -747,14 +522,238 @@ impl AlertWorker for ZtfAlertWorker {
             .into_iter()
             .map(|x| mongify(&x))
             .collect::<Vec<_>>();
+        (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc)
+    }
+}
 
-        trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
+#[async_trait::async_trait]
+impl AlertWorker for ZtfAlertWorker {
+    #[instrument(err)]
+    async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
+        let config_file =
+            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
-        let start = std::time::Instant::now();
-        let survey_matches = Some(self.get_survey_matches(ra, dec).await?);
-        trace!(
-            "Xmatching ZTF alert with other surveys: {:?}",
-            start.elapsed()
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+            .inspect_err(as_error!("failed to load xmatch config"))?;
+
+        let db: mongodb::Database = conf::build_db(&config_file)
+            .await
+            .inspect_err(as_error!("failed to create mongo client"))?;
+
+        let alert_collection = db.collection(&ALERT_COLLECTION);
+        let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
+
+        let lsst_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&lsst::ALERT_AUX_COLLECTION);
+
+        let decam_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&decam::ALERT_AUX_COLLECTION);
+
+        let worker = ZtfAlertWorker {
+            stream_name: STREAM_NAME.to_string(),
+            xmatch_configs,
+            db,
+            alert_collection,
+            alert_aux_collection,
+            alert_cutout_collection,
+            cached_schema: None,
+            cached_start_idx: None,
+            lsst_alert_aux_collection,
+            decam_alert_aux_collection,
+        };
+        Ok(worker)
+    }
+
+    fn stream_name(&self) -> String {
+        self.stream_name.clone()
+    }
+
+    fn input_queue_name(&self) -> String {
+        format!("{}_alerts_packets_queue", self.stream_name)
+    }
+
+    fn output_queue_name(&self) -> String {
+        format!("{}_alerts_classifier_queue", self.stream_name)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<ZtfAlert, AlertError> {
+        // if the schema is not cached, get it from the avro_bytes
+        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
+            (Some(schema), Some(start_idx)) => (schema, start_idx),
+            _ => {
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                (self.cached_schema.as_ref().unwrap(), startidx)
+            }
+        };
+
+        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
+
+        // if value is an error, try recomputing the schema from the avro_bytes
+        // as it could be that the schema has changed
+        let value = match value {
+            Ok(value) => value,
+            Err(error) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "Error deserializing avro message with cached schema"
+                );
+                let (schema, startidx) =
+                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
+
+                // if it's not an error this time, cache the new schema
+                // otherwise return the error
+                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
+                    .inspect_err(as_error!())?;
+                self.cached_schema = Some(schema);
+                self.cached_start_idx = Some(startidx);
+                value
+            }
+        };
+
+        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
+
+        Ok(alert)
+    }
+
+    #[instrument(
+        skip(
+            self,
+            ra,
+            dec,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            survey_matches
+        ),
+        err
+    )]
+    async fn insert_aux(
+        self: &mut Self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        prv_candidates_doc: &Vec<Document>,
+        prv_nondetections_doc: &Vec<Document>,
+        fp_hist_doc: &Vec<Document>,
+        survey_matches: &Option<Document>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+        self.insert_alert_aux(
+            object_id.into(),
+            ra,
+            dec,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            xmatches,
+            survey_matches,
+            now,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            survey_matches
+        ),
+        err
+    )]
+    async fn update_aux(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates_doc: &Vec<Document>,
+        prv_nondetections_doc: &Vec<Document>,
+        fp_hist_doc: &Vec<Document>,
+        survey_matches: &Option<Document>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let update_doc = doc! {
+            "$addToSet": {
+                "prv_candidates": { "$each": prv_candidates_doc },
+                "prv_nondetections": { "$each": prv_nondetections_doc },
+                "fp_hists": { "$each": fp_hist_doc }
+            },
+            "$set": {
+                "updated_at": now,
+                "aliases": survey_matches,
+            }
+        };
+        self.alert_aux_collection
+            .update_one(doc! { "_id": object_id }, update_doc)
+            .await?;
+        Ok(())
+    }
+
+    #[instrument(skip_all, err)]
+    async fn process_alert(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<ProcessAlertStatus, AlertError> {
+        let now = Time::now().to_jd();
+        let mut alert = self
+            .alert_from_avro_bytes(avro_bytes)
+            .await
+            .inspect_err(as_error!())?;
+
+        let candid = alert.candid();
+        let object_id = alert.object_id();
+        let ra = alert.ra();
+        let dec = alert.dec();
+
+        let prv_candidates = alert.prv_candidates.take();
+        let fp_hist = alert.fp_hists.take();
+
+        let candidate_doc = mongify(&alert.candidate);
+
+        let status = self
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
+        }
+
+        self.format_and_insert_cutouts(
+            candid,
+            alert.cutout_science,
+            alert.cutout_template,
+            alert.cutout_difference,
+            &self.alert_cutout_collection,
+        )
+        .await
+        .inspect_err(as_error!())?;
+        let alert_aux_exists = self
+            .check_alert_aux_exists(&object_id)
+            .await
+            .inspect_err(as_error!())?;
+
+        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) =
+            self.format_prv_candidates_and_fp_hist(prv_candidates, candidate_doc, fp_hist);
+
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
         );
 
         if !alert_aux_exists {
@@ -779,9 +778,10 @@ impl AlertWorker for ZtfAlertWorker {
                     &survey_matches,
                     now,
                 )
-                .await?;
+                .await
+                .inspect_err(as_error!())?;
             } else {
-                result?;
+                result.inspect_err(as_error!())?;
             }
         } else {
             self.update_aux(
@@ -792,9 +792,10 @@ impl AlertWorker for ZtfAlertWorker {
                 &survey_matches,
                 now,
             )
-            .await?;
+            .await
+            .inspect_err(as_error!())?;
         }
 
-        Ok(candid)
+        Ok(status)
     }
 }

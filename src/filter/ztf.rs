@@ -2,13 +2,14 @@ use flare::phot::{limmag_to_fluxerr, mag_to_flux};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
-    validate_filter_pipeline, Alert, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, Origin, Photometry, Survey,
+    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
+    FilterWorker, FilterWorkerError, Origin, Photometry,
 };
+use crate::utils::enums::Survey;
 
 #[derive(Debug)]
 pub struct ZtfFilter {
@@ -19,6 +20,7 @@ pub struct ZtfFilter {
 
 #[async_trait::async_trait]
 impl Filter for ZtfFilter {
+    #[instrument(skip(filter_collection), err)]
     async fn build(
         filter_id: i32,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
@@ -50,7 +52,9 @@ impl Filter for ZtfFilter {
         let mut pipeline = vec![
             doc! {
                 "$match": doc! {
-                    // during filter::run proper candis are inserted here
+                    "_id": doc! {
+                        "$in": [] // candids will be inserted here
+                    }
                 }
             },
             doc! {
@@ -264,6 +268,7 @@ pub struct ZtfFilterWorker {
 
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
+    #[instrument(err)]
     async fn new(
         config_path: &str,
         filter_ids: Option<Vec<i32>>,
@@ -321,6 +326,10 @@ impl FilterWorker for ZtfFilterWorker {
         })
     }
 
+    fn survey() -> Survey {
+        Survey::Ztf
+    }
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }
@@ -333,6 +342,7 @@ impl FilterWorker for ZtfFilterWorker {
         !self.filters.is_empty()
     }
 
+    #[instrument(skip(self, filter_results), err)]
     async fn build_alert(
         &self,
         candid: i64,
@@ -352,7 +362,8 @@ impl FilterWorker for ZtfFilterWorker {
                     "dec": "$candidate.dec",
                     "cutoutScience": 1,
                     "cutoutTemplate": 1,
-                    "cutoutDifference": 1
+                    "cutoutDifference": 1,
+                    "classifications": 1,
                 }
             },
             doc! {
@@ -406,7 +417,8 @@ impl FilterWorker for ZtfFilterWorker {
                             "$cutouts.cutoutDifference",
                             0
                         ]
-                    }
+                    },
+                    "classifications": 1,
                 }
             },
         ];
@@ -460,7 +472,7 @@ impl FilterWorker for ZtfFilterWorker {
                 zero_point,
                 origin: Origin::Alert,
                 programid,
-                survey: Survey::ZTF,
+                survey: Survey::Ztf,
                 ra,
                 dec,
             });
@@ -488,13 +500,28 @@ impl FilterWorker for ZtfFilterWorker {
                 zero_point,
                 origin: Origin::Alert,
                 programid,
-                survey: Survey::ZTF,
+                survey: Survey::Ztf,
                 ra: None,
                 dec: None,
             });
         }
 
         // we ignore the forced photometry for now, but will add it later
+
+        // last but not least, we need to get the classifications
+        let mut classifications = Vec::new();
+        // classifications in the alert is a document with classifier names as keys and the scores as values
+        // we need to convert it to a vec of Classification structs
+        if let Some(classifications_doc) = alert_document.get_document("classifications").ok() {
+            for (key, value) in classifications_doc.iter() {
+                if let Some(score) = value.as_f64() {
+                    classifications.push(Classification {
+                        classifier: key.to_string(),
+                        score,
+                    });
+                }
+            }
+        }
 
         let alert = Alert {
             candid,
@@ -503,6 +530,7 @@ impl FilterWorker for ZtfFilterWorker {
             ra,
             dec,
             filters: filter_results, // assuming you have filter results to attach
+            classifications,
             photometry,
             cutout_science,
             cutout_template,
@@ -512,6 +540,7 @@ impl FilterWorker for ZtfFilterWorker {
         Ok(alert)
     }
 
+    #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
@@ -540,6 +569,7 @@ impl FilterWorker for ZtfFilterWorker {
                 let filter = &self.filters[*i];
                 let out_documents = run_filter(
                     candids.clone(),
+                    filter.id,
                     filter.pipeline.clone(),
                     &self.alert_collection,
                 )

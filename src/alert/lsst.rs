@@ -1,22 +1,27 @@
+use crate::{
+    alert::base::{
+        Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+    },
+    conf,
+    utils::{
+        conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
+        db::mongify,
+        o11y::as_error,
+        spatial::xmatch,
+    },
+};
+
 use apache_avro::{from_avro_datum, from_value};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::trace;
-
-use crate::{
-    alert::base::{AlertError, AlertWorker, AlertWorkerError, SchemaRegistry},
-    conf,
-    utils::{
-        conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
-        db::{cutout2bsonbinary, get_coordinates, mongify},
-        spatial::xmatch,
-    },
-};
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "LSST";
+pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
+pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
@@ -35,11 +40,13 @@ pub struct DiaSource {
     /// Id of the detector where this diaSource was measured. Datatype short instead of byte because of DB concerns about unsigned bytes.
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
-    #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    pub object_id: Option<i64>,
+    #[serde(rename = "diaObjectId")]
+    #[serde(deserialize_with = "deserialize_objid_option")]
+    pub dia_object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
-    pub ss_object_id: Option<i64>,
+    #[serde(deserialize_with = "deserialize_sso_objid_option")]
+    pub ss_object_id: Option<String>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
     pub parent_dia_source_id: Option<i64>,
@@ -182,6 +189,8 @@ pub struct DiaSource {
 pub struct Candidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
+    #[serde(rename(serialize = "objectId"))]
+    pub object_id: String,
     pub magpsf: f32,
     pub sigmapsf: f32,
     pub diffmaglim: f32,
@@ -189,6 +198,7 @@ pub struct Candidate {
     pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub is_sso: bool,
 }
 
 impl TryFrom<DiaSource> for Candidate {
@@ -208,8 +218,24 @@ impl TryFrom<DiaSource> for Candidate {
 
         let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, ZP_AB);
 
+        // if dia_object_id is defined, is_sso is false
+        // if ss_object_id is defined, is_sso is true
+        // if both are undefined or both are defined, we throw an error
+        let (object_id, is_sso) = match (
+            dia_source.dia_object_id.clone(),
+            dia_source.ss_object_id.clone(),
+        ) {
+            (Some(dia_id), None) => (dia_id, false),
+            (None, Some(ss_id)) => (format!("sso{}", ss_id), true),
+            (None, None) => return Err(AlertError::MissingObjectId),
+            (Some(dia_id), Some(ss_id)) => {
+                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
+            }
+        };
+
         Ok(Candidate {
             dia_source,
+            object_id,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -217,6 +243,7 @@ impl TryFrom<DiaSource> for Candidate {
             snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            is_sso,
         })
     }
 }
@@ -227,7 +254,8 @@ impl TryFrom<DiaSource> for Candidate {
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    pub object_id: i64,
+    #[serde(deserialize_with = "deserialize_objid")]
+    pub object_id: String,
     /// Right ascension coordinate of the position of the object at time radecMjdTai.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -457,7 +485,8 @@ pub struct DiaForcedSource {
     pub dia_forced_source_id: i64,
     /// Id of the DiaObject that this DiaForcedSource was associated with.
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    pub object_id: i64,
+    #[serde(deserialize_with = "deserialize_objid")]
+    pub object_id: String,
     /// Right ascension coordinate of the position of the DiaObject at time radecMjdTai.
     pub ra: f64,
     /// Declination coordinate of the position of the DiaObject at time radecMjdTai.
@@ -555,14 +584,55 @@ pub struct LsstAlert {
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_difference: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_difference: Vec<u8>,
     #[serde(rename = "cutoutScience")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_science: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-    pub cutout_template: Option<Vec<u8>>,
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_template: Vec<u8>,
+}
+
+// Deserialize helper functions
+fn deserialize_objid<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // it's an i64 in the avro but we want to have it as a string
+    let objid: i64 = <i64 as Deserialize>::deserialize(deserializer)?;
+    Ok(objid.to_string())
+}
+
+fn deserialize_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
+    Ok(objid.map(|i| i.to_string()))
+}
+
+fn deserialize_sso_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
+    match objid {
+        Some(0) | None => Ok(None),
+        Some(i) => Ok(Some(i.to_string())),
+    }
+}
+
+pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cutout: Option<Vec<u8>> = apache_avro::serde_avro_bytes_opt::deserialize(deserializer)?;
+    // if cutout is None, return an error
+    match cutout {
+        None => Err(serde::de::Error::custom("Missing cutout data")),
+        Some(cutout) => Ok(cutout),
+    }
 }
 
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
@@ -635,6 +705,21 @@ where
     }
 }
 
+impl Alert for LsstAlert {
+    fn object_id(&self) -> String {
+        self.candidate.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.dia_source.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.dia_source.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
+}
+
 pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
@@ -646,40 +731,102 @@ pub struct LsstAlertWorker {
 }
 
 impl LsstAlertWorker {
-    pub async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<LsstAlert, AlertError> {
-        let magic = avro_bytes[0];
-        if magic != _MAGIC_BYTE {
-            Err(AlertError::MagicBytesError)?;
-        }
-        let schema_id =
-            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await?;
+    #[instrument(
+        skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, xmatches,),
+        err
+    )]
+    async fn insert_alert_aux(
+        &self,
+        object_id: String,
+        ra: f64,
+        dec: f64,
+        prv_candidates_doc: &Vec<Document>,
+        prv_nondetections_doc: &Vec<Document>,
+        fp_hist_doc: &Vec<Document>,
+        xmatches: Document,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let alert_aux_doc = doc! {
+            "_id": object_id,
+            "prv_candidates": prv_candidates_doc,
+            "prv_nondetections": prv_nondetections_doc,
+            "fp_hists": fp_hist_doc,
+            "cross_matches": xmatches,
+            "created_at": now,
+            "updated_at": now,
+            "coordinates": {
+                "radec_geojson": {
+                    "type": "Point",
+                    "coordinates": [ra - 180.0, dec],
+                },
+            },
+        };
 
-        let mut slice = &avro_bytes[5..];
-        let value = from_avro_datum(&schema, &mut slice, None)?;
+        self.alert_aux_collection
+            .insert_one(alert_aux_doc)
+            .await
+            .map_err(|e| match *e.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
+                _ => e.into(),
+            })?;
+        Ok(())
+    }
 
-        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
+    #[instrument(skip(self), err)]
+    async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
+        let alert_aux_exists = self
+            .alert_aux_collection
+            .count_documents(doc! { "_id": object_id })
+            .await?
+            > 0;
+        Ok(alert_aux_exists)
+    }
 
-        Ok(alert)
+    #[instrument(skip_all)]
+    fn format_prv_candidates_and_fp_hist(
+        &self,
+        prv_candidates: Option<Vec<Candidate>>,
+        candidate_doc: Document,
+        fp_hist: Option<Vec<ForcedPhot>>,
+        prv_nondetections: Option<Vec<NonDetection>>,
+    ) -> (Vec<Document>, Vec<Document>, Vec<Document>) {
+        let mut prv_candidates_doc = prv_candidates
+            .unwrap_or(vec![])
+            .into_iter()
+            .map(|x| mongify(&x))
+            .collect::<Vec<_>>();
+        prv_candidates_doc.push(candidate_doc);
+
+        let fp_hist_doc = fp_hist
+            .unwrap_or(vec![])
+            .into_iter()
+            .map(|x| mongify(&x))
+            .collect::<Vec<_>>();
+
+        let prv_nondetections_doc = prv_nondetections
+            .unwrap_or(vec![])
+            .into_iter()
+            .map(|x| mongify(&x))
+            .collect::<Vec<_>>();
+        (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc)
     }
 }
 
 #[async_trait::async_trait]
 impl AlertWorker for LsstAlertWorker {
-    type ObjectId = i64;
-
+    #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
-        let config_file = conf::load_config(&config_path)?;
+        let config_file =
+            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, "LSST")?;
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+            .inspect_err(as_error!("failed to load xmatch config"))?;
 
-        let db: mongodb::Database = conf::build_db(&config_file).await?;
+        let db: mongodb::Database = conf::build_db(&config_file)
+            .await
+            .inspect_err(as_error!("failed to create mongo client"))?;
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
@@ -709,9 +856,45 @@ impl AlertWorker for LsstAlertWorker {
         format!("{}_alerts_filter_queue", self.stream_name)
     }
 
+    #[instrument(skip_all, err)]
+    async fn alert_from_avro_bytes(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<LsstAlert, AlertError> {
+        let magic = avro_bytes[0];
+        if magic != _MAGIC_BYTE {
+            Err(AlertError::MagicBytesError)?;
+        }
+        let schema_id =
+            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
+        let schema = self
+            .schema_registry
+            .get_schema("alert-packet", schema_id)
+            .await?;
+
+        let mut slice = &avro_bytes[5..];
+        let value = from_avro_datum(&schema, &mut slice, None)?;
+
+        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
+
+        Ok(alert)
+    }
+
+    #[instrument(
+        skip(
+            self,
+            ra,
+            dec,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            _survey_matches
+        ),
+        err
+    )]
     async fn insert_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
@@ -720,53 +903,40 @@ impl AlertWorker for LsstAlertWorker {
         _survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
         let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-        trace!("Xmatch took: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-        let alert_aux_doc = doc! {
-            "_id": object_id.into(),
-            "prv_candidates": prv_candidates_doc,
-            "prv_nondetections": prv_nondetections_doc,
-            "fp_hists": fp_hist_doc,
-            "cross_matches": xmatches,
-            "created_at": now,
-            "updated_at": now,
-            "coordinates": {
-                "radec_geojson": {
-                    "type": "Point",
-                    "coordinates": [ra - 180.0, dec],
-                },
-            },
-        };
-
-        self.alert_aux_collection
-            .insert_one(alert_aux_doc)
-            .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
-                _ => e.into(),
-            })?;
-
-        trace!("Inserting alert_aux: {:?}", start.elapsed());
-
+        self.insert_alert_aux(
+            object_id.into(),
+            ra,
+            dec,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            xmatches,
+            now,
+        )
+        .await?;
         Ok(())
     }
 
+    #[instrument(
+        skip(
+            self,
+            prv_candidates_doc,
+            prv_nondetections_doc,
+            fp_hist_doc,
+            _survey_matches
+        ),
+        err
+    )]
     async fn update_aux(
         self: &mut Self,
-        object_id: impl Into<Self::ObjectId> + Send,
+        object_id: &str,
         prv_candidates_doc: &Vec<Document>,
         prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
         _survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let start = std::time::Instant::now();
-
         let update_doc = doc! {
             "$addToSet": {
                 "prv_candidates": { "$each": prv_candidates_doc },
@@ -777,109 +947,76 @@ impl AlertWorker for LsstAlertWorker {
                 "updated_at": now,
             }
         };
-
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id.into() }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_doc)
             .await?;
-
-        trace!("Updating alert_aux: {:?}", start.elapsed());
-
         Ok(())
     }
 
-    async fn process_alert(self: &mut Self, avro_bytes: &[u8]) -> Result<i64, AlertError> {
+    #[instrument(skip_all, err)]
+    async fn process_alert(
+        self: &mut Self,
+        avro_bytes: &[u8],
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
+        let mut alert = self
+            .alert_from_avro_bytes(avro_bytes)
+            .await
+            .inspect_err(as_error!())?;
 
-        let mut alert = self.alert_from_avro_bytes(avro_bytes).await?;
-
-        let start = std::time::Instant::now();
+        let candid = alert.candid();
+        let object_id = alert.object_id();
+        let ra = alert.ra();
+        let dec = alert.dec();
 
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
         let prv_nondetections = alert.prv_nondetections.take();
 
-        let candid = alert.candid;
-        let object_id = alert
-            .candidate
-            .dia_source
-            .object_id
-            .ok_or(AlertError::MissingObjectId)?;
-        let ra = alert.candidate.dia_source.ra;
-        let dec = alert.candidate.dia_source.dec;
-
         let candidate_doc = mongify(&alert.candidate);
 
-        let alert_doc = doc! {
-            "_id": &candid,
-            "objectId": &object_id,
-            "candidate": &candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
-        self.alert_collection
-            .insert_one(alert_doc)
+        let status = self
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
             .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertExists,
-                _ => e.into(),
-            })?;
+            .inspect_err(as_error!())?;
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
+        }
 
-        trace!("Formatting & Inserting alert: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(alert.cutout_science.ok_or(AlertError::MissingCutout)?),
-            "cutoutTemplate": cutout2bsonbinary(alert.cutout_template.ok_or(AlertError::MissingCutout)?),
-            "cutoutDifference": cutout2bsonbinary(alert.cutout_difference.ok_or(AlertError::MissingCutout)?),
-        };
-
-        self.alert_cutout_collection.insert_one(cutout_doc).await?;
-
-        trace!("Formatting & Inserting cutout: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
+        self.format_and_insert_cutouts(
+            candid,
+            alert.cutout_science,
+            alert.cutout_template,
+            alert.cutout_difference,
+            &self.alert_cutout_collection,
+        )
+        .await
+        .inspect_err(as_error!())?;
         let alert_aux_exists = self
-            .alert_aux_collection
-            .count_documents(doc! { "_id": &object_id })
-            .await?
-            > 0;
+            .check_alert_aux_exists(&object_id)
+            .await
+            .inspect_err(as_error!())?;
 
-        trace!("Checking if alert_aux exists: {:?}", start.elapsed());
-
-        let start = std::time::Instant::now();
-
-        let mut prv_candidates_doc = prv_candidates
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| Ok(mongify(&x)))
-            .collect::<Result<Vec<_>, AlertError>>()?;
-        prv_candidates_doc.push(candidate_doc);
-
-        let fp_hist_doc = fp_hist
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| Ok(mongify(&x)))
-            .collect::<Result<Vec<_>, AlertError>>()?;
-
-        let prv_nondetections_doc = prv_nondetections
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| Ok(mongify(&x)))
-            .collect::<Result<Vec<_>, AlertError>>()?;
-
-        trace!("Formatting prv_candidates & fp_hist: {:?}", start.elapsed());
+        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) = self
+            .format_prv_candidates_and_fp_hist(
+                prv_candidates,
+                candidate_doc,
+                fp_hist,
+                prv_nondetections,
+            );
 
         if !alert_aux_exists {
             let result = self
                 .insert_aux(
-                    object_id,
+                    &object_id,
                     ra,
                     dec,
                     &prv_candidates_doc,
@@ -891,29 +1028,31 @@ impl AlertWorker for LsstAlertWorker {
                 .await;
             if let Err(AlertError::AlertAuxExists) = result {
                 self.update_aux(
-                    object_id,
+                    &object_id,
                     &prv_candidates_doc,
                     &prv_nondetections_doc,
                     &fp_hist_doc,
                     &None,
                     now,
                 )
-                .await?;
+                .await
+                .inspect_err(as_error!())?;
             } else {
-                result?;
+                result.inspect_err(as_error!())?;
             }
         } else {
             self.update_aux(
-                object_id,
+                &object_id,
                 &prv_candidates_doc,
                 &prv_nondetections_doc,
                 &fp_hist_doc,
                 &None,
                 now,
             )
-            .await?;
+            .await
+            .inspect_err(as_error!())?;
         }
 
-        Ok(candid)
+        Ok(status)
     }
 }

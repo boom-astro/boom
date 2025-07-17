@@ -1,10 +1,16 @@
-use crate::{conf, ml::models::ModelError, utils::fits::CutoutError, utils::worker::WorkerCmd};
+use crate::{
+    conf,
+    ml::models::ModelError,
+    utils::{
+        fits::CutoutError,
+        worker::{should_terminate, WorkerCmd},
+    },
+};
 use mongodb::bson::Document;
 use redis::AsyncCommands;
 use std::num::NonZero;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, warn};
+use tracing::{debug, error, instrument};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MLWorkerError {
@@ -33,16 +39,17 @@ pub trait MLWorker {
         &self,
         candids: &[i64], // this is a slice of candids to process
     ) -> Result<Vec<Document>, MLWorkerError>;
-    async fn process_alerts(&self, alerts: &[i64]) -> Result<Vec<String>, MLWorkerError>;
+    async fn process_alerts(&mut self, alerts: &[i64]) -> Result<Vec<String>, MLWorkerError>;
 }
 
 #[tokio::main]
+#[instrument(skip_all, err)]
 pub async fn run_ml_worker<T: MLWorker>(
-    id: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), MLWorkerError> {
-    let ml_worker = T::new(config_path).await?;
+    debug!(?config_path);
+    let mut ml_worker = T::new(config_path).await?;
 
     let config = conf::load_config(config_path)?;
     let mut con = conf::build_redis(&config).await?;
@@ -50,51 +57,32 @@ pub async fn run_ml_worker<T: MLWorker>(
     let input_queue = ml_worker.input_queue_name();
     let output_queue = ml_worker.output_queue_name();
 
-    let command_interval: i64 = 500;
+    let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
     loop {
         if command_check_countdown == 0 {
-            match receiver.try_recv() {
-                Ok(WorkerCmd::TERM) => {
-                    info!("alert worker {} received termination command", &id);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("alert worker {} receiver disconnected, terminating", &id);
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    command_check_countdown = command_interval;
-                }
+            if should_terminate(&mut receiver) {
+                break;
             }
-        }
-        // if the queue is empty, wait for a bit and continue the loop
-        let queue_len: i64 = con.llen(&input_queue).await?;
-        if queue_len == 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            continue;
+            command_check_countdown = command_interval;
         }
 
-        // get candids from redis
         let candids: Vec<i64> = con
             .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
             .await?;
 
-        let nb_candids = candids.len();
-        if nb_candids == 0 {
-            // sleep for a bit if no alerts were found
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        if candids.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            command_check_countdown = 0;
             continue;
         }
 
         let processed_alerts = ml_worker.process_alerts(&candids).await?;
+        command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
-        // push that back to redis to the output queue
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await?;
-
-        command_check_countdown -= nb_candids as i64;
     }
 
     Ok(())

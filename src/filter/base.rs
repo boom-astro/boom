@@ -1,3 +1,11 @@
+use crate::{
+    conf,
+    utils::{
+        enums::Survey,
+        worker::{should_terminate, WorkerCmd},
+    },
+};
+
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
@@ -7,10 +15,7 @@ use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use std::num::NonZero;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
-use tracing::{error, info, trace, warn};
-
-use crate::{conf, utils::worker::WorkerCmd};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
@@ -33,6 +38,17 @@ const ALERT_SCHEMA: &str = r#"
                     {"name": "filter_id", "type": "int"},
                     {"name": "passed_at", "type": "double"},
                     {"name": "annotations", "type": "string"}
+                ]
+            }
+        }},
+        {"name": "classifications", "type": {
+            "type": "array",
+            "items": {
+                "type": "record",
+                "name": "Classification",
+                "fields": [
+                    {"name": "classifier", "type": "string"},
+                    {"name": "score", "type": "double"}
                 ]
             }
         }},
@@ -115,12 +131,6 @@ pub enum Origin {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum Survey {
-    ZTF,
-    LSST,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
     pub flux: Option<f64>,
@@ -132,6 +142,12 @@ pub struct Photometry {
     pub survey: Survey,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Classification {
+    pub classifier: String,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -150,6 +166,7 @@ pub struct Alert {
     pub ra: f64,
     pub dec: f64,
     pub filters: Vec<FilterResults>,
+    pub classifications: Vec<Classification>,
     pub photometry: Vec<Photometry>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
     pub cutout_science: Vec<u8>,
@@ -166,6 +183,7 @@ pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
     Ok(schema)
 }
 
+#[instrument(skip(alert, schema), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
     let mut writer = Writer::new(schema, Vec::new());
     writer.append_ser(alert).inspect_err(|e| {
@@ -179,25 +197,28 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
 }
 
 // TODO, use the config file to get the kafka server
-pub async fn create_producer() -> Result<FutureProducer, FilterWorkerError> {
+pub async fn create_producer(
+    kafka_config: &conf::SurveyKafkaConfig,
+) -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
+        .set("bootstrap.servers", &kafka_config.producer)
         .set("message.timeout.ms", "5000")
         .create()?;
 
     Ok(producer)
 }
 
+#[instrument(skip(alert, schema, producer), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub async fn send_alert_to_kafka(
     alert: &Alert,
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-    id: &str,
+    key: &str,
 ) -> Result<(), FilterWorkerError> {
     let encoded = alert_to_avro_bytes(alert, schema)?;
 
-    let record = FutureRecord::to(&topic).key(id).payload(&encoded);
+    let record = FutureRecord::to(&topic).key(key).payload(&encoded);
 
     producer
         .send(record, std::time::Duration::from_secs(0))
@@ -360,6 +381,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     Ok(())
 }
 
+#[instrument(skip(filter_collection), err)]
 pub async fn get_filter_object(
     filter_id: i32,
     catalog: &str,
@@ -419,8 +441,10 @@ pub async fn get_filter_object(
     Ok(filter_obj)
 }
 
+#[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
     candids: Vec<i64>,
+    filter_id: i32,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {
@@ -498,6 +522,7 @@ pub trait FilterWorker {
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
+    fn survey() -> crate::utils::enums::Survey;
     async fn build_alert(
         &self,
         candid: i64,
@@ -507,20 +532,22 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
+#[instrument(skip_all, err)]
 pub async fn run_filter_worker<T: FilterWorker>(
-    id: String,
+    key: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
+    debug!(?config_path);
+
     let config = conf::load_config(config_path)?;
+    let kafka_config = conf::build_kafka_config(&config, &T::survey())
+        .inspect_err(|e| error!("Failed to build Kafka config: {}", e))?;
 
     let mut filter_worker = T::new(config_path, None).await?;
 
     if !filter_worker.has_filters() {
-        info!(
-            "No filters available for filter worker {} to process alerts",
-            &id
-        );
+        info!("no filters available for processing");
         return Ok(());
     }
 
@@ -530,32 +557,26 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
 
-    let producer = create_producer().await?;
+    let producer = create_producer(&kafka_config).await?;
     let schema = load_alert_schema()?;
 
-    let command_interval: i64 = 500;
+    let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
     loop {
         if command_check_countdown == 0 {
-            match receiver.try_recv() {
-                Ok(WorkerCmd::TERM) => {
-                    info!("filterworker {} received termination command", &id);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("filter worker {} receiver disconnected, terminating", &id);
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    command_check_countdown = command_interval;
-                }
+            if should_terminate(&mut receiver) {
+                break;
+            } else {
+                command_check_countdown = command_interval + 1;
             }
         }
+        command_check_countdown -= 1;
         // if the queue is empty, wait for a bit and continue the loop
         let queue_len: i64 = con.llen(&input_queue).await?;
         if queue_len == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            command_check_countdown = 0;
             continue;
         }
 
@@ -572,15 +593,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         let alerts_output = filter_worker.process_alerts(&alerts).await?;
+        command_check_countdown -= nb_alerts - 1; // As if iterated this many times
+
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &id).await?;
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key).await?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
                 &alert.candid,
                 &output_topic
             );
         }
-        command_check_countdown -= nb_alerts as i64;
     }
 
     Ok(())
