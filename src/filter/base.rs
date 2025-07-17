@@ -94,8 +94,6 @@ pub enum FilterError {
     FilterNotFound,
     #[error("filter pipeline could not be parsed")]
     FilterPipelineError,
-    #[error("failed to deserialize filter pipeline")]
-    DeserializePipelineError(#[source] serde_json::Error),
     #[error("invalid filter pipeline")]
     InvalidFilterPipeline,
     #[error("invalid filter id")]
