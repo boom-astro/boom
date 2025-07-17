@@ -310,6 +310,7 @@ pub fn build_xmatch_configs(
     Ok(catalog_xmatch_configs)
 }
 
+#[derive(Debug, Clone)]
 pub struct SurveyKafkaConfig {
     pub consumer: String, // URL of the Kafka broker for the consumer (alert worker input)
     pub producer: String, // URL of the Kafka broker for the producer (filter worker output)

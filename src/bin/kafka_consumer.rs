@@ -8,7 +8,7 @@ use boom::{
 
 use chrono::{NaiveDate, NaiveDateTime};
 use clap::Parser;
-use tracing::instrument;
+use tracing::{error, info, instrument};
 
 #[derive(Parser)]
 struct Cli {
@@ -68,47 +68,67 @@ async fn run(args: Cli) {
 
     match args.survey {
         Survey::Ztf => {
-            let consumer = ZtfAlertConsumer::new(
-                args.processes,
-                Some(args.max_in_queue),
-                None,
-                None,
-                None,
-                args.program_id,
-                &args.config,
-            );
+            let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
             if args.clear {
-                let _ = consumer.clear_output_queue();
+                let _ = consumer.clear_output_queue(&args.config);
             }
-            consumer.consume(timestamp).await;
+            match consumer
+                .consume(
+                    timestamp,
+                    &args.config,
+                    false,
+                    None,
+                    Some(args.max_in_queue),
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
         }
         Survey::Lsst => {
-            let consumer = LsstAlertConsumer::new(
-                args.processes,
-                Some(args.max_in_queue),
-                None,
-                None,
-                None,
-                simulated,
-                &args.config,
-            );
+            let consumer = LsstAlertConsumer::new(None, simulated);
             if args.clear {
-                let _ = consumer.clear_output_queue();
+                let _ = consumer.clear_output_queue(&args.config);
             }
-            consumer.consume(timestamp).await;
+            match consumer
+                .consume(
+                    timestamp,
+                    &args.config,
+                    false,
+                    None,
+                    Some(args.max_in_queue),
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
         }
         Survey::Decam => {
-            let consumer = DecamAlertConsumer::new(
-                args.processes,
-                Some(args.max_in_queue),
-                None,
-                None,
-                &args.config,
-            );
+            let consumer = DecamAlertConsumer::new(None);
             if args.clear {
-                let _ = consumer.clear_output_queue();
+                let _ = consumer.clear_output_queue(&args.config);
             }
-            consumer.consume(timestamp).await;
+            match consumer
+                .consume(
+                    timestamp,
+                    &args.config,
+                    false,
+                    None,
+                    Some(args.max_in_queue),
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
         }
     }
 }

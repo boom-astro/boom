@@ -21,6 +21,7 @@ kafka:
   consumer:
     ZTF: "localhost:9092" # ZTF alert consumer
     LSST: "usdf-alert-stream-dev.lsst.cloud:9094" # LSST alert consumer
+    DECAM: "localhost:9092" # DECam alert consumer
   producer: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
   ZTF:

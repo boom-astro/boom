@@ -1,7 +1,7 @@
-use boom::kafka::{AlertProducer, ZtfAlertProducer};
-use boom::utils::enums::ProgramId;
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use boom::{
+    kafka::{AlertConsumer, AlertProducer, ZtfAlertConsumer, ZtfAlertProducer},
+    utils::{enums::ProgramId, testing::TEST_CONFIG_FILE},
+};
 
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -19,17 +19,19 @@ async fn test_download_from_archive() {
 }
 
 #[tokio::test]
-async fn test_produce_from_archive() {
+async fn test_produce_and_consume_from_archive() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let date_str = "20240617".to_string();
-    let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y%m%d").unwrap();
+    let date_str = "20240617";
+    let date =
+        chrono::NaiveDateTime::parse_from_str(&format!("{}T00:00:00", date_str), "%Y%m%dT%H:%M:%S")
+            .unwrap();
     let ztf_alert_producer =
-        ZtfAlertProducer::new(date, 0, ProgramId::Public, "localhost:9092", false);
+        ZtfAlertProducer::new(date.date(), 0, ProgramId::Public, "localhost:9092", false);
 
     let topic = uuid::Uuid::new_v4().to_string();
 
@@ -38,62 +40,25 @@ async fn test_produce_from_archive() {
     assert!(result.unwrap() == 710);
     assert!(std::path::Path::new(&format!("data/alerts/ztf/public/{}", &date_str)).exists());
 
-    let consumer: BaseConsumer = match ClientConfig::new()
-        .set("group.id", "test")
-        .set("bootstrap.servers", "localhost:9092")
-        .create()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            assert!(false, "Error creating consumer: {:?}", e);
-            return;
-        }
-    };
+    let timestamp = date.and_utc().timestamp();
 
-    match consumer.subscribe(&[&topic]) {
-        Ok(_) => {}
-        Err(e) => {
-            assert!(false, "Error subscribing to topic: {:?}", e);
-            return;
-        }
-    }
+    let ztf_alert_consumer = ZtfAlertConsumer::new(None, Some(ProgramId::Public));
 
-    let metadata = match consumer.fetch_metadata(Some(&topic), std::time::Duration::from_secs(1)) {
-        Ok(m) => m,
-        Err(e) => {
-            assert!(false, "Error fetching metadata: {:?}", e);
-            return;
-        }
-    };
+    ztf_alert_consumer
+        .clear_output_queue(TEST_CONFIG_FILE)
+        .await
+        .unwrap();
 
-    let mut found_topic = false;
-
-    for metadata_topic in metadata.topics().iter() {
-        if metadata_topic.name() == topic {
-            found_topic = true;
-            assert_eq!(metadata_topic.partitions().len(), 15);
-            let mut total = 0;
-            for partition in metadata_topic.partitions().iter() {
-                match consumer.fetch_watermarks(
-                    metadata_topic.name(),
-                    partition.id(),
-                    std::time::Duration::from_secs(1),
-                ) {
-                    Ok((low, high)) => {
-                        assert!(low >= 0);
-                        assert!(high >= 0);
-                        total += high - low;
-                    }
-                    Err(e) => {
-                        assert!(false, "Error fetching watermarks: {:?}", e);
-                        return;
-                    }
-                }
-            }
-
-            assert_eq!(total, 710);
-        }
-    }
-
-    assert!(found_topic);
+    ztf_alert_consumer
+        .consume(
+            timestamp,
+            TEST_CONFIG_FILE,
+            true,
+            None,
+            None,
+            None,
+            Some(topic),
+        )
+        .await
+        .unwrap();
 }
