@@ -146,6 +146,21 @@ async fn db_from_config(config: AppConfig) -> Database {
         eprintln!("Failed to initialize API admin user: {}", e);
     }
 
+    // Create a unique index for the filters collection
+    let filters_collection: mongodb::Collection<mongodb::bson::Document> = db.collection("filters");
+    let filter_id_index = mongodb::IndexModel::builder()
+        .keys(doc! { "id": 1 })
+        .options(
+            mongodb::options::IndexOptions::builder()
+                .unique(true)
+                .build(),
+        )
+        .build();
+    let _ = filters_collection
+        .create_index(filter_id_index)
+        .await
+        .expect("failed to create id index on filters collection");
+
     db
 }
 
