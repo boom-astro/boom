@@ -179,7 +179,8 @@ struct FilterPipelinePatch {
         (status = 200, description = "Filter version added successfully"),
         (status = 400, description = "Invalid filter submitted"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Filters"]
 )]
 #[patch("/filters/{filter_id}")]
 pub async fn add_filter_version(
@@ -284,7 +285,8 @@ pub struct FilterPost {
         (status = 200, description = "Filter created successfully", body = Filter),
         (status = 400, description = "Invalid filter submitted"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Filters"]
 )]
 #[post("/filters")]
 pub async fn post_filter(
