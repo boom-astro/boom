@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus},
+    alert::{AlertWorker, DecamAlert, ProcessAlertStatus},
     conf,
     utils::enums::Survey,
     utils::testing::{
@@ -14,11 +14,14 @@ async fn test_decam_alert_from_avro_bytes() {
 
     let (candid, object_id, ra, dec, bytes_content) =
         AlertRandomizer::new_randomized(Survey::Decam).get().await;
-    let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
+    let alert = alert_worker
+        .schema_cache
+        .alert_from_avro_bytes(&bytes_content)
+        .await;
     assert!(alert.is_ok());
 
     // validate the alert
-    let alert = alert.unwrap();
+    let alert: DecamAlert = alert.unwrap();
     assert_eq!(alert.publisher, "DESIRT");
     assert_eq!(alert.object_id, object_id);
     assert_eq!(alert.candid, candid);

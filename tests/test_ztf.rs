@@ -1,7 +1,7 @@
 use boom::{
     alert::{
-        AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
-        ZTF_LSST_XMATCH_RADIUS,
+        AlertWorker, ProcessAlertStatus, ZtfAlert, DECAM_DEC_RANGE, LSST_DEC_RANGE,
+        ZTF_DECAM_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
     },
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
@@ -23,11 +23,14 @@ async fn test_alert_from_avro_bytes() {
 
     let (candid, object_id, ra, dec, bytes_content) =
         AlertRandomizer::new_randomized(Survey::Ztf).get().await;
-    let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
+    let alert = alert_worker
+        .schema_cache
+        .alert_from_avro_bytes(&bytes_content)
+        .await;
     assert!(alert.is_ok());
 
     // validate the alert
-    let mut alert = alert.unwrap();
+    let mut alert: ZtfAlert = alert.unwrap();
     assert_eq!(alert.schemavsn, "4.02");
     assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
     assert_eq!(alert.object_id, object_id);

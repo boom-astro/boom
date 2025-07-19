@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus},
+    alert::{AlertWorker, LsstAlert, ProcessAlertStatus},
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::{
@@ -19,9 +19,12 @@ async fn test_lsst_alert_from_avro_bytes() {
     let (candid, object_id, ra, dec, bytes_content) =
         AlertRandomizer::new_randomized(Survey::Lsst).get().await;
     let alert = alert_worker
+        .schema_registry
         .alert_from_avro_bytes(&bytes_content)
-        .await
-        .unwrap();
+        .await;
+    assert!(alert.is_ok());
+
+    let alert: LsstAlert = alert.unwrap();
 
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.candidate.object_id, object_id);

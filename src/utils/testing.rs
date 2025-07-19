@@ -211,19 +211,14 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf => {
-                let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-                let reader = Reader::new(&payload[..]).unwrap();
-                let schema = reader.writer_schema().clone();
-                (
-                    Some(Self::randomize_object_id(&survey)),
-                    Some(payload),
-                    Some(schema),
-                    None,
-                )
-            }
-            Survey::Decam => {
-                let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
+            Survey::Ztf | Survey::Decam => {
+                let payload = match survey {
+                    Survey::Ztf => {
+                        fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
+                    }
+                    Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    _ => unreachable!(),
+                };
                 let reader = Reader::new(&payload[..]).unwrap();
                 let schema = reader.writer_schema().clone();
                 (
@@ -242,7 +237,6 @@ impl AlertRandomizer {
                     Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
                 )
             }
-            _ => panic!("Unsupported survey for randomization"),
         };
         let candid = Some(rand::rng().random_range(0..i64::MAX));
         let ra = Some(rand::rng().random_range(0.0..360.0));
@@ -320,7 +314,6 @@ impl AlertRandomizer {
                 object_id
             }
             Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
-            _ => panic!("Unsupported survey for randomization"),
         }
     }
 
@@ -560,7 +553,6 @@ impl AlertRandomizer {
                     new_payload,
                 )
             }
-            _ => panic!("Unsupported survey for randomization"),
         }
     }
 
