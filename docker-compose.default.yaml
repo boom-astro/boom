@@ -1,6 +1,7 @@
 volumes:
   mongodb:
   valkey:
+  kafka_data:
 
 networks:
   boom:
@@ -64,8 +65,10 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 15
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     healthcheck:
       test: /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:9092
       interval: 10s

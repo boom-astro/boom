@@ -130,6 +130,43 @@ pub trait AlertProducer {
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>>;
     fn default_nb_partitions(&self) -> usize;
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
+        // TODO: refactor this new bit, make it nicer, unify with what's already in this module
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &self.server_url())
+            .create()?;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let metadata = consumer.fetch_metadata(None, timeout)?;
+        if let Some(topic_metadata) = metadata
+            .topics()
+            .iter()
+            .find(|t| t.name() == self.topic_name())
+        {
+            // Topic exists, skip producing if it has the expected number of messages.
+            let total_messages = topic_metadata.partitions().iter().try_fold(
+                0u32,
+                |total_messages, partition_metadata| {
+                    let partition_id = partition_metadata.id();
+                    consumer
+                        .fetch_watermarks(&self.topic_name(), partition_id, timeout)
+                        .map(|(low, high)| {
+                            debug!(
+                                ?partition_id,
+                                ?low,
+                                ?high,
+                                messages = high - low,
+                                "watermarks"
+                            );
+                            total_messages + (high - low) as u32
+                        })
+                },
+            )?;
+            debug!(?total_messages);
+
+            // TODO: need to get the expected count
+            // TODO: finish the produce-or-not logic
+        }
+
         match self.download_alerts_from_archive().await {
             Ok(count) => count,
             Err(e) => {
