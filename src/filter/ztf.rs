@@ -8,7 +8,10 @@ use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
     FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
 };
-use crate::utils::enums::Survey;
+use crate::utils::{
+    enums::Survey,
+    o11y::as_error,
+};
 
 #[derive(Debug)]
 pub struct ZtfFilter {
@@ -474,10 +477,13 @@ impl FilterWorker for ZtfFilterWorker {
                 let now_ts = chrono::Utc::now().timestamp_millis() as f64;
 
                 for doc in out_documents {
-                    let candid = doc.get_i64("_id")?;
+                    // DEBUG, print the document
+                    debug!("Processing document: {:?}", doc);
+                    let candid = doc.get_i64("_id").inspect_err(as_error!("Failed to get candid from document"))?;
                     // might want to have the annotations as an optional field instead of empty
                     let annotations =
-                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
+                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))
+                        .inspect_err(as_error!("Failed to serialize annotations"))?;
                     let filter_result = FilterResults {
                         filter_id: filter.id,
                         passed_at: now_ts,
