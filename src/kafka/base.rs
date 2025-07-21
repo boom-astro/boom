@@ -200,14 +200,23 @@ pub trait AlertProducer {
 
             // we do not specify a key for the record, to let kafka distribute messages across partitions
             // across partitions evenly with its built-in round-robin strategy
-            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
-                .payload(&payload)
-                .timestamp(chrono::Utc::now().timestamp_millis());
-
-            producer
-                .send(record, std::time::Duration::from_secs(0))
-                .await
-                .unwrap();
+            // use retries in case of transient errors
+            let mut n_retries = 6;
+            while n_retries > 0 {
+                let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
+                    .payload(&payload)
+                    .timestamp(chrono::Utc::now().timestamp_millis());
+                let status = producer.send(record, std::time::Duration::from_secs(5)).await;
+                match status {
+                    Ok(delivery) => {
+                        break;
+                    }
+                    Err((e, message)) => {
+                        error!("Failed to deliver message: {:?}, retrying ({} left)", e, n_retries - 1);
+                    }
+                }
+                n_retries -= 1;
+            }
 
             total_pushed += 1;
             if verbose {
@@ -339,7 +348,7 @@ pub trait AlertConsumer: Sized {
     }
 }
 
-#[instrument(skip(username, password, survey_config))]
+#[instrument(skip(username, password, config, survey_config))]
 pub async fn consume_partitions(
     id: &str,
     topic: &str,
@@ -418,8 +427,7 @@ pub async fn consume_partitions(
             }
         }
         match consumer.poll(tokio::time::Duration::from_secs(5)) {
-            Some(result) => {
-                let message = result.inspect_err(as_error!("failed to get message"))?;
+            Some(Ok(message)) => {
                 let payload = message.payload().unwrap_or_default();
                 con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
                     .await
@@ -435,9 +443,15 @@ pub async fn consume_partitions(
                     );
                 }
             }
+            Some(Err(e)) => {
+                error!("Error while consuming from Kafka, retrying: {}", e);
+                std::thread::sleep(core::time::Duration::from_secs(1));
+                continue;
+            }
             None => {
                 trace!("No message available");
                 if exit_on_eof {
+                    info!("No more messages, exiting consumer {}", id);
                     break;
                 }
             }

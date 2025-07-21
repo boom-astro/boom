@@ -145,7 +145,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
         if count > 0 {
-            info!("Alerts already downloaded to {}{}", data_folder, file_name);
+            info!("Alerts already downloaded to {}/{}", data_folder, file_name);
             return Ok(count as i64);
         }
 
