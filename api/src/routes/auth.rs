@@ -26,6 +26,7 @@ pub struct FailedAuthResponse {
     pub error_description: String,
 }
 
+/// Authenticate a user
 #[utoipa::path(
     post,
     path = "/auth",
@@ -34,7 +35,8 @@ pub struct FailedAuthResponse {
         (status = 200, description = "Successful authentication", body = AuthResponse),
         (status = 401, description = "Invalid Client", body = FailedAuthResponse),
         (status = 400, description = "Invalid Request", body = FailedAuthResponse),
-    )
+    ),
+    tags=["Auth"]
 )]
 #[post("/auth")]
 pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Json<AuthPost>) -> HttpResponse {

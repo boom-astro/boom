@@ -22,6 +22,7 @@ pub struct User {
     pub is_admin: bool,   // Indicates if the user is an admin
 }
 
+/// Add a new user (admin only)
 #[utoipa::path(
     post,
     path = "/users",
@@ -30,7 +31,8 @@ pub struct User {
         (status = 200, description = "User created successfully", body = User),
         (status = 409, description = "User already exists"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Users"]
 )]
 #[post("/users")]
 pub async fn post_user(
@@ -90,13 +92,15 @@ pub struct UserGet {
     pub is_admin: bool,
 }
 
+/// Get a list of users
 #[utoipa::path(
     get,
     path = "/users",
     responses(
         (status = 200, description = "Users retrieved successfully", body = [User]),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Users"]
 )]
 #[get("/users")]
 pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
@@ -123,6 +127,7 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     }
 }
 
+/// Delete a user by ID (admin only)
 #[utoipa::path(
     delete,
     path = "/users/{user_id}",
@@ -130,7 +135,8 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
         (status = 200, description = "User deleted successfully"),
         (status = 404, description = "User not found"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Users"]
 )]
 #[delete("/users/{user_id}")]
 pub async fn delete_user(
