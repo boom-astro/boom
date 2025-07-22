@@ -163,8 +163,40 @@ pub trait AlertProducer {
             )?;
             debug!(?total_messages);
 
-            // TODO: need to get the expected count
-            // TODO: finish the produce-or-not logic
+            // Count the number of Avro files in the data directory
+            let avro_count = count_files_in_dir(&self.data_directory(), Some(&["avro"]))?;
+
+            // If they don't match, delete all messages from the topic and
+            // start fresh
+            if total_messages != avro_count as u32 {
+                warn!(
+                    "Topic {} already exists with {} messages, but {} Avro files found in data directory",
+                    self.topic_name(),
+                    total_messages,
+                    avro_count
+                );
+                // Delete all messages from Kafka topic so we start fresh
+                let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
+                    .set("bootstrap.servers", &self.server_url())
+                    .create()?;
+                let opts =
+                    AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+                admin_client
+                    .delete_topics(&[&self.topic_name()], &opts)
+                    .await
+                    .map_err(|e: KafkaError| {
+                        error!("Failed to delete topic {}: {}", self.topic_name(), e);
+                        e.into()
+                    })?;
+                info!("Deleted topic {}", self.topic_name());
+            } else {
+                info!(
+                    "Topic {} already exists with {} messages, no need to produce more",
+                    self.topic_name(),
+                    total_messages
+                );
+                return Ok(total_messages as i64);
+            }
         }
 
         match self.download_alerts_from_archive().await {
