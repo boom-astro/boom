@@ -28,7 +28,8 @@ struct CountQuery {
         (status = 200, description = "Count of documents in the catalog", body = serde_json::Value),
         (status = 404, description = "Catalog does not exist"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Queries"]
 )]
 #[post("/queries/count")]
 pub async fn post_count_query(
@@ -71,7 +72,8 @@ struct EstimatedCountQuery {
         (status = 200, description = "Approximately count documents in the catalog", body = serde_json::Value),
         (status = 404, description = "Catalog does not exist"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Queries"]
 )]
 #[post("/queries/estimated-count")]
 pub async fn post_estimated_count_query(
@@ -137,7 +139,8 @@ impl FindQuery {
         (status = 200, description = "Documents found in the catalog", body = serde_json::Value),
         (status = 400, description = "Bad request"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Queries"]
 )]
 #[post("/queries/find")]
 pub async fn post_find_query(db: web::Data<Database>, body: web::Json<FindQuery>) -> HttpResponse {
@@ -254,7 +257,8 @@ impl ConeSearchQuery {
         (status = 200, description = "Cone search results", body = serde_json::Value),
         (status = 400, description = "Bad request"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Queries"]
 )]
 #[post("/queries/cone-search")]
 pub async fn post_cone_search_query(
