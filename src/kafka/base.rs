@@ -168,7 +168,7 @@ pub trait AlertProducer {
 
             // If they don't match, delete all messages from the topic and
             // start fresh
-            if total_messages != avro_count as u32 {
+            if total_messages > 0 && total_messages != avro_count as u32 {
                 warn!(
                     "Topic {} already exists with {} messages, but {} Avro files found in data directory",
                     self.topic_name(),
@@ -180,7 +180,7 @@ pub trait AlertProducer {
                 return Err(
                     "Topic exists with different message count; manually delete the topic".into(),
                 );
-            } else {
+            } else if total_messages == avro_count as u32 {
                 info!(
                     "Topic {} already exists with {} messages, no need to produce more",
                     self.topic_name(),
