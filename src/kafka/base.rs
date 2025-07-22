@@ -175,20 +175,11 @@ pub trait AlertProducer {
                     total_messages,
                     avro_count
                 );
-                // Delete all messages from Kafka topic so we start fresh
-                let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
-                    .set("bootstrap.servers", &self.server_url())
-                    .create()?;
-                let opts =
-                    AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
-                admin_client
-                    .delete_topics(&[&self.topic_name()], &opts)
-                    .await
-                    .map_err(|e: KafkaError| {
-                        error!("Failed to delete topic {}: {}", self.topic_name(), e);
-                        e.into()
-                    })?;
-                info!("Deleted topic {}", self.topic_name());
+                // TODO: Delete all messages from Kafka topic so we start fresh
+                // For now, just return an error
+                return Err(
+                    "Topic exists with different message count; manually delete the topic".into(),
+                );
             } else {
                 info!(
                     "Topic {} already exists with {} messages, no need to produce more",
