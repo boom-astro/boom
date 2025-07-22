@@ -2,7 +2,7 @@ use flare::phot::{limmag_to_fluxerr, mag_to_flux};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument, warn, debug};
 
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
