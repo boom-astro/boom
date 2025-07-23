@@ -55,7 +55,8 @@ fn bson_docs_to_json_values(
         (status = 200, description = "Object found", body = ObjResponse),
         (status = 404, description = "Object not found"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Surveys"]
 )]
 #[get("/surveys/{survey_name}/objects/{object_id}")]
 pub async fn get_object(
