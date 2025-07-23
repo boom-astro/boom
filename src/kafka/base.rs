@@ -164,7 +164,10 @@ pub trait AlertProducer {
             debug!(?total_messages);
 
             // Count the number of Avro files in the data directory
-            let avro_count = count_files_in_dir(&self.data_directory(), Some(&["avro"]))?;
+            let avro_count = match count_files_in_dir(&self.data_directory(), Some(&["avro"])) {
+                Ok(count) => count,
+                Err(_) => 0, // If we can't count files, the directory must not exist
+            };
 
             // If they don't match, delete all messages from the topic and
             // start fresh
