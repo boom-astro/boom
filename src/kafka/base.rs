@@ -169,9 +169,16 @@ pub trait AlertProducer {
                 Err(_) => 0, // If we can't count files, the directory must not exist
             };
 
-            // If they don't match, delete all messages from the topic and
-            // start fresh
-            if total_messages > 0 && total_messages != avro_count as u32 {
+            // If the counts match, then nothing to do, return early. Otherwise,
+            // delete the topic and start fresh
+            if total_messages == avro_count as u32 {
+                info!(
+                    "Topic {} already exists with {} messages, no need to produce more",
+                    self.topic_name(),
+                    total_messages
+                );
+                return Ok(total_messages as i64);
+            } else {
                 warn!(
                     "Topic {} already exists with {} messages, but {} Avro files found in data directory",
                     self.topic_name(),
@@ -183,13 +190,6 @@ pub trait AlertProducer {
                 return Err(
                     "Topic exists with different message count; manually delete the topic".into(),
                 );
-            } else if total_messages == avro_count as u32 {
-                info!(
-                    "Topic {} already exists with {} messages, no need to produce more",
-                    self.topic_name(),
-                    total_messages
-                );
-                return Ok(total_messages as i64);
             }
         }
 
