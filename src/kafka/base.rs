@@ -206,13 +206,19 @@ pub trait AlertProducer {
                 let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
                     .payload(&payload)
                     .timestamp(chrono::Utc::now().timestamp_millis());
-                let status = producer.send(record, std::time::Duration::from_secs(5)).await;
+                let status = producer
+                    .send(record, std::time::Duration::from_secs(5))
+                    .await;
                 match status {
-                    Ok(delivery) => {
+                    Ok(_) => {
                         break;
                     }
-                    Err((e, message)) => {
-                        error!("Failed to deliver message: {:?}, retrying ({} left)", e, n_retries - 1);
+                    Err((e, _)) => {
+                        error!(
+                            "Failed to deliver message: {:?}, retrying ({} left)",
+                            e,
+                            n_retries - 1
+                        );
                     }
                 }
                 n_retries -= 1;

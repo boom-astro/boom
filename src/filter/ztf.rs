@@ -2,16 +2,13 @@ use flare::phot::{limmag_to_fluxerr, mag_to_flux};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn, debug};
+use tracing::{debug, info, instrument, warn};
 
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
     FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
 };
-use crate::utils::{
-    enums::Survey,
-    o11y::as_error,
-};
+use crate::utils::{enums::Survey, o11y::as_error};
 
 #[derive(Debug)]
 pub struct ZtfFilter {
@@ -479,11 +476,13 @@ impl FilterWorker for ZtfFilterWorker {
                 for doc in out_documents {
                     // DEBUG, print the document
                     debug!("Processing document: {:?}", doc);
-                    let candid = doc.get_i64("_id").inspect_err(as_error!("Failed to get candid from document"))?;
+                    let candid = doc
+                        .get_i64("_id")
+                        .inspect_err(as_error!("Failed to get candid from document"))?;
                     // might want to have the annotations as an optional field instead of empty
                     let annotations =
                         serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))
-                        .inspect_err(as_error!("Failed to serialize annotations"))?;
+                            .inspect_err(as_error!("Failed to serialize annotations"))?;
                     let filter_result = FilterResults {
                         filter_id: filter.id,
                         passed_at: now_ts,
