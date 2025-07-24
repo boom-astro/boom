@@ -59,7 +59,7 @@ pub async fn assign_partitions_to_consumers(
             break nb_partitions;
         }
         info!("Topic {} does not exist yet, retrying...", &topic_name);
-        std::thread::sleep(core::time::Duration::from_secs(5));
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     };
 
     let nb_consumers = nb_consumers.clone().min(nb_partitions);
@@ -426,7 +426,7 @@ pub async fn consume_partitions(
                         "{} (limit: {}) items in queue, sleeping...",
                         nb_in_queue, max_in_queue
                     );
-                    std::thread::sleep(core::time::Duration::from_millis(500));
+                    tokio::time::sleep(core::time::Duration::from_millis(500)).await;
                     continue;
                 }
                 break;
@@ -451,7 +451,7 @@ pub async fn consume_partitions(
             }
             Some(Err(e)) => {
                 error!("Error while consuming from Kafka, retrying: {}", e);
-                std::thread::sleep(core::time::Duration::from_secs(1));
+                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
                 continue;
             }
             None => {
