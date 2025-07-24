@@ -25,29 +25,27 @@ async fn test_uses_field_in_filter() {
     let pipeline = pipeline_to_json(&pipeline);
 
     // uses_field_in_filter should return true for "candidate.drb"
-    let (uses_field, stage_index) = uses_field_in_filter(&pipeline, "candidate.drb").unwrap();
-    assert!(uses_field);
-    assert_eq!(stage_index, 0);
+    let stage_index = uses_field_in_filter(&pipeline, "candidate.drb");
+    assert!(stage_index.is_some());
+    assert_eq!(stage_index, Some(0));
 
     // uses_field_in_filter should also return true for "candidate.magpsf", but it should be in the second stage
-    let (uses_field, stage_index) = uses_field_in_filter(&pipeline, "candidate.magpsf").unwrap();
-    assert!(uses_field);
-    assert_eq!(stage_index, 1);
+    let stage_index = uses_field_in_filter(&pipeline, "candidate.magpsf");
+    assert!(stage_index.is_some());
+    assert_eq!(stage_index, Some(1));
 
     // uses_field_in_filter should return true for "LSST.prv_candidates"
-    let (uses_field, stage_index) = uses_field_in_filter(&pipeline, "LSST.prv_candidates").unwrap();
-    assert!(uses_field);
-    assert_eq!(stage_index, 0);
+    let stage_index = uses_field_in_filter(&pipeline, "LSST.prv_candidates");
+    assert!(stage_index.is_some());
+    assert_eq!(stage_index, Some(0));
 
     // however, if we look for "prv_candidates" only, we should not find it (using the prefixes to avoid)
-    let (uses_field, stage_index) = uses_field_in_filter(&pipeline, "prv_candidates").unwrap();
-    assert!(!uses_field);
-    assert_eq!(stage_index, 0);
+    let stage_index = uses_field_in_filter(&pipeline, "prv_candidates");
+    assert!(stage_index.is_none());
 
     // uses_field_in_filter should return false for "candidate.jd"
-    let (uses_field, stage_index) = uses_field_in_filter(&pipeline, "candidate.jd").unwrap();
-    assert!(!uses_field);
-    assert_eq!(stage_index, 0);
+    let stage_index = uses_field_in_filter(&pipeline, "candidate.jd");
+    assert!(stage_index.is_none());
 }
 
 #[tokio::test]

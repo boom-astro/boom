@@ -223,7 +223,7 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
-pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> Result<bool, FilterError> {
+pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     // we consider a value is a match with field if it is:
     // - equal to the field
     // - equal to the field with a $ prefix
@@ -231,52 +231,36 @@ pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> Result<boo
     // - starts with the field with a $ prefix and a dot
     // then we found it
     if let Some(array) = stage.as_array() {
-        for item in array {
-            if uses_field_in_stage(item, field)? {
-                return Ok(true);
-            }
-        }
+        return array.iter().any(|item| uses_field_in_stage(item, field));
     } else if let Some(obj) = stage.as_object() {
-        for (key, value) in obj.iter() {
-            if key.starts_with(&format!("${}.", field)) {
-                return Ok(true);
-            } else if key.starts_with(&format!("{}.", field)) {
-                return Ok(true);
-            } else if key == field {
-                return Ok(true);
-            } else if key == &format!("${}", field) {
-                return Ok(true);
-            }
-            if uses_field_in_stage(value, field)? {
-                return Ok(true);
-            }
-        }
+        // The unwrap here is ok, the key was already a json value
+        return obj
+            .iter()
+            .map(|(key, value)| (serde_json::to_value(key).unwrap(), value))
+            .any(|(key, value)| {
+                uses_field_in_stage(&key, field) || uses_field_in_stage(value, field)
+            });
     } else if let Some(stage_str) = stage.as_str() {
         let stage_str = stage_str.trim();
-        if stage_str.starts_with(&format!("${}.", field)) {
-            return Ok(true);
-        } else if stage_str.starts_with(&format!("{}.", field)) {
-            return Ok(true);
-        } else if stage_str == field {
-            return Ok(true);
-        } else if stage_str == &format!("${}", field) {
-            return Ok(true);
+        if stage_str == field
+            || stage_str == &format!("${}", field)
+            || stage_str.starts_with(&format!("{}.", field))
+            || stage_str.starts_with(&format!("${}.", field))
+        {
+            return true;
         }
     }
 
-    Ok(false)
+    false
 }
 
-pub fn uses_field_in_filter(
-    filter_pipeline: &[serde_json::Value],
-    field: &str,
-) -> Result<(bool, usize), FilterError> {
+pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) -> Option<usize> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
-        if uses_field_in_stage(stage, field)? {
-            return Ok((true, i));
+        if uses_field_in_stage(stage, field) {
+            return Some(i);
         }
     }
-    Ok((false, 0))
+    None
 }
 
 pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result<(), FilterError> {

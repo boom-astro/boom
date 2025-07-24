@@ -84,14 +84,12 @@ impl Filter for ZtfFilter {
         // validate filter
         validate_filter_pipeline(&filter_pipeline)?;
 
-        let (use_prv_candidates, use_prv_candidates_index) =
-            uses_field_in_filter(filter_pipeline, "prv_candidates")?;
-        let (use_prv_nondetections, use_prv_nondetections_index) =
-            uses_field_in_filter(filter_pipeline, "prv_nondetections")?;
-        let (use_cross_matches, use_cross_matches_index) =
-            uses_field_in_filter(filter_pipeline, "cross_matches")?;
+        let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
+        let use_prv_nondetections_index =
+            uses_field_in_filter(filter_pipeline, "prv_nondetections");
+        let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
 
-        if use_prv_candidates {
+        if use_prv_candidates_index.is_some() {
             // insert it in aux addFields stage
             aux_add_fields.insert(
                 "prv_candidates".to_string(),
@@ -136,7 +134,7 @@ impl Filter for ZtfFilter {
                 },
             );
         }
-        if use_prv_nondetections {
+        if use_prv_nondetections_index.is_some() {
             aux_add_fields.insert(
                 "prv_nondetections".to_string(),
                 doc! {
@@ -180,7 +178,7 @@ impl Filter for ZtfFilter {
                 },
             );
         }
-        if use_cross_matches {
+        if use_cross_matches_index.is_some() {
             aux_add_fields.insert(
                 "cross_matches".to_string(),
                 doc! {
@@ -192,18 +190,19 @@ impl Filter for ZtfFilter {
             );
         }
 
-        let mut insert_aux_pipeline =
-            use_prv_candidates || use_prv_nondetections || use_cross_matches;
+        let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
+            || use_prv_nondetections_index.is_some()
+            || use_cross_matches_index.is_some();
 
         let mut insert_aux_index = usize::MAX;
-        if use_prv_candidates {
-            insert_aux_index = insert_aux_index.min(use_prv_candidates_index);
+        if let Some(index) = use_prv_candidates_index {
+            insert_aux_index = insert_aux_index.min(index);
         }
-        if use_prv_nondetections {
-            insert_aux_index = insert_aux_index.min(use_prv_nondetections_index);
+        if let Some(index) = use_prv_nondetections_index {
+            insert_aux_index = insert_aux_index.min(index);
         }
-        if use_cross_matches {
-            insert_aux_index = insert_aux_index.min(use_cross_matches_index);
+        if let Some(index) = use_cross_matches_index {
+            insert_aux_index = insert_aux_index.min(index);
         }
 
         // some sanity checks
