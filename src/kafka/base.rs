@@ -18,6 +18,8 @@ use rdkafka::{
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace, warn};
 
+const MAX_RETRIES_PRODUCER: usize = 6;
+
 // check that the topic exists and return the number of partitions
 pub async fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
@@ -201,7 +203,7 @@ pub trait AlertProducer {
             // we do not specify a key for the record, to let kafka distribute messages across partitions
             // across partitions evenly with its built-in round-robin strategy
             // use retries in case of transient errors
-            let mut n_retries = 6;
+            let mut n_retries = MAX_RETRIES_PRODUCER;
             while n_retries > 0 {
                 let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
                     .payload(&payload)
