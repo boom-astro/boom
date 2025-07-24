@@ -184,22 +184,22 @@ pub async fn xmatch(
                 } else {
                     distance_max * (0.05 / doc_z) // in arcsec
                 };
-                let angular_separation_arcsec =
+                let distance_arcsec =
                     great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0; // convert to arcsec
 
-                if angular_separation_arcsec < cm_radius_arcsec {
+                if distance_arcsec < cm_radius_arcsec {
                     // calculate the distance between objs in kpc
                     // let distance_kpc = angular_separation * (doc_z / 0.05);
                     let distance_kpc = if doc_z > 0.005 {
-                        angular_separation_arcsec * (doc_z / 0.05)
+                        distance_arcsec * (doc_z / 0.05)
                     } else {
                         -1.0
                     };
 
                     // we make a mutable copy of the xmatch_doc
                     let mut xmatch_doc = xmatch_doc.clone();
-                    // overwrite doc_copy with doc_copy + the angular separation and the distance in kpc
-                    xmatch_doc.insert("distance_arcsec", angular_separation_arcsec);
+                    // add the distance fields to the xmatch_doc
+                    xmatch_doc.insert("distance_arcsec", distance_arcsec);
                     xmatch_doc.insert("distance_kpc", distance_kpc);
                     matches_filtered.push(xmatch_doc);
                 }
