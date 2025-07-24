@@ -25,7 +25,8 @@ impl Default for CatalogsQueryParams {
     responses(
         (status = 200, description = "List of catalogs", body = Vec<serde_json::Value>),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Catalogs"]
 )]
 #[get("/catalogs")]
 pub async fn get_catalogs(
@@ -92,7 +93,8 @@ pub async fn get_catalogs(
         (status = 200, description = "List of indexes in the catalog", body = Vec<serde_json::Value>),
         (status = 400, description = "Bad request"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Catalogs"]
 )]
 #[get("/catalogs/{catalog_name}/indexes")]
 pub async fn get_catalog_indexes(
@@ -140,7 +142,8 @@ impl Default for SampleQuery {
         (status = 200, description = "Sample records from the catalog", body = Vec<serde_json::Value>),
         (status = 400, description = "Bad request"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Catalogs"]
 )]
 #[get("/catalogs/{catalog_name}/sample")]
 pub async fn get_catalog_sample(
