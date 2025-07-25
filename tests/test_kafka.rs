@@ -143,13 +143,12 @@ async fn produce_ztf_in_dir(
         eprintln!("got entry {:?}", entry);
         let entry = entry.expect("entry error");
         let src_path = entry.path();
+        if !(src_path.is_file() && src_path.extension().is_some_and(|ext| ext == "avro")) {
+            eprintln!("ignoring {:?}", src_path);
+            continue;
+        }
         let dst_path = dst_dir.join(entry.file_name());
-        eprintln!(
-            "copying {:?} to {:?} (exists: {})",
-            src_path,
-            dst_path,
-            dst_path.exists()
-        );
+        eprintln!("copying {:?} to {:?}", src_path, dst_path);
         let bytes_copied = std::fs::copy(src_path, dst_path).expect("failed to copy");
         let src_bytes = entry
             .metadata()
