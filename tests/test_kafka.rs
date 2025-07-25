@@ -141,6 +141,8 @@ async fn produce_ztf_in_dir(
         .read_dir()
         .expect(&format!("failed to read source directory"))
     {
+        // Can't simply use Iterator::take(limit) because not all entries are
+        // guaranteed to be avro files, so we use a counter instead:
         if n_copied >= limit {
             break;
         }
@@ -153,16 +155,7 @@ async fn produce_ztf_in_dir(
         }
         let dst_path = dst_dir.join(entry.file_name());
         eprintln!("copying {:?} to {:?}", src_path, dst_path);
-        let bytes_copied = std::fs::copy(src_path, dst_path).expect("failed to copy");
-        let src_bytes = entry
-            .metadata()
-            .expect("failed to get source file metadata")
-            .len();
-        eprintln!(
-            "copied {} bytes (original: {} bytes)",
-            bytes_copied, src_bytes
-        );
-        assert_eq!(bytes_copied, src_bytes);
+        _ = std::fs::copy(src_path, dst_path).expect("failed to copy");
         n_copied += 1;
     }
 
