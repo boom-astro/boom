@@ -5,48 +5,72 @@ use crate::{
         o11y::{as_error, log_error},
     },
 };
+
+use std::collections::HashMap;
+
 use indicatif::ProgressBar;
-use rdkafka::client::DefaultClientContext;
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::Message;
-use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
+    client::DefaultClientContext,
+    config::ClientConfig,
+    consumer::{BaseConsumer, Consumer},
     error::KafkaError,
+    message::Message,
+    producer::{FutureProducer, FutureRecord, Producer},
 };
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace, warn};
 
+#[derive(Debug)]
+pub(self) struct Metadata(HashMap<String, Vec<i32>>);
+
+impl Metadata {
+    pub(self) fn topics(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub(self) fn partition_ids(&self, topic: &str) -> Option<&[i32]> {
+        self.0.get(topic).map(Vec::as_slice)
+    }
+}
+
+// The purpose of this function is to copy the topic metadata that rdkafka keeps
+// behind references of types that don't implement Clone.
+fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
+    let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(5))?;
+    let inner = cluster_metadata
+        .topics()
+        .iter()
+        .map(|metadata_topic| {
+            let name = metadata_topic.name().to_string();
+            let partition_ids = metadata_topic
+                .partitions()
+                .iter()
+                .map(|metadata_partition| metadata_partition.id())
+                .collect::<Vec<_>>();
+            (name, partition_ids)
+        })
+        .collect::<HashMap<_, _>>();
+    Ok(Metadata(inner))
+}
+
 // check that the topic exists and return the number of partitions
-pub async fn check_kafka_topic_partitions(
+pub fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
 ) -> Result<Option<usize>, KafkaError> {
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
-
-    let metadata = consumer.fetch_metadata(None, std::time::Duration::from_secs(5))?;
-
+    let metadata = get_metadata(&consumer)?;
     debug!(
         "Existing topics: {}",
-        metadata
-            .topics()
-            .iter()
-            .map(|t| t.name())
-            .collect::<Vec<_>>()
-            .join(", ")
+        metadata.topics().collect::<Vec<_>>().join(", ")
     );
-
-    let topic_metadata = metadata.topics().iter().find(|t| t.name() == topic_name);
-    match topic_metadata.map(|t| t.partitions().len()) {
-        Some(partitions) => Ok(Some(partitions)),
-        None => Ok(None),
-    }
+    Ok(metadata.partition_ids(topic_name).map(|ids| ids.len()))
 }
 
-pub async fn assign_partitions_to_consumers(
+pub fn assign_partitions_to_consumers(
     topic_name: &str,
     nb_consumers: usize,
     kafka_config: &SurveyKafkaConfig,
@@ -54,7 +78,7 @@ pub async fn assign_partitions_to_consumers(
     // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
     let nb_partitions = loop {
         if let Some(nb_partitions) =
-            check_kafka_topic_partitions(&kafka_config.consumer, &topic_name).await?
+            check_kafka_topic_partitions(&kafka_config.consumer, &topic_name)?
         {
             break nb_partitions;
         }
@@ -81,7 +105,7 @@ pub async fn initialize_topic(
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let nb_partitions = match check_kafka_topic_partitions(bootstrap_servers, topic_name).await? {
+    let nb_partitions = match check_kafka_topic_partitions(bootstrap_servers, topic_name)? {
         Some(nb_partitions) => {
             if nb_partitions != expected_nb_partitions {
                 warn!(
@@ -118,6 +142,54 @@ pub async fn initialize_topic(
     Ok(nb_partitions)
 }
 
+async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), KafkaError> {
+    let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+
+    let opts = AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+    admin_client.delete_topics(&[topic_name], &opts).await?;
+    Ok(())
+}
+
+fn count_messages(bootstrap_servers: &str, topic_name: &str) -> Result<Option<u32>, KafkaError> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+    let metadata = get_metadata(&consumer)?;
+    if let Some(partition_ids) = metadata.partition_ids(topic_name) {
+        debug!(?topic_name, "topic found");
+        let total_messages =
+            partition_ids
+                .iter()
+                .try_fold(0u32, |total_messages, &partition_id| {
+                    consumer
+                        .fetch_watermarks(
+                            topic_name,
+                            partition_id,
+                            std::time::Duration::from_secs(5),
+                        )
+                        .map(|(low, high)| {
+                            let count = high - low;
+                            debug!(
+                                ?topic_name,
+                                ?partition_id,
+                                ?low,
+                                ?high,
+                                ?count,
+                                "watermarks"
+                            );
+                            total_messages + count as u32
+                        })
+                })?;
+        debug!(?topic_name, ?total_messages);
+        Ok(Some(total_messages))
+    } else {
+        debug!(?topic_name, "topic not found");
+        Ok(None)
+    }
+}
+
 #[async_trait::async_trait]
 pub trait AlertProducer {
     fn topic_name(&self) -> String;
@@ -130,69 +202,47 @@ pub trait AlertProducer {
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>>;
     fn default_nb_partitions(&self) -> usize;
     async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
-        // TODO: refactor this new bit, make it nicer, unify with what's already in this module
-        let consumer: BaseConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.server_url())
-            .create()?;
-
-        let timeout = std::time::Duration::from_secs(5);
-        let metadata = consumer.fetch_metadata(None, timeout)?;
-        if let Some(topic_metadata) = metadata
-            .topics()
-            .iter()
-            .find(|t| t.name() == self.topic_name())
-        {
-            // Topic exists, skip producing if it has the expected number of messages.
-            let total_messages = topic_metadata.partitions().iter().try_fold(
-                0u32,
-                |total_messages, partition_metadata| {
-                    let partition_id = partition_metadata.id();
-                    consumer
-                        .fetch_watermarks(&self.topic_name(), partition_id, timeout)
-                        .map(|(low, high)| {
-                            debug!(
-                                ?partition_id,
-                                ?low,
-                                ?high,
-                                messages = high - low,
-                                "watermarks"
-                            );
-                            total_messages + (high - low) as u32
-                        })
-                },
-            )?;
-            debug!(?total_messages);
-
-            // Count the number of Avro files in the data directory
-            let avro_count =
-                count_files_in_dir(&self.data_directory(), Some(&["avro"])).or_else(|error| {
-                    (error.kind() == std::io::ErrorKind::NotFound)
-                        .then_some(0)
-                        .ok_or(error)
-                })?;
-
-            // If the counts match, then nothing to do, return early. Otherwise,
-            // delete the topic and start fresh
-            if total_messages == avro_count as u32 {
-                info!(
-                    "Topic {} already exists with {} messages, no need to produce more",
-                    self.topic_name(),
-                    total_messages
+        if let Some(total_messages) = count_messages(&self.server_url(), &self.topic_name())? {
+            // Topic exists, skip producing if it has the expected number of
+            // messages. Count the number of Avro files in the data directory:
+            if let Some(avro_count) = count_files_in_dir(&self.data_directory(), Some(&["avro"]))
+                .map(|count| Some(count))
+                .or_else(|error| match error.kind() {
+                    std::io::ErrorKind::NotFound => Ok(None),
+                    _ => Err(error),
+                })?
+            {
+                debug!(
+                    "{} avro files found in {}",
+                    avro_count,
+                    self.data_directory()
                 );
-                return Ok(total_messages as i64);
+                // If the counts match, then nothing to do, return early.
+                if total_messages == avro_count as u32 {
+                    info!(
+                        "Topic {} already exists with {} messages, no need to produce",
+                        self.topic_name(),
+                        total_messages
+                    );
+                    return Ok(total_messages as i64);
+                } else {
+                    warn!(
+                        "Topic {} already exists with {} messages, but {} Avro files found in data directory",
+                        self.topic_name(),
+                        total_messages,
+                        avro_count
+                    );
+                }
             } else {
                 warn!(
-                    "Topic {} already exists with {} messages, but {} Avro files found in data directory",
+                    "Topic {} already exists, but data directory not found",
                     self.topic_name(),
-                    total_messages,
-                    avro_count
-                );
-                // TODO: Delete all messages from Kafka topic so we start fresh
-                // For now, just return an error
-                return Err(
-                    "Topic exists with different message count; manually delete the topic".into(),
                 );
             }
+            // The topic and data directory are inconsistent. Delete the topic
+            // to start fresh:
+            warn!("recreating topic {}", self.topic_name());
+            delete_topic(&self.server_url(), &self.topic_name()).await?;
         }
 
         match self.download_alerts_from_archive().await {
@@ -219,7 +269,7 @@ pub trait AlertProducer {
             .set("acks", "1")
             .set("max.in.flight.requests.per.connection", "5")
             .set("retries", "3")
-            .set("debug", "broker,topic,msg")
+            // .set("debug", "broker,topic,msg") // Seems ignore EnvFilter directives
             .create()
             .expect("Producer creation error");
 
@@ -345,7 +395,7 @@ pub trait AlertConsumer: Sized {
         });
 
         let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
-        let partitions = assign_partitions_to_consumers(&topic, n_threads, &kafka_config).await?;
+        let partitions = assign_partitions_to_consumers(&topic, n_threads, &kafka_config)?;
 
         let mut handles = vec![];
         for i in 0..n_threads {
@@ -423,8 +473,8 @@ pub async fn consume_partitions(
     client_config
         .set("bootstrap.servers", &survey_config.consumer)
         .set("security.protocol", "SASL_PLAINTEXT")
-        .set("group.id", group_id)
-        .set("debug", "consumer,cgrp,topic,fetch");
+        .set("group.id", group_id);
+    // .set("debug", "consumer,cgrp,topic,fetch"); // Seems ignore EnvFilter directives
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
