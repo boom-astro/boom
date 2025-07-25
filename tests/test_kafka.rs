@@ -133,11 +133,33 @@ async fn produce_ztf_in_dir(
     let dst_dir = PathBuf::from(producer.data_directory());
 
     // Copy the downloaded alerts to the working directory:
-    std::fs::create_dir_all(dst_dir.clone()).unwrap();
-    for entry in src_dir.read_dir().unwrap() {
-        let entry = entry.unwrap();
-        let bytes_copied = std::fs::copy(entry.path(), dst_dir.join(entry.file_name())).unwrap();
-        assert_eq!(bytes_copied, entry.metadata().unwrap().len());
+    eprintln!("creating destination directory {:?}", dst_dir);
+    std::fs::create_dir_all(dst_dir.clone()).expect("failed to create destination directory");
+    eprintln!("reading source directory {:?}", src_dir);
+    for entry in src_dir
+        .read_dir()
+        .expect(&format!("failed to read source directory"))
+    {
+        eprintln!("got entry {:?}", entry);
+        let entry = entry.expect("entry error");
+        let src_path = entry.path();
+        let dst_path = dst_dir.join(entry.file_name());
+        eprintln!(
+            "copying {:?} to {:?} (exists: {})",
+            src_path,
+            dst_path,
+            dst_path.exists()
+        );
+        let bytes_copied = std::fs::copy(src_path, dst_path).expect("failed to copy");
+        let src_bytes = entry
+            .metadata()
+            .expect("failed to get source file metadata")
+            .len();
+        eprintln!(
+            "copied {} bytes (original: {} bytes)",
+            bytes_copied, src_bytes
+        );
+        assert_eq!(bytes_copied, src_bytes);
     }
 
     // Produce the alerts and verify the message count
