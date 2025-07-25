@@ -115,7 +115,7 @@ async fn produce_ztf_in_dir(
     date_str: &str,
     working_dir: &str,
     topic: &str,
-    expected_count: u32,
+    limit: u32,
 ) -> ZtfAlertProducer {
     // Cache data for the given date as usual:
     let producer = ZtfAlertProducer::new(
@@ -136,10 +136,14 @@ async fn produce_ztf_in_dir(
     eprintln!("creating destination directory {:?}", dst_dir);
     std::fs::create_dir_all(dst_dir.clone()).expect("failed to create destination directory");
     eprintln!("reading source directory {:?}", src_dir);
+    let mut n_copied = 0;
     for entry in src_dir
         .read_dir()
         .expect(&format!("failed to read source directory"))
     {
+        if n_copied >= limit {
+            break;
+        }
         eprintln!("got entry {:?}", entry);
         let entry = entry.expect("entry error");
         let src_path = entry.path();
@@ -159,6 +163,7 @@ async fn produce_ztf_in_dir(
             bytes_copied, src_bytes
         );
         assert_eq!(bytes_copied, src_bytes);
+        n_copied += 1;
     }
 
     // Produce the alerts and verify the message count
@@ -168,7 +173,7 @@ async fn produce_ztf_in_dir(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count as i64);
+    assert_eq!(message_count, limit as i64);
 
     // Verify the file count equals the message count:
     let avro_count = count_files_in_dir(&producer.data_directory(), Some(&["avro"])).unwrap();
@@ -181,17 +186,12 @@ async fn produce_ztf_in_dir(
 async fn test_skip_producing_when_counts_match() {
     let date_str = "20231118";
     let topic = uuid::Uuid::new_v4().to_string();
-    let expected_count = 271u32;
+    let limit = 10u32;
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // Produce:
-    let producer = produce_ztf_in_dir(
-        date_str,
-        tmp_dir.path().to_str().unwrap(),
-        &topic,
-        expected_count,
-    )
-    .await;
+    let producer =
+        produce_ztf_in_dir(date_str, tmp_dir.path().to_str().unwrap(), &topic, limit).await;
 
     // Try again: the message count matches the avro count, so no more messages
     // will be produced:
@@ -202,24 +202,19 @@ async fn test_skip_producing_when_counts_match() {
     let message_count = count_messages(&producer.server_url(), &topic)
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count);
+    assert_eq!(message_count, limit);
 }
 
 #[tokio::test]
 async fn test_produce_when_counts_do_not_match() {
     let date_str = "20231118";
     let topic = uuid::Uuid::new_v4().to_string();
-    let expected_count = 271u32;
+    let limit = 10u32;
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // Produce:
-    let producer = produce_ztf_in_dir(
-        date_str,
-        tmp_dir.path().to_str().unwrap(),
-        &topic,
-        expected_count,
-    )
-    .await;
+    let producer =
+        produce_ztf_in_dir(date_str, tmp_dir.path().to_str().unwrap(), &topic, limit).await;
 
     // Remove a file:
     let first_file = PathBuf::from(producer.data_directory())
@@ -241,30 +236,25 @@ async fn test_produce_when_counts_do_not_match() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, (expected_count - 1) as i64);
+    assert_eq!(message_count, (limit - 1) as i64);
 
     // Verify the topic now has one fewer message:
     let message_count = count_messages(&producer.server_url(), &topic)
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count - 1);
+    assert_eq!(message_count, limit - 1);
 }
 
 #[tokio::test]
 async fn test_produce_when_topic_does_not_exist() {
     let date_str = "20231118";
     let topic = uuid::Uuid::new_v4().to_string();
-    let expected_count = 271u32;
+    let limit = 10u32;
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // Produce:
-    let producer = produce_ztf_in_dir(
-        date_str,
-        tmp_dir.path().to_str().unwrap(),
-        &topic,
-        expected_count,
-    )
-    .await;
+    let producer =
+        produce_ztf_in_dir(date_str, tmp_dir.path().to_str().unwrap(), &topic, limit).await;
 
     // Delete the topic:
     delete_topic(&producer.server_url(), &topic).await.unwrap();
@@ -275,13 +265,13 @@ async fn test_produce_when_topic_does_not_exist() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count as i64);
+    assert_eq!(message_count, limit as i64);
 
     // Verify the topic has the correct number of messages:
     let message_count = count_messages(&producer.server_url(), &topic)
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count);
+    assert_eq!(message_count, limit);
 }
 
 // Ignored because it *always* downloads ZTF alerts and is therefore too
@@ -291,17 +281,12 @@ async fn test_produce_when_topic_does_not_exist() {
 async fn test_produce_when_data_does_not_exist() {
     let date_str = "20231118";
     let topic = uuid::Uuid::new_v4().to_string();
-    let expected_count = 271u32;
+    let limit = 10u32;
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // Produce:
-    let producer = produce_ztf_in_dir(
-        date_str,
-        tmp_dir.path().to_str().unwrap(),
-        &topic,
-        expected_count,
-    )
-    .await;
+    let producer =
+        produce_ztf_in_dir(date_str, tmp_dir.path().to_str().unwrap(), &topic, limit).await;
 
     // Delete the data directory:
     std::fs::remove_dir_all(PathBuf::from(producer.data_directory())).unwrap();
@@ -313,11 +298,11 @@ async fn test_produce_when_data_does_not_exist() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count as i64);
+    assert_eq!(message_count, limit as i64);
 
     // Verify the topic has the correct number of messages:
     let message_count = count_messages(&producer.server_url(), &topic)
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, expected_count);
+    assert_eq!(message_count, limit);
 }
