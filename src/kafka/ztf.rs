@@ -90,6 +90,13 @@ impl ZtfAlertProducer {
             working_dir: ".".to_string(),
         }
     }
+
+    pub fn with_working_dir(self, working_dir: &str) -> Self {
+        Self {
+            working_dir: working_dir.to_string(),
+            ..self
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -150,7 +157,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
         if count > 0 {
-            info!("Alerts already downloaded to {}{}", data_folder, file_name);
+            info!("Alerts already downloaded to {}", data_folder);
             return Ok(count as i64);
         }
 

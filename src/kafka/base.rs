@@ -22,20 +22,22 @@ use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 #[derive(Debug)]
-pub(self) struct Metadata(HashMap<String, Vec<i32>>);
+struct Metadata(HashMap<String, Vec<i32>>);
 
 impl Metadata {
-    pub(self) fn topics(&self) -> impl Iterator<Item = &str> {
+    fn topics(&self) -> impl Iterator<Item = &str> {
         self.0.keys().map(String::as_str)
     }
 
-    pub(self) fn partition_ids(&self, topic: &str) -> Option<&[i32]> {
+    fn partition_ids(&self, topic: &str) -> Option<&[i32]> {
         self.0.get(topic).map(Vec::as_slice)
     }
 }
 
-// The purpose of this function is to copy the topic metadata that rdkafka keeps
-// behind references of types that don't implement Clone.
+// rdkafka's Metadata type provides *references* to MetadataTopic and
+// MetadataPartition values, neither of which implement Clone. We use a custom
+// Metadata type to capture the topic and partition information from the rdkafka
+// types, which can then can be returned to the caller.
 fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
     let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(5))?;
     let inner = cluster_metadata
@@ -142,7 +144,7 @@ pub async fn initialize_topic(
     Ok(nb_partitions)
 }
 
-async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), KafkaError> {
+pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), KafkaError> {
     let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
@@ -152,7 +154,10 @@ async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), K
     Ok(())
 }
 
-fn count_messages(bootstrap_servers: &str, topic_name: &str) -> Result<Option<u32>, KafkaError> {
+pub fn count_messages(
+    bootstrap_servers: &str,
+    topic_name: &str,
+) -> Result<Option<u32>, KafkaError> {
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
@@ -201,8 +206,12 @@ pub trait AlertProducer {
     }
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>>;
     fn default_nb_partitions(&self) -> usize;
-    async fn produce(&self, topic: Option<String>) -> Result<i64, Box<dyn std::error::Error>> {
-        if let Some(total_messages) = count_messages(&self.server_url(), &self.topic_name())? {
+    async fn produce(
+        &self,
+        topic: Option<String>,
+    ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+        let topic_name = topic.unwrap_or_else(|| self.topic_name());
+        if let Some(total_messages) = count_messages(&self.server_url(), &topic_name)? {
             // Topic exists, skip producing if it has the expected number of
             // messages. Count the number of Avro files in the data directory:
             if let Some(avro_count) = count_files_in_dir(&self.data_directory(), Some(&["avro"]))
@@ -221,14 +230,13 @@ pub trait AlertProducer {
                 if total_messages == avro_count as u32 {
                     info!(
                         "Topic {} already exists with {} messages, no need to produce",
-                        self.topic_name(),
-                        total_messages
+                        topic_name, total_messages
                     );
-                    return Ok(total_messages as i64);
+                    return Ok(None);
                 } else {
                     warn!(
                         "Topic {} already exists with {} messages, but {} Avro files found in data directory",
-                        self.topic_name(),
+                        topic_name,
                         total_messages,
                         avro_count
                     );
@@ -236,13 +244,13 @@ pub trait AlertProducer {
             } else {
                 warn!(
                     "Topic {} already exists, but data directory not found",
-                    self.topic_name(),
+                    topic_name,
                 );
             }
             // The topic and data directory are inconsistent. Delete the topic
             // to start fresh:
-            warn!("recreating topic {}", self.topic_name());
-            delete_topic(&self.server_url(), &self.topic_name()).await?;
+            warn!("recreating topic {}", topic_name);
+            delete_topic(&self.server_url(), &topic_name).await?;
         }
 
         match self.download_alerts_from_archive().await {
@@ -253,7 +261,6 @@ pub trait AlertProducer {
             }
         };
 
-        let topic_name = topic.unwrap_or_else(|| self.topic_name());
         let limit = self.limit();
         let verbose = self.verbose();
 
@@ -344,7 +351,7 @@ pub trait AlertProducer {
         // close producer
         producer.flush(std::time::Duration::from_secs(1)).unwrap();
 
-        Ok(total_pushed as i64)
+        Ok(Some(total_pushed as i64))
     }
 }
 
