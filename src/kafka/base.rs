@@ -276,7 +276,7 @@ pub trait AlertProducer {
             .set("acks", "1")
             .set("max.in.flight.requests.per.connection", "5")
             .set("retries", "3")
-            // .set("debug", "broker,topic,msg") // Seems ignore EnvFilter directives
+            // .set("debug", "broker,topic,msg") // Seems to ignore EnvFilter directives
             .create()
             .expect("Producer creation error");
 
@@ -481,7 +481,7 @@ pub async fn consume_partitions(
         .set("bootstrap.servers", &survey_config.consumer)
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id);
-    // .set("debug", "consumer,cgrp,topic,fetch"); // Seems ignore EnvFilter directives
+    // .set("debug", "consumer,cgrp,topic,fetch"); // Seems to ignore EnvFilter directives
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
