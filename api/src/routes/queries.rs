@@ -324,3 +324,132 @@ pub async fn post_cone_search_query(
         serde_json::json!(docs),
     );
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////// 7/22
+#[derive(serde::Deserialize, Clone, ToSchema)]
+struct NearQuery {
+    catalog_name: String,
+    filter: Option<serde_json::Value>,
+    projection: Option<serde_json::Value>,
+    max_distance: f64, // different from cone search
+    unit: Unit,
+    object_coordinates: HashMap<String, [f64; 2]>, // Map of catalog name to coordinates [RA, Dec]
+    limit: Option<i64>,
+    skip: Option<u64>,
+    sort: Option<serde_json::Value>,
+    max_time_ms: Option<u64>,
+}
+//////////// Should be good ^^^^
+impl NearQuery {
+    /// Convert to MongoDB Find options
+    fn to_find_options(&self) -> mongodb::options::FindOptions {
+        let mut options = mongodb::options::FindOptions::default();
+        if let Some(projection) = &self.projection {
+            options.projection = Some(mongodb::bson::to_document(&projection).unwrap());
+        }
+        if let Some(limit) = self.limit {
+            options.limit = Some(limit);
+        }
+        if let Some(skip) = self.skip {
+            options.skip = Some(skip);
+        }
+        if let Some(sort) = &self.sort {
+            options.sort = Some(mongodb::bson::to_document(&sort).unwrap());
+        }
+        if let Some(max_time_ms) = self.max_time_ms {
+            options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
+        }
+        options
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////// 7/21
+/// Perform a near search queary on a catalog
+#[utoipa::path(
+    post,
+    path = "/queries/near", // check name
+    request_body = NearQuery, // check name
+    responses(
+        (status = 200, description = "Near search results", body = serde_json::Value), // check name
+        (status = 400, description = "Bad request"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Queries"]
+)]
+////////// Should be good^^^^^
+#[post("/queries/near")]
+pub async fn post_near_queary(
+    // check name
+    db: web::Data<Database>,
+    body: web::Json<NearQuery>, // **
+) -> HttpResponse {
+    let catalog_name = body.catalog_name.trim();
+    if !catalog_exists(&db, &catalog_name).await {
+        return response::not_found(&format!("Catalog {} does not exist", catalog_name));
+    }
+    let collection_name = catalog_name.to_string();
+    // Get the collection
+    let collection = db.collection::<mongodb::bson::Document>(&collection_name);
+    // Perform near search over each set of object coordinates   // **
+    let find_options = body.to_find_options();
+    let mut max_distance = body.max_distance; // **
+    let unit = body.unit.clone();
+    // Convert radius to radians based on unit
+    match unit {
+        Unit::Degrees => max_distance = max_distance.to_radians(), // **
+        Unit::Arcseconds => max_distance = max_distance.to_radians() / 3600.0, // **
+        Unit::Arcminutes => max_distance = max_distance.to_radians() / 60.0, // **
+        Unit::Radians => {}
+    }
+    let object_coordinates = &body.object_coordinates;
+    let mut docs: HashMap<String, Vec<mongodb::bson::Document>> = HashMap::new();
+    let filter = match parse_optional_filter(&body.filter) {
+        Ok(f) => f,
+        Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
+    };
+    for (object_name, radec) in object_coordinates {
+        ///////////////// logic difference
+        let ra = radec[0] - 180.0;
+        let dec = radec[1];
+        let near_sphere = doc! { // **
+            "$nearsphere": [ra, dec],
+            "maxDistance": max_distance, // **
+        };
+        let geo_within = doc! {
+            "$geoWithin": near_sphere // check kowalski to make sure this is correct
+        };
+        ///////////////////// logic difference
+        // line 301
+        let mut near_filter = filter.clone(); // **
+        near_filter.insert("coordinates.radec_geojson", geo_within); // **
+        let cursor = match collection
+            .find(near_filter) // **
+            .with_options(find_options.clone())
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return response::internal_error(&format!("Error finding documents: {:?}", e));
+            }
+        };
+        // Create map entry for this object's near search     // **
+        let data = match cursor.try_collect::<Vec<mongodb::bson::Document>>().await {
+            Ok(d) => d,
+            Err(e) => {
+                return response::internal_error(&format!("Error collecting documents: {:?}", e));
+            }
+        };
+        docs.insert(object_name.clone(), data);
+    }
+    return response::ok(
+        &format!("Near search on {} completed", catalog_name), // **
+        serde_json::json!(docs),
+    );
+}
+// look over this so that I can understand it better.
+// ** -> indicates a change was made
+// currently similar to post_cone_search, few minor changes.
+// look at reimplementing post_cone_search as apposed to rewriting this code from scratch
+// also check kowalski for differences in implemnetation. - need to check the options for
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -48,6 +48,7 @@ impl Modify for SecurityAddon {
         routes::queries::post_estimated_count_query,
         routes::queries::post_find_query,
         routes::queries::post_cone_search_query,
+        routes::queries::post_near_queary,
     ),
     security(
         ("api_jwt_token" = [])
