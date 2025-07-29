@@ -266,6 +266,8 @@ pub trait AlertProducer {
 
         info!("Initializing kafka alert producer");
         let producer: FutureProducer = ClientConfig::new()
+            // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+            // .set("debug", "broker,topic,msg")
             .set("bootstrap.servers", &self.server_url())
             .set("message.timeout.ms", "5000")
             // it's best to increase batch.size if the cluster
@@ -276,7 +278,6 @@ pub trait AlertProducer {
             .set("acks", "1")
             .set("max.in.flight.requests.per.connection", "5")
             .set("retries", "3")
-            // .set("debug", "broker,topic,msg") // Seems to ignore EnvFilter directives
             .create()
             .expect("Producer creation error");
 
@@ -478,10 +479,11 @@ pub async fn consume_partitions(
 ) -> Result<(), ConsumerError> {
     let mut client_config = ClientConfig::new();
     client_config
+        // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+        // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", &survey_config.consumer)
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id);
-    // .set("debug", "consumer,cgrp,topic,fetch"); // Seems to ignore EnvFilter directives
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
