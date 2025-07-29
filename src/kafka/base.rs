@@ -221,6 +221,9 @@ pub trait AlertProducer {
                     _ => Err(error),
                 })?
             {
+                if avro_count == 0 {
+                    warn!("data directory {} is empty", self.data_directory());
+                }
                 debug!(
                     "{} avro files found in {}",
                     avro_count,
