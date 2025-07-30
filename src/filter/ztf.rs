@@ -565,8 +565,9 @@ impl FilterWorker for ZtfFilterWorker {
                 .await?;
 
                 info!(
-                    "{} alerts passed ztf filter {} with programid {}",
+                    "{}/{} alerts passed ztf filter {} with programid {}",
                     out_documents.len(),
+                    candids.len(),
                     filter.id,
                     programid,
                 );
