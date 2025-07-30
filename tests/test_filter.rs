@@ -13,8 +13,8 @@ async fn test_build_filter() {
     let filter_collection = db.collection("filters");
 
     let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
-    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
-    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
+    let filter_result = ZtfFilter::build(&filter_id, &filter_collection).await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
 
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
@@ -53,8 +53,8 @@ async fn test_filter_found() {
     let db = conf::build_db(&config).await.unwrap();
     let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
     let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
-    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
+    let filter_result = ZtfFilter::build(&filter_id, &filter_collection).await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(filter_result.is_ok());
 }
 
@@ -63,6 +63,6 @@ async fn test_no_filter_found() {
     let config = conf::load_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build(-2, &filter_collection).await;
+    let filter_result = ZtfFilter::build("thisdoesntexist", &filter_collection).await;
     assert!(filter_result.is_err());
 }

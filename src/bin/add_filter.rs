@@ -3,15 +3,13 @@ use mongodb::bson::doc;
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use boom::conf;
 use boom::utils::enums::Survey;
-use boom::{conf, utils::db::create_index};
 
 #[derive(Parser)]
 struct Cli {
     #[arg(value_enum, help = "Survey to add a filter for.")]
     survey: Survey,
-    #[arg(help = "Filter ID to add")]
-    filter_id: i32,
     #[arg(help = "Path to the JSON file containing the filter")]
     filter_file: String,
 }
@@ -26,7 +24,6 @@ async fn main() {
 
     let args = Cli::parse();
     let survey = args.survey;
-    let filter_id = args.filter_id;
     let filter_file = args.filter_file;
 
     // read the JSON as a string
@@ -38,11 +35,12 @@ async fn main() {
         }
     };
 
-    // create a bson document with filter_id, active, catalog, permissions
+    // Create a bson document with id, active, catalog, permissions
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
+    let filter_id: String = uuid::Uuid::new_v4().to_string();
 
     let filter = doc! {
-        "filter_id": filter_id,
+        "id": filter_id.clone(),
         "active": true,
         "catalog": format!("{}_alerts", survey),
         "permissions": [1,2,3],
@@ -75,17 +73,12 @@ async fn main() {
 
     let collection = db.collection::<mongodb::bson::Document>("filters");
 
-    // add a unique index on filter_id
-    match create_index(&collection, doc! {"filter_id": 1}, true).await {
-        Ok(_) => {}
-        Err(e) => {
-            error!("error creating index on filter_id: {}", e);
-        }
-    }
-
     match collection.insert_one(filter).await {
         Ok(_) => {
-            println!("Filter added successfully");
+            println!(
+                "Filter with ID {} added successfully from {}",
+                filter_id, filter_file
+            );
         }
         Err(e) => {
             error!("error inserting filter obj: {}", e);

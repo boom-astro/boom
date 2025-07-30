@@ -12,7 +12,7 @@ use crate::utils::enums::Survey;
 
 #[derive(Debug)]
 pub struct ZtfFilter {
-    pub id: i32,
+    pub id: String,
     pub pipeline: Vec<Document>,
     pub permissions: Vec<i32>,
 }
@@ -21,7 +21,7 @@ pub struct ZtfFilter {
 impl Filter for ZtfFilter {
     #[instrument(skip(filter_collection), err)]
     async fn build(
-        filter_id: i32,
+        filter_id: &str,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
     ) -> Result<Self, FilterError> {
         // get filter object
@@ -144,7 +144,7 @@ impl Filter for ZtfFilter {
         }
 
         let filter = ZtfFilter {
-            id: filter_id,
+            id: filter_id.to_string(),
             pipeline: pipeline,
             permissions: permissions,
         };
@@ -158,7 +158,7 @@ pub struct ZtfFilterWorker {
     input_queue: String,
     output_topic: String,
     filters: Vec<ZtfFilter>,
-    filters_by_permission: HashMap<i32, Vec<usize>>,
+    filters_by_permission: HashMap<i32, Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -173,29 +173,34 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filter_ids: Vec<i32> = filter_collection
-            .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
+        // Get a list of active filter IDs for ZTF alerts
+        let filter_ids = filter_collection
+            .distinct("id", doc! {"active": true, "catalog": "ZTF_alerts"})
             .await?
             .into_iter()
-            .map(|x| x.as_i32().ok_or(FilterError::InvalidFilterId))
-            .filter_map(Result::ok)
-            .collect();
+            .map(|x| {
+                x.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or(FilterError::InvalidFilterId)
+            })
+            .collect::<Result<Vec<String>, FilterError>>()?;
 
         let mut filters: Vec<ZtfFilter> = Vec::new();
         for filter_id in filter_ids {
-            filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+            filters.push(ZtfFilter::build(&filter_id, &filter_collection).await?);
         }
 
-        // create a hashmap of filters per programid (permissions)
+        // Create a hashmap of filters per programid (permissions)
         // basically we'll have the 4 programid (from 0 to 3) as keys
-        // and the idx of the filters that have that programid in their permissions as values
-        let mut filters_by_permission: HashMap<i32, Vec<usize>> = HashMap::new();
-        for (i, filter) in filters.iter().enumerate() {
+        // and the ids of the filters that have that programid in their
+        // permissions as values
+        let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
+        for filter in &filters {
             for permission in &filter.permissions {
                 let entry = filters_by_permission
                     .entry(*permission)
                     .or_insert(Vec::new());
-                entry.push(i);
+                entry.push(filter.id.to_string());
             }
         }
 
@@ -437,21 +442,26 @@ impl FilterWorker for ZtfFilterWorker {
             }
         }
 
-        // for each programid, get the filters that have that programid in their permissions
-        // and run the filters
+        // For each programid, get the filters that have that programid in their
+        // permissions and run the filters
         for (programid, candids) in alerts_by_programid {
             let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
 
-            let filter_indices = self
+            let filter_ids_with_perms = self
                 .filters_by_permission
                 .get(&programid)
                 .ok_or(FilterWorkerError::GetFilterByQueueError)?;
 
-            for i in filter_indices {
-                let filter = &self.filters[*i];
+            for filter in &self.filters {
+                // If the filter ID is not in the list of filter IDs for this
+                // programid, skip it
+                if !filter_ids_with_perms.contains(&filter.id) {
+                    continue;
+                }
+
                 let out_documents = run_filter(
                     candids.clone(),
-                    filter.id,
+                    &filter.id,
                     filter.pipeline.clone(),
                     &self.alert_collection,
                 )
@@ -479,7 +489,7 @@ impl FilterWorker for ZtfFilterWorker {
                     let annotations =
                         serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
                     let filter_result = FilterResults {
-                        filter_id: filter.id,
+                        filter_id: filter.id.to_string(),
                         passed_at: now_ts,
                         annotations,
                     };
