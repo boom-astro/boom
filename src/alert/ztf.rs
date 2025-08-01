@@ -1,18 +1,16 @@
 use crate::{
     alert::{
-        base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus},
-        decam, get_schema_and_startidx, lsst,
+        base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
+        decam, lsst,
     },
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
         db::{mongify, update_timeseries_op},
-        o11y::{as_error, log_error, WARN},
+        o11y::as_error,
         spatial::xmatch,
     },
 };
-use apache_avro::from_value;
-use apache_avro::{from_avro_datum, Schema};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -400,8 +398,7 @@ pub struct ZtfAlertWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_aux_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
-    cached_schema: Option<Schema>,
-    cached_start_idx: Option<usize>,
+    schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
 }
@@ -557,8 +554,7 @@ impl AlertWorker for ZtfAlertWorker {
             alert_collection,
             alert_aux_collection,
             alert_cutout_collection,
-            cached_schema: None,
-            cached_start_idx: None,
+            schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
         };
@@ -575,50 +571,6 @@ impl AlertWorker for ZtfAlertWorker {
 
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_classifier_queue", self.stream_name)
-    }
-
-    #[instrument(skip_all, err)]
-    async fn alert_from_avro_bytes(&mut self, avro_bytes: &[u8]) -> Result<ZtfAlert, AlertError> {
-        // if the schema is not cached, get it from the avro_bytes
-        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
-            (Some(schema), Some(start_idx)) => (schema, start_idx),
-            _ => {
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                (self.cached_schema.as_ref().unwrap(), startidx)
-            }
-        };
-
-        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
-
-        // if value is an error, try recomputing the schema from the avro_bytes
-        // as it could be that the schema has changed
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                log_error!(
-                    WARN,
-                    error,
-                    "Error deserializing avro message with cached schema"
-                );
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-
-                // if it's not an error this time, cache the new schema
-                // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
-                    .inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                value
-            }
-        };
-
-        let alert: ZtfAlert = from_value::<ZtfAlert>(&value).inspect_err(as_error!())?;
-
-        Ok(alert)
     }
 
     #[instrument(
@@ -700,9 +652,9 @@ impl AlertWorker for ZtfAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut alert = self
+        let mut alert: ZtfAlert = self
+            .schema_cache
             .alert_from_avro_bytes(avro_bytes)
-            .await
             .inspect_err(as_error!())?;
 
         let candid = alert.candid();
@@ -795,5 +747,82 @@ impl AlertWorker for ZtfAlertWorker {
         }
 
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::{
+        enums::Survey,
+        testing::{ztf_alert_worker, AlertRandomizer},
+    };
+
+    #[tokio::test]
+    async fn test_ztf_alert_from_avro_bytes() {
+        let mut alert_worker = ztf_alert_worker().await;
+
+        let (candid, object_id, ra, dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+        let alert = alert_worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content);
+        assert!(alert.is_ok());
+
+        // validate the alert
+        let alert: ZtfAlert = alert.unwrap();
+        assert_eq!(alert.schemavsn, "4.02");
+        assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
+        assert_eq!(alert.object_id, object_id);
+        assert_eq!(alert.candid, candid);
+        assert_eq!(alert.candidate.ra, ra);
+        assert_eq!(alert.candidate.dec, dec);
+
+        // validate the prv_candidates
+        let prv_candidates = alert.clone().prv_candidates;
+        assert!(!prv_candidates.is_none());
+
+        let prv_candidates = prv_candidates.unwrap();
+        assert_eq!(prv_candidates.len(), 10);
+
+        let non_detection = prv_candidates.get(0).unwrap();
+        assert_eq!(non_detection.magpsf.is_none(), true);
+        assert_eq!(non_detection.diffmaglim.is_some(), true);
+
+        let detection = prv_candidates.get(1).unwrap();
+        assert_eq!(detection.magpsf.is_some(), true);
+        assert_eq!(detection.sigmapsf.is_some(), true);
+        assert_eq!(detection.diffmaglim.is_some(), true);
+        assert_eq!(detection.isdiffpos.is_some(), true);
+
+        // validate the fp_hists
+        let fp_hists = alert.clone().fp_hists;
+        assert!(fp_hists.is_some());
+
+        let fp_hists = fp_hists.unwrap();
+        assert_eq!(fp_hists.len(), 10);
+
+        // at the moment, negative fluxes yield non-detections
+        // this is a conscious choice, might be revisited in the future
+        let fp_negative_det = fp_hists.get(0).unwrap();
+        assert!(fp_negative_det.magpsf.is_none());
+        assert!(fp_negative_det.sigmapsf.is_none());
+        assert!((fp_negative_det.diffmaglim - 20.879942).abs() < 1e-6);
+        assert!(fp_negative_det.isdiffpos.is_none());
+        assert!(fp_negative_det.snr.is_none());
+        assert!((fp_negative_det.fp_hist.jd - 2460447.9202778).abs() < 1e-6);
+
+        let fp_positive_det = fp_hists.get(9).unwrap();
+        assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
+        assert!((fp_positive_det.sigmapsf.unwrap() - 0.3616859).abs() < 1e-6);
+        assert!((fp_positive_det.diffmaglim - 20.247562).abs() < 1e-6);
+        assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
+        assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
+        assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
+
+        // validate the cutouts
+        assert_eq!(alert.cutout_science.len(), 13107);
+        assert_eq!(alert.cutout_template.len(), 12410);
+        assert_eq!(alert.cutout_difference.len(), 14878);
     }
 }
