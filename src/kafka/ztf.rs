@@ -52,6 +52,7 @@ pub struct ZtfAlertProducer {
     partnership_archive_password: Option<String>,
     server_url: String,
     verbose: bool,
+    working_dir: String,
 }
 
 impl ZtfAlertProducer {
@@ -86,6 +87,14 @@ impl ZtfAlertProducer {
             partnership_archive_password,
             server_url: server_url.to_string(),
             verbose,
+            working_dir: ".".to_string(),
+        }
+    }
+
+    pub fn with_working_dir(self, working_dir: &str) -> Self {
+        Self {
+            working_dir: working_dir.to_string(),
+            ..self
         }
     }
 }
@@ -100,13 +109,17 @@ impl AlertProducer for ZtfAlertProducer {
         )
     }
     fn data_directory(&self) -> String {
-        match self.program_id {
-            ProgramId::Public => format!("data/alerts/ztf/public/{}", self.date.format("%Y%m%d")),
-            ProgramId::Partnership => {
-                format!("data/alerts/ztf/partnership/{}", self.date.format("%Y%m%d"))
-            }
-            ProgramId::Caltech => format!("data/alerts/ztf/caltech/{}", self.date.format("%Y%m%d")),
-        }
+        let program = match self.program_id {
+            ProgramId::Public => "public",
+            ProgramId::Partnership => "partnership",
+            ProgramId::Caltech => "caltech",
+        };
+        format!(
+            "{}/data/alerts/ztf/{}/{}",
+            self.working_dir,
+            program,
+            self.date.format("%Y%m%d")
+        )
     }
     fn server_url(&self) -> String {
         self.server_url.clone()
@@ -127,25 +140,24 @@ impl AlertProducer for ZtfAlertProducer {
             date_str, self.program_id
         );
 
-        let (file_name, data_folder, base_url) = match self.program_id {
+        let (file_name, base_url) = match self.program_id {
             ProgramId::Public => (
                 format!("ztf_public_{}.tar.gz", date_str),
-                format!("data/alerts/ztf/public/{}", date_str),
                 "https://ztf.uw.edu/alerts/public/".to_string(),
             ),
             ProgramId::Partnership => (
                 format!("ztf_partnership_{}.tar.gz", date_str),
-                format!("data/alerts/ztf/partnership/{}", date_str),
                 "https://ztf.uw.edu/alerts/partnership/".to_string(),
             ),
             _ => return Err("Unsupported program ID for ZTF alerts".into()),
         };
 
+        let data_folder = self.data_directory();
         std::fs::create_dir_all(&data_folder)?;
 
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
         if count > 0 {
-            info!("Alerts already downloaded to {}{}", data_folder, file_name);
+            info!("Alerts already downloaded to {}", data_folder);
             return Ok(count as i64);
         }
 
