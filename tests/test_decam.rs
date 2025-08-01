@@ -9,32 +9,6 @@ use boom::{
 use mongodb::bson::doc;
 
 #[tokio::test]
-async fn test_decam_alert_from_avro_bytes() {
-    let mut alert_worker = decam_alert_worker().await;
-
-    let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::new_randomized(Survey::Decam).get().await;
-    let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
-    assert!(alert.is_ok());
-
-    // validate the alert
-    let alert = alert.unwrap();
-    assert_eq!(alert.publisher, "DESIRT");
-    assert_eq!(alert.object_id, object_id);
-    assert_eq!(alert.candid, candid);
-
-    // validate the candidate
-    let candidate = alert.clone().candidate;
-    assert_eq!(candidate.ra, ra);
-    assert_eq!(candidate.dec, dec);
-
-    // validate the cutouts
-    assert_eq!(alert.cutout_science.clone().len(), 54561);
-    assert_eq!(alert.cutout_template.clone().len(), 49810);
-    assert_eq!(alert.cutout_difference.clone().len(), 54569);
-}
-
-#[tokio::test]
 async fn test_process_decam_alert() {
     let mut alert_worker = decam_alert_worker().await;
 

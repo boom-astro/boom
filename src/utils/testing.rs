@@ -26,27 +26,27 @@ async fn test_db() -> mongodb::Database {
     db
 }
 
-async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
-    let db = test_db().await;
-    initialize_survey_indexes(survey, &db).await?;
-    Ok(())
-}
-
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Ztf).await.unwrap();
+    initialize_survey_indexes(&Survey::Ztf, &test_db().await)
+        .await
+        .unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Lsst).await.unwrap();
+    initialize_survey_indexes(&Survey::Lsst, &test_db().await)
+        .await
+        .unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn decam_alert_worker() -> DecamAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Decam).await.unwrap();
+    initialize_survey_indexes(&Survey::Decam, &test_db().await)
+        .await
+        .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
@@ -216,19 +216,14 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf => {
-                let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-                let reader = Reader::new(&payload[..]).unwrap();
-                let schema = reader.writer_schema().clone();
-                (
-                    Some(Self::randomize_object_id(&survey)),
-                    Some(payload),
-                    Some(schema),
-                    None,
-                )
-            }
-            Survey::Decam => {
-                let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
+            Survey::Ztf | Survey::Decam => {
+                let payload = match survey {
+                    Survey::Ztf => {
+                        fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
+                    }
+                    Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    _ => unreachable!(),
+                };
                 let reader = Reader::new(&payload[..]).unwrap();
                 let schema = reader.writer_schema().clone();
                 (
