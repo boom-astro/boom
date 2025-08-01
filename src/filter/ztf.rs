@@ -2,7 +2,7 @@ use flare::phot::{limmag_to_fluxerr, mag_to_flux};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{debug, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
@@ -581,8 +581,6 @@ impl FilterWorker for ZtfFilterWorker {
                 let now_ts = chrono::Utc::now().timestamp_millis() as f64;
 
                 for doc in out_documents {
-                    // DEBUG, print the document
-                    debug!("Processing document: {:?}", doc);
                     let candid = doc
                         .get_i64("_id")
                         .inspect_err(as_error!("Failed to get candid from document"))?;

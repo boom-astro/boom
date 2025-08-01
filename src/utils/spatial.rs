@@ -21,6 +21,18 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
+fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
+    match doc.get(key) {
+        Some(mongodb::bson::Bson::Double(v)) => Some(*v),
+        Some(mongodb::bson::Bson::Int32(v)) => Some(*v as f64),
+        Some(mongodb::bson::Bson::Int64(v)) => Some(*v as f64),
+        _ => {
+            warn!("no valid {} in doc", key);
+            None
+        }
+    }
+}
+
 #[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
@@ -151,30 +163,22 @@ pub async fn xmatch(
                 let xmatch_doc = xmatch_doc
                     .as_document()
                     .ok_or(XmatchError::AsDocumentError)?;
-                let xmatch_ra = match xmatch_doc.get("ra") {
-                    Some(mongodb::bson::Bson::Double(v)) => *v,
-                    Some(mongodb::bson::Bson::Int32(v)) => *v as f64,
-                    Some(mongodb::bson::Bson::Int64(v)) => *v as f64,
-                    _ => {
-                        warn!("no valid ra in xmatch doc");
+
+                let xmatch_ra = match get_f64_from_doc(&xmatch_doc, "ra") {
+                    Some(v) => v,
+                    None => {
                         continue;
                     }
                 };
-                let xmatch_dec = match xmatch_doc.get("dec") {
-                    Some(mongodb::bson::Bson::Double(v)) => *v,
-                    Some(mongodb::bson::Bson::Int32(v)) => *v as f64,
-                    Some(mongodb::bson::Bson::Int64(v)) => *v as f64,
-                    _ => {
-                        warn!("no valid dec in xmatch doc");
+                let xmatch_dec = match get_f64_from_doc(&xmatch_doc, "dec") {
+                    Some(v) => v,
+                    None => {
                         continue;
                     }
                 };
-                let doc_z = match xmatch_doc.get(&distance_key) {
-                    Some(mongodb::bson::Bson::Double(v)) => *v,
-                    Some(mongodb::bson::Bson::Int32(v)) => *v as f64,
-                    Some(mongodb::bson::Bson::Int64(v)) => *v as f64,
-                    _ => {
-                        warn!("no valid {} in xmatch doc", distance_key);
+                let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
+                    Some(v) => v,
+                    None => {
                         continue;
                     }
                 };
