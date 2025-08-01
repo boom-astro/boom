@@ -22,15 +22,21 @@ pub enum XmatchError {
 }
 
 fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
-    match doc.get(key) {
-        Some(mongodb::bson::Bson::Double(v)) => Some(*v),
-        Some(mongodb::bson::Bson::Int32(v)) => Some(*v as f64),
-        Some(mongodb::bson::Bson::Int64(v)) => Some(*v as f64),
+    let value = match doc.get(key) {
+        Some(mongodb::bson::Bson::Double(v)) => *v,
+        Some(mongodb::bson::Bson::Int32(v)) => *v as f64,
+        Some(mongodb::bson::Bson::Int64(v)) => *v as f64,
         _ => {
             warn!("no valid {} in doc", key);
-            None
+            return None;
         }
+    };
+    // if the value is out of bounds, return None
+    if value.is_nan() || value.is_infinite() {
+        warn!("{} is NaN or infinite", key);
+        return None;
     }
+    Some(value)
 }
 
 #[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
