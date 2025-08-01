@@ -84,18 +84,6 @@ pub struct DiaSource {
     /// Uncertainty of psfFlux.
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
-    /// Right ascension coordinate of centroid for point source model.
-    #[serde(rename = "psfRa")]
-    pub psf_ra: Option<f64>,
-    /// Uncertainty of psfRa.
-    #[serde(rename = "psfRaErr")]
-    pub psf_ra_err: Option<f32>,
-    /// Declination coordinate of centroid for point source model.
-    #[serde(rename = "psfDec")]
-    pub psf_dec: Option<f64>,
-    /// Uncertainty of psfDec.
-    #[serde(rename = "psfDecErr")]
-    pub psf_dec_err: Option<f32>,
     /// Chi^2 statistic of the point source model fit.
     #[serde(rename = "psfChi2")]
     pub psf_chi2: Option<f32>,
@@ -149,6 +137,12 @@ pub struct DiaSource {
     pub trail_ndata: Option<i32>,
     /// This flag is set if a trailed source extends onto or past edge pixels.
     pub trail_flag_edge: Option<bool>,
+    /// Forced photometry flux for a point source model measured on the visit image centered at DiaSource position
+    #[serde(rename = "scienceFlux")]
+    pub science_flux: Option<f32>,
+    /// Uncertainty of scienceFlux.
+    #[serde(rename = "scienceFluxErr")]
+    pub science_flux_err: Option<f32>,
     /// Forced PSF photometry on science image failed. Another forced_PsfFlux flag field should also be set to provide more information.
     #[serde(rename = "forced_PsfFlux_flag")]
     pub forced_psf_flux_flag: Option<bool>,
@@ -158,12 +152,12 @@ pub struct DiaSource {
     /// Forced PSF flux not enough non-rejected pixels in data to attempt the fit.
     #[serde(rename = "forced_PsfFlux_flag_noGoodPixels")]
     pub forced_psf_flux_flag_no_good_pixels: Option<bool>,
-    /// Estimated sky background at the position (centroid) of the object.
-    #[serde(rename = "fpBkgd")]
-    pub fp_bkgd: Option<f32>,
-    /// Estimated uncertainty of fpBkgd.
-    #[serde(rename = "fpBkgdErr")]
-    pub fp_bkgd_err: Option<f32>,
+    /// Forced photometry flux for a point source model measured on the template image centered at the DiaObject position.
+    #[serde(rename = "templateFlux")]
+    pub template_flux: Option<f32>,
+    /// Uncertainty of templateFlux.
+    #[serde(rename = "templateFluxErr")]
+    pub template_flux_err: Option<f32>,
     /// General source shape algorithm failure flag; set if anything went wrong when measuring the shape. Another shape flag field should also be set to provide more information.
     pub shape_flag: Option<bool>,
     /// No pixels to measure shape.
@@ -178,9 +172,15 @@ pub struct DiaSource {
     pub reliability: Option<f32>,
     /// Filter band this source was observed with.
     pub band: Option<String>,
+    /// Source well fit by a dipole.
+    pub is_dipole: Option<bool>,
+    /// Time when the image was processed and this DiaSource record was generated (timestamp-micros).
+    pub time_processed: Option<i64>,
     /// General pixel flags failure; set if anything went wrong when setting pixels flags from this footprint's mask. This implies that some pixelFlags for this source may be incorrectly set to False.
     #[serde(rename = "pixelFlags")]
     pub pixel_flags: Option<bool>,
+    /// This flag is set if the source is part of a glint trail.
+    pub glint_trail: Option<bool>,
 }
 
 #[serde_as]
@@ -256,6 +256,9 @@ pub struct DiaObject {
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
     #[serde(deserialize_with = "deserialize_objid")]
     pub object_id: String,
+    /// Processing time when validity of this diaObject starts (timestamp-micros).
+    #[serde(rename = "validityStart")]
+    pub validity_start: Option<i64>,
     /// Right ascension coordinate of the position of the object at time radecMjdTai.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -266,33 +269,6 @@ pub struct DiaObject {
     /// Uncertainty of dec.
     #[serde(rename = "decErr")]
     pub dec_err: Option<f32>,
-    /// Time at which the object was at a position ra/dec, expressed as Modified Julian Date, International Atomic Time.
-    #[serde(rename(deserialize = "radecMjdTai", serialize = "jd"))]
-    #[serde(deserialize_with = "deserialize_mjd_option")]
-    pub jd: Option<f64>,
-    /// Proper motion in right ascension.
-    #[serde(rename = "pmRa")]
-    pub pm_ra: Option<f32>,
-    /// Uncertainty of pmRa.
-    #[serde(rename = "pmRaErr")]
-    pub pm_ra_err: Option<f32>,
-    /// Proper motion of declination.
-    #[serde(rename = "pmDec")]
-    pub pm_dec: Option<f32>,
-    /// Uncertainty of pmDec.
-    #[serde(rename = "pmDecErr")]
-    pub pm_dec_err: Option<f32>,
-    /// Parallax.
-    pub parallax: Option<f32>,
-    /// Uncertainty of parallax.
-    #[serde(rename = "parallaxErr")]
-    pub parallax_err: Option<f32>,
-    /// Chi^2 static of the model fit.
-    #[serde(rename = "pmParallaxChi2")]
-    pub pm_parallax_chi2: Option<f32>,
-    /// The number of data points used to fit the model.
-    #[serde(rename = "pmParallaxNdata")]
-    pub pm_parallax_ndata: Option<i32>,
     /// Weighted mean point-source model magnitude for u filter.
     #[serde(rename = "u_psfFluxMean")]
     pub u_psf_flux_mean: Option<f32>,
@@ -419,27 +395,53 @@ pub struct DiaObject {
     /// Mean of the y band flux errors.
     #[serde(rename = "y_psfFluxErrMean")]
     pub y_psf_flux_err_mean: Option<f32>,
-
-    #[serde(rename = "nearbyObj1")]
-    pub nearby_obj1: Option<i64>,
-    #[serde(rename = "nearbyObj1Dist")]
-    pub nearby_obj1_dist: Option<f32>,
-    #[serde(rename = "nearbyObj1LnP")]
-    pub nearby_obj1_lnp: Option<f32>,
-
-    #[serde(rename = "nearbyObj2")]
-    pub nearby_obj2: Option<i64>,
-    #[serde(rename = "nearbyObj2Dist")]
-    pub nearby_obj2_dist: Option<f32>,
-    #[serde(rename = "nearbyObj2LnP")]
-    pub nearby_obj2_lnp: Option<f32>,
-
-    #[serde(rename = "nearbyObj3")]
-    pub nearby_obj3: Option<i64>,
-    #[serde(rename = "nearbyObj3Dist")]
-    pub nearby_obj3_dist: Option<f32>,
-    #[serde(rename = "nearbyObj3LnP")]
-    pub nearby_obj3_lnp: Option<f32>,
+    /// Weighted mean forced photometry flux for u filter.
+    #[serde(rename = "u_scienceFluxMean")]
+    pub u_science_flux_mean: Option<f32>,
+    /// Standard error of u_scienceFluxMean.
+    #[serde(rename = "u_scienceFluxMeanErr")]
+    pub u_science_flux_mean_err: Option<f32>,
+    /// Weighted mean forced photometry flux for g filter.
+    #[serde(rename = "g_scienceFluxMean")]
+    pub g_science_flux_mean: Option<f32>,
+    /// Standard error of g_scienceFluxMean.
+    #[serde(rename = "g_scienceFluxMeanErr")]
+    pub g_science_flux_mean_err: Option<f32>,
+    /// Weighted mean forced photometry flux for r filter.
+    #[serde(rename = "r_scienceFluxMean")]
+    pub r_science_flux_mean: Option<f32>,
+    /// Standard error of r_scienceFluxMean.
+    #[serde(rename = "r_scienceFluxMeanErr")]
+    pub r_science_flux_mean_err: Option<f32>,
+    /// Weighted mean forced photometry flux for i filter.
+    #[serde(rename = "i_scienceFluxMean")]
+    pub i_science_flux_mean: Option<f32>,
+    /// Standard error of i_scienceFluxMean.
+    #[serde(rename = "i_scienceFluxMeanErr")]
+    pub i_science_flux_mean_err: Option<f32>,
+    /// Weighted mean forced photometry flux for z filter.
+    #[serde(rename = "z_scienceFluxMean")]
+    pub z_science_flux_mean: Option<f32>,
+    /// Standard error of z_scienceFluxMean.
+    #[serde(rename = "z_scienceFluxMeanErr")]
+    pub z_science_flux_mean_err: Option<f32>,
+    /// Weighted mean forced photometry flux for y filter.
+    #[serde(rename = "y_scienceFluxMean")]
+    pub y_science_flux_mean: Option<f32>,
+    /// Standard error of y_scienceFluxMean.
+    #[serde(rename = "y_scienceFluxMeanErr")]
+    pub y_science_flux_mean_err: Option<f32>,
+    /// Time of the first diaSource, expressed as Modified Julian Date, International Atomic Time.
+    #[serde(rename(deserialize = "firstDiaSourceMjdTai", serialize = "jdstarthist"))]
+    #[serde(deserialize_with = "deserialize_mjd")]
+    pub jdstarthist: f64,
+    /// Last time when non-forced DIASource was seen for this object.
+    #[serde(rename(deserialize = "lastDiaSourceMjdTai", serialize = "jdendhist"))]
+    #[serde(deserialize_with = "deserialize_mjd")]
+    pub jdendhist: f64,
+    /// Total number of DiaSources associated with this DiaObject.
+    #[serde(rename(deserialize = "nDiaSources", serialize = "ndethist"))]
+    pub ndethist: i32,
 }
 
 #[serde_as]
@@ -454,26 +456,6 @@ pub struct DiaNondetectionLimit {
     pub band: String,
     #[serde(rename = "diaNoise")]
     pub dia_noise: f32,
-}
-
-#[serde_as]
-#[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct NonDetection {
-    #[serde(flatten)]
-    pub dia_nondetection_limit: DiaNondetectionLimit,
-    pub diffmaglim: f32,
-}
-
-impl From<DiaNondetectionLimit> for NonDetection {
-    fn from(dia_nondetection_limit: DiaNondetectionLimit) -> Self {
-        let diffmaglim = fluxerr2diffmaglim(dia_nondetection_limit.dia_noise * 1e-9, ZP_AB);
-
-        NonDetection {
-            dia_nondetection_limit,
-            diffmaglim,
-        }
-    }
 }
 
 #[serde_as]
@@ -505,8 +487,16 @@ pub struct DiaForcedSource {
     #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
     #[serde(deserialize_with = "deserialize_mjd")]
     pub jd: f64,
+    /// Forced photometry flux for a point source model measured on the visit image centered at the DiaObject position.
+    #[serde(rename = "scienceFlux")]
+    pub science_flux: Option<f32>,
+    /// Uncertainty of scienceFlux.
+    #[serde(rename = "scienceFluxErr")]
+    pub science_flux_err: Option<f32>,
     /// Filter band this source was observed with.
     pub band: Option<String>,
+    /// Time when this record was generated (timestamp-micros).
+    pub time_processed: Option<i64>,
 }
 
 #[serde_as]
@@ -567,7 +557,7 @@ impl TryFrom<DiaForcedSource> for ForcedPhot {
 /// Rubin Avro alert schema v7.3
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstAlert {
-    #[serde(rename(deserialize = "alertId"))]
+    #[serde(rename(deserialize = "diaSourceId"))]
     pub candid: i64,
     #[serde(rename(deserialize = "diaSource"))]
     #[serde(deserialize_with = "deserialize_candidate")]
@@ -578,9 +568,11 @@ pub struct LsstAlert {
     #[serde(rename = "prvDiaForcedSources")]
     #[serde(deserialize_with = "deserialize_prv_forced_sources")]
     pub fp_hists: Option<Vec<ForcedPhot>>,
-    #[serde(rename = "prvDiaNondetectionLimits")]
-    #[serde(deserialize_with = "deserialize_prv_nondetections")]
-    pub prv_nondetections: Option<Vec<NonDetection>>,
+    // NOTE: the prv_nondetections is missing in version 8 of the schema,
+    // and will be reintroduced in a future version
+    // #[serde(rename = "prvDiaNondetectionLimits")]
+    // #[serde(deserialize_with = "deserialize_prv_nondetections")]
+    // pub prv_nondetections: Option<Vec<NonDetection>>,
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
@@ -671,38 +663,12 @@ where
     Ok(Some(forced_phots))
 }
 
-fn deserialize_prv_nondetections<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<NonDetection>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let dia_nondetection_limits =
-        <Vec<DiaNondetectionLimit> as Deserialize>::deserialize(deserializer)?;
-    let nondetections = dia_nondetection_limits
-        .into_iter()
-        .map(NonDetection::from)
-        .collect::<Vec<NonDetection>>();
-    Ok(Some(nondetections))
-}
-
 fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: Deserializer<'de>,
 {
     let mjd = <f64 as Deserialize>::deserialize(deserializer)?;
     Ok(mjd + 2400000.5)
-}
-
-fn deserialize_mjd_option<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mjd = <Option<f64> as Deserialize>::deserialize(deserializer)?;
-    match mjd {
-        Some(mjd) => Ok(Some(mjd + 2400000.5)),
-        None => Ok(None),
-    }
 }
 
 impl Alert for LsstAlert {
@@ -731,17 +697,13 @@ pub struct LsstAlertWorker {
 }
 
 impl LsstAlertWorker {
-    #[instrument(
-        skip(self, prv_candidates_doc, prv_nondetections_doc, fp_hist_doc, xmatches,),
-        err
-    )]
+    #[instrument(skip(self, prv_candidates_doc, fp_hist_doc, xmatches,), err)]
     async fn insert_alert_aux(
         &self,
         object_id: String,
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
         xmatches: Document,
         now: f64,
@@ -749,7 +711,6 @@ impl LsstAlertWorker {
         let alert_aux_doc = doc! {
             "_id": object_id,
             "prv_candidates": prv_candidates_doc,
-            "prv_nondetections": prv_nondetections_doc,
             "fp_hists": fp_hist_doc,
             "cross_matches": xmatches,
             "created_at": now,
@@ -790,8 +751,7 @@ impl LsstAlertWorker {
         prv_candidates: Option<Vec<Candidate>>,
         candidate_doc: Document,
         fp_hist: Option<Vec<ForcedPhot>>,
-        prv_nondetections: Option<Vec<NonDetection>>,
-    ) -> (Vec<Document>, Vec<Document>, Vec<Document>) {
+    ) -> (Vec<Document>, Vec<Document>) {
         let mut prv_candidates_doc = prv_candidates
             .unwrap_or(vec![])
             .into_iter()
@@ -805,12 +765,7 @@ impl LsstAlertWorker {
             .map(|x| mongify(&x))
             .collect::<Vec<_>>();
 
-        let prv_nondetections_doc = prv_nondetections
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
-        (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc)
+        (prv_candidates_doc, fp_hist_doc)
     }
 }
 
@@ -886,7 +841,7 @@ impl AlertWorker for LsstAlertWorker {
             ra,
             dec,
             prv_candidates_doc,
-            prv_nondetections_doc,
+            _prv_nondetections_doc,
             fp_hist_doc,
             _survey_matches
         ),
@@ -898,7 +853,7 @@ impl AlertWorker for LsstAlertWorker {
         ra: f64,
         dec: f64,
         prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
+        _prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
         _survey_matches: &Option<Document>,
         now: f64,
@@ -909,7 +864,6 @@ impl AlertWorker for LsstAlertWorker {
             ra,
             dec,
             prv_candidates_doc,
-            prv_nondetections_doc,
             fp_hist_doc,
             xmatches,
             now,
@@ -922,7 +876,7 @@ impl AlertWorker for LsstAlertWorker {
         skip(
             self,
             prv_candidates_doc,
-            prv_nondetections_doc,
+            _prv_nondetections_doc,
             fp_hist_doc,
             _survey_matches
         ),
@@ -932,7 +886,7 @@ impl AlertWorker for LsstAlertWorker {
         self: &mut Self,
         object_id: &str,
         prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
+        _prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
         _survey_matches: &Option<Document>,
         now: f64,
@@ -940,7 +894,6 @@ impl AlertWorker for LsstAlertWorker {
         let update_doc = doc! {
             "$set": {
                 "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
-                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", prv_nondetections_doc),
                 "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
                 "updated_at": now,
             }
@@ -969,7 +922,6 @@ impl AlertWorker for LsstAlertWorker {
 
         let prv_candidates = alert.prv_candidates.take();
         let fp_hist = alert.fp_hists.take();
-        let prv_nondetections = alert.prv_nondetections.take();
 
         let candidate_doc = mongify(&alert.candidate);
 
@@ -1003,13 +955,8 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) = self
-            .format_prv_candidates_and_fp_hist(
-                prv_candidates,
-                candidate_doc,
-                fp_hist,
-                prv_nondetections,
-            );
+        let (prv_candidates_doc, fp_hist_doc) =
+            self.format_prv_candidates_and_fp_hist(prv_candidates, candidate_doc, fp_hist);
 
         if !alert_aux_exists {
             let result = self
@@ -1018,7 +965,7 @@ impl AlertWorker for LsstAlertWorker {
                     ra,
                     dec,
                     &prv_candidates_doc,
-                    &prv_nondetections_doc,
+                    &Vec::new(),
                     &fp_hist_doc,
                     &None,
                     now,
@@ -1028,7 +975,7 @@ impl AlertWorker for LsstAlertWorker {
                 self.update_aux(
                     &object_id,
                     &prv_candidates_doc,
-                    &prv_nondetections_doc,
+                    &Vec::new(),
                     &fp_hist_doc,
                     &None,
                     now,
@@ -1042,7 +989,7 @@ impl AlertWorker for LsstAlertWorker {
             self.update_aux(
                 &object_id,
                 &prv_candidates_doc,
-                &prv_nondetections_doc,
+                &Vec::new(),
                 &fp_hist_doc,
                 &None,
                 now,

@@ -71,11 +71,6 @@ async fn test_lsst_alert_from_avro_bytes() {
     assert_eq!(fp_hist.isdiffpos.unwrap(), true);
     assert_eq!(fp_hist.dia_forced_source.band.clone().unwrap(), "g");
 
-    // validate the non detections
-    assert!(!alert.prv_nondetections.is_none());
-    // length should be 0
-    assert_eq!(alert.prv_nondetections.unwrap().len(), 0);
-
     // TODO: find an LSST avro packet that has non detections so we can test it
 }
 
