@@ -4,7 +4,11 @@ use crate::{
         SchemaCache,
     },
     conf,
-    utils::{db::mongify, o11y::as_error, spatial::xmatch},
+    utils::{
+        db::{mongify, update_timeseries_op},
+        o11y::as_error,
+        spatial::xmatch,
+    },
 };
 use constcat::concat;
 use flare::Time;
@@ -224,12 +228,10 @@ impl AlertWorker for DecamAlertWorker {
         now: f64,
     ) -> Result<(), AlertError> {
         let update_doc = doc! {
-            "$addToSet": {
-                "fp_hists": { "$each": fp_hist_doc }
-            },
             "$set": {
-                "updated_at": now,
+                "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
                 "aliases": survey_matches,
+                "updated_at": now,
             }
         };
 

@@ -6,7 +6,7 @@ use crate::{
     conf,
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
-        db::mongify,
+        db::{mongify, update_timeseries_op},
         o11y::as_error,
         spatial::xmatch,
     },
@@ -632,14 +632,12 @@ impl AlertWorker for ZtfAlertWorker {
         now: f64,
     ) -> Result<(), AlertError> {
         let update_doc = doc! {
-            "$addToSet": {
-                "prv_candidates": { "$each": prv_candidates_doc },
-                "prv_nondetections": { "$each": prv_nondetections_doc },
-                "fp_hists": { "$each": fp_hist_doc }
-            },
             "$set": {
-                "updated_at": now,
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
+                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", prv_nondetections_doc),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
                 "aliases": survey_matches,
+                "updated_at": now,
             }
         };
         self.alert_aux_collection

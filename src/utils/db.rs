@@ -86,3 +86,31 @@ pub async fn initialize_survey_indexes(
 
     Ok(())
 }
+
+/// This function updates a timeseries array by appending new values
+/// while deduplicating based on a time field
+/// (so we have only one measurement per epoch).
+pub fn update_timeseries_op(
+    array_field: &str,
+    time_field: &str,
+    value: &Vec<mongodb::bson::Document>,
+) -> mongodb::bson::Document {
+    doc! {
+        "$sortArray": {
+            "input": {
+                "$reduce": {
+                    "input": { "$concatArrays": [array_field, value] },
+                    "initialValue": [],
+                    "in": {
+                        "$cond": {
+                            "if": { "$in": [format!("$$this.{}", time_field), format!("$$value.{}", time_field)] },
+                            "then": "$$value",
+                            "else": { "$concatArrays": ["$$value", ["$$this"]] }
+                        }
+                    }
+                }
+            },
+            "sortBy": { time_field: 1 }
+        }
+    }
+}
