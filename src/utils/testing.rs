@@ -26,27 +26,27 @@ async fn test_db() -> mongodb::Database {
     db
 }
 
-pub async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
-    let db = test_db().await;
-    initialize_survey_indexes(survey, &db).await?;
-    Ok(())
-}
-
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Ztf).await.unwrap();
+    initialize_survey_indexes(&Survey::Ztf, &test_db().await)
+        .await
+        .unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Lsst).await.unwrap();
+    initialize_survey_indexes(&Survey::Lsst, &test_db().await)
+        .await
+        .unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn decam_alert_worker() -> DecamAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Decam).await.unwrap();
+    initialize_survey_indexes(&Survey::Decam, &test_db().await)
+        .await
+        .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
