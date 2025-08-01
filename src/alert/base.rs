@@ -333,18 +333,8 @@ pub struct SchemaCache {
 }
 
 impl SchemaCache {
-    pub fn new(cached_schema: Schema, cached_start_idx: usize) -> Self {
-        SchemaCache {
-            cached_schema: Some(cached_schema),
-            cached_start_idx: Some(cached_start_idx),
-        }
-    }
-
     #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes<T: Alert>(
-        &mut self,
-        avro_bytes: &[u8],
-    ) -> Result<T, AlertError> {
+    pub fn alert_from_avro_bytes<T: Alert>(&mut self, avro_bytes: &[u8]) -> Result<T, AlertError> {
         // if the schema is not cached, get it from the avro_bytes
         let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
             (Some(schema), Some(start_idx)) => (schema, start_idx),

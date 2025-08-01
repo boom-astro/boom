@@ -398,7 +398,7 @@ pub struct ZtfAlertWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_aux_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
-    pub schema_cache: SchemaCache,
+    schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
 }
@@ -657,7 +657,6 @@ impl AlertWorker for ZtfAlertWorker {
         let mut alert: ZtfAlert = self
             .schema_cache
             .alert_from_avro_bytes(avro_bytes)
-            .await
             .inspect_err(as_error!())?;
 
         let candid = alert.candid();
@@ -750,5 +749,82 @@ impl AlertWorker for ZtfAlertWorker {
         }
 
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::{
+        enums::Survey,
+        testing::{ztf_alert_worker, AlertRandomizer},
+    };
+
+    #[tokio::test]
+    async fn test_ztf_alert_from_avro_bytes() {
+        let mut alert_worker = ztf_alert_worker().await;
+
+        let (candid, object_id, ra, dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+        let alert = alert_worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content);
+        assert!(alert.is_ok());
+
+        // validate the alert
+        let alert: ZtfAlert = alert.unwrap();
+        assert_eq!(alert.schemavsn, "4.02");
+        assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
+        assert_eq!(alert.object_id, object_id);
+        assert_eq!(alert.candid, candid);
+        assert_eq!(alert.candidate.ra, ra);
+        assert_eq!(alert.candidate.dec, dec);
+
+        // validate the prv_candidates
+        let prv_candidates = alert.clone().prv_candidates;
+        assert!(!prv_candidates.is_none());
+
+        let prv_candidates = prv_candidates.unwrap();
+        assert_eq!(prv_candidates.len(), 10);
+
+        let non_detection = prv_candidates.get(0).unwrap();
+        assert_eq!(non_detection.magpsf.is_none(), true);
+        assert_eq!(non_detection.diffmaglim.is_some(), true);
+
+        let detection = prv_candidates.get(1).unwrap();
+        assert_eq!(detection.magpsf.is_some(), true);
+        assert_eq!(detection.sigmapsf.is_some(), true);
+        assert_eq!(detection.diffmaglim.is_some(), true);
+        assert_eq!(detection.isdiffpos.is_some(), true);
+
+        // validate the fp_hists
+        let fp_hists = alert.clone().fp_hists;
+        assert!(fp_hists.is_some());
+
+        let fp_hists = fp_hists.unwrap();
+        assert_eq!(fp_hists.len(), 10);
+
+        // at the moment, negative fluxes yield non-detections
+        // this is a conscious choice, might be revisited in the future
+        let fp_negative_det = fp_hists.get(0).unwrap();
+        assert!(fp_negative_det.magpsf.is_none());
+        assert!(fp_negative_det.sigmapsf.is_none());
+        assert!((fp_negative_det.diffmaglim - 20.879942).abs() < 1e-6);
+        assert!(fp_negative_det.isdiffpos.is_none());
+        assert!(fp_negative_det.snr.is_none());
+        assert!((fp_negative_det.fp_hist.jd - 2460447.9202778).abs() < 1e-6);
+
+        let fp_positive_det = fp_hists.get(9).unwrap();
+        assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
+        assert!((fp_positive_det.sigmapsf.unwrap() - 0.3616859).abs() < 1e-6);
+        assert!((fp_positive_det.diffmaglim - 20.247562).abs() < 1e-6);
+        assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
+        assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
+        assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
+
+        // validate the cutouts
+        assert_eq!(alert.cutout_science.len(), 13107);
+        assert_eq!(alert.cutout_template.len(), 12410);
+        assert_eq!(alert.cutout_difference.len(), 14878);
     }
 }

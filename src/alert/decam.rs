@@ -92,7 +92,7 @@ pub struct DecamAlertWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_aux_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
-    pub schema_cache: SchemaCache,
+    schema_cache: SchemaCache,
 }
 
 impl DecamAlertWorker {
@@ -248,7 +248,6 @@ impl AlertWorker for DecamAlertWorker {
         let alert: DecamAlert = self
             .schema_cache
             .alert_from_avro_bytes(avro_bytes)
-            .await
             .inspect_err(as_error!())?;
 
         let candid = alert.candid();
@@ -333,5 +332,49 @@ impl AlertWorker for DecamAlertWorker {
         }
 
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::{
+        enums::Survey,
+        testing::{decam_alert_worker, AlertRandomizer},
+    };
+
+    #[tokio::test]
+    async fn test_decam_alert_from_avro_bytes() {
+        let mut alert_worker = decam_alert_worker().await;
+
+        let (candid, object_id, ra, dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Decam).get().await;
+        let alert = alert_worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content);
+        assert!(alert.is_ok());
+
+        // validate the alert
+        let alert: DecamAlert = alert.unwrap();
+        assert_eq!(alert.publisher, "DESIRT");
+        assert_eq!(alert.object_id, object_id);
+        assert_eq!(alert.candid, candid);
+        assert_eq!(alert.candidate.ra, ra);
+        assert_eq!(alert.candidate.dec, dec);
+
+        // validate the fp_hists
+        let fp_hists = alert.clone().fp_hists;
+        assert_eq!(fp_hists.len(), 61);
+
+        let fp_positive_det = fp_hists.get(0).unwrap();
+        assert!((fp_positive_det.magap - 22.595936).abs() < 1e-6);
+        assert!((fp_positive_det.sigmagap - 0.093660).abs() < 1e-6);
+        assert!((fp_positive_det.jd - 2460709.838387).abs() < 1e-6);
+        assert_eq!(fp_positive_det.band, "g");
+
+        // validate the cutouts
+        assert_eq!(alert.cutout_science.clone().len(), 54561);
+        assert_eq!(alert.cutout_template.clone().len(), 49810);
+        assert_eq!(alert.cutout_difference.clone().len(), 54569);
     }
 }

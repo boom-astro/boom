@@ -26,7 +26,7 @@ async fn test_db() -> mongodb::Database {
     db
 }
 
-async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
     let db = test_db().await;
     initialize_survey_indexes(survey, &db).await?;
     Ok(())
