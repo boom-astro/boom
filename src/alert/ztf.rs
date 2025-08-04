@@ -631,7 +631,7 @@ impl AlertWorker for ZtfAlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_doc = doc! {
+        let update_pipeline = vec![doc! {
             "$set": {
                 "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
                 "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", prv_nondetections_doc),
@@ -639,9 +639,9 @@ impl AlertWorker for ZtfAlertWorker {
                 "aliases": survey_matches,
                 "updated_at": now,
             }
-        };
+        }];
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
         Ok(())
     }

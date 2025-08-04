@@ -227,16 +227,16 @@ impl AlertWorker for DecamAlertWorker {
         survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_doc = doc! {
+        let update_pipeline = vec![doc! {
             "$set": {
                 "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
                 "aliases": survey_matches,
                 "updated_at": now,
             }
-        };
+        }];
 
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
 
         Ok(())
