@@ -99,7 +99,7 @@ pub fn update_timeseries_op(
         "$sortArray": {
             "input": {
                 "$reduce": {
-                    "input": { "$concatArrays": [array_field, value] },
+                    "input": { "$concatArrays": [format!("${}", array_field), value] },
                     "initialValue": [],
                     "in": {
                         "$cond": {
