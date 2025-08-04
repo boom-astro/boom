@@ -96,27 +96,22 @@ pub fn update_timeseries_op(
     value: &Vec<mongodb::bson::Document>,
 ) -> mongodb::bson::Document {
     doc! {
-        "$sortArray": {
+        "$reduce": {
             "input": {
-                "$reduce": {
-                    "input": {
-                        "$concatArrays": [
-                            // handle the case where the array_field is not present
-                            { "$ifNull": [format!("${}", array_field), []] },
-                            value
-                        ]
-                    },
-                    "initialValue": [],
-                    "in": {
-                        "$cond": {
-                            "if": { "$in": [format!("$$this.{}", time_field), format!("$$value.{}", time_field)] },
-                            "then": "$$value",
-                            "else": { "$concatArrays": ["$$value", ["$$this"]] }
-                        }
-                    }
-                }
+                "$concatArrays": [
+                    // handle the case where the array_field is not present
+                    { "$ifNull": [format!("${}", array_field), []] },
+                    value
+                ]
             },
-            "sortBy": { time_field: 1 }
+            "initialValue": [],
+            "in": {
+                "$cond": {
+                    "if": { "$in": [format!("$$this.{}", time_field), format!("$$value.{}", time_field)] },
+                    "then": "$$value",
+                    "else": { "$concatArrays": ["$$value", ["$$this"]] }
+                }
+            }
         }
     }
 }
