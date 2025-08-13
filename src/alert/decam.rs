@@ -268,6 +268,7 @@ impl AlertWorker for DecamAlertWorker {
                 ra,
                 dec,
                 &candidate_doc,
+                &doc! {},
                 now,
                 &self.alert_collection,
             )

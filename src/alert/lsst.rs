@@ -4,8 +4,8 @@ use crate::{
     },
     conf,
     utils::{
-        conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         db::{mongify, update_timeseries_op},
+        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         o11y::as_error,
         spatial::xmatch,
     },
@@ -955,6 +955,7 @@ impl AlertWorker for LsstAlertWorker {
                 ra,
                 dec,
                 &candidate_doc,
+                &doc! {},
                 now,
                 &self.alert_collection,
             )
