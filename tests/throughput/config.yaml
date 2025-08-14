@@ -1,0 +1,99 @@
+crossmatch:
+  LSST: []
+  ZTF:
+  - catalog: PS1_DR1
+    projection:
+      _id: 1
+      dec: 1
+      gMeanPSFMag: 1
+      gMeanPSFMagErr: 1
+      iMeanPSFMag: 1
+      iMeanPSFMagErr: 1
+      rMeanPSFMag: 1
+      rMeanPSFMagErr: 1
+      ra: 1
+      yMeanPSFMag: 1
+      yMeanPSFMagErr: 1
+      zMeanPSFMag: 1
+      zMeanPSFMagErr: 1
+    radius: 2.0
+    use_distance: false
+  - catalog: Gaia_DR3
+    projection:
+      _id: 1
+      dec: 1
+      parallax: 1
+      parallax_error: 1
+      phot_bp_mean_mag: 1
+      phot_g_mean_mag: 1
+      phot_rp_mean_mag: 1
+      ra: 1
+    radius: 2.0
+    use_distance: false
+  - catalog: milliquas_v6
+    projection:
+      Descrip: 1
+      Name: 1
+      Qpct: 1
+      _id: 1
+      dec: 1
+      ra: 1
+    radius: 2.0
+    use_distance: false
+  - catalog: NED
+    distance_key: z
+    distance_max: 30.0
+    distance_max_near: 300.0
+    projection:
+      DistMpc: 1
+      DistMpc_unc: 1
+      Mstar: 1
+      Mstar_unc: 1
+      _id: 0
+      dec: 1
+      ebv: 1
+      m_Ks: 1
+      m_Ks_unc: 1
+      objname: 1
+      objtype: 1
+      ra: 1
+      tMASSphot: 1
+      z: 1
+      z_qual: 1
+      z_tech: 1
+      z_unc: 1
+    radius: 300.0
+    use_distance: true
+database:
+  host: mongo
+  max_pool_size: 200
+  name: boom
+  password: mongoadminsecret
+  port: 27017
+  replica_set: null
+  srv: false
+  username: mongoadmin
+kafka:
+  consumer:
+    ZTF: broker:29092
+  producer: broker:29092
+redis:
+  host: valkey
+  port: 6379
+workers:
+  LSST:
+    alert:
+      n_workers: 1
+    command_interval: 500
+    filter:
+      n_workers: 1
+    ml:
+      n_workers: 0
+  ZTF:
+    alert:
+      n_workers: 4
+    command_interval: 500
+    filter:
+      n_workers: 1
+    ml:
+      n_workers: 6
