@@ -158,7 +158,7 @@ impl FilterWorker for LsstFilterWorker {
             // if filter_ids are provided, we only build those filters
             for filter_id in filter_ids {
                 if all_filter_ids.contains(&filter_id) {
-                    filters.push(LsstFilter::build(filter_id, &filter_collection).await?);
+                    filters.push(LsstFilter::build(&filter_id, &filter_collection).await?);
                 } else {
                     return Err(FilterWorkerError::FilterNotFound);
                 }
@@ -166,7 +166,7 @@ impl FilterWorker for LsstFilterWorker {
         } else {
             // if no filter_ids are provided, we build all active filters
             for filter_id in all_filter_ids {
-                filters.push(LsstFilter::build(filter_id, &filter_collection).await?);
+                filters.push(LsstFilter::build(&filter_id, &filter_collection).await?);
             }
         }
 

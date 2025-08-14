@@ -260,7 +260,7 @@ impl FilterWorker for ZtfFilterWorker {
     #[instrument(err)]
     async fn new(
         config_path: &str,
-        filter_ids: Option<Vec<i32>>,
+        filter_ids: Option<Vec<String>>,
     ) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
@@ -288,11 +288,11 @@ impl FilterWorker for ZtfFilterWorker {
                 if !all_filter_ids.contains(&filter_id) {
                     return Err(FilterWorkerError::FilterNotFound);
                 }
-                filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+                filters.push(ZtfFilter::build(&filter_id, &filter_collection).await?);
             }
         } else {
             for filter_id in all_filter_ids {
-                filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+                filters.push(ZtfFilter::build(&filter_id, &filter_collection).await?);
             }
         }
 

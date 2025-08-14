@@ -125,8 +125,8 @@ async fn test_build_filter() {
     let filter_collection = db.collection("filters");
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
-    let filter_result = ZtfFilter::build(filter_id, &filter_collection).await;
-    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
+    let filter_result = ZtfFilter::build(&filter_id, &filter_collection).await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
 
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![

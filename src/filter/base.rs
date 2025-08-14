@@ -503,7 +503,7 @@ pub enum FilterWorkerError {
 pub trait FilterWorker {
     async fn new(
         config_path: &str,
-        filter_ids: Option<Vec<i32>>,
+        filter_ids: Option<Vec<String>>,
     ) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
