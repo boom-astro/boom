@@ -21,6 +21,24 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
+fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
+    let value = match doc.get(key) {
+        Some(mongodb::bson::Bson::Double(v)) => *v,
+        Some(mongodb::bson::Bson::Int32(v)) => *v as f64,
+        Some(mongodb::bson::Bson::Int64(v)) => *v as f64,
+        _ => {
+            warn!("no valid {} in doc", key);
+            return None;
+        }
+    };
+    // if the value is out of bounds, return None
+    if value.is_nan() || value.is_infinite() {
+        warn!("{} is NaN or infinite", key);
+        return None;
+    }
+    Some(value)
+}
+
 #[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
@@ -60,7 +78,8 @@ pub async fn xmatch(
         doc! {
             "$project": {
                 "_id": 0,
-                &xmatch_configs[0].catalog: "$matches"
+                "matches": 1,
+                "catalog": &xmatch_configs[0].catalog
             }
         },
     ];
@@ -150,40 +169,47 @@ pub async fn xmatch(
                 let xmatch_doc = xmatch_doc
                     .as_document()
                     .ok_or(XmatchError::AsDocumentError)?;
-                let Ok(xmatch_ra) = xmatch_doc.get_f64("ra") else {
-                    warn!("no ra in xmatch doc");
-                    continue;
+
+                let xmatch_ra = match get_f64_from_doc(&xmatch_doc, "ra") {
+                    Some(v) => v,
+                    None => {
+                        continue;
+                    }
                 };
-                let Ok(xmatch_dec) = xmatch_doc.get_f64("dec") else {
-                    warn!("no dec in xmatch doc");
-                    continue;
+                let xmatch_dec = match get_f64_from_doc(&xmatch_doc, "dec") {
+                    Some(v) => v,
+                    None => {
+                        continue;
+                    }
                 };
-                let Ok(doc_z) = xmatch_doc.get_f64(&distance_key) else {
-                    warn!("no z in xmatch doc");
-                    continue;
+                let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
+                    Some(v) => v,
+                    None => {
+                        continue;
+                    }
                 };
 
-                let cm_radius = if doc_z < 0.01 {
-                    distance_max_near / 3600.0 // to degrees
+                let cm_radius_arcsec = if doc_z < 0.01 {
+                    distance_max_near // in arcsec
                 } else {
-                    distance_max * (0.05 / doc_z) / 3600.0 // to degrees
+                    distance_max * (0.05 / doc_z) // in arcsec
                 };
-                let angular_separation =
-                    great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0;
+                let distance_arcsec =
+                    great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0; // convert to arcsec
 
-                if angular_separation < cm_radius {
+                if distance_arcsec < cm_radius_arcsec {
                     // calculate the distance between objs in kpc
                     // let distance_kpc = angular_separation * (doc_z / 0.05);
                     let distance_kpc = if doc_z > 0.005 {
-                        angular_separation * (doc_z / 0.05)
+                        distance_arcsec * (doc_z / 0.05)
                     } else {
                         -1.0
                     };
 
                     // we make a mutable copy of the xmatch_doc
                     let mut xmatch_doc = xmatch_doc.clone();
-                    // overwrite doc_copy with doc_copy + the angular separation and the distance in kpc
-                    xmatch_doc.insert("angular_separation", angular_separation);
+                    // add the distance fields to the xmatch_doc
+                    xmatch_doc.insert("distance_arcsec", distance_arcsec);
                     xmatch_doc.insert("distance_kpc", distance_kpc);
                     matches_filtered.push(xmatch_doc);
                 }
