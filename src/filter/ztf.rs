@@ -271,7 +271,7 @@ impl FilterWorker for ZtfFilterWorker {
         let output_topic = "ZTF_alerts_results".to_string();
 
         let all_filter_ids: Vec<String> = filter_collection
-            .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
+            .distinct("id", doc! {"active": true, "catalog": "ZTF_alerts"})
             .await?
             .into_iter()
             .map(|x| {
