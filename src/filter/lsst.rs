@@ -405,7 +405,7 @@ impl FilterWorker for LsstFilterWorker {
                 let annotations =
                     serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
                 let filter_result = FilterResults {
-                    filter_id: filter.id.to_string(),
+                    filter_id: filter.id.clone(),
                     passed_at: now_ts,
                     annotations,
                 };

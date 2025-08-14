@@ -306,7 +306,7 @@ impl FilterWorker for ZtfFilterWorker {
                 let entry = filters_by_permission
                     .entry(*permission)
                     .or_insert(Vec::new());
-                entry.push(filter.id.to_string());
+                entry.push(filter.id.clone());
             }
         }
 
@@ -599,7 +599,7 @@ impl FilterWorker for ZtfFilterWorker {
                         serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))
                             .inspect_err(as_error!("Failed to serialize annotations"))?;
                     let filter_result = FilterResults {
-                        filter_id: filter.id.to_string(),
+                        filter_id: filter.id.clone(),
                         passed_at: now_ts,
                         annotations,
                     };
