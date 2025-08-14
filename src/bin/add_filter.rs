@@ -40,11 +40,11 @@ async fn main() {
     let filter_id: String = uuid::Uuid::new_v4().to_string();
 
     let filter = doc! {
-        "id": filter_id.clone(),
+        "_id": filter_id.clone(),
         "active": true,
+        "user_id": "cli",
         "catalog": format!("{}_alerts", survey),
-        "permissions": [1,2,3],
-        "group_id": 41,
+        "permissions": [1, 2, 3],
         "fv": [
             {
                 "fid": "v2e0fs",
