@@ -9,19 +9,21 @@ use std::vec;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(serde::Deserialize, Clone, ToSchema)]
-pub struct FilterSubmissionBody {
-    pub pipeline: Option<Vec<serde_json::Value>>,
-    pub permissions: Option<Vec<i32>>,
-    pub catalog: Option<String>,
+#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
+struct FilterVersion {
+    fid: String,
+    pipeline: Vec<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
 struct Filter {
-    pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
-    pub catalog: String,
     pub id: String,
+    pub permissions: Vec<i32>,
+    pub user_id: String,
+    pub catalog: String,
+    pub active: bool,
+    pub active_fid: String,
+    pub fv: Vec<FilterVersion>,
 }
 
 fn build_test_pipeline(
@@ -118,51 +120,6 @@ async fn run_test_pipeline(
             return Err(e);
         }
     }
-}
-
-/// Takes a verified filter and builds the properly formatted bson document for the database
-fn build_filter_bson(
-    filter: Filter,
-    user_id: &str,
-) -> Result<mongodb::bson::Document, mongodb::error::Error> {
-    // generate new object id
-    let id = mongodb::bson::oid::ObjectId::new();
-    let date_time = mongodb::bson::DateTime::now();
-    let pipeline_id = Uuid::new_v4().to_string(); // generate random pipeline id
-    // Convert the filter pipeline from JSON into a vector of BSON Documents
-    let pipeline: Vec<mongodb::bson::Document> = filter
-        .pipeline
-        .into_iter()
-        .map(|v| {
-            mongodb::bson::to_document(&v).map_err(|e| {
-                mongodb::error::Error::from(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Failed to convert pipeline step to BSON Document: {}", e),
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    let database_filter_bson = doc! {
-        "_id": id,
-        "id": filter.id,
-        "catalog": filter.catalog,
-        "permissions": filter.permissions,
-        "active": true,
-        "active_fid": pipeline_id.clone(),
-        "fv": [
-            {
-                "fid": pipeline_id,
-                "pipeline": pipeline,
-                "created_at": date_time,
-            }
-        ],
-        "autosave": false,
-        "update_annotations": true,
-        "created_by": user_id,
-        "created_at": date_time,
-        "last_modified": date_time,
-    };
-    Ok(database_filter_bson)
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
@@ -332,14 +289,21 @@ pub async fn post_filter(
 
     // Save filter to database
     let filter_id = uuid::Uuid::new_v4().to_string();
+    let filter_version: String = uuid::Uuid::new_v4().to_string();
     let filter_collection: Collection<mongodb::bson::Document> = db.collection("filters");
     let database_filter = Filter {
-        pipeline,
         permissions,
         catalog,
         id: filter_id,
+        user_id: current_user.id.clone(),
+        active: true,
+        active_fid: filter_version.clone(),
+        fv: vec![FilterVersion {
+            fid: filter_version,
+            pipeline: pipeline,
+        }],
     };
-    let filter_bson = match build_filter_bson(database_filter.clone(), &current_user.id) {
+    let filter_bson = match mongodb::bson::to_document(&database_filter) {
         Ok(bson) => bson,
         Err(e) => {
             return HttpResponse::BadRequest()
