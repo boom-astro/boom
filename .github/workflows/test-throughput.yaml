@@ -32,6 +32,7 @@ jobs:
       - name: Download NED alerts from Google Drive
         if: steps.cache-ned-alerts.outputs.cache-hit != 'true'
         run: |
+          mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
       # TODO: Run throughput test
       # uv run --with pyyaml tests/throughput/boom-throughput.py
