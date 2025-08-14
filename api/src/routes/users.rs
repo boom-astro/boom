@@ -16,7 +16,7 @@ pub struct UserPost {
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct User {
     // Save in the database as _id, but we want to rename on the way out
-    #[serde(rename = "_id")]
+    #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub username: String,
     pub email: String,
@@ -88,7 +88,7 @@ pub async fn post_user(
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct UserPublic {
-    #[serde(rename = "_id")]
+    #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub username: String,
     pub email: String,

@@ -18,7 +18,7 @@ pub struct FilterVersion {
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
 pub struct Filter {
-    #[serde(rename = "_id")]
+    #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub permissions: Vec<i32>,
     pub user_id: String,
@@ -148,11 +148,11 @@ pub async fn add_filter_version(
     body: web::Json<FilterPipelinePatch>,
 ) -> HttpResponse {
     let filter_id = filter_id.into_inner();
-    let collection: Collection<Document> = db.collection("filters");
+    let collection: Collection<Filter> = db.collection("filters");
     let owner_filter = match collection.find_one(doc! {"_id": filter_id.clone()}).await {
         Ok(Some(filter)) => filter,
         Ok(None) => {
-            return HttpResponse::BadRequest()
+            return HttpResponse::NotFound()
                 .body(format!("filter with id {} does not exist", filter_id));
         }
         Err(e) => {
@@ -162,12 +162,8 @@ pub async fn add_filter_version(
             ));
         }
     };
-    let catalog = owner_filter.get_str("catalog").unwrap();
-    let permissions = owner_filter.get_array("permissions").unwrap();
-    let permissions: Vec<i32> = permissions
-        .iter()
-        .map(|perm| perm.as_i32().unwrap())
-        .collect();
+    let catalog = owner_filter.catalog.clone();
+    let permissions = owner_filter.permissions.clone();
     // Create test version of filter and test it
     // Convert pipeline from JSON to an array of Documents
     let pipeline = body.pipeline.clone();
@@ -197,9 +193,10 @@ pub async fn add_filter_version(
 
     let new_pipeline_id = Uuid::new_v4().to_string();
     let date_time = mongodb::bson::DateTime::now();
+    let new_pipeline_json: String = serde_json::to_string(&pipeline).unwrap();
     let new_pipeline_bson = doc! {
         "fid": new_pipeline_id,
-        "pipeline": pipeline,
+        "pipeline": new_pipeline_json,
         "created_at": date_time,
     };
     let update_result = collection
