@@ -18,6 +18,18 @@ pub struct FilterVersion {
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
 pub struct Filter {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub permissions: Vec<i32>,
+    pub user_id: String,
+    pub catalog: String,
+    pub active: bool,
+    pub active_fid: String,
+    pub fv: Vec<FilterVersion>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
+pub struct FilterPublic {
     #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub permissions: Vec<i32>,
@@ -26,6 +38,20 @@ pub struct Filter {
     pub active: bool,
     pub active_fid: String,
     pub fv: Vec<FilterVersion>,
+}
+
+impl FilterPublic {
+    pub fn from_filter(filter: Filter) -> Self {
+        Self {
+            id: filter.id,
+            permissions: filter.permissions,
+            user_id: filter.user_id,
+            catalog: filter.catalog,
+            active: filter.active,
+            active_fid: filter.active_fid,
+            fv: filter.fv,
+        }
+    }
 }
 
 fn build_test_pipeline(
@@ -238,7 +264,7 @@ pub struct FilterPost {
     path = "/filters",
     request_body = FilterPost,
     responses(
-        (status = 200, description = "Filter created successfully", body = Filter),
+        (status = 200, description = "Filter created successfully", body = FilterPublic),
         (status = 400, description = "Invalid filter submitted"),
         (status = 500, description = "Internal server error")
     ),
@@ -311,9 +337,11 @@ pub async fn post_filter(
                 .body(format!("unable to create filter bson, got error: {}", e));
         }
     };
+    // Convert to FilterPublic for response
+    let filter_public = FilterPublic::from_filter(database_filter.clone());
     match filter_collection.insert_one(filter_bson).await {
         Ok(_) => {
-            return response::ok("success", serde_json::to_value(database_filter).unwrap());
+            return response::ok("success", serde_json::to_value(filter_public).unwrap());
         }
         Err(e) => {
             return HttpResponse::BadRequest().body(format!(
@@ -329,19 +357,19 @@ pub async fn post_filter(
     get,
     path = "/filters",
     responses(
-        (status = 200, description = "Filters retrieved successfully", body = [Filter]),
+        (status = 200, description = "Filters retrieved successfully", body = [FilterPublic]),
         (status = 500, description = "Internal server error")
     ),
     tags=["Filters"]
 )]
 #[get("/filters")]
 pub async fn get_filters(db: web::Data<Database>) -> HttpResponse {
-    let filter_collection: Collection<Filter> = db.collection("filters");
+    let filter_collection: Collection<FilterPublic> = db.collection("filters");
     let filters = filter_collection.find(doc! {}).await;
 
     match filters {
         Ok(mut cursor) => {
-            let mut filter_list = Vec::<Filter>::new();
+            let mut filter_list = Vec::<FilterPublic>::new();
             while let Some(filter_in_db) = cursor.next().await {
                 match filter_in_db {
                     Ok(filter) => {
