@@ -551,7 +551,6 @@ dependencies = [
  "actix-web",
  "base64 0.22.1",
  "bcrypt",
- "boom",
  "chrono",
  "config",
  "env_logger",
