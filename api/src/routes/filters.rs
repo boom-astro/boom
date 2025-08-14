@@ -1,6 +1,7 @@
 use crate::{models::response, routes::users::User};
 
-use actix_web::{HttpResponse, patch, post, web};
+use actix_web::{HttpResponse, get, patch, post, web};
+use futures::stream::StreamExt;
 use mongodb::{
     Collection, Database,
     bson::{Document, doc},
@@ -10,13 +11,14 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-struct FilterVersion {
+pub struct FilterVersion {
     fid: String,
-    pipeline: Vec<serde_json::Value>,
+    pipeline: String,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-struct Filter {
+pub struct Filter {
+    #[serde(rename = "_id")]
     pub id: String,
     pub permissions: Vec<i32>,
     pub user_id: String,
@@ -291,6 +293,8 @@ pub async fn post_filter(
     let filter_id = uuid::Uuid::new_v4().to_string();
     let filter_version: String = uuid::Uuid::new_v4().to_string();
     let filter_collection: Collection<mongodb::bson::Document> = db.collection("filters");
+    // Pipeline needs to be a string
+    let pipeline_json = serde_json::to_string(&pipeline_bson).unwrap();
     let database_filter = Filter {
         permissions,
         catalog,
@@ -300,7 +304,7 @@ pub async fn post_filter(
         active_fid: filter_version.clone(),
         fv: vec![FilterVersion {
             fid: filter_version,
-            pipeline: pipeline,
+            pipeline: pipeline_json,
         }],
     };
     let filter_bson = match mongodb::bson::to_document(&database_filter) {
@@ -319,6 +323,43 @@ pub async fn post_filter(
                 "failed to insert filter into database. error: {}",
                 e
             ));
+        }
+    }
+}
+
+/// Get a list of filters
+#[utoipa::path(
+    get,
+    path = "/filters",
+    responses(
+        (status = 200, description = "Filters retrieved successfully", body = [Filter]),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters")]
+pub async fn get_filters(db: web::Data<Database>) -> HttpResponse {
+    let filter_collection: Collection<Filter> = db.collection("filters");
+    let filters = filter_collection.find(doc! {}).await;
+
+    match filters {
+        Ok(mut cursor) => {
+            let mut filter_list = Vec::<Filter>::new();
+            while let Some(filter_in_db) = cursor.next().await {
+                match filter_in_db {
+                    Ok(filter) => {
+                        filter_list.push(filter);
+                    }
+                    Err(e) => {
+                        return HttpResponse::InternalServerError()
+                            .body(format!("error reading filter: {}", e));
+                    }
+                }
+            }
+            response::ok("success", serde_json::to_value(&filter_list).unwrap())
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().body(format!("failed to query filters: {}", e))
         }
     }
 }
