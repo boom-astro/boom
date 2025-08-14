@@ -379,7 +379,7 @@ pub async fn get_filter_object(
         .aggregate(vec![
             doc! {
                 "$match": doc! {
-                    "id": filter_id,
+                    "_id": filter_id,
                     "active": true,
                     "catalog": catalog
                 }

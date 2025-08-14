@@ -15,6 +15,8 @@ pub struct UserPost {
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct User {
+    // Save in the database as _id, but we want to rename on the way out
+    #[serde(rename = "_id")]
     pub id: String,
     pub username: String,
     pub email: String,
@@ -64,7 +66,7 @@ pub async fn post_user(
     match user_collection.insert_one(user_insert.clone()).await {
         Ok(_) => response::ok(
             "success",
-            serde_json::to_value(UserGet {
+            serde_json::to_value(UserPublic {
                 id: user_id,
                 username: user_insert.username.clone(),
                 email: user_insert.email.clone(),
@@ -85,7 +87,8 @@ pub async fn post_user(
 }
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
-pub struct UserGet {
+pub struct UserPublic {
+    #[serde(rename = "_id")]
     pub id: String,
     pub username: String,
     pub email: String,
@@ -104,12 +107,12 @@ pub struct UserGet {
 )]
 #[get("/users")]
 pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
-    let user_collection: Collection<UserGet> = db.collection("users");
+    let user_collection: Collection<UserPublic> = db.collection("users");
     let users = user_collection.find(doc! {}).await;
 
     match users {
         Ok(mut cursor) => {
-            let mut user_list = Vec::<UserGet>::new();
+            let mut user_list = Vec::<UserPublic>::new();
             while let Some(user) = cursor.next().await {
                 match user {
                     Ok(user) => {
@@ -150,9 +153,9 @@ pub async fn delete_user(
     }
     // TODO: Ensure the caller is authorized to delete this user
     let user_id = path.into_inner();
-    let user_collection: Collection<UserGet> = db.collection("users");
+    let user_collection: Collection<UserPublic> = db.collection("users");
 
-    match user_collection.delete_one(doc! { "id": &user_id }).await {
+    match user_collection.delete_one(doc! { "_id": &user_id }).await {
         Ok(delete_result) => {
             if delete_result.deleted_count > 0 {
                 HttpResponse::Ok().json(json!({

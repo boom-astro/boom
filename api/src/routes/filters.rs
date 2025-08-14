@@ -149,7 +149,7 @@ pub async fn add_filter_version(
 ) -> HttpResponse {
     let filter_id = filter_id.into_inner();
     let collection: Collection<Document> = db.collection("filters");
-    let owner_filter = match collection.find_one(doc! {"id": filter_id.clone()}).await {
+    let owner_filter = match collection.find_one(doc! {"_id": filter_id.clone()}).await {
         Ok(Some(filter)) => filter,
         Ok(None) => {
             return HttpResponse::BadRequest()
@@ -204,7 +204,7 @@ pub async fn add_filter_version(
     };
     let update_result = collection
         .update_one(
-            doc! {"id": filter_id.clone()},
+            doc! {"_id": filter_id.clone()},
             doc! {
                 "$push": {
                     "fv": new_pipeline_bson

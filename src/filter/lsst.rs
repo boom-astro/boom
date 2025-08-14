@@ -143,7 +143,7 @@ impl FilterWorker for LsstFilterWorker {
         let output_topic = "LSST_alerts_results".to_string();
 
         let all_filter_ids: Vec<String> = filter_collection
-            .distinct("id", doc! {"active": true, "catalog": "LSST_alerts"})
+            .distinct("_id", doc! {"active": true, "catalog": "LSST_alerts"})
             .await?
             .into_iter()
             .map(|x| {

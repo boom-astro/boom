@@ -119,7 +119,7 @@ pub async fn remove_test_filter(
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"id": filter_id, "catalog": &format!("{}_alerts", survey)})
+        .delete_many(doc! {"_id": filter_id, "catalog": &format!("{}_alerts", survey)})
         .await;
 
     Ok(())
@@ -146,9 +146,7 @@ pub async fn insert_test_filter(
     };
 
     let filter_obj: mongodb::bson::Document = doc! {
-        "_id": mongodb::bson::oid::ObjectId::new(),
-        "group_id": 41,
-        "id": &filter_id,
+        "_id": &filter_id,
         "catalog": catalog,
         "permissions": [1],
         "active": true,
