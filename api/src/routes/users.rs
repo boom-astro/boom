@@ -16,7 +16,7 @@ pub struct UserPost {
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct User {
     // Save in the database as _id, but we want to rename on the way out
-    #[serde(rename(serialize = "id", deserialize = "_id"))]
+    #[serde(rename = "_id")]
     pub id: String,
     pub username: String,
     pub email: String,
@@ -30,7 +30,7 @@ pub struct User {
     path = "/users",
     request_body = UserPost,
     responses(
-        (status = 200, description = "User created successfully", body = User),
+        (status = 200, description = "User created successfully", body = UserPublic),
         (status = 409, description = "User already exists"),
         (status = 500, description = "Internal server error")
     ),
