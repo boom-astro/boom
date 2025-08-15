@@ -34,5 +34,12 @@ jobs:
         run: |
           mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
-      # TODO: Run throughput test
-      # uv run --with pyyaml tests/throughput/boom-throughput.py
+      - name: Cache ZTF alerts
+        id: cache-ztf-alerts
+        uses: actions/cache@v4
+        with:
+          path: ./data/alerts/ztf/public/20250311
+          key: ztf-alerts-v1
+      - name: Run test
+        run: |
+          uv run tests/throughput/run.py
