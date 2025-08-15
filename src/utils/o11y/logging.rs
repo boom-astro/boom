@@ -1,6 +1,6 @@
 //! Common observability utilities.
 //!
-//! This module provides a collection of tools for instrumentation and logging
+//! This module provides a collection of tools for tracing and logging
 //! throughout the application.
 //!
 use std::{fs::File, io::BufWriter, iter::successors};
@@ -44,7 +44,7 @@ pub const SEP: &str = " | ";
 /// Examples:
 ///
 /// ```no_run
-/// use boom::utils::o11y::{log_error, WARN};
+/// use boom::utils::o11y::logging::{log_error, WARN};
 /// use std::io::{Error, ErrorKind};
 ///
 /// let error = Error::new(ErrorKind::Other, "borked");
@@ -68,9 +68,9 @@ macro_rules! log_error {
     // Error + Format string + args
     ($error:expr, $fmt:literal, $($arg:tt)*) => {
         tracing::event!(
-            $crate::utils::o11y::ERROR,
+            $crate::utils::o11y::logging::ERROR,
             error = %$error,
-            source = %$crate::utils::o11y::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::SEP),
+            source = %$crate::utils::o11y::logging::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::logging::SEP),
             debug = ?$error,
             $fmt,
             $($arg)*
@@ -82,7 +82,7 @@ macro_rules! log_error {
         tracing::event!(
             $lvl,
             error = %$error,
-            source = %$crate::utils::o11y::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::SEP),
+            source = %$crate::utils::o11y::logging::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::logging::SEP),
             debug = ?$error,
             $fmt,
             $($arg)*
@@ -92,9 +92,9 @@ macro_rules! log_error {
     // Error + Message string
     ($error:expr, $msg:literal) => {
         tracing::event!(
-            $crate::utils::o11y::ERROR,
+            $crate::utils::o11y::logging::ERROR,
             error = %$error,
-            source = %$crate::utils::o11y::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::SEP),
+            source = %$crate::utils::o11y::logging::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::logging::SEP),
             debug = ?$error,
             $msg
         )
@@ -105,7 +105,7 @@ macro_rules! log_error {
         tracing::event!(
             $lvl,
             error = %$error,
-            source = %$crate::utils::o11y::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::SEP),
+            source = %$crate::utils::o11y::logging::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::logging::SEP),
             debug = ?$error,
             $msg
         )
@@ -114,9 +114,9 @@ macro_rules! log_error {
     // Error
     ($error:expr) => {
         tracing::event!(
-            $crate::utils::o11y::ERROR,
+            $crate::utils::o11y::logging::ERROR,
             error = %$error,
-            source = %$crate::utils::o11y::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::SEP),
+            source = %$crate::utils::o11y::logging::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::logging::SEP),
             debug = ?$error
         )
     };
@@ -126,7 +126,7 @@ macro_rules! log_error {
         tracing::event!(
             $lvl,
             error = %$error,
-            source = %$crate::utils::o11y::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::SEP),
+            source = %$crate::utils::o11y::logging::iter_sources(&$error).collect::<Vec<_>>().join($crate::utils::o11y::logging::SEP),
             debug = ?$error
         )
     };
@@ -145,7 +145,7 @@ pub use log_error;
 /// Examples:
 ///
 /// ```no_run
-/// use boom::utils::o11y::{as_error, log_error, WARN};
+/// use boom::utils::o11y::logging::{as_error, log_error, WARN};
 /// use std::io::{Error, ErrorKind};
 ///
 /// fn f() -> Result<(), Error> {
@@ -163,32 +163,32 @@ pub use log_error;
 macro_rules! as_error {
     // Format string + args
     ($fmt:literal, $($arg:tt)*) => {
-        |error| $crate::utils::o11y::log_error!(error, $fmt, $($arg)*)
+        |error| $crate::utils::o11y::logging::log_error!(error, $fmt, $($arg)*)
     };
 
     // Level + Format string + args
     ($lvl:expr, $fmt:literal, $($arg:tt)*) => {
-        |error| $crate::utils::o11y::log_error!($lvl, error, $fmt, $($arg)*)
+        |error| $crate::utils::o11y::logging::log_error!($lvl, error, $fmt, $($arg)*)
     };
 
     // Message string
     ($msg:literal) => {
-        |error| $crate::utils::o11y::log_error!(error, $msg)
+        |error| $crate::utils::o11y::logging::log_error!(error, $msg)
     };
 
     // Level + Message string
     ($lvl:expr, $msg:literal) => {
-        |error| $crate::utils::o11y::log_error!($lvl, error, $msg)
+        |error| $crate::utils::o11y::logging::log_error!($lvl, error, $msg)
     };
 
     // Nullary
     () => {
-        |error| $crate::utils::o11y::log_error!(error)
+        |error| $crate::utils::o11y::logging::log_error!(error)
     };
 
     // Level
     ($lvl:expr) => {
-        |error| $crate::utils::o11y::log_error!($lvl, error)
+        |error| $crate::utils::o11y::logging::log_error!($lvl, error)
     };
 }
 

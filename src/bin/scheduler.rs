@@ -2,7 +2,8 @@ use boom::{
     conf,
     scheduler::{get_num_workers, ThreadPool},
     utils::{
-        db::initialize_survey_indexes, enums::Survey, o11y::build_subscriber, worker::WorkerType,
+        db::initialize_survey_indexes, enums::Survey, o11y::logging::build_subscriber,
+        worker::WorkerType,
     },
 };
 

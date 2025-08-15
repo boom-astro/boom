@@ -2,7 +2,7 @@ use crate::{
     conf::{self, SurveyKafkaConfig},
     utils::{
         data::count_files_in_dir,
-        o11y::{as_error, log_error},
+        o11y::logging::{as_error, log_error},
     },
 };
 

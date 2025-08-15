@@ -3,7 +3,7 @@ use crate::{
     conf,
     utils::{
         db::{cutout2bsonbinary, get_coordinates},
-        o11y::{as_error, log_error, WARN},
+        o11y::logging::{as_error, log_error, WARN},
         spatial::XmatchError,
         worker::should_terminate,
     },

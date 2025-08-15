@@ -4,7 +4,7 @@ use crate::{
     ml::{run_ml_worker, ZtfMLWorker},
     utils::{
         enums::Survey,
-        o11y::{as_error, INFO},
+        o11y::logging::{as_error, INFO},
         worker::{WorkerCmd, WorkerType},
     },
 };
