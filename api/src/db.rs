@@ -94,7 +94,7 @@ async fn init_api_admin_user(
             is_admin: true, // Ensure the user remains an admin
         };
         users_collection
-            .replace_one(doc! { "id": &existing_user.id }, updated_user)
+            .replace_one(doc! { "_id": &existing_user.id }, updated_user)
             .await
             .expect("failed to update admin user");
     }
@@ -124,22 +124,10 @@ async fn db_from_config(config: AppConfig) -> Database {
                 .build(),
         )
         .build();
-    let user_id_index = mongodb::IndexModel::builder()
-        .keys(doc! { "id": 1})
-        .options(
-            mongodb::options::IndexOptions::builder()
-                .unique(true)
-                .build(),
-        )
-        .build();
     let _ = users_collection
         .create_index(username_index)
         .await
         .expect("failed to create username index on users collection");
-    let _ = users_collection
-        .create_index(user_id_index)
-        .await
-        .expect("failed to create id index on users collection");
 
     // Initialize the API admin user if it does not exist
     if let Err(e) = init_api_admin_user(config.auth, &users_collection).await {

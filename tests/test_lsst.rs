@@ -95,12 +95,12 @@ async fn test_filter_lsst_alert() {
 
     let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
 
-    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id]))
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await
         .unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
-    remove_test_filter(filter_id, &Survey::Lsst).await.unwrap();
+    remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();
