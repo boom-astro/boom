@@ -3,7 +3,7 @@ FROM rust:1.87-slim-bookworm AS builder
 WORKDIR /app
 
 # Copy the Cargo.toml and Cargo.lock files
-COPY ./boom/Cargo.toml ./boom/Cargo.lock ./
+COPY Cargo.toml Cargo.lock ./
 
 RUN apt-get update && \
     apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config && \
@@ -12,8 +12,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy the source code
-COPY ../../src ./src
-COPY ../../api ./api
+COPY ./src ./src
+COPY ./api ./api
 
 # Build the application (all of the binaries)
 RUN cargo build --release --workspace
@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Copy in the ML models
-COPY boom/data/models /app/data/models
+COPY data/models /app/data/models
 
 # Copy the built executables from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler

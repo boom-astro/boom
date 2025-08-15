@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-COMPOSE_CONFIG="config/boom/compose.yaml"
+COMPOSE_CONFIG="tests/throughput/compose.yaml"
 
 # Logs folder is the first argument to the script
 LOGS_DIR=${1:-logs/boom}
@@ -12,7 +12,6 @@ current_datetime() {
 
 # Remove any existing containers
 docker compose -f $COMPOSE_CONFIG down
-docker compose -f config/kowalski/compose.yaml down
 
 # Spin up BOOM services with Docker Compose
 docker compose -f $COMPOSE_CONFIG up --build -d
@@ -31,13 +30,13 @@ N_FILTERS=25
 
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
+while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
     sleep 1
 done
 
 # Wait until we see all alerts with classifications
 echo "$(current_datetime) - Waiting for all alerts to be classified"
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })") -lt $EXPECTED_ALERTS ]; do
+while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })") -lt $EXPECTED_ALERTS ]; do
     sleep 1
 done
 
