@@ -2,7 +2,12 @@ use boom::{
     conf,
     scheduler::{get_num_workers, ThreadPool},
     utils::{
-        db::initialize_survey_indexes, enums::Survey, o11y::logging::build_subscriber,
+        db::initialize_survey_indexes,
+        enums::Survey,
+        o11y::{
+            logging::build_subscriber,
+            metrics::{init_metrics, Service},
+        },
         worker::WorkerType,
     },
 };
@@ -12,6 +17,7 @@ use std::time::Duration;
 use clap::Parser;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument, warn, Instrument};
+use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
@@ -111,7 +117,18 @@ async fn run(args: Cli) {
 #[tokio::main]
 async fn main() {
     let args = Cli::parse();
+
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+
+    let instance_id = if let Ok(string) = std::env::var("BOOM_SCHEDULER_INSTANCE_ID") {
+        Uuid::parse_str(&string).expect("failed to parse BOOM_SCHEDULER_INSTANCE_ID")
+    } else {
+        Uuid::new_v4()
+    };
+    let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or(String::from("dev"));
+    init_metrics(Service::Scheduler, instance_id, deployment_env)
+        .expect("failed to initialize metrics");
+
     run(args).await;
 }

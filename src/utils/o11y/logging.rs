@@ -1,8 +1,4 @@
-//! Common observability utilities.
-//!
-//! This module provides a collection of tools for tracing and logging
-//! throughout the application.
-//!
+//! Common logging utilities.
 use std::{fs::File, io::BufWriter, iter::successors};
 
 use tracing::Subscriber;
