@@ -40,8 +40,8 @@ pub struct FilterPublic {
     pub fv: Vec<FilterVersion>,
 }
 
-impl FilterPublic {
-    pub fn from_filter(filter: Filter) -> Self {
+impl From<Filter> for FilterPublic {
+    fn from(filter: Filter) -> Self {
         Self {
             id: filter.id,
             permissions: filter.permissions,
@@ -315,10 +315,10 @@ pub async fn post_filter(
     // Save filter to database
     let filter_id = uuid::Uuid::new_v4().to_string();
     let filter_version: String = uuid::Uuid::new_v4().to_string();
-    let filter_collection: Collection<mongodb::bson::Document> = db.collection("filters");
+    let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
     let pipeline_json = serde_json::to_string(&pipeline_bson).unwrap();
-    let database_filter = Filter {
+    let filter = Filter {
         permissions,
         catalog,
         id: filter_id,
@@ -330,18 +330,12 @@ pub async fn post_filter(
             pipeline: pipeline_json,
         }],
     };
-    let filter_bson = match mongodb::bson::to_document(&database_filter) {
-        Ok(bson) => bson,
-        Err(e) => {
-            return HttpResponse::BadRequest()
-                .body(format!("unable to create filter bson, got error: {}", e));
-        }
-    };
-    // Convert to FilterPublic for response
-    let filter_public = FilterPublic::from_filter(database_filter.clone());
-    match filter_collection.insert_one(filter_bson).await {
+    match filter_collection.insert_one(&filter).await {
         Ok(_) => {
-            return response::ok("success", serde_json::to_value(filter_public).unwrap());
+            return response::ok(
+                "success",
+                serde_json::to_value(FilterPublic::from(filter)).unwrap(),
+            );
         }
         Err(e) => {
             return HttpResponse::BadRequest().body(format!(
