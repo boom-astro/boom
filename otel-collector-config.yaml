@@ -27,7 +27,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlphttp/prometheus, debug]
+      exporters: [otlphttp/prometheus]
 
 # [^1]: https://github.com/open-telemetry/opentelemetry-collector/tree/main/receiver/otlpreceiver
 
