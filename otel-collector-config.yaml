@@ -1,0 +1,41 @@
+# https://opentelemetry.io/docs/collector/configuration/
+
+receivers:
+  otlp: # [^1]
+    protocols:
+      grpc:
+        endpoint: otel-collector:4317
+
+processors:
+  batch:
+
+exporters:
+  otlphttp/prometheus: # [^2]
+    endpoint: "http://prometheus:9090/api/v1/otlp" # [^3]
+  debug:
+    verbosity: detailed
+
+extensions:
+  health_check:
+    endpoint: otel-collector:13133
+  zpages:
+    endpoint: otel-collector:55679
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/prometheus]
+
+# [^1]: https://github.com/open-telemetry/opentelemetry-collector/tree/main/receiver/otlpreceiver
+
+# [^2]:
+#   * https://prometheus.io/docs/guides/opentelemetry/#send-opentelemetry-metrics-to-the-prometheus-server
+#   * https://github.com/open-telemetry/opentelemetry-collector/blob/main/exporter/otlphttpexporter
+#
+#   The Prometheus OTLP receiver requires HTTP and protobuf, so use the otlphttp
+#   exporter (which encodes as proto by default).
+
+# [^3]: https://prometheus.io/docs/guides/opentelemetry/#enable-the-otlp-receiver

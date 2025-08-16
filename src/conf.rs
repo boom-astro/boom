@@ -1,4 +1,4 @@
-use crate::utils::{enums::Survey, o11y::as_error};
+use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of

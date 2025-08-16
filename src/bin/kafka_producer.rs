@@ -2,7 +2,7 @@ use boom::{
     kafka::{AlertProducer, DecamAlertProducer, ZtfAlertProducer},
     utils::{
         enums::{ProgramId, Survey},
-        o11y::build_subscriber,
+        o11y::logging::build_subscriber,
     },
 };
 

@@ -1,4 +1,4 @@
-use crate::{conf, utils::o11y::as_error};
+use crate::{conf, utils::o11y::logging::as_error};
 
 use flare::spatial::great_circle_distance;
 use futures::stream::StreamExt;
