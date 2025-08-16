@@ -1,0 +1,413 @@
+[
+    {
+        "$match": {
+            "candidate.rb": {
+                "$gte": 0.3
+            },
+            "candidate.drb": {
+                "$gt": 0.5
+            },
+            "candidate.fwhm": {
+                "$gt": 0.5,
+                "$lt": 8
+            },
+            "candidate.nbad": {
+                "$lt": 5
+            },
+            "candidate.isdiffpos": true,
+            "$and": [
+                {
+                    "$or": [
+                        {
+                            "candidate.ssdistnr": {
+                                "$lt": 0
+                            }
+                        }, {
+                            "candidate.ssdistnr": {
+                                "$gte": 12
+                            }
+                        }, {
+                            "candidate.ssmagnr": {
+                                "$lte": 0
+                            }
+                        }, {
+                            "candidate.ssmagnr": {
+                                "$eq": null
+                            }
+                        }, {
+                            "$expr": {
+                                "$gte": [
+                                    {
+                                        "$abs": {
+                                            "$subtract": [
+                                                "$candidate.magpsf", "$candidate.ssmagnr"
+                                            ]
+                                        }
+                                    }, 2
+                                ]
+                            }
+                        }
+                    ]
+                }, {
+                    "$expr": {
+                        "$lt": [
+                            {
+                                "$abs": {
+                                    "$subtract": [
+                                        "$candidate.magpsf", "$candidate.magap"
+                                    ]
+                                }
+                            }, 0.75
+                        ]
+                    }
+                }
+            ]
+        }
+    },
+    {
+        "$project": {
+            "objectId": 1,
+            "candidate": {
+                "jd": 1,
+                "magpsf": 1,
+                "sigmapsf": 1,
+                "jdstarthist": 1,
+                "ndethist": 1,
+                "drb": 1,
+                "rb": 1
+            },
+            "stationary": {
+                "$or": [
+                    {
+                        "$anyElementTrue": {
+                            "$map": {
+                                "input": "$prv_candidates",
+                                "as": "cand",
+                                "in": {
+                                    "$and": [
+                                        {
+                                            "$gt": [
+                                                {
+                                                    "$abs": {
+                                                        "$subtract": [
+                                                            "$candidate.jd", "$$cand.jd"
+                                                        ]
+                                                    }
+                                                }, 0.007
+                                            ]
+                                        }, {
+                                            "$lte": [
+                                                {
+                                                    "$abs": {
+                                                        "$subtract": [
+                                                            "$candidate.jd", "$$cand.jd"
+                                                        ]
+                                                    }
+                                                }, 3.0
+                                            ]
+                                        }, {
+                                            "$lt": [
+                                                "$$cand.magpsf", 99
+                                            ]
+                                        }, {
+                                            "$eq": [
+                                                "$$cand.isdiffpos", true
+                                            ]
+                                        }, {
+                                            "$or": [
+                                                {
+                                                    "$lt": [
+                                                        "$$cand.ssdistnr", 0
+                                                    ]
+                                                }, {
+                                                    "$gt": [
+                                                        "$$cand.ssdistnr", 2
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }, {
+                        "$anyElementTrue": {
+                            "$map": {
+                                "input": {
+                                    "$ifNull": [
+                                        "$fp_hists", []
+                                    ]
+                                },
+                                "as": "cand",
+                                "in": {
+                                    "$and": [
+                                        {
+                                            "$gt": [
+                                                {
+                                                    "$abs": {
+                                                        "$subtract": [
+                                                            "$candidate.jd", "$$cand.jd"
+                                                        ]
+                                                    }
+                                                }, 0.007
+                                            ]
+                                        }, {
+                                            "$lte": [
+                                                {
+                                                    "$abs": {
+                                                        "$subtract": [
+                                                            "$candidate.jd", "$$cand.jd"
+                                                        ]
+                                                    }
+                                                }, 3.0
+                                            ]
+                                        }, {
+                                            "$gte": [
+                                                "$$cand.snr", 4
+                                            ]
+                                        }, {
+                                            "$eq": [
+                                                "$$cand.procstatus", "0"
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ]
+            },
+            "star": {
+                "$and": [
+                    {
+                        "$gt": [
+                            "$candidate.sgscore1", 0.76
+                        ]
+                    }, {
+                        "$lt": [
+                            "$candidate.distpsnr1", 2
+                        ]
+                    }
+                ]
+            },
+            "near_brightstar": {
+                "$or": [
+                    {
+                        "$and": [
+                            {
+                                "$lt": [
+                                    "$candidate.distpsnr1", 20
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.srmag", 15
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.srmag", 0
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.sgscore1", 0.49
+                                ]
+                            }
+                        ]
+                    }, {
+                        "$and": [
+                            {
+                                "$lt": [
+                                    "$candidate.distpsnr2", 20
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.srmag2", 15
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.srmag2", 0
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.sgscore2", 0.49
+                                ]
+                            }
+                        ]
+                    }, {
+                        "$and": [
+                            {
+                                "$lt": [
+                                    "$candidate.distpsnr3", 20
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.srmag3", 15
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.srmag3", 0
+                                ]
+                            }, {
+                                "$gt": [
+                                    "$candidate.sgscore3", 0.49
+                                ]
+                            }
+                        ]
+                    }, {
+                        "$and": [
+                            {
+                                "$eq": [
+                                    "$candidate.sgscore1", 0.5
+                                ]
+                            }, {
+                                "$lt": [
+                                    "$candidate.distpsnr1", 0.5
+                                ]
+                            }, {
+                                "$or": [
+                                    {
+                                        "$lt": [
+                                            {
+                                                "$abs": "$candidate.sgmag1"
+                                            }, 17
+                                        ]
+                                    }, {
+                                        "$lt": [
+                                            {
+                                                "$abs": "$candidate.srmag1"
+                                            }, 17
+                                        ]
+                                    }, {
+                                        "$lt": [
+                                            {
+                                                "$abs": "$candidate.simag1"
+                                            }, 17
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+            "mag_cut": {
+                "$or": [
+                    {
+                        "$lt": [
+                            {
+                                "$subtract": [
+                                    "$candidate.magpsf", "$candidate.sigmapsf"
+                                ]
+                            }, 20
+                        ]
+                    }, {
+                        "$anyElementTrue": {
+                            "$map": {
+                                "input": "$prv_candidates",
+                                "as": "cand",
+                                "in": {
+                                    "$and": [
+                                        {
+                                            "$eq": [
+                                                "$$cand.isdiffpos", true
+                                            ]
+                                        }, {
+                                            "$or": [
+                                                {
+                                                    "$lt": [
+                                                        "$$cand.ssdistnr", -0.5
+                                                    ]
+                                                }, {
+                                                    "$gt": [
+                                                        "$$cand.ssdistnr", 2
+                                                    ]
+                                                }
+                                            ]
+                                        }, {
+                                            "$lt": [
+                                                {
+                                                    "$subtract": [
+                                                        "$$cand.magpsf", "$$cand.sigmapsf"
+                                                    ]
+                                                }, 20
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }, {
+                        "$anyElementTrue": {
+                            "$map": {
+                                "input": {
+                                    "$ifNull": [
+                                        "$fp_hists", []
+                                    ]
+                                },
+                                "as": "cand",
+                                "in": {
+                                    "$and": [
+                                        {
+                                            "$gte": [
+                                                "$$cand.snr", 4
+                                            ]
+                                        }, {
+                                            "$eq": [
+                                                "$$cand.procstatus", "0"
+                                            ]
+                                        }, {
+                                            "$lt": [
+                                                {
+                                                    "$subtract": [
+                                                        "$$cand.mag", "$$cand.magerr"
+                                                    ]
+                                                }, 20
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    }, {
+        "$match": {
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "mag_cut": true
+        }
+    }, {
+        "$project": {
+            "objectId": 1,
+            "annotations": {
+                "mag": {
+                    "$round": [
+                        "$candidate.magpsf", 4
+                    ]
+                },
+                "jd": {
+                    "$round": [
+                        "$candidate.jd", 4
+                    ]
+                },
+                "age": {
+                    "$round": [
+                        {
+                            "$subtract": [
+                                "$candidate.jd", "$candidate.jdstarthist"
+                            ]
+                        }, 4
+                    ]
+                },
+                "drb": {
+                    "$round": [
+                        "$candidate.drb", 2
+                    ]
+                },
+                "nb_detections": "$candidate.ndethist"
+            }
+        }
+    }
+]

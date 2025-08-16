@@ -1,0 +1,47 @@
+name: Throughput test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run throughput test
+    runs-on: ubuntu-latest
+    permissions: write-all
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+          clean: false
+          lfs: "true"
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+      - name: Cache NED alerts
+        id: cache-ned-alerts
+        uses: actions/cache@v4
+        with:
+          path: ./data/alerts/kowalski.NED.json.gz
+          key: ned-alerts-v1
+      - name: Download NED alerts from Google Drive
+        if: steps.cache-ned-alerts.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ./data/alerts
+          uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
+      - name: Create ZTF alerts directory
+        run: mkdir -p ./data/alerts/ztf/public/20250311
+      - name: Cache ZTF alerts
+        id: cache-ztf-alerts
+        uses: actions/cache@v4
+        with:
+          path: ./data/alerts/ztf/public/20250311
+          key: ztf-alerts-v1
+      - name: Run test
+        run: |
+          uv run tests/throughput/run.py

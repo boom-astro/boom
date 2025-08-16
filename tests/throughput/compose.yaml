@@ -1,0 +1,165 @@
+name: boom-benchmarking
+
+networks:
+  boom:
+
+volumes:
+  mongodb:
+  kafka_data:
+
+services:
+  mongo:
+    image: mongo:8.0
+    hostname: mongo
+    expose:
+      - "27017"
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=mongoadmin
+      - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
+    restart: always
+    networks:
+      - boom
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      start_period: 20s
+    volumes:
+      - mongodb:/data/db
+  mongo-init:
+    image: mongo:8.0
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - boom
+    volumes:
+      - ${PWD}/tests/throughput/mongo-init.sh:/mongo-init.sh
+      - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
+      - ${PWD}/tests/throughput/cats150.json:/cats150.json
+    environment:
+      - DB_NAME=boom-benchmarking
+      - DB_ADD_URI=
+      - MONGO_INITDB_ROOT_USERNAME=mongoadmin
+      - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
+    entrypoint: ["/bin/bash", "/mongo-init.sh"]
+  valkey:
+    image: valkey/valkey:7.2.6
+    environment:
+      # ALLOW_EMPTY_PASSWORD is recommended only for development.
+      - ALLOW_EMPTY_PASSWORD=yes
+      - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
+    ports:
+      - "6379:6379"
+    restart: always
+    networks:
+      - boom
+    # Disable persistence for benchmarking, so we start fresh
+    command: valkey-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  broker:
+    image: apache/kafka:latest
+    hostname: broker
+    ports:
+      - 9092:9092
+    networks:
+      - boom
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: 15
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:9092
+      interval: 10s
+  # Run the Kafka producer just once
+  producer:
+    image: boom/boom-benchmarking:latest
+    hostname: producer
+    build:
+      dockerfile: ${PWD}/Dockerfile-benchmark
+      context: ${PWD}
+      pull: false
+    command:
+      - /app/kafka_producer
+      - ztf
+      - "20250311"
+      - public
+      - --server-url
+      - broker:29092
+    networks:
+      - boom
+    depends_on:
+      broker:
+        condition: service_healthy
+    # Mount local data directory so we don't need to redownload
+    volumes:
+      - ${PWD}/data/alerts:/app/data/alerts
+      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+  # TODO: Add a prestart script here to load in some filters and have others
+  # depend on its "service_completed_successfully" healthcheck
+  consumer:
+    image: boom/boom-benchmarking:latest
+    hostname: consumer
+    build:
+      dockerfile: ${PWD}/Dockerfile-benchmark
+      context: ${PWD}
+      pull: false
+    networks:
+      - boom
+    # have it sleep 5 seconds to allow kafka to finish producing
+    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 public"]
+    depends_on:
+      producer:
+        condition: service_completed_successfully
+      broker:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+  scheduler:
+    image: boom/boom-benchmarking:latest
+    hostname: scheduler
+    build:
+      dockerfile: ${PWD}/Dockerfile-benchmark
+      context: ${PWD}
+      pull: false
+    command:
+      - /app/scheduler
+      - ztf
+    environment:
+      RUST_LOG: debug,ort=error
+    networks:
+      - boom
+    depends_on:
+      producer:
+        condition: service_completed_successfully
+      broker:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    volumes:
+      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
