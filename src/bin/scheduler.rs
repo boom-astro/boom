@@ -4,10 +4,7 @@ use boom::{
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
-        o11y::{
-            logging::build_subscriber,
-            metrics::{init_metrics, Service},
-        },
+        o11y::{logging::build_subscriber, metrics::init_metrics},
         worker::WorkerType,
     },
 };
@@ -127,7 +124,7 @@ async fn main() {
         Uuid::new_v4()
     };
     let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or(String::from("dev"));
-    init_metrics(Service::Scheduler, instance_id, deployment_env)
+    init_metrics(String::from("scheduler"), instance_id, deployment_env)
         .expect("failed to initialize metrics");
 
     run(args).await;

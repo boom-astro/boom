@@ -1,5 +1,5 @@
 //! Common metrics utilities.
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use opentelemetry::{metrics::Meter, KeyValue};
 use opentelemetry_sdk::{
@@ -7,26 +7,41 @@ use opentelemetry_sdk::{
     Resource,
 };
 
+// From the `opentelemetry` docs for the `MeterProvider` trait,
+//
+// > A Meter should be scoped at most to a single application or crate. The name
+// > needs to be unique so it does not collide with other names used by an
+// > application, nor other applications.
+//
+// Each binary should get its own, uniquely-named meter so that metrics don't
+// merge or collide in the Collector.
+
+/// Global OTel meter used to create instruments throughout the kafka consumer
+/// application.
+///
+/// Only available after calling `init_metrics`.
+pub static CONSUMER_METER: LazyLock<Meter> =
+    LazyLock::new(|| opentelemetry::global::meter("boom-consumer-meter"));
+
+/// Global OTel meter used to create instruments throughout the kafka producer
+/// application.
+///
+/// Only available after calling `init_metrics`.
+pub static PRODUCER_METER: LazyLock<Meter> =
+    LazyLock::new(|| opentelemetry::global::meter("boom-producer-meter"));
+
+/// Global OTel meter used to create instruments throughout the scheduler
+/// application.
+///
+/// Only available after calling `init_metrics`.
+pub static SCHEDULER_METER: LazyLock<Meter> =
+    LazyLock::new(|| opentelemetry::global::meter("boom-scheduler-meter"));
+
 /// The error type returned when initializing metrics.
 #[derive(Debug, thiserror::Error)]
 pub enum InitMetricsError {
     #[error("failed to build the OTLP exporter")]
     Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
-
-    #[error("static meter already initialized")]
-    Meter,
-}
-
-/// Global OTel meter used to create instruments throughout the application.
-///
-/// Only available after calling `init_metrics`.
-static METER: OnceLock<Meter> = OnceLock::new();
-
-/// Services for which metrics can be initialized.
-pub enum Service {
-    Consumer,
-    Producer,
-    Scheduler,
 }
 
 /// Initialize the OTel metrics system for the application corresponding to the
@@ -38,9 +53,10 @@ pub enum Service {
 /// other instances of the same service.
 ///
 /// This function is responsible for creating an exporter for OTel metrics, a
-/// meter provider based on that exporter, and then a global meter used to
-/// create instruments for the application. The meter can be accessed from the
-/// static item `METER` and is only available after this function completes.
+/// meter provider based on that exporter, and then some global meters used to
+/// create instruments for different applications. The meters can be accessed
+/// from the static items `CONSUMER_METER`, `PRODUCER_METER`, and
+/// `SCHEDULER_METER`, which are only available after this function completes.
 ///
 /// The exporter is an OTLP exporter designed to send metrics every 60 s over
 /// gRPC to the OTel Collector at `localhost:4317`. It uses cumulative
@@ -48,24 +64,10 @@ pub enum Service {
 /// delta temporality is still experimental. Cumulative temporality is just fine
 /// as long as attribute cardinality doesn't explode.)
 pub fn init_metrics(
-    service: Service,
+    service_name: String,
     instance_id: uuid::Uuid,
     deployment_env: String,
 ) -> Result<(), InitMetricsError> {
-    // From the `opentelemetry` docs for the `MeterProvider` trait,
-    //
-    // > A Meter should be scoped at most to a single application or crate. The
-    // > name needs to be unique so it does not collide with other names used by
-    // > an application, nor other applications.
-    //
-    // Each binary should get its own, uniquely-named meter so that metrics
-    // don't merge or collide in the Collector.
-    let (service_name, meter_name) = match service {
-        Service::Consumer => ("consumer", "boom-consumer-meter"),
-        Service::Producer => ("producer", "boom-producer-meter"),
-        Service::Scheduler => ("scheduler", "boom-scheduler-meter"),
-    };
-
     // From the OTel docs, "A resource represents the entity producing
     // telemetry...". In this case the entity is the app itself.
     let resource = Resource::builder()
@@ -93,8 +95,5 @@ pub fn init_metrics(
         .build();
 
     opentelemetry::global::set_meter_provider(meter_provider.clone());
-    METER
-        .set(opentelemetry::global::meter(meter_name))
-        .map_err(|_| InitMetricsError::Meter)?;
     Ok(())
 }

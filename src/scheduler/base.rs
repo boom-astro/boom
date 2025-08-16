@@ -8,7 +8,9 @@ use crate::{
         worker::{WorkerCmd, WorkerType},
     },
 };
+
 use std::thread;
+
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, error, info, instrument, span, warn};
@@ -188,7 +190,9 @@ impl Worker {
                         Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                         Survey::Decam => run_alert_worker::<DecamAlertWorker>,
                     };
-                    run(receiver, &config_path).unwrap_or_else(as_error!("alert worker failed"));
+                    let worker_id = format!("{tid:?}");
+                    run(receiver, &config_path, worker_id)
+                        .unwrap_or_else(as_error!("alert worker failed"));
                 })
             }),
             WorkerType::Filter => thread::spawn(move || {
