@@ -4,7 +4,10 @@ use boom::{
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
-        o11y::{logging::build_subscriber, metrics::init_metrics},
+        o11y::{
+            logging::{build_subscriber, log_error, WARN},
+            metrics::init_metrics,
+        },
         worker::WorkerType,
     },
 };
@@ -12,6 +15,7 @@ use boom::{
 use std::time::Duration;
 
 use clap::Parser;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
@@ -30,7 +34,7 @@ struct Cli {
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli) {
+async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -109,6 +113,9 @@ async fn run(args: Cli) {
     drop(alert_pool);
     drop(ml_pool);
     drop(filter_pool);
+    if let Err(error) = meter_provider.shutdown() {
+        log_error!(WARN, error, "failed to shut down the meter provider");
+    }
 }
 
 #[tokio::main]
@@ -124,8 +131,8 @@ async fn main() {
         Uuid::new_v4()
     };
     let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or(String::from("dev"));
-    init_metrics(String::from("scheduler"), instance_id, deployment_env)
+    let meter_provider = init_metrics(String::from("scheduler"), instance_id, deployment_env)
         .expect("failed to initialize metrics");
 
-    run(args).await;
+    run(args, meter_provider).await;
 }

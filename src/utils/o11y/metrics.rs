@@ -45,7 +45,7 @@ pub enum InitMetricsError {
 }
 
 /// Initialize the OTel metrics system for the application corresponding to the
-/// given service.
+/// given service and return the resulting meter provider.
 ///
 /// The `instance_id` and `deployment_env` arguments are a UUID and a deployment
 /// environment name (e.g., "dev", "prod", etc.), respectively. They distinguish
@@ -63,11 +63,15 @@ pub enum InitMetricsError {
 /// temporality, which is more natural for Prometheus. (Prometheus support for
 /// delta temporality is still experimental. Cumulative temporality is just fine
 /// as long as attribute cardinality doesn't explode.)
+///
+/// The meter provider is returned so it can be cloned if needed (cloning
+/// providers is cheap), to have finer control of how/when it's dropped, or so
+/// its `shutdown` method can be called later to manually flush metrics.
 pub fn init_metrics(
     service_name: String,
     instance_id: uuid::Uuid,
     deployment_env: String,
-) -> Result<(), InitMetricsError> {
+) -> Result<SdkMeterProvider, InitMetricsError> {
     // From the OTel docs, "A resource represents the entity producing
     // telemetry...". In this case the entity is the app itself.
     let resource = Resource::builder()
@@ -95,5 +99,5 @@ pub fn init_metrics(
         .build();
 
     opentelemetry::global::set_meter_provider(meter_provider.clone());
-    Ok(())
+    Ok(meter_provider)
 }
