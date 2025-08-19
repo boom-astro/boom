@@ -32,7 +32,7 @@ jobs:
       - name: bake
         uses: docker/bake-action@v2
         with:
-          workdir: tests/throughput
+          workdir: ./tests/throughput
           load: true
           set: |
             *.cache-to=type=gha,mode=max                                                                   
