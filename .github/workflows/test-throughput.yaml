@@ -7,7 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PWD: "."
+  PWD: ${{ github.workspace }}
+  BUILDX_BAKE_ENTITLEMENTS_FS: 0
 
 jobs:
   test:
