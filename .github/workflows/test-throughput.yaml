@@ -65,7 +65,8 @@ jobs:
       - name: Run test
         run: |
           uv run tests/throughput/run.py
-      - name: Upload logs
+
+      - name: Upload logs (including wall time) as artifact
         uses: actions/upload-artifact@v4
         with:
           name: throughput-logs
@@ -100,9 +101,38 @@ jobs:
 
           echo "Percentage difference: $percentage_diff%"
 
+          # if (( $(echo "$percentage_diff > $TOLERANCE * 100" | bc -l) )); then
+          #   echo "Error: Wall time increased by more than ${TOLERANCE*100}% compared to baseline."
+          #   exit 1
+          # else
+          #   echo "Wall time is within acceptable limits."
+          # fi
+
+          # instead of echoing a message, set 4 output variables
+          # one with the percentage difference, one with the baseline, one with the current wall time, and one with
+          # the log message saying if it's comparable, slower, faster
+          echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
+          echo "baseline=$baseline" >> $GITHUB_OUTPUT
+          echo "current=$current" >> $GITHUB_OUTPUT
           if (( $(echo "$percentage_diff > $TOLERANCE * 100" | bc -l) )); then
-            echo "Error: Wall time increased by more than ${TOLERANCE*100}% compared to baseline."
-            exit 1
+            echo "log_message=Throughput test is ${percentage_diff}% slower than baseline." >> $GITHUB_OUTPUT
+          elif (( $(echo "$percentage_diff < -$TOLERANCE * 100" | bc -l) )); then
+            echo "log_message=Throughput test is ${percentage_diff}% faster than baseline." >> $GITHUB_OUTPUT
           else
-            echo "Wall time is within acceptable limits."
+            echo "log_message=Throughput test is comparable to baseline (within ${TOLERANCE*100}%)." >> $GITHUB_OUTPUT
           fi
+
+      - name: Post comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            Throughput test results:
+            - **Percentage difference**: ${{ steps.compare-with-baseline.outputs.percentage_diff }}
+            - **Baseline wall time**: ${{ steps.compare-with-baseline.outputs.baseline }}
+            - **Current wall time**: ${{ steps.compare-with-baseline.outputs.current }}
+            - **Log message**: ${{ steps.compare-with-baseline.outputs.log_message }}
+          comment-type: edit
+          reuse-existing-comment: true
+          edit-mode: replace
