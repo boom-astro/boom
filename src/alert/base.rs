@@ -34,7 +34,7 @@ const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
 // considered a best practice. According to the `opentelemetry` crate,
 // "Instruments are designed for reuse. Avoid creating new instruments
 // repeatedly." One solution is to clone (cloning instruments is cheap). Another
-// is to use static items, with `LazyLock` to ensure each one os only
+// is to use static items, with `LazyLock` to ensure each one is only
 // initialized once.
 
 // UpDownCounter for the number of alerts currently being processed by the alert workers.
@@ -657,6 +657,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut count = 0;
 
     let start = std::time::Instant::now();
+    let worker_id_attr = KeyValue::new("worker.id", worker_id);
+    let alert_worker_active_attrs = [worker_id_attr.clone()];
+    let alert_worker_added_attrs = [worker_id_attr.clone(), KeyValue::new("status", "added")];
+    let alert_worker_exists_attrs = [worker_id_attr.clone(), KeyValue::new("status", "exists")];
+    let alert_worker_error_attrs = [worker_id_attr, KeyValue::new("status", "error")];
     loop {
         let alert_start = std::time::Instant::now();
 
@@ -671,8 +676,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         command_check_countdown -= 1;
 
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
-        let worker_id_attr = KeyValue::new("worker.id", worker_id.clone());
-        ALERT_WORKER_ACTIVE.add(1, &[worker_id_attr.clone()]);
+        ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
@@ -689,10 +693,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
         };
 
         let process_result = alert_processor.process_alert(&avro_bytes).await;
-        let status = match process_result {
-            Ok(ProcessAlertStatus::Added(_)) => "added",
-            Ok(ProcessAlertStatus::Exists(_)) => "exists",
-            Err(_) => "error",
+        let attributes = match process_result {
+            Ok(ProcessAlertStatus::Added(_)) => &alert_worker_added_attrs,
+            Ok(ProcessAlertStatus::Exists(_)) => &alert_worker_exists_attrs,
+            Err(_) => &alert_worker_error_attrs,
         };
         let handle_result = handle_process_result(
             &mut con,
@@ -704,10 +708,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to handle process result"));
 
-        ALERT_WORKER_ACTIVE.add(-1, &[worker_id_attr.clone()]);
-        let attributes = [worker_id_attr, KeyValue::new("status", status)];
-        ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), &attributes);
-        ALERT_WORKER_PROCESSED.add(1, &attributes);
+        ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
+        ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
+        ALERT_WORKER_PROCESSED.add(1, attributes);
 
         handle_result?;
         if count > 0 && count % 1000 == 0 {
