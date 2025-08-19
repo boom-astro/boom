@@ -27,9 +27,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: setup docker buildx
+      - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
-      - name: bake
+      - name: Build & Cache Docker images
         uses: docker/bake-action@v2
         with:
           workdir: ./tests/throughput
