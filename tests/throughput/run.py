@@ -107,4 +107,7 @@ with open(boom_scheduler_log_fpath) as f:
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
 
-# TODO: Add threshold for error
+# save the wall time to a file
+os.makedirs(logs_dir, exist_ok=True)
+with open(os.path.join(logs_dir, "wall_time.txt"), "w") as f:
+    f.write(f"{wall_time_s:.1f}\n")
