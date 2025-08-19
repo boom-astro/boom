@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TOLERANCE: 0.05 # 5% tolerance for wall time increase
 
 jobs:
   test:
@@ -69,3 +70,39 @@ jobs:
         with:
           name: throughput-logs
           path: logs/boom-*
+
+      - name: Download baseline benchmark (PR only)
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          workflow: ${{ github.workflow }}
+          branch: main
+          name: throughput-logs
+          path: ./baseline
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Compare with baseline (PR only)
+        # the artifact (is it exists) should have a file called wall_time.txt
+        # so if the file doesn't exist we skip this action, otherwise we compare the wall time
+        if: github.event_name == 'pull_request' && steps.cache-ztf-alerts.outputs.cache-hit != 'true'
+        run: |
+          if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
+            baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
+            current=$(cat logs/boom-*/wall_time.txt)
+            echo "Baseline wall time: $baseline seconds"
+            echo "Current wall time: $current seconds"
+            percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
+          else
+            echo "No baseline wall time found. Skipping comparison."
+            percentage_diff=0
+          fi
+
+          echo "Percentage difference: $percentage_diff%"
+
+          if (( $(echo "$percentage_diff > $TOLERANCE * 100" | bc -l) )); then
+            echo "Error: Wall time increased by more than ${TOLERANCE*100}% compared to baseline."
+            exit 1
+          else
+            echo "Wall time is within acceptable limits."
+          fi
