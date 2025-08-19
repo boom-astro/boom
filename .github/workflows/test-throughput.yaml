@@ -85,7 +85,7 @@ jobs:
       - name: Compare with baseline (PR only)
         # the artifact (is it exists) should have a file called wall_time.txt
         # so if the file doesn't exist we skip this action, otherwise we compare the wall time
-        if: github.event_name == 'pull_request' && steps.cache-ztf-alerts.outputs.cache-hit != 'true'
+        if: github.event_name == 'pull_request'
         run: |
           if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
             baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
