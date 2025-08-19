@@ -7,8 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PWD: ${{ github.workspace }}
-  BUILDX_BAKE_ENTITLEMENTS_FS: 0
 
 jobs:
   test:
@@ -39,6 +37,9 @@ jobs:
           set: |
             *.cache-to=type=gha,mode=max                                                                   
             *.cache-from=type=gha
+        env:
+          PWD: ${{ github.workspace }}
+          BUILDX_BAKE_ENTITLEMENTS_FS: 0
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
       - name: Cache NED catalog
