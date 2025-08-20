@@ -88,7 +88,6 @@ jobs:
         # so if the file doesn't exist we skip this action, otherwise we compare the wall time
         if: github.event_name == 'pull_request'
         run: |
-          tolerance=${{ env.TOLERANCE }}
           if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
             baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
             current=$(cat logs/boom-*/wall_time.txt)
@@ -105,12 +104,13 @@ jobs:
           echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
           echo "baseline=$baseline" >> $GITHUB_OUTPUT
           echo "current=$current" >> $GITHUB_OUTPUT
-          if (( $(echo "$percentage_diff > $tolerance * 100" | bc -l) )); then
+          if (( $(echo "$percentage_diff > $TOLERANCE * 100" | bc -l) )); then
             echo "log_message=Throughput test is ${percentage_diff}% slower than baseline." >> $GITHUB_OUTPUT
-          elif (( $(echo "$percentage_diff < -$tolerance * 100" | bc -l) )); then
+          elif (( $(echo "$percentage_diff < -$TOLERANCE * 100" | bc -l) )); then
             echo "log_message=Throughput test is ${percentage_diff}% faster than baseline." >> $GITHUB_OUTPUT
           else
-            echo "log_message=Throughput test is comparable to baseline (within ${tolerance*100}%)." >> $GITHUB_OUTPUT
+            tolerance_percentage=$(echo "$TOLERANCE * 100" | bc)
+            echo "log_message=Throughput test is comparable to baseline (within ${tolerance_percentage}%)." >> $GITHUB_OUTPUT
           fi
 
       - name: Post comment on PR (if applicable)
