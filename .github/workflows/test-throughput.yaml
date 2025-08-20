@@ -121,11 +121,10 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            Throughput test results:
-            - **Percentage difference**: ${{ steps.compare-with-baseline.outputs.percentage_diff }}
-            - **Baseline wall time**: ${{ steps.compare-with-baseline.outputs.baseline }}
-            - **Current wall time**: ${{ steps.compare-with-baseline.outputs.current }}
-            - **Log message**: ${{ steps.compare-with-baseline.outputs.log_message }}
+            Throughput results (`${{ github.sha }}`):
+            | New Wall Time | Baseline Wall Time | Difference |
+            | -------------- | ------------------ | ---------- |
+            | ${{ steps.compare-with-baseline.outputs.current }} | ${{ steps.compare-with-baseline.outputs.baseline }} | ${{ steps.compare-with-baseline.outputs.percentage_diff }}% |
           comment-type: edit
           reuse-existing-comment: true
           edit-mode: replace
