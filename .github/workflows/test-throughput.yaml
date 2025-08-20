@@ -107,13 +107,6 @@ jobs:
           echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
           echo "baseline=$baseline" >> $GITHUB_OUTPUT
           echo "current=$current" >> $GITHUB_OUTPUT
-          if (( $(echo "$percentage_diff > $TOLERANCE_PERCENT" | bc -l) )); then
-            echo "log_message=Throughput test is ${percentage_diff}% slower than baseline." >> $GITHUB_OUTPUT
-          elif (( $(echo "$percentage_diff < -$TOLERANCE_PERCENT" | bc -l) )); then
-            echo "log_message=Throughput test is ${percentage_diff}% faster than baseline." >> $GITHUB_OUTPUT
-          else
-            echo "log_message=Throughput test is comparable to baseline (within ${TOLERANCE_PERCENT}%)." >> $GITHUB_OUTPUT
-          fi
 
       - name: Post comment on PR (if applicable)
         if: github.event_name == 'pull_request'
