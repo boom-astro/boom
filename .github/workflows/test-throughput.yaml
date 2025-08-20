@@ -101,16 +101,6 @@ jobs:
 
           echo "Percentage difference: $percentage_diff%"
 
-          # if (( $(echo "$percentage_diff > $TOLERANCE * 100" | bc -l) )); then
-          #   echo "Error: Wall time increased by more than ${TOLERANCE*100}% compared to baseline."
-          #   exit 1
-          # else
-          #   echo "Wall time is within acceptable limits."
-          # fi
-
-          # instead of echoing a message, set 4 output variables
-          # one with the percentage difference, one with the baseline, one with the current wall time, and one with
-          # the log message saying if it's comparable, slower, faster
           echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
           echo "baseline=$baseline" >> $GITHUB_OUTPUT
           echo "current=$current" >> $GITHUB_OUTPUT
