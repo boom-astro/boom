@@ -90,10 +90,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           current=$(cat logs/boom-*/wall_time.txt)
+          echo "Current wall time: $current seconds"
           if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
             baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
             echo "Baseline wall time: $baseline seconds"
-            echo "Current wall time: $current seconds"
             percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
           else
             echo "No baseline wall time found. Skipping comparison."
