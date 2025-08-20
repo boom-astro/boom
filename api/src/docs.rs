@@ -44,6 +44,7 @@ impl Modify for SecurityAddon {
         routes::catalogs::get_catalog_sample,
         routes::filters::post_filter,
         routes::filters::get_filters,
+        routes::filters::get_filter,
         routes::filters::add_filter_version,
         routes::queries::post_count_query,
         routes::queries::post_estimated_count_query,

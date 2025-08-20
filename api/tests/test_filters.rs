@@ -89,4 +89,81 @@ mod tests {
             .await
             .expect("Failed to delete filter");
     }
+
+    /// Test GET /filters/{id}
+    #[actix_rt::test]
+    async fn test_get_filter() {
+        let database: Database = get_default_db().await;
+        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_config = AppConfig::default().auth;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::post_filter)
+                .service(routes::filters::get_filter),
+        )
+        .await;
+
+        let (token, _) = auth_app_data
+            .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
+            .await
+            .expect("Failed to create token for admin user");
+
+        // Create a new filter
+        let new_filter = serde_json::json!({
+            "pipeline": [{"$match": {"something": 5}}],
+            "catalog": "ZTF_alerts",
+            "permissions": [1, 2],
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/filters")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&new_filter)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Get the filter out of the response body data so we know the ID
+        let body = test::read_body(resp).await;
+        let body_str = String::from_utf8_lossy(&body);
+        let resp: serde_json::Value =
+            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        assert_eq!(resp["status"], "success");
+        let filter_id = resp["data"]["id"].as_str().unwrap();
+        // Assert we have no _id field in the response
+        assert!(!resp["data"].as_object().unwrap().contains_key("_id"));
+
+        // Now get this filter by ID
+        let get_req = test::TestRequest::get()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let get_resp = test::call_service(&app, get_req).await;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = test::read_body(get_resp).await;
+        let get_body_str = String::from_utf8_lossy(&get_body);
+        let get_resp: serde_json::Value =
+            serde_json::from_str(&get_body_str).expect("failed to parse JSON");
+        assert_eq!(get_resp["status"], "success");
+        assert_eq!(get_resp["data"]["id"], filter_id);
+        // Assert we have no _id field in the response
+        assert!(!get_resp["data"].as_object().unwrap().contains_key("_id"));
+
+        // Now delete this filter
+        let filters_collection: Collection<Document> = database.collection("filters");
+        filters_collection
+            .delete_one(doc! { "_id": &filter_id })
+            .await
+            .expect("Failed to delete filter");
+
+        // Now try to get this filter by ID again, it should not exist
+        let non_existent_req = test::TestRequest::get()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let non_existent_resp = test::call_service(&app, non_existent_req).await;
+        assert_eq!(non_existent_resp.status(), StatusCode::NOT_FOUND);
+    }
 }

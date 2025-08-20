@@ -32,6 +32,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::surveys::get_object)
                     .service(routes::filters::post_filter)
                     .service(routes::filters::get_filters)
+                    .service(routes::filters::get_filter)
                     .service(routes::filters::add_filter_version)
                     .service(routes::users::post_user)
                     .service(routes::users::get_users)

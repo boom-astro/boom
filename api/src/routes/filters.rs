@@ -382,3 +382,28 @@ pub async fn get_filters(db: web::Data<Database>) -> HttpResponse {
         }
     }
 }
+
+/// Get a filter by ID
+#[utoipa::path(
+    get,
+    path = "/filters/{filter_id}",
+    responses(
+        (status = 200, description = "Filter retrieved successfully", body = FilterPublic),
+        (status = 404, description = "Filter not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters/{filter_id}")]
+pub async fn get_filter(db: web::Data<Database>, path: web::Path<String>) -> HttpResponse {
+    let filter_id = path.into_inner();
+    let filter_collection: Collection<FilterPublic> = db.collection("filters");
+
+    match filter_collection.find_one(doc! { "_id": &filter_id }).await {
+        Ok(Some(filter)) => response::ok("success", serde_json::to_value(filter).unwrap()),
+        Ok(None) => HttpResponse::NotFound().body("filter not found"),
+        Err(e) => {
+            HttpResponse::InternalServerError().body(format!("failed to query filter: {}", e))
+        }
+    }
+}
