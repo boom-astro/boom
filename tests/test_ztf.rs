@@ -370,14 +370,14 @@ async fn test_filter_ztf_alert() {
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
 
-    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id]))
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await
         .unwrap();
     let result = filter_worker
         .process_alerts(&[candid_programid_str.clone()])
         .await;
 
-    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();
