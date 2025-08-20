@@ -101,15 +101,16 @@ jobs:
 
           echo "Percentage difference: $percentage_diff%"
 
+          TOLERANCE_PERCENT=$((TOLERANCE*100))
+
           echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
           echo "baseline=$baseline" >> $GITHUB_OUTPUT
           echo "current=$current" >> $GITHUB_OUTPUT
-          if (( $(echo "$percentage_diff > $TOLERANCE * 100" | bc -l) )); then
+          if (( $(echo "$percentage_diff > $TOLERANCE_PERCENT" | bc -l) )); then
             echo "log_message=Throughput test is ${percentage_diff}% slower than baseline." >> $GITHUB_OUTPUT
-          elif (( $(echo "$percentage_diff < -$TOLERANCE * 100" | bc -l) )); then
+          elif (( $(echo "$percentage_diff < -$TOLERANCE_PERCENT" | bc -l) )); then
             echo "log_message=Throughput test is ${percentage_diff}% faster than baseline." >> $GITHUB_OUTPUT
           else
-            TOLERANCE_PERCENT=$((TOLERANCE*100))
             echo "log_message=Throughput test is comparable to baseline (within ${TOLERANCE_PERCENT}%)." >> $GITHUB_OUTPUT
           fi
 
