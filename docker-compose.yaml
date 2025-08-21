@@ -108,6 +108,8 @@ services:
       - 4317:4317 # OTLP gRPC receiver (from Rust OTLP exporter)
       - 55679:55679 # zpages extension
       - 13133:13133 # health_check extension
+    networks:
+      - boom
   prometheus:
     image: prom/prometheus:latest
     command:
@@ -117,6 +119,8 @@ services:
       - ./prometheus.yaml:/etc/prometheus/prometheus.yaml
     ports:
       - 9090:9090
+    networks:
+      - boom
 
 # [^1]:
 #   * https://opentelemetry.io/docs/collector/quick-start/
