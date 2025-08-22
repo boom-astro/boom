@@ -42,6 +42,8 @@ pub struct FilterPublic {
     pub active: bool,
     pub active_fid: String,
     pub fv: Vec<FilterVersion>,
+    created_at: f64,
+    updated_at: f64,
 }
 
 impl From<Filter> for FilterPublic {
@@ -54,6 +56,8 @@ impl From<Filter> for FilterPublic {
             active: filter.active,
             active_fid: filter.active_fid,
             fv: filter.fv,
+            created_at: filter.created_at,
+            updated_at: filter.updated_at,
         }
     }
 }
@@ -229,14 +233,13 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
-    let date_time = mongodb::bson::DateTime::now();
     let new_pipeline_json: String = serde_json::to_string(&pipeline).unwrap();
     let mut update_doc = doc! {
         "$push": {
             "fv": {
                 "fid": &new_pipeline_id,
                 "pipeline": new_pipeline_json,
-                "created_at": date_time,
+                "created_at": Time::now().to_jd(),
             }
         },
     };
