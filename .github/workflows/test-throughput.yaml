@@ -89,8 +89,8 @@ jobs:
         run: |
           current=$(cat logs/boom-*/wall_time.txt)
           echo "Current wall time: $current seconds"
-          if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
-            baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
+          if [ -f ./baseline/boom-*/wall_time.txt ]; then
+            baseline=$(cat ./baseline/boom-*/wall_time.txt)
             echo "Baseline wall time: $baseline seconds"
             percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
           else
