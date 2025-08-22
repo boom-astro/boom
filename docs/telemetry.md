@@ -332,6 +332,12 @@ It's also possible to see this in ZPages by visiting
 <http://localhost:55679/debug/tracez>. If metrics are being collected, then
 trace samples should start showing up under `receiver/otlp/MetricsReceived`.
 
+Another indicator that the application and Collector are properly connected is
+whether the meter provider shuts down successfully. If boom can't communicate
+with the Collector (e.g., due to a misconfigured endpoint), then it will log a
+warning during termination that it wasn't able to properly shut down the meter
+provider.
+
 If the application is stopped, then the Collector won't get any more metrics and
 it won't emit any more `Metrics` lines. The application can then be started
 again and the Collector log will show more metrics being received.

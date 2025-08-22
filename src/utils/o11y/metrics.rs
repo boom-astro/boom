@@ -2,6 +2,7 @@
 use std::sync::LazyLock;
 
 use opentelemetry::{metrics::Meter, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     metrics::{SdkMeterProvider, Temporality},
     Resource,
@@ -88,6 +89,7 @@ pub fn init_metrics(
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_temporality(Temporality::Cumulative)
         .with_tonic()
+        .with_endpoint("https://localhost:4317/v1/metrics")
         .build()?;
 
     // From the OTel docs, "... a Meter Provider is initialized once and its
