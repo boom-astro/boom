@@ -182,19 +182,17 @@ pub async fn post_filter_version(
     let filter = match collection.find_one(doc! {"_id": filter_id.clone()}).await {
         Ok(Some(filter)) => filter,
         Ok(None) => {
-            return HttpResponse::NotFound()
-                .body(format!("filter with id {} does not exist", filter_id));
+            return response::not_found(&format!("filter with id {} does not exist", filter_id));
         }
         Err(e) => {
-            return HttpResponse::InternalServerError().body(format!(
+            return response::internal_error(&format!(
                 "failed to find filter with id {}. error: {}",
                 &filter_id, e
             ));
         }
     };
     if filter.user_id != current_user.id && !current_user.is_admin {
-        return HttpResponse::Forbidden()
-            .body("only the filter owner or an admin can modify a filter");
+        return response::forbidden("only the filter owner or an admin can modify a filter");
     }
 
     let catalog = filter.catalog.clone();
@@ -206,7 +204,7 @@ pub async fn post_filter_version(
         .into_iter()
         .map(|v| {
             mongodb::bson::to_document(&v).map_err(|e| {
-                HttpResponse::BadRequest().body(format!(
+                response::bad_request(&format!(
                     "Failed to convert new filter version to a valid BSON Document: {}",
                     e
                 ))
@@ -219,7 +217,7 @@ pub async fn post_filter_version(
     match run_test_pipeline(db.clone(), catalog.to_string(), test_pipeline).await {
         Ok(()) => {}
         Err(e) => {
-            return HttpResponse::BadRequest().body(format!(
+            return response::bad_request(&format!(
                 "Invalid filter submitted, filter test failed with error: {}",
                 e
             ));
@@ -246,14 +244,19 @@ pub async fn post_filter_version(
         .await;
     match update_result {
         Ok(_) => {
-            return HttpResponse::Ok().body(format!(
-                "successfully added new version {} to filter id: {}",
-                &new_pipeline_id, &filter_id
-            ));
+            return response::ok(
+                &format!(
+                    "successfully added new version {} to filter id: {}",
+                    &new_pipeline_id, &filter_id
+                ),
+                serde_json::json!({"fid": new_pipeline_id}),
+            );
         }
         Err(e) => {
-            return HttpResponse::InternalServerError()
-                .body(format!("failed to add new version to filter. error: {}", e));
+            return response::internal_error(&format!(
+                "failed to add new version to filter. error: {}",
+                e
+            ));
         }
     }
 }
@@ -297,7 +300,7 @@ pub async fn post_filter(
         .into_iter()
         .map(|v| {
             mongodb::bson::to_document(&v).map_err(|e| {
-                HttpResponse::BadRequest().body(format!(
+                response::bad_request(&format!(
                     "Failed to convert pipeline step to BSON Document: {}",
                     e
                 ))
@@ -312,7 +315,7 @@ pub async fn post_filter(
     match run_test_pipeline(db.clone(), catalog.clone(), test_pipeline).await {
         Ok(()) => {}
         Err(e) => {
-            return HttpResponse::BadRequest().body(format!(
+            return response::bad_request(&format!(
                 "Invalid filter submitted, filter test failed with error: {}",
                 e
             ));
@@ -340,12 +343,12 @@ pub async fn post_filter(
     match filter_collection.insert_one(&filter).await {
         Ok(_) => {
             return response::ok(
-                "success",
+                "successfully created new filter",
                 serde_json::to_value(FilterPublic::from(filter)).unwrap(),
             );
         }
         Err(e) => {
-            return HttpResponse::BadRequest().body(format!(
+            return response::internal_error(&format!(
                 "failed to insert filter into database. error: {}",
                 e
             ));
@@ -386,19 +389,17 @@ pub async fn patch_filter(
     let filter = match collection.find_one(doc! {"_id": filter_id.clone()}).await {
         Ok(Some(filter)) => filter,
         Ok(None) => {
-            return HttpResponse::NotFound()
-                .body(format!("filter with id {} does not exist", filter_id));
+            return response::not_found(&format!("filter with id {} does not exist", filter_id));
         }
         Err(e) => {
-            return HttpResponse::InternalServerError().body(format!(
+            return response::internal_error(&format!(
                 "failed to find filter with id {}. error: {}",
                 &filter_id, e
             ));
         }
     };
     if filter.user_id != current_user.id && !current_user.is_admin {
-        return HttpResponse::Forbidden()
-            .body("only the filter owner or an admin can modify a filter");
+        return response::forbidden("only the filter owner or an admin can modify a filter");
     }
 
     let mut update_doc = Document::new();
@@ -409,8 +410,9 @@ pub async fn patch_filter(
     if let Some(active_fid) = body.active_fid.clone() {
         // Ensure the fid exists in the filter versions
         if !filter.fv.iter().any(|fv| fv.fid == active_fid) {
-            return HttpResponse::BadRequest()
-                .body("active_fid must be one of the existing filter version IDs");
+            return response::bad_request(
+                "active_fid must be one of the existing filter version IDs",
+            );
         }
         update_doc.insert("active_fid", active_fid);
     }
@@ -418,19 +420,20 @@ pub async fn patch_filter(
         update_doc.insert("permissions", permissions);
     }
     if update_doc.is_empty() {
-        return HttpResponse::BadRequest().body("no valid fields to update");
+        return response::bad_request("no valid fields to update");
     }
     let update_result = collection
         .update_one(doc! {"_id": filter_id.clone()}, doc! {"$set": update_doc})
         .await;
     match update_result {
         Ok(_) => {
-            return HttpResponse::Ok()
-                .body(format!("successfully updated filter id: {}", &filter_id));
+            return response::ok(
+                &format!("successfully updated filter id: {}", &filter_id),
+                serde_json::Value::Null,
+            );
         }
         Err(e) => {
-            return HttpResponse::InternalServerError()
-                .body(format!("failed to update filter. error: {}", e));
+            return response::internal_error(&format!("failed to update filter. error: {}", e));
         }
     }
 }
@@ -469,15 +472,17 @@ pub async fn get_filters(
                         filter_list.push(filter);
                     }
                     Err(e) => {
-                        return HttpResponse::InternalServerError()
-                            .body(format!("error reading filter: {}", e));
+                        return response::internal_error(&format!("error reading filter: {}", e));
                     }
                 }
             }
-            response::ok("success", serde_json::to_value(&filter_list).unwrap())
+            response::ok(
+                "retrieved filters successfully",
+                serde_json::to_value(&filter_list).unwrap(),
+            )
         }
         Err(e) => {
-            HttpResponse::InternalServerError().body(format!("failed to query filters: {}", e))
+            return response::internal_error(&format!("failed to query filters: {}", e));
         }
     }
 }
@@ -510,10 +515,13 @@ pub async fn get_filter(
     let filter_collection: Collection<FilterPublic> = db.collection("filters");
 
     match filter_collection.find_one(filter_query).await {
-        Ok(Some(filter)) => response::ok("success", serde_json::to_value(filter).unwrap()),
-        Ok(None) => HttpResponse::NotFound().body("filter not found"),
+        Ok(Some(filter)) => response::ok(
+            "retrieved filter successfully",
+            serde_json::to_value(filter).unwrap(),
+        ),
+        Ok(None) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
         Err(e) => {
-            HttpResponse::InternalServerError().body(format!("failed to query filter: {}", e))
+            return response::internal_error(&format!("failed to query filter: {}", e));
         }
     }
 }

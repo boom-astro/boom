@@ -126,17 +126,11 @@ mod tests {
         assert_eq!(post_resp.status(), StatusCode::OK);
         let post_body = test::read_body(post_resp).await;
         let post_body_str = String::from_utf8_lossy(&post_body);
-        assert!(post_body_str.contains("successfully added new version"));
-        assert!(post_body_str.contains(&format!("to filter id: {}", filter_id)));
-        // get the version ID from the response message, split after "new version " and before " to filter"
-        let version_id = post_body_str
-            .split("new version ")
-            .nth(1)
-            .unwrap()
-            .split(" to filter")
-            .nth(0)
-            .unwrap()
-            .to_string();
+        let post_resp: serde_json::Value =
+            serde_json::from_str(&post_body_str).expect("failed to parse JSON");
+        assert_eq!(post_resp["status"], "success");
+        let version_id = post_resp["data"]["fid"].as_str().unwrap().to_string();
+        assert!(!version_id.is_empty());
         version_id
     }
 
@@ -301,8 +295,11 @@ mod tests {
         assert_eq!(patch_resp.status(), StatusCode::OK);
         let patch_body = test::read_body(patch_resp).await;
         let patch_body_str = String::from_utf8_lossy(&patch_body);
+        let patch_resp: serde_json::Value =
+            serde_json::from_str(&patch_body_str).expect("failed to parse JSON");
+        assert_eq!(patch_resp["status"], "success");
         assert_eq!(
-            patch_body_str,
+            patch_resp["message"],
             format!("successfully updated filter id: {}", filter_id)
         );
 
