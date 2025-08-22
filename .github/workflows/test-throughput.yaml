@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  TOLERANCE: 0.05 # 5% tolerance for wall time increase
+  TOLERANCE_PERCENTAGE: 5.0 # 5% tolerance for wall time increase
 
 jobs:
   test:
@@ -74,7 +74,7 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: dawidd6/action-download-artifact@v11
         with:
-          workflow: ${{ github.workflow }}
+          workflow: test-throughput.yaml
           branch: main
           name: throughput-logs
           path: ./baseline
@@ -89,8 +89,8 @@ jobs:
         run: |
           current=$(cat logs/boom-*/wall_time.txt)
           echo "Current wall time: $current seconds"
-          if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
-            baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
+          if [ -f ./baseline/boom-*/wall_time.txt ]; then
+            baseline=$(cat ./baseline/boom-*/wall_time.txt)
             echo "Baseline wall time: $baseline seconds"
             percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
           else
@@ -99,8 +99,6 @@ jobs:
           fi
 
           echo "Percentage difference: $percentage_diff%"
-
-          TOLERANCE_PERCENT=$((TOLERANCE*100))
 
           echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
           echo "baseline=$baseline" >> $GITHUB_OUTPUT
@@ -119,3 +117,12 @@ jobs:
           comment-type: edit
           reuse-existing-comment: true
           edit-mode: replace
+      - name: Fail if wall time increased too much (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          percentage_diff=${{ steps.compare-with-baseline.outputs.percentage_diff }}
+          if (( $(echo "$percentage_diff > $TOLERANCE_PERCENTAGE" | bc -l) )); then
+            echo "Wall time increased by $percentage_diff%, which is more than the allowed $TOLERANCE_PERCENTAGE%."
+            exit 1
+          fi
+          
