@@ -156,7 +156,7 @@ struct FilterVersionPost {
     set_as_active: Option<bool>,
 }
 
-/// Add a new version to an existing filter
+/// Create a new version for a filter
 #[utoipa::path(
     post,
     path = "/filters/{filter_id}/versions",
@@ -360,7 +360,7 @@ struct FilterPatch {
     active_fid: Option<String>,
     permissions: Option<Vec<i32>>,
 }
-/// Update filter metadata (active, active_fid, permissions)
+/// Update a filter's metadata
 #[utoipa::path(
     patch,
     path = "/filters/{filter_id}",
@@ -435,7 +435,7 @@ pub async fn patch_filter(
     }
 }
 
-/// Get a list of filters
+/// Get multiple filters
 #[utoipa::path(
     get,
     path = "/filters",
@@ -482,7 +482,7 @@ pub async fn get_filters(
     }
 }
 
-/// Get a filter by ID
+/// Get a single filter
 #[utoipa::path(
     get,
     path = "/filters/{filter_id}",
