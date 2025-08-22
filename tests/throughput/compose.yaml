@@ -64,6 +64,7 @@ services:
     image: apache/kafka:latest
     hostname: broker
     expose:
+      - "9092"
       - "29092"
     networks:
       - boom
