@@ -8,6 +8,15 @@ database:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+redis:
+  host: localhost
+  port: 6379
+kafka:
+  consumer:
+    ZTF: "localhost:9092" # ZTF alert consumer
+    LSST: "usdf-alert-stream-dev.lsst.cloud:9094" # LSST alert consumer
+    DECAM: "localhost:9092" # DECam alert consumer
+  producer: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
   ZTF:
     command_interval: 500
@@ -25,8 +34,17 @@ workers:
       n_workers: 0
     filter:
       n_workers: 1
+  DECAM:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    ml:
+      n_workers: 0
+    filter:
+      n_workers: 1
 crossmatch:
   LSST: []
+  DECAM: []
   ZTF:
     - catalog: PS1_DR1
       radius: 2.0 # 2 arcseconds

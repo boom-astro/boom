@@ -202,6 +202,10 @@ impl MLWorker for ZtfMLWorker {
             );
         }
 
+        if alerts.is_empty() {
+            return Ok(vec![]);
+        }
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();

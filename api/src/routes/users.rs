@@ -15,6 +15,8 @@ pub struct UserPost {
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct User {
+    // Save in the database as _id, but we want to rename on the way out
+    #[serde(rename = "_id")]
     pub id: String,
     pub username: String,
     pub email: String,
@@ -22,15 +24,37 @@ pub struct User {
     pub is_admin: bool,   // Indicates if the user is an admin
 }
 
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
+pub struct UserPublic {
+    #[serde(rename(serialize = "id", deserialize = "_id"))]
+    pub id: String,
+    pub username: String,
+    pub email: String,
+    pub is_admin: bool,
+}
+
+impl From<User> for UserPublic {
+    fn from(user: User) -> Self {
+        Self {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            is_admin: user.is_admin,
+        }
+    }
+}
+
+/// Add a new user (admin only)
 #[utoipa::path(
     post,
     path = "/users",
     request_body = UserPost,
     responses(
-        (status = 200, description = "User created successfully", body = User),
+        (status = 200, description = "User created successfully", body = UserPublic),
         (status = 409, description = "User already exists"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Users"]
 )]
 #[post("/users")]
 pub async fn post_user(
@@ -62,13 +86,7 @@ pub async fn post_user(
     match user_collection.insert_one(user_insert.clone()).await {
         Ok(_) => response::ok(
             "success",
-            serde_json::to_value(UserGet {
-                id: user_id,
-                username: user_insert.username.clone(),
-                email: user_insert.email.clone(),
-                is_admin: user_insert.is_admin,
-            })
-            .unwrap(),
+            serde_json::to_value(UserPublic::from(user_insert)).unwrap(),
         ),
         // Catch unique index constraint error
         Err(e) if e.to_string().contains("E11000 duplicate key error") => HttpResponse::Conflict()
@@ -82,30 +100,24 @@ pub async fn post_user(
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, ToSchema)]
-pub struct UserGet {
-    pub id: String,
-    pub username: String,
-    pub email: String,
-    pub is_admin: bool,
-}
-
+/// Get a list of users
 #[utoipa::path(
     get,
     path = "/users",
     responses(
-        (status = 200, description = "Users retrieved successfully", body = [User]),
+        (status = 200, description = "Users retrieved successfully", body = [UserPublic]),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Users"]
 )]
 #[get("/users")]
 pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
-    let user_collection: Collection<UserGet> = db.collection("users");
+    let user_collection: Collection<UserPublic> = db.collection("users");
     let users = user_collection.find(doc! {}).await;
 
     match users {
         Ok(mut cursor) => {
-            let mut user_list = Vec::<UserGet>::new();
+            let mut user_list = Vec::<UserPublic>::new();
             while let Some(user) = cursor.next().await {
                 match user {
                     Ok(user) => {
@@ -123,6 +135,7 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     }
 }
 
+/// Delete a user by ID (admin only)
 #[utoipa::path(
     delete,
     path = "/users/{user_id}",
@@ -130,7 +143,8 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
         (status = 200, description = "User deleted successfully"),
         (status = 404, description = "User not found"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Users"]
 )]
 #[delete("/users/{user_id}")]
 pub async fn delete_user(
@@ -144,9 +158,9 @@ pub async fn delete_user(
     }
     // TODO: Ensure the caller is authorized to delete this user
     let user_id = path.into_inner();
-    let user_collection: Collection<UserGet> = db.collection("users");
+    let user_collection: Collection<UserPublic> = db.collection("users");
 
-    match user_collection.delete_one(doc! { "id": &user_id }).await {
+    match user_collection.delete_one(doc! { "_id": &user_id }).await {
         Ok(delete_result) => {
             if delete_result.deleted_count > 0 {
                 HttpResponse::Ok().json(json!({

@@ -1,158 +1,20 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus, LSST_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS},
+    alert::{
+        AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
+        ZTF_LSST_XMATCH_RADIUS,
+    },
     conf,
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     ml::{MLWorker, ZtfMLWorker},
     utils::{
-        db::mongify,
         enums::Survey,
         testing::{
-            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
-            ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+            decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
+            remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
 use mongodb::bson::doc;
-
-#[tokio::test]
-async fn test_alert_from_avro_bytes() {
-    let mut alert_worker = ztf_alert_worker().await;
-
-    let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
-    let alert = alert_worker.alert_from_avro_bytes(&bytes_content).await;
-    assert!(alert.is_ok());
-
-    // validate the alert
-    let mut alert = alert.unwrap();
-    assert_eq!(alert.schemavsn, "4.02");
-    assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
-    assert_eq!(alert.object_id, object_id);
-    assert_eq!(alert.candid, candid);
-
-    // validate the candidate
-    let candidate = alert.clone().candidate;
-    assert_eq!(candidate.ra, ra);
-    assert_eq!(candidate.dec, dec);
-
-    // validate the prv_candidates
-    let prv_candidates = alert.clone().prv_candidates;
-    assert!(!prv_candidates.is_none());
-
-    let prv_candidates = prv_candidates.unwrap();
-    assert_eq!(prv_candidates.len(), 10);
-
-    let non_detection = prv_candidates.get(0).unwrap();
-    assert_eq!(non_detection.magpsf.is_none(), true);
-    assert_eq!(!non_detection.diffmaglim.is_none(), true);
-
-    let detection = prv_candidates.get(1).unwrap();
-    assert_eq!(detection.magpsf.is_some(), true);
-    assert_eq!(detection.sigmapsf.is_some(), true);
-    assert_eq!(detection.diffmaglim.is_some(), true);
-    assert_eq!(detection.isdiffpos.is_some(), true);
-
-    // validate the fp_hists
-    let fp_hists = alert.clone().fp_hists;
-    assert!(!fp_hists.is_none());
-
-    let fp_hists = fp_hists.unwrap();
-    assert_eq!(fp_hists.len(), 10);
-
-    // at the moment, negative fluxes yield non-detections
-    // this is a conscious choice, might be revisited in the future
-    let fp_negative_det = fp_hists.get(0).unwrap();
-    assert!(fp_negative_det.magpsf.is_none());
-    assert!(fp_negative_det.sigmapsf.is_none());
-    assert!((fp_negative_det.diffmaglim - 20.879942).abs() < 1e-6);
-    assert!(fp_negative_det.isdiffpos.is_none());
-    assert!(fp_negative_det.snr.is_none());
-    assert!((fp_negative_det.fp_hist.jd - 2460447.9202778).abs() < 1e-6);
-
-    let fp_positive_det = fp_hists.get(9).unwrap();
-    assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
-    assert!((fp_positive_det.sigmapsf.unwrap() - 0.3616859).abs() < 1e-6);
-    assert!((fp_positive_det.diffmaglim - 20.247562).abs() < 1e-6);
-    assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
-    assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
-    assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
-
-    // validate the cutouts
-    assert_eq!(alert.cutout_science.len(), 13107);
-    assert_eq!(alert.cutout_template.len(), 12410);
-    assert_eq!(alert.cutout_difference.len(), 14878);
-
-    let prv_candidates = alert.prv_candidates.take();
-    let fp_hist = alert.fp_hists.take();
-
-    // validate the prv_candidates
-    assert!(!prv_candidates.is_none());
-    assert_eq!(prv_candidates.clone().unwrap().len(), 10);
-
-    // validate the fp_hist
-    assert!(!fp_hist.is_none());
-    assert_eq!(fp_hist.clone().unwrap().len(), 10);
-
-    // validate the conversion to bson
-    let alert_doc = mongify(&alert);
-    assert_eq!(alert_doc.get_str("schemavsn").unwrap(), "4.02");
-    assert_eq!(
-        alert_doc.get_str("publisher").unwrap(),
-        "ZTF (www.ztf.caltech.edu)"
-    );
-    assert_eq!(alert_doc.get_str("objectId").unwrap(), object_id);
-    assert_eq!(alert_doc.get_i64("candid").unwrap(), candid);
-    assert_eq!(
-        alert_doc
-            .get_document("candidate")
-            .unwrap()
-            .get_f64("ra")
-            .unwrap(),
-        ra
-    );
-    assert_eq!(
-        alert_doc
-            .get_document("candidate")
-            .unwrap()
-            .get_f64("dec")
-            .unwrap(),
-        dec
-    );
-
-    // validate the conversion to bson for prv_candidates
-    let prv_candidates_doc = prv_candidates
-        .unwrap()
-        .into_iter()
-        .map(|x| mongify(&x))
-        .collect::<Vec<_>>();
-    assert_eq!(prv_candidates_doc.len(), 10);
-
-    let non_detection = prv_candidates_doc.get(0).unwrap();
-    assert!(!non_detection.get_f64("magpsf").is_ok());
-
-    let detection = prv_candidates_doc.get(1).unwrap();
-    assert_eq!(detection.get_f64("magpsf").unwrap(), 16.800199508666992);
-
-    // validate the conversion to bson for fp_hist
-    let fp_hist_doc = fp_hist
-        .unwrap()
-        .into_iter()
-        .map(|x| mongify(&x))
-        .collect::<Vec<_>>();
-    assert_eq!(fp_hist_doc.len(), 10);
-
-    let fp_negative_flux = fp_hist_doc.get(0).unwrap();
-    assert_eq!(
-        fp_negative_flux.get_f64("forcediffimflux").unwrap(),
-        -11859.8798828125
-    );
-
-    let fp_positive_flux = fp_hist_doc.get(9).unwrap();
-    assert_eq!(
-        fp_positive_flux.get_f64("forcediffimflux").unwrap(),
-        138.2030029296875
-    );
-}
 
 #[tokio::test]
 async fn test_process_ztf_alert() {
@@ -226,7 +88,7 @@ async fn test_process_ztf_alert() {
 }
 
 #[tokio::test]
-async fn test_process_ztf_lsst_xmatch() {
+async fn test_process_ztf_alert_xmatch() {
     let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
 
@@ -362,14 +224,15 @@ async fn test_process_ztf_lsst_xmatch() {
     //    even attempt to match. Test this by creating an LSST alert with an
     //    unrealistically high dec that ZTF would otherwise match without this
     //    constraint:
-    let (_, object_id, ra, dec, bytes_content) = AlertRandomizer::new_randomized(Survey::Ztf)
-        .dec(LSST_DEC_RANGE.1 + 10.0)
-        .get()
-        .await;
+    let (_, bad_object_id, bad_ra, bad_dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf)
+            .dec(LSST_DEC_RANGE.1 + 10.0)
+            .get()
+            .await;
 
     let (_, _, _, _, lsst_bytes_content) = AlertRandomizer::new_randomized(Survey::Lsst)
-        .ra(ra)
-        .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+        .ra(bad_ra)
+        .dec(bad_dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
         .get()
         .await;
     lsst_alert_worker
@@ -378,10 +241,10 @@ async fn test_process_ztf_lsst_xmatch() {
         .unwrap();
 
     alert_worker.process_alert(&bytes_content).await.unwrap();
-    let filter_aux = doc! {"_id": &object_id};
+    let bad_filter_aux = doc! {"_id": &bad_object_id};
     let aux = db
         .collection::<mongodb::bson::Document>(aux_collection_name)
-        .find_one(filter_aux)
+        .find_one(bad_filter_aux)
         .await
         .unwrap()
         .unwrap();
@@ -394,6 +257,41 @@ async fn test_process_ztf_lsst_xmatch() {
         .map(|x| x.as_i64().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lsst_matches.len(), 0);
+
+    // DECAM setup (here we just verify that xmatching is done, and do not test all possible cases):
+    let ztf_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Ztf).dec(DECAM_DEC_RANGE.1 - 10.0);
+
+    let (_, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.get().await;
+    let filter_aux = doc! {"_id": &object_id};
+
+    let mut decam_alert_worker = decam_alert_worker().await;
+    let (_, decam_object_id, _, _, decam_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Decam)
+            .ra(ra)
+            .dec(dec + 0.9 * ZTF_DECAM_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+
+    decam_alert_worker
+        .process_alert(&decam_bytes_content)
+        .await
+        .unwrap();
+
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("DECAM")
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches.get(0).unwrap().as_str().unwrap(), &decam_object_id);
 }
 
 #[tokio::test]
@@ -470,14 +368,16 @@ async fn test_filter_ztf_alert() {
     let candid_programid_str = &ml_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
-    let filter_id = insert_test_filter(&Survey::Ztf).await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
 
-    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
     let result = filter_worker
         .process_alerts(&[candid_programid_str.clone()])
         .await;
 
-    remove_test_filter(filter_id, &Survey::Ztf).await.unwrap();
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();

@@ -1,7 +1,5 @@
 /target
 Cargo.lock
-config.yaml
-docker-compose.yaml
 data/alerts
 data/schema
 __pycache__
@@ -13,3 +11,6 @@ scripts/convert2onnx/env/
 scripts/convert2onnx/models_input/
 scripts/convert2onnx/models_output/
 .env
+tests/throughput/config.yaml
+tests/throughput/cats150.json
+logs

@@ -1,6 +1,7 @@
 use crate::{
     alert::{
-        AlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_URL,
+        AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
+        LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     utils::{db::initialize_survey_indexes, enums::Survey},
@@ -25,22 +26,28 @@ async fn test_db() -> mongodb::Database {
     db
 }
 
-async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
-    let db = test_db().await;
-    initialize_survey_indexes(survey, &db).await?;
-    Ok(())
-}
-
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Ztf).await.unwrap();
+    initialize_survey_indexes(&Survey::Ztf, &test_db().await)
+        .await
+        .unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Lsst).await.unwrap();
+    initialize_survey_indexes(&Survey::Lsst, &test_db().await)
+        .await
+        .unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn decam_alert_worker() -> DecamAlertWorker {
+    // initialize the ZTF indexes
+    initialize_survey_indexes(&Survey::Decam, &test_db().await)
+        .await
+        .unwrap();
+    DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 // drops alert collections from the database
@@ -101,17 +108,18 @@ pub async fn drop_alert_from_collections(
 }
 
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
-    filter_id: i32,
+    filter_id: &str,
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": &format!("{}_alerts", survey)})
+        .delete_many(doc! {"_id": filter_id, "catalog": &format!("{}_alerts", survey)})
         .await;
 
     Ok(())
@@ -119,12 +127,16 @@ pub async fn remove_test_filter(
 
 // we want to replace the 3 insert_test_..._filter functions with a single function that
 // takes the survey as argument
-pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::error::Error>> {
-    let filter_id = rand::random::<i32>();
+pub async fn insert_test_filter(
+    survey: &Survey,
+    use_prv_candidates: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let filter_id = uuid::Uuid::new_v4().to_string();
     let catalog = format!("{}_alerts", survey);
-    let pipeline = match survey {
-        Survey::Ztf => ZTF_TEST_PIPELINE,
-        Survey::Lsst => LSST_TEST_PIPELINE,
+    let pipeline = match (survey, use_prv_candidates) {
+        (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
+        (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
+        (Survey::Lsst, _) => LSST_TEST_PIPELINE,
         _ => {
             return Err(Box::from(format!(
                 "Unsupported survey for test filter: {}",
@@ -134,9 +146,7 @@ pub async fn insert_test_filter(survey: &Survey) -> Result<i32, Box<dyn std::err
     };
 
     let filter_obj: mongodb::bson::Document = doc! {
-        "_id": mongodb::bson::oid::ObjectId::new(),
-        "group_id": 41,
-        "filter_id": filter_id,
+        "_id": &filter_id,
         "catalog": catalog,
         "permissions": [1],
         "active": true,
@@ -204,8 +214,14 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf => {
-                let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+            Survey::Ztf | Survey::Decam => {
+                let payload = match survey {
+                    Survey::Ztf => {
+                        fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
+                    }
+                    Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    _ => unreachable!(),
+                };
                 let reader = Reader::new(&payload[..]).unwrap();
                 let schema = reader.writer_schema().clone();
                 (
@@ -224,7 +240,6 @@ impl AlertRandomizer {
                     Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
                 )
             }
-            _ => panic!("Unsupported survey for randomization"),
         };
         let candid = Some(rand::rng().random_range(0..i64::MAX));
         let ra = Some(rand::rng().random_range(0.0..360.0));
@@ -291,7 +306,7 @@ impl AlertRandomizer {
     fn randomize_object_id(survey: &Survey) -> String {
         let mut rng = rand::rng();
         match survey {
-            Survey::Ztf => {
+            Survey::Ztf | Survey::Decam => {
                 let mut object_id = survey.to_string();
                 for _ in 0..2 {
                     object_id.push(rng.random_range('0'..='9'));
@@ -302,7 +317,6 @@ impl AlertRandomizer {
                 object_id
             }
             Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
-            _ => panic!("Unsupported survey for randomization"),
         }
     }
 
@@ -382,7 +396,8 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf => {
+            Survey::Ztf | Survey::Decam => {
+                // Use the same logic for ZTF/Decam, just different objectId prefix
                 let mut candid = self.candid;
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
@@ -390,8 +405,15 @@ impl AlertRandomizer {
                 let (payload, schema) = match (self.payload, self.schema) {
                     (Some(payload), Some(schema)) => (payload, schema),
                     _ => {
-                        let payload =
-                            fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+                        let payload = match self.survey {
+                            Survey::Ztf => {
+                                fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
+                            }
+                            Survey::Decam => {
+                                fs::read("tests/data/alerts/decam/alert.avro").unwrap()
+                            }
+                            _ => panic!("Unsupported survey for test payload"),
+                        };
                         let reader = Reader::new(&payload[..]).unwrap();
                         let schema = reader.writer_schema().clone();
                         (payload, schema)
@@ -534,7 +556,6 @@ impl AlertRandomizer {
                     new_payload,
                 )
             }
-            _ => panic!("Unsupported survey for randomization"),
         }
     }
 

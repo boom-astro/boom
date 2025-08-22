@@ -5,14 +5,15 @@ use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
 use crate::filter::{
-    get_filter_object, parse_programid_candid_tuple, run_filter, Alert, Classification, Filter,
-    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
+    get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
+    FilterWorker, FilterWorkerError, Origin, Photometry,
 };
-use crate::utils::enums::Survey;
+use crate::utils::{enums::Survey, o11y::as_error};
 
 #[derive(Debug)]
 pub struct ZtfFilter {
-    pub id: i32,
+    pub id: String,
     pub pipeline: Vec<Document>,
     pub permissions: Vec<i32>,
 }
@@ -21,7 +22,7 @@ pub struct ZtfFilter {
 impl Filter for ZtfFilter {
     #[instrument(skip(filter_collection), err)]
     async fn build(
-        filter_id: i32,
+        filter_id: &str,
         filter_collection: &mongodb::Collection<mongodb::bson::Document>,
     ) -> Result<Self, FilterError> {
         // get filter object
@@ -57,94 +58,187 @@ impl Filter for ZtfFilter {
                 }
             },
             doc! {
-                "$lookup": doc! {
-                    "from": format!("ZTF_alerts_aux"),
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
                 "$project": doc! {
                     "objectId": 1,
                     "candidate": 1,
                     "classifications": 1,
                     "coordinates": 1,
-                    "cross_matches": doc! {
-                        "$arrayElemAt": [
-                            "$aux.cross_matches",
-                            0
-                        ]
-                    },
-                    "aliases": doc! {
-                        "$arrayElemAt": [
-                            "$aux.aliases",
-                            0
-                        ]
-                    },
-                    "prv_candidates": doc! {
-                        "$filter": doc! {
-                            "input": doc! {
-                                "$arrayElemAt": [
-                                    "$aux.prv_candidates",
-                                    0
-                                ]
-                            },
-                            "as": "x",
-                            "cond": doc! {
-                                "$and": [
-                                    {
-                                        "$in": [
-                                            "$$x.programid",
-                                            &permissions
-                                        ]
-                                    },
-                                    { // maximum 1 year of past data
-                                        "$lt": [
-                                            {
-                                                "$subtract": [
-                                                    "$candidate.jd",
-                                                    "$$x.jd"
-                                                ]
-                                            },
-                                            365
-                                        ]
-                                    },
-                                    { // only datapoints up to (and including) current alert
-                                        "$lte": [
-                                            "$$x.jd",
-                                            "$candidate.jd"
-                                        ]
-                                    }
-
-                                ]
-                            }
-                        }
-                    },
                 }
             },
         ];
 
+        let mut aux_add_fields = doc! {};
+
         // get filter pipeline as str and convert to Vec<Bson>
         let filter_pipeline = filter_obj
             .get("pipeline")
-            .ok_or(FilterError::FilterNotFound)?
+            .ok_or(FilterError::FilterPipelineError)?
             .as_str()
-            .ok_or(FilterError::FilterNotFound)?;
+            .ok_or(FilterError::FilterPipelineError)?;
 
         let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
         let filter_pipeline = filter_pipeline
             .as_array()
             .ok_or(FilterError::InvalidFilterPipeline)?;
 
-        // append stages to prefix
-        for stage in filter_pipeline {
-            let x = mongodb::bson::to_document(stage)?;
+        // validate filter
+        validate_filter_pipeline(&filter_pipeline)?;
+
+        let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
+        let use_prv_nondetections_index =
+            uses_field_in_filter(filter_pipeline, "prv_nondetections");
+        let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+
+        if use_prv_candidates_index.is_some() {
+            // insert it in aux addFields stage
+            aux_add_fields.insert(
+                "prv_candidates".to_string(),
+                doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_candidates",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // apply ZTF alert stream permissions
+                                    "$in": [
+                                        "$$x.programid",
+                                        &permissions
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            );
+        }
+        if use_prv_nondetections_index.is_some() {
+            aux_add_fields.insert(
+                "prv_nondetections".to_string(),
+                doc! {
+                    "$filter": doc! {
+                        "input": doc! {
+                            "$arrayElemAt": [
+                                "$aux.prv_nondetections",
+                                0
+                            ]
+                        },
+                        "as": "x",
+                        "cond": doc! {
+                            "$and": [
+                                { // ZTF alert stream permissions
+                                    "$in": [
+                                        "$$x.programid",
+                                        &permissions
+                                    ]
+                                },
+                                { // maximum 1 year of past data
+                                    "$lt": [
+                                        {
+                                            "$subtract": [
+                                                "$candidate.jd",
+                                                "$$x.jd"
+                                            ]
+                                        },
+                                        365
+                                    ]
+                                },
+                                { // only datapoints up to (and including) current alert
+                                    "$lte": [
+                                        "$$x.jd",
+                                        "$candidate.jd"
+                                    ]
+                                }
+
+                            ]
+                        }
+                    }
+                },
+            );
+        }
+        if use_cross_matches_index.is_some() {
+            aux_add_fields.insert(
+                "cross_matches".to_string(),
+                doc! {
+                    "$arrayElemAt": [
+                        "$aux.cross_matches",
+                        0
+                    ]
+                },
+            );
+        }
+
+        let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
+            || use_prv_nondetections_index.is_some()
+            || use_cross_matches_index.is_some();
+
+        let mut insert_aux_index = usize::MAX;
+        if let Some(index) = use_prv_candidates_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
+        if let Some(index) = use_prv_nondetections_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
+        if let Some(index) = use_cross_matches_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
+
+        // some sanity checks
+        if insert_aux_index == usize::MAX && insert_aux_pipeline {
+            return Err(FilterError::InvalidFilterPipeline);
+        }
+
+        // now we loop over the base_pipeline and insert stages from the filter_pipeline
+        // and when i = insert_index, we insert the aux_pipeline before the stage
+        for i in 0..filter_pipeline.len() {
+            let x = mongodb::bson::to_document(&filter_pipeline[i])?;
+
+            if insert_aux_pipeline && i == insert_aux_index {
+                pipeline.push(doc! {
+                    "$lookup": doc! {
+                        "from": format!("ZTF_alerts_aux"),
+                        "localField": "objectId",
+                        "foreignField": "_id",
+                        "as": "aux"
+                    }
+                });
+                pipeline.push(doc! {
+                    "$addFields": &aux_add_fields
+                });
+                pipeline.push(doc! {
+                    "$unset": "aux"
+                });
+                insert_aux_pipeline = false; // only insert once
+            }
+
+            // push the current stage
             pipeline.push(x);
         }
 
         let filter = ZtfFilter {
-            id: filter_id,
+            id: filter_id.to_string(),
             pipeline: pipeline,
             permissions: permissions,
         };
@@ -158,13 +252,16 @@ pub struct ZtfFilterWorker {
     input_queue: String,
     output_topic: String,
     filters: Vec<ZtfFilter>,
-    filters_by_permission: HashMap<i32, Vec<usize>>,
+    filters_by_permission: HashMap<i32, Vec<String>>,
 }
 
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
     #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, FilterWorkerError> {
+    async fn new(
+        config_path: &str,
+        filter_ids: Option<Vec<String>>,
+    ) -> Result<Self, FilterWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let alert_collection = db.collection("ZTF_alerts");
@@ -173,29 +270,43 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filter_ids: Vec<i32> = filter_collection
-            .distinct("filter_id", doc! {"active": true, "catalog": "ZTF_alerts"})
+        let all_filter_ids: Vec<String> = filter_collection
+            .distinct("_id", doc! {"active": true, "catalog": "ZTF_alerts"})
             .await?
             .into_iter()
-            .map(|x| x.as_i32().ok_or(FilterError::InvalidFilterId))
-            .filter_map(Result::ok)
-            .collect();
+            .map(|x| {
+                x.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or(FilterError::InvalidFilterId)
+            })
+            .collect::<Result<Vec<String>, FilterError>>()?;
 
         let mut filters: Vec<ZtfFilter> = Vec::new();
-        for filter_id in filter_ids {
-            filters.push(ZtfFilter::build(filter_id, &filter_collection).await?);
+        if let Some(filter_ids) = filter_ids {
+            // if filter_ids is provided, we only build those filters
+            for filter_id in filter_ids {
+                if !all_filter_ids.contains(&filter_id) {
+                    return Err(FilterWorkerError::FilterNotFound);
+                }
+                filters.push(ZtfFilter::build(&filter_id, &filter_collection).await?);
+            }
+        } else {
+            for filter_id in all_filter_ids {
+                filters.push(ZtfFilter::build(&filter_id, &filter_collection).await?);
+            }
         }
 
-        // create a hashmap of filters per programid (permissions)
+        // Create a hashmap of filters per programid (permissions)
         // basically we'll have the 4 programid (from 0 to 3) as keys
-        // and the idx of the filters that have that programid in their permissions as values
-        let mut filters_by_permission: HashMap<i32, Vec<usize>> = HashMap::new();
-        for (i, filter) in filters.iter().enumerate() {
+        // and the ids of the filters that have that programid in their
+        // permissions as values
+        let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
+        for filter in &filters {
             for permission in &filter.permissions {
                 let entry = filters_by_permission
                     .entry(*permission)
                     .or_insert(Vec::new());
-                entry.push(i);
+                entry.push(filter.id.clone());
             }
         }
 
@@ -437,49 +548,58 @@ impl FilterWorker for ZtfFilterWorker {
             }
         }
 
-        // for each programid, get the filters that have that programid in their permissions
-        // and run the filters
+        // For each programid, get the filters that have that programid in their
+        // permissions and run the filters
         for (programid, candids) in alerts_by_programid {
             let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
 
-            let filter_indices = self
+            let filter_ids_with_perms = self
                 .filters_by_permission
                 .get(&programid)
                 .ok_or(FilterWorkerError::GetFilterByQueueError)?;
 
-            for i in filter_indices {
-                let filter = &self.filters[*i];
+            for filter in &self.filters {
+                // If the filter ID is not in the list of filter IDs for this
+                // programid, skip it
+                if !filter_ids_with_perms.contains(&filter.id) {
+                    continue;
+                }
+
                 let out_documents = run_filter(
                     candids.clone(),
-                    filter.id,
+                    &filter.id,
                     filter.pipeline.clone(),
                     &self.alert_collection,
                 )
                 .await?;
 
-                // if the array is empty, continue
+                info!(
+                    "{}/{} ZTF alerts with programid {} passed filter {}",
+                    out_documents.len(),
+                    candids.len(),
+                    programid,
+                    filter.id,
+                );
+
+                // If we have output documents, we need to process them
+                // and create filter results for each document (which contain annotations)
+                // however, if the array is empty, there's nothing to do
                 if out_documents.is_empty() {
                     continue;
-                } else {
-                    // if we have output documents, we need to process them
-                    // and create filter results for each document (which contain annotations)
-                    info!(
-                        "{} alerts passed ztf filter {} with programid {}",
-                        out_documents.len(),
-                        filter.id,
-                        programid,
-                    );
                 }
 
                 let now_ts = chrono::Utc::now().timestamp_millis() as f64;
 
                 for doc in out_documents {
-                    let candid = doc.get_i64("_id")?;
+                    let candid = doc
+                        .get_i64("_id")
+                        .inspect_err(as_error!("Failed to get candid from document"))?;
                     // might want to have the annotations as an optional field instead of empty
                     let annotations =
-                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
+                        serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))
+                            .inspect_err(as_error!("Failed to serialize annotations"))?;
                     let filter_result = FilterResults {
-                        filter_id: filter.id,
+                        filter_id: filter.id.clone(),
                         passed_at: now_ts,
                         annotations,
                     };

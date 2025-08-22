@@ -1,6 +1,7 @@
 use crate::{models::response, routes::users::User};
 
-use actix_web::{HttpResponse, patch, post, web};
+use actix_web::{HttpResponse, get, patch, post, web};
+use futures::stream::StreamExt;
 use mongodb::{
     Collection, Database,
     bson::{Document, doc},
@@ -9,19 +10,48 @@ use std::vec;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(serde::Deserialize, Clone, ToSchema)]
-pub struct FilterSubmissionBody {
-    pub pipeline: Option<Vec<serde_json::Value>>,
-    pub permissions: Option<Vec<i32>>,
-    pub catalog: Option<String>,
+#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
+pub struct FilterVersion {
+    fid: String,
+    pipeline: String,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-struct Filter {
-    pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
-    pub catalog: String,
+pub struct Filter {
+    #[serde(rename = "_id")]
     pub id: String,
+    pub permissions: Vec<i32>,
+    pub user_id: String,
+    pub catalog: String,
+    pub active: bool,
+    pub active_fid: String,
+    pub fv: Vec<FilterVersion>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
+pub struct FilterPublic {
+    #[serde(rename(serialize = "id", deserialize = "_id"))]
+    pub id: String,
+    pub permissions: Vec<i32>,
+    pub user_id: String,
+    pub catalog: String,
+    pub active: bool,
+    pub active_fid: String,
+    pub fv: Vec<FilterVersion>,
+}
+
+impl From<Filter> for FilterPublic {
+    fn from(filter: Filter) -> Self {
+        Self {
+            id: filter.id,
+            permissions: filter.permissions,
+            user_id: filter.user_id,
+            catalog: filter.catalog,
+            active: filter.active,
+            active_fid: filter.active_fid,
+            fv: filter.fv,
+        }
+    }
 }
 
 fn build_test_pipeline(
@@ -120,51 +150,6 @@ async fn run_test_pipeline(
     }
 }
 
-/// Takes a verified filter and builds the properly formatted bson document for the database
-fn build_filter_bson(
-    filter: Filter,
-    user_id: &str,
-) -> Result<mongodb::bson::Document, mongodb::error::Error> {
-    // generate new object id
-    let id = mongodb::bson::oid::ObjectId::new();
-    let date_time = mongodb::bson::DateTime::now();
-    let pipeline_id = Uuid::new_v4().to_string(); // generate random pipeline id
-    // Convert the filter pipeline from JSON into a vector of BSON Documents
-    let pipeline: Vec<mongodb::bson::Document> = filter
-        .pipeline
-        .into_iter()
-        .map(|v| {
-            mongodb::bson::to_document(&v).map_err(|e| {
-                mongodb::error::Error::from(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Failed to convert pipeline step to BSON Document: {}", e),
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    let database_filter_bson = doc! {
-        "_id": id,
-        "id": filter.id,
-        "catalog": filter.catalog,
-        "permissions": filter.permissions,
-        "active": true,
-        "active_fid": pipeline_id.clone(),
-        "fv": [
-            {
-                "fid": pipeline_id,
-                "pipeline": pipeline,
-                "created_at": date_time,
-            }
-        ],
-        "autosave": false,
-        "update_annotations": true,
-        "created_by": user_id,
-        "created_at": date_time,
-        "last_modified": date_time,
-    };
-    Ok(database_filter_bson)
-}
-
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterPipelinePatch {
     pipeline: Vec<serde_json::Value>,
@@ -179,7 +164,8 @@ struct FilterPipelinePatch {
         (status = 200, description = "Filter version added successfully"),
         (status = 400, description = "Invalid filter submitted"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Filters"]
 )]
 #[patch("/filters/{filter_id}")]
 pub async fn add_filter_version(
@@ -188,11 +174,11 @@ pub async fn add_filter_version(
     body: web::Json<FilterPipelinePatch>,
 ) -> HttpResponse {
     let filter_id = filter_id.into_inner();
-    let collection: Collection<Document> = db.collection("filters");
-    let owner_filter = match collection.find_one(doc! {"id": filter_id.clone()}).await {
+    let collection: Collection<Filter> = db.collection("filters");
+    let owner_filter = match collection.find_one(doc! {"_id": filter_id.clone()}).await {
         Ok(Some(filter)) => filter,
         Ok(None) => {
-            return HttpResponse::BadRequest()
+            return HttpResponse::NotFound()
                 .body(format!("filter with id {} does not exist", filter_id));
         }
         Err(e) => {
@@ -202,12 +188,8 @@ pub async fn add_filter_version(
             ));
         }
     };
-    let catalog = owner_filter.get_str("catalog").unwrap();
-    let permissions = owner_filter.get_array("permissions").unwrap();
-    let permissions: Vec<i32> = permissions
-        .iter()
-        .map(|perm| perm.as_i32().unwrap())
-        .collect();
+    let catalog = owner_filter.catalog.clone();
+    let permissions = owner_filter.permissions.clone();
     // Create test version of filter and test it
     // Convert pipeline from JSON to an array of Documents
     let pipeline = body.pipeline.clone();
@@ -237,14 +219,15 @@ pub async fn add_filter_version(
 
     let new_pipeline_id = Uuid::new_v4().to_string();
     let date_time = mongodb::bson::DateTime::now();
+    let new_pipeline_json: String = serde_json::to_string(&pipeline).unwrap();
     let new_pipeline_bson = doc! {
         "fid": new_pipeline_id,
-        "pipeline": pipeline,
+        "pipeline": new_pipeline_json,
         "created_at": date_time,
     };
     let update_result = collection
         .update_one(
-            doc! {"id": filter_id.clone()},
+            doc! {"_id": filter_id.clone()},
             doc! {
                 "$push": {
                     "fv": new_pipeline_bson
@@ -281,10 +264,11 @@ pub struct FilterPost {
     path = "/filters",
     request_body = FilterPost,
     responses(
-        (status = 200, description = "Filter created successfully", body = Filter),
+        (status = 200, description = "Filter created successfully", body = FilterPublic),
         (status = 400, description = "Invalid filter submitted"),
         (status = 500, description = "Internal server error")
-    )
+    ),
+    tags=["Filters"]
 )]
 #[post("/filters")]
 pub async fn post_filter(
@@ -330,29 +314,96 @@ pub async fn post_filter(
 
     // Save filter to database
     let filter_id = uuid::Uuid::new_v4().to_string();
-    let filter_collection: Collection<mongodb::bson::Document> = db.collection("filters");
-    let database_filter = Filter {
-        pipeline,
+    let filter_version: String = uuid::Uuid::new_v4().to_string();
+    let filter_collection: Collection<Filter> = db.collection("filters");
+    // Pipeline needs to be a string
+    let pipeline_json = serde_json::to_string(&pipeline_bson).unwrap();
+    let filter = Filter {
         permissions,
         catalog,
         id: filter_id,
+        user_id: current_user.id.clone(),
+        active: true,
+        active_fid: filter_version.clone(),
+        fv: vec![FilterVersion {
+            fid: filter_version,
+            pipeline: pipeline_json,
+        }],
     };
-    let filter_bson = match build_filter_bson(database_filter.clone(), &current_user.id) {
-        Ok(bson) => bson,
-        Err(e) => {
-            return HttpResponse::BadRequest()
-                .body(format!("unable to create filter bson, got error: {}", e));
-        }
-    };
-    match filter_collection.insert_one(filter_bson).await {
+    match filter_collection.insert_one(&filter).await {
         Ok(_) => {
-            return response::ok("success", serde_json::to_value(database_filter).unwrap());
+            return response::ok(
+                "success",
+                serde_json::to_value(FilterPublic::from(filter)).unwrap(),
+            );
         }
         Err(e) => {
             return HttpResponse::BadRequest().body(format!(
                 "failed to insert filter into database. error: {}",
                 e
             ));
+        }
+    }
+}
+
+/// Get a list of filters
+#[utoipa::path(
+    get,
+    path = "/filters",
+    responses(
+        (status = 200, description = "Filters retrieved successfully", body = [FilterPublic]),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters")]
+pub async fn get_filters(db: web::Data<Database>) -> HttpResponse {
+    let filter_collection: Collection<FilterPublic> = db.collection("filters");
+    let filters = filter_collection.find(doc! {}).await;
+
+    match filters {
+        Ok(mut cursor) => {
+            let mut filter_list = Vec::<FilterPublic>::new();
+            while let Some(filter_in_db) = cursor.next().await {
+                match filter_in_db {
+                    Ok(filter) => {
+                        filter_list.push(filter);
+                    }
+                    Err(e) => {
+                        return HttpResponse::InternalServerError()
+                            .body(format!("error reading filter: {}", e));
+                    }
+                }
+            }
+            response::ok("success", serde_json::to_value(&filter_list).unwrap())
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().body(format!("failed to query filters: {}", e))
+        }
+    }
+}
+
+/// Get a filter by ID
+#[utoipa::path(
+    get,
+    path = "/filters/{filter_id}",
+    responses(
+        (status = 200, description = "Filter retrieved successfully", body = FilterPublic),
+        (status = 404, description = "Filter not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters/{filter_id}")]
+pub async fn get_filter(db: web::Data<Database>, path: web::Path<String>) -> HttpResponse {
+    let filter_id = path.into_inner();
+    let filter_collection: Collection<FilterPublic> = db.collection("filters");
+
+    match filter_collection.find_one(doc! { "_id": &filter_id }).await {
+        Ok(Some(filter)) => response::ok("success", serde_json::to_value(filter).unwrap()),
+        Ok(None) => HttpResponse::NotFound().body("filter not found"),
+        Err(e) => {
+            HttpResponse::InternalServerError().body(format!("failed to query filter: {}", e))
         }
     }
 }

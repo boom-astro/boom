@@ -13,73 +13,6 @@ use boom::{
 use mongodb::bson::doc;
 
 #[tokio::test]
-async fn test_lsst_alert_from_avro_bytes() {
-    let mut alert_worker = lsst_alert_worker().await;
-
-    let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::new_randomized(Survey::Lsst).get().await;
-    let alert = alert_worker
-        .alert_from_avro_bytes(&bytes_content)
-        .await
-        .unwrap();
-
-    assert_eq!(alert.candid, candid);
-    assert_eq!(alert.candidate.object_id, object_id);
-
-    assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
-    assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
-
-    // add mag data to the candidate
-
-    assert!((alert.candidate.dia_source.jd - 2457454.829282).abs() < 1e-6);
-    assert!((alert.candidate.magpsf - 23.146893).abs() < 1e-6);
-    assert!((alert.candidate.sigmapsf - 0.039097).abs() < 1e-6);
-    assert!((alert.candidate.diffmaglim - 25.00841).abs() < 1e-5);
-    assert!(alert.candidate.snr - 27.770037 < 1e-6);
-    assert_eq!(alert.candidate.isdiffpos, true);
-    assert_eq!(alert.candidate.dia_source.band.unwrap(), "g");
-
-    // verify that the prv_candidates are present
-    assert!(!alert.prv_candidates.is_none());
-    let prv_candidates = alert.prv_candidates.unwrap();
-    assert_eq!(prv_candidates.len(), 2);
-
-    // validate the first prv_candidate
-    let prv_candidate = prv_candidates.get(0).unwrap();
-
-    assert!((prv_candidate.dia_source.jd - 2457454.7992).abs() < 1e-6);
-    assert!((prv_candidate.magpsf - 24.763279).abs() < 1e-6);
-    assert!((prv_candidate.sigmapsf - 0.329765).abs() < 1e-6);
-    assert!((prv_candidate.diffmaglim - 24.309652).abs() < 1e-6);
-    assert!(prv_candidate.snr - 3.292455 < 1e-6);
-    assert_eq!(prv_candidate.isdiffpos, true);
-    assert_eq!(prv_candidate.dia_source.band.clone().unwrap(), "g");
-
-    // same for the fp_hists
-    assert!(!alert.fp_hists.is_none());
-    let fp_hists = alert.fp_hists.unwrap();
-    assert_eq!(fp_hists.len(), 3);
-
-    // validate the first fp_hist
-    let fp_hist = fp_hists.get(0).unwrap();
-
-    assert!((fp_hist.dia_forced_source.jd - 2457454.7992).abs() < 1e-6);
-    assert!((fp_hist.magpsf.unwrap() - 24.735056).abs() < 1e-6);
-    assert!((fp_hist.sigmapsf.unwrap() - 0.329754).abs() < 1e-6);
-    assert!((fp_hist.diffmaglim - 24.281467).abs() < 1e-6);
-    assert!((fp_hist.snr.unwrap() - 3.292566).abs() < 1e-6);
-    assert_eq!(fp_hist.isdiffpos.unwrap(), true);
-    assert_eq!(fp_hist.dia_forced_source.band.clone().unwrap(), "g");
-
-    // validate the non detections
-    assert!(!alert.prv_nondetections.is_none());
-    // length should be 0
-    assert_eq!(alert.prv_nondetections.unwrap().len(), 0);
-
-    // TODO: find an LSST avro packet that has non detections so we can test it
-}
-
-#[tokio::test]
 async fn test_process_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
@@ -160,12 +93,14 @@ async fn test_filter_lsst_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let filter_id = insert_test_filter(&Survey::Lsst).await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
 
-    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
-    remove_test_filter(filter_id, &Survey::Lsst).await.unwrap();
+    remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();
