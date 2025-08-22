@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TOLERANCE: 0.05 # 5% tolerance for wall time increase
 
 jobs:
   test:
@@ -21,16 +22,35 @@ jobs:
           submodules: true
           clean: false
           lfs: "true"
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build & Cache Docker images
+        uses: docker/bake-action@v2
+        with:
+          workdir: ./tests/throughput
+          load: true
+          set: |
+            *.cache-to=type=gha,mode=max                                                                   
+            *.cache-from=type=gha
+        env:
+          PWD: ${{ github.workspace }}
+          BUILDX_BAKE_ENTITLEMENTS_FS: 0
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
-      - name: Cache NED alerts
-        id: cache-ned-alerts
+      - name: Cache NED catalog
+        id: cache-ned-catalog
         uses: actions/cache@v4
         with:
           path: ./data/alerts/kowalski.NED.json.gz
-          key: ned-alerts-v1
-      - name: Download NED alerts from Google Drive
-        if: steps.cache-ned-alerts.outputs.cache-hit != 'true'
+          key: ned-catalog-v1
+      - name: Download NED catalog from Google Drive
+        if: steps.cache-ned-catalog.outputs.cache-hit != 'true'
         run: |
           mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
@@ -45,3 +65,59 @@ jobs:
       - name: Run test
         run: |
           uv run tests/throughput/run.py
+
+      - name: Upload logs (including wall time) as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-logs
+          path: logs/boom-*
+
+      - name: Download baseline benchmark (PR only)
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          workflow: ${{ github.workflow }}
+          branch: main
+          name: throughput-logs
+          path: ./baseline
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Compare with baseline (PR only)
+        id: compare-with-baseline
+        # the artifact (is it exists) should have a file called wall_time.txt
+        # so if the file doesn't exist we skip this action, otherwise we compare the wall time
+        if: github.event_name == 'pull_request'
+        run: |
+          current=$(cat logs/boom-*/wall_time.txt)
+          echo "Current wall time: $current seconds"
+          if [ -f ./baseline/logs/boom-*/wall_time.txt ]; then
+            baseline=$(cat ./baseline/logs/boom-*/wall_time.txt)
+            echo "Baseline wall time: $baseline seconds"
+            percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
+          else
+            echo "No baseline wall time found. Skipping comparison."
+            percentage_diff=0
+          fi
+
+          echo "Percentage difference: $percentage_diff%"
+
+          TOLERANCE_PERCENT=$((TOLERANCE*100))
+
+          echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
+          echo "baseline=$baseline" >> $GITHUB_OUTPUT
+          echo "current=$current" >> $GITHUB_OUTPUT
+
+      - name: Post comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            Throughput results (`${{ github.sha }}`):
+            | New Wall Time | Baseline Wall Time | Difference |
+            | -------------- | ------------------ | ---------- |
+            | ${{ steps.compare-with-baseline.outputs.current }} | ${{ steps.compare-with-baseline.outputs.baseline }} | ${{ steps.compare-with-baseline.outputs.percentage_diff }}% |
+          comment-type: edit
+          reuse-existing-comment: true
+          edit-mode: replace
