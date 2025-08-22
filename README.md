@@ -131,6 +131,12 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 - You should not see anything related to the filter worker. **This is normal, as we did not define any filters yet!** The next version of the README will include instructions on how to upload a dummy filter to the system for testing purposes.
 - What you should definitely see is a lot of `heart beat (MAIN)` messages, which means that the scheduler is running and managing the workers correctly.
 
+Metrics are available in the Prometheus instance at <http://localhost:9090>.
+Click [here][example-queries] to load Prometheus with a collection of useful
+queries already entered in the UI.
+
+[example-queries]: http://localhost:9090/query?g0.expr=alert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=15m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=15m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=avg+by+%28status%29+%28irate%28alert_worker_alert_duration_seconds_sum%5B5m%5D%29+%2F+irate%28alert_worker_alert_duration_seconds_count%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=15m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%7D%29+by+%28le%29+%2F+scalar%28sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%2C+le%3D%22%2BInf%22%7D%29%29&g3.show_tree=0&g3.tab=graph&g3.range_input=15m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
+
 ## Stopping BOOM:
 
 To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then stop the scheduler with `CTRL+C` as well.

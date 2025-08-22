@@ -21,9 +21,11 @@ And in a different terminal, run the scheduler:
 scheduler ztf
 ```
 
-Now, visit the Prometheus UI at `localhost:9090` where you can query the metrics
-emitted by boom. Note that it may take a minute or two for the first data points
-to become available.
+Now, visit the Prometheus UI at <http://localhost:9090> where you can query the
+metrics emitted by boom, as demonstrated [here][example-queries]. Note that it
+may take a minute or two for the first data points to become available.
+
+[example-queries]: http://localhost:9090/query?g0.expr=alert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=15m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=15m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=avg+by+%28status%29+%28irate%28alert_worker_alert_duration_seconds_sum%5B5m%5D%29+%2F+irate%28alert_worker_alert_duration_seconds_count%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=15m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%7D%29+by+%28le%29+%2F+scalar%28sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%2C+le%3D%22%2BInf%22%7D%29%29&g3.show_tree=0&g3.tab=graph&g3.range_input=15m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
 
 ## Overview
 
@@ -377,7 +379,7 @@ the read interval, which is much simpler.)
 
 ### Querying
 
-The Prometheus UI is available at `localhost:9090`.
+The Prometheus UI is available at <http://localhost:9090>.
 
 In the query box, look for a menu where you can select "Explore metrics". This
 will show a searchable list of all the boom metrics that Prometheus currently
@@ -432,6 +434,10 @@ Example queries:
   ```
 
   The "le" values are the bin edges.
+
+Note that the http query parameters in your browser's address bar are updated as
+you work in the UI. The resulting URL can be bookmarked or shared with others,
+serving as a makeshift dashboard.
 
 ## Other resources
 
