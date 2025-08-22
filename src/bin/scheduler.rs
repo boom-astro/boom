@@ -22,15 +22,22 @@ use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(
-        value_enum,
-        required = true,
-        help = "Name of stream/survey to process alerts for."
-    )]
+    /// Name of stream/survey to process alerts for.
+    #[arg(value_enum)]
     survey: Survey,
 
-    #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
+    /// Path to the configuration file
+    #[arg(long, value_name = "FILE")]
     config: Option<String>,
+
+    /// UUID associated with this instance of the scheduler, generated
+    /// automatically if not provided
+    #[arg(long, env = "BOOM_SCHEDULER_INSTANCE_ID")]
+    instance_id: Option<Uuid>,
+
+    /// Name of the environment where this instance is deployed
+    #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
+    deployment_env: String,
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
@@ -125,14 +132,13 @@ async fn main() {
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
-    let instance_id = if let Ok(string) = std::env::var("BOOM_SCHEDULER_INSTANCE_ID") {
-        Uuid::parse_str(&string).expect("failed to parse BOOM_SCHEDULER_INSTANCE_ID")
-    } else {
-        Uuid::new_v4()
-    };
-    let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or(String::from("dev"));
-    let meter_provider = init_metrics(String::from("scheduler"), instance_id, deployment_env)
-        .expect("failed to initialize metrics");
+    let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
+    let meter_provider = init_metrics(
+        String::from("scheduler"),
+        instance_id,
+        args.deployment_env.clone(),
+    )
+    .expect("failed to initialize metrics");
 
     run(args, meter_provider).await;
 }
