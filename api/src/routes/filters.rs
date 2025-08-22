@@ -1,6 +1,7 @@
 use crate::{models::response, routes::users::User};
 
 use actix_web::{HttpResponse, get, patch, post, web};
+use flare::Time;
 use futures::stream::StreamExt;
 use mongodb::{
     Collection, Database,
@@ -14,6 +15,7 @@ use uuid::Uuid;
 pub struct FilterVersion {
     fid: String,
     pipeline: String,
+    created_at: f64,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
@@ -26,6 +28,8 @@ pub struct Filter {
     pub active: bool,
     pub active_fid: String,
     pub fv: Vec<FilterVersion>,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
@@ -328,6 +332,7 @@ pub async fn post_filter(
     let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
     let pipeline_json = serde_json::to_string(&pipeline_bson).unwrap();
+    let now = Time::now().to_jd();
     let filter = Filter {
         permissions,
         catalog,
@@ -338,7 +343,10 @@ pub async fn post_filter(
         fv: vec![FilterVersion {
             fid: filter_version,
             pipeline: pipeline_json,
+            created_at: now,
         }],
+        created_at: now,
+        updated_at: now,
     };
     match filter_collection.insert_one(&filter).await {
         Ok(_) => {
@@ -422,6 +430,7 @@ pub async fn patch_filter(
     if update_doc.is_empty() {
         return response::bad_request("no valid fields to update");
     }
+    update_doc.insert("updated_at", Time::now().to_jd());
     let update_result = collection
         .update_one(doc! {"_id": filter_id.clone()}, doc! {"$set": update_doc})
         .await;
