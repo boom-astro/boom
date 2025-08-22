@@ -13,8 +13,6 @@ services:
     hostname: mongo
     expose:
       - "27017"
-    ports:
-      - "27017:27017"
     environment:
       - MONGO_INITDB_ROOT_USERNAME=mongoadmin
       - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
@@ -50,8 +48,8 @@ services:
       # ALLOW_EMPTY_PASSWORD is recommended only for development.
       - ALLOW_EMPTY_PASSWORD=yes
       - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
-    ports:
-      - "6379:6379"
+    expose:
+      - "6379"
     restart: always
     networks:
       - boom
@@ -65,8 +63,9 @@ services:
   broker:
     image: apache/kafka:latest
     hostname: broker
-    ports:
-      - 9092:9092
+    expose:
+      - "9092"
+      - "29092"
     networks:
       - boom
     environment:
