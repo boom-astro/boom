@@ -81,7 +81,7 @@ impl AuthProvider {
         // query the user
         let user = self
             .users_collection
-            .find_one(doc! {"id": &user_id})
+            .find_one(doc! {"_id": &user_id})
             .await
             .map_err(|e| {
                 eprintln!(
