@@ -13,7 +13,7 @@ chrono = "0.4.39"
 config = "0.15.6"
 constcat = "0.6.0"
 clap = { version = "4", features = ["derive"] }
-flare = "0.1.0"
+flare = "0.2.0"
 futures = "0.3.31"
 mongodb = "3.2.0"
 rdkafka = { version = "0.37.0", features = ["gssapi", "ssl", "tracing"] }
