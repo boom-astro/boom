@@ -36,7 +36,7 @@ jobs:
           workdir: ./tests/throughput
           load: true
           set: |
-            *.cache-to=type=gha,mode=max                                                                   
+            *.cache-to=type=gha,mode=max
             *.cache-from=type=gha
         env:
           PWD: ${{ github.workspace }}
@@ -65,13 +65,11 @@ jobs:
       - name: Run test
         run: |
           uv run tests/throughput/run.py
-
       - name: Upload logs (including wall time) as artifact
         uses: actions/upload-artifact@v4
         with:
           name: throughput-logs
           path: logs/boom-*
-
       - name: Download baseline benchmark (PR only)
         if: github.event_name == 'pull_request'
         uses: dawidd6/action-download-artifact@v11
@@ -82,11 +80,11 @@ jobs:
           path: ./baseline
           if_no_artifact_found: warn
         continue-on-error: true
-
       - name: Compare with baseline (PR only)
         id: compare-with-baseline
-        # the artifact (is it exists) should have a file called wall_time.txt
-        # so if the file doesn't exist we skip this action, otherwise we compare the wall time
+        # The artifact (is it exists) should have a file called wall_time.txt
+        # so if the file doesn't exist we skip this action, otherwise we
+        # compare the wall time
         if: github.event_name == 'pull_request'
         run: |
           current=$(cat logs/boom-*/wall_time.txt)
@@ -107,7 +105,6 @@ jobs:
           echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
           echo "baseline=$baseline" >> $GITHUB_OUTPUT
           echo "current=$current" >> $GITHUB_OUTPUT
-
       - name: Post comment on PR (if applicable)
         if: github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@v4
@@ -115,7 +112,7 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
             Throughput results (`${{ github.sha }}`):
-            | New Wall Time | Baseline Wall Time | Difference |
+            | New wall time | Baseline wall time | Difference |
             | -------------- | ------------------ | ---------- |
             | ${{ steps.compare-with-baseline.outputs.current }} | ${{ steps.compare-with-baseline.outputs.baseline }} | ${{ steps.compare-with-baseline.outputs.percentage_diff }}% |
           comment-type: edit
