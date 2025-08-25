@@ -675,19 +675,21 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
         command_check_countdown -= 1;
 
-        let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
         ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
+        let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 info!("queue is empty");
+                ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 command_check_countdown = 0;
                 continue;
             }
             Err(e) => {
                 error!(?e, "failed to retrieve avro bytes");
+                ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
                 continue;
             }
         };
