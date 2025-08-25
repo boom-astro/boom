@@ -7,7 +7,7 @@ use crate::{
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT},
         db::{mongify, update_timeseries_op},
-        o11y::as_error,
+        o11y::logging::as_error,
         spatial::xmatch,
     },
 };
