@@ -245,12 +245,12 @@ impl FilterWorker for LsstFilterWorker {
                             0
                         ]
                     },
-                    "prv_nondetections": {
-                        "$arrayElemAt": [
-                            "$aux.prv_nondetections",
-                            0
-                        ]
-                    },
+                    // "prv_nondetections": {
+                    //     "$arrayElemAt": [
+                    //         "$aux.prv_nondetections",
+                    //         0
+                    //     ]
+                    // },
                     "cutoutScience": {
                         "$arrayElemAt": [
                             "$cutouts.cutoutScience",
@@ -322,28 +322,28 @@ impl FilterWorker for LsstFilterWorker {
         }
 
         // next we do the non detections
-        for doc in alert_document.get_array("prv_nondetections")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux_err = doc.get_f64("noise")?;
-            let band = doc.get_str("band")?.to_string();
+        // for doc in alert_document.get_array("prv_nondetections")?.iter() {
+        //     let doc = match doc.as_document() {
+        //         Some(doc) => doc,
+        //         None => continue, // skip if not a document
+        //     };
+        //     let jd = doc.get_f64("jd")?;
+        //     let flux_err = doc.get_f64("noise")?;
+        //     let band = doc.get_str("band")?.to_string();
 
-            photometry.push(Photometry {
-                jd,
-                flux: None, // for non-detections, flux is None
-                flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
-                origin: Origin::Alert,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
-                ra: None,
-                dec: None,
-            });
-        }
+        //     photometry.push(Photometry {
+        //         jd,
+        //         flux: None, // for non-detections, flux is None
+        //         flux_err,
+        //         band: format!("lsst{}", band),
+        //         zero_point: 8.9,
+        //         origin: Origin::Alert,
+        //         programid: 1, // only one public stream for LSST
+        //         survey: Survey::Lsst,
+        //         ra: None,
+        //         dec: None,
+        //     });
+        // }
 
         // we ignore the forced photometry for now, but will add it later
 

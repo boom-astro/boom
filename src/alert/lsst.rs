@@ -6,6 +6,7 @@ use crate::{
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         db::{mongify, update_timeseries_op},
+        enums::Survey,
         o11y::logging::as_error,
         spatial::xmatch,
     },
@@ -774,6 +775,14 @@ impl AlertWorker for LsstAlertWorker {
         let config_file =
             conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
+        let kafka_config = conf::build_kafka_config(&config_file, &Survey::Lsst)
+            .inspect_err(as_error!("failed to build kafka config"))?;
+
+        let schema_registry_url = match kafka_config.schema_registry {
+            Some(ref url) => url.as_ref(),
+            None => LSST_SCHEMA_REGISTRY_URL,
+        };
+
         let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
             .inspect_err(as_error!("failed to load xmatch config"))?;
 
@@ -787,7 +796,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let worker = LsstAlertWorker {
             stream_name: STREAM_NAME.to_string(),
-            schema_registry: SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL),
+            schema_registry: SchemaRegistry::new(schema_registry_url),
             xmatch_configs,
             db,
             alert_collection,
@@ -1003,47 +1012,15 @@ mod tests {
         assert_eq!(alert.candidate.object_id, object_id);
         assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
-        assert!((alert.candidate.dia_source.jd - 2457454.829282).abs() < 1e-6);
-        assert!((alert.candidate.magpsf - 23.146893).abs() < 1e-6);
-        assert!((alert.candidate.sigmapsf - 0.039097).abs() < 1e-6);
-        assert!((alert.candidate.diffmaglim - 25.00841).abs() < 1e-5);
-        assert!(alert.candidate.snr - 27.770037 < 1e-6);
-        assert_eq!(alert.candidate.isdiffpos, true);
-        assert_eq!(alert.candidate.dia_source.band.unwrap(), "g");
-
-        // verify that the prv_candidates are present
-        assert!(!alert.prv_candidates.is_none());
-        let prv_candidates = alert.prv_candidates.unwrap();
-        assert_eq!(prv_candidates.len(), 2);
-
-        // validate the first prv_candidate
-        let prv_candidate = prv_candidates.get(0).unwrap();
-
-        assert!((prv_candidate.dia_source.jd - 2457454.7992).abs() < 1e-6);
-        assert!((prv_candidate.magpsf - 24.763279).abs() < 1e-6);
-        assert!((prv_candidate.sigmapsf - 0.329765).abs() < 1e-6);
-        assert!((prv_candidate.diffmaglim - 24.309652).abs() < 1e-6);
-        assert!(prv_candidate.snr - 3.292455 < 1e-6);
-        assert_eq!(prv_candidate.isdiffpos, true);
-        assert_eq!(prv_candidate.dia_source.band.clone().unwrap(), "g");
-
-        // same for the fp_hists
-        assert!(!alert.fp_hists.is_none());
-        let fp_hists = alert.fp_hists.unwrap();
-        assert_eq!(fp_hists.len(), 3);
-
-        // validate the first fp_hist
-        let fp_hist = fp_hists.get(0).unwrap();
-
-        assert!((fp_hist.dia_forced_source.jd - 2457454.7992).abs() < 1e-6);
-        assert!((fp_hist.magpsf.unwrap() - 24.735056).abs() < 1e-6);
-        assert!((fp_hist.sigmapsf.unwrap() - 0.329754).abs() < 1e-6);
-        assert!((fp_hist.diffmaglim - 24.281467).abs() < 1e-6);
-        assert!((fp_hist.snr.unwrap() - 3.292566).abs() < 1e-6);
-        assert_eq!(fp_hist.isdiffpos.unwrap(), true);
-        assert_eq!(fp_hist.dia_forced_source.band.clone().unwrap(), "g");
-
-        // validate the non detections
-        // TODO: add back later once these are available in the schema
+        assert!((alert.candidate.dia_source.jd - 2460961.733092).abs() < 1e-6);
+        assert!((alert.candidate.magpsf - 23.674994).abs() < 1e-6);
+        assert!((alert.candidate.sigmapsf - 0.217043).abs() < 1e-6);
+        assert!((alert.candidate.diffmaglim - 23.675514).abs() < 1e-5);
+        assert!(alert.candidate.snr - 5.002406 < 1e-6);
+        assert_eq!(alert.candidate.isdiffpos, false);
+        assert_eq!(alert.candidate.dia_source.band.unwrap(), "r");
+        // TODO: check prv_candidates and forced photometry once we have alerts
+        //       where they aren't empty
+        // TODO: check non detections once these are available in the schema
     }
 }
