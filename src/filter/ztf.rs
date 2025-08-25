@@ -9,7 +9,7 @@ use crate::filter::{
     validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
     FilterWorker, FilterWorkerError, Origin, Photometry,
 };
-use crate::utils::{enums::Survey, o11y::as_error};
+use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 #[derive(Debug)]
 pub struct ZtfFilter {
