@@ -439,10 +439,10 @@ pub async fn patch_filter(
         .await;
     match update_result {
         Ok(_) => {
-            return response::ok(
-                &format!("successfully updated filter id: {}", &filter_id),
-                serde_json::Value::Null,
-            );
+            return response::ok_no_data(&format!(
+                "successfully updated filter id: {}",
+                &filter_id
+            ));
         }
         Err(e) => {
             return response::internal_error(&format!("failed to update filter. error: {}", e));

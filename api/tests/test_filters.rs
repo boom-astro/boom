@@ -63,7 +63,6 @@ mod tests {
         let body_str = String::from_utf8_lossy(&body);
         let resp: serde_json::Value =
             serde_json::from_str(&body_str).expect("failed to parse JSON");
-        assert_eq!(resp["status"], "success");
         assert!(!resp["data"].as_object().unwrap().contains_key("_id"));
         let filter_id = resp["data"]["id"].as_str().unwrap().to_string();
 
@@ -94,7 +93,6 @@ mod tests {
         let get_body_str = String::from_utf8_lossy(&get_body);
         let get_resp: serde_json::Value =
             serde_json::from_str(&get_body_str).expect("failed to parse JSON");
-        assert_eq!(get_resp["status"], "success");
         // Assert we have no _id field in the response
         assert!(!get_resp["data"].as_object().unwrap().contains_key("_id"));
         assert_eq!(get_resp["data"]["id"], filter_id);
@@ -128,7 +126,6 @@ mod tests {
         let post_body_str = String::from_utf8_lossy(&post_body);
         let post_resp: serde_json::Value =
             serde_json::from_str(&post_body_str).expect("failed to parse JSON");
-        assert_eq!(post_resp["status"], "success");
         let version_id = post_resp["data"]["fid"].as_str().unwrap().to_string();
         assert!(!version_id.is_empty());
         version_id
@@ -195,7 +192,7 @@ mod tests {
         let resp: serde_json::Value =
             serde_json::from_str(&body_str).expect("failed to parse JSON");
 
-        assert_eq!(resp["status"], "success");
+        assert!(resp["data"].is_array());
     }
 
     /// Test POST /filters/{id}/versions
@@ -297,7 +294,6 @@ mod tests {
         let patch_body_str = String::from_utf8_lossy(&patch_body);
         let patch_resp: serde_json::Value =
             serde_json::from_str(&patch_body_str).expect("failed to parse JSON");
-        assert_eq!(patch_resp["status"], "success");
         assert_eq!(
             patch_resp["message"],
             format!("successfully updated filter id: {}", filter_id)

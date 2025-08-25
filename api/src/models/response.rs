@@ -1,26 +1,26 @@
 use actix_web::HttpResponse;
+use serde_with::{serde_as, skip_serializing_none};
 
+#[serde_as]
+#[skip_serializing_none]
 #[derive(serde::Serialize)]
 pub struct ApiResponseBody {
-    pub status: String,
     pub message: String,
-    pub data: serde_json::Value,
+    pub data: Option<serde_json::Value>,
 }
 
 // ApiResponse constructors
 impl ApiResponseBody {
     pub fn ok(message: &str, data: serde_json::Value) -> Self {
         Self {
-            status: "success".to_string(),
             message: message.to_string(),
-            data,
+            data: Some(data),
         }
     }
     pub fn error(message: &str) -> Self {
         Self {
-            status: "error".to_string(),
             message: message.to_string(),
-            data: serde_json::Value::Null,
+            data: None,
         }
     }
 }
@@ -28,6 +28,10 @@ impl ApiResponseBody {
 // builds an HttpResponse with an ApiResponseBody
 pub fn ok(message: &str, data: serde_json::Value) -> HttpResponse {
     HttpResponse::Ok().json(ApiResponseBody::ok(message, data))
+}
+
+pub fn ok_no_data(message: &str) -> HttpResponse {
+    HttpResponse::Ok().json(ApiResponseBody::ok(message, serde_json::Value::Null))
 }
 
 pub fn not_found(message: &str) -> HttpResponse {

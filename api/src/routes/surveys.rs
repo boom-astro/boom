@@ -101,10 +101,7 @@ pub async fn get_object(
     let newest_alert = match alert_cursor.try_next().await {
         Ok(Some(alert)) => alert,
         Ok(None) => {
-            return response::ok(
-                &format!("no object found with id {}", object_id),
-                serde_json::Value::Null,
-            );
+            return response::not_found(&format!("no object found with id {}", object_id));
         }
         Err(error) => {
             return response::internal_error(&format!("error getting documents: {}", error));
@@ -115,7 +112,7 @@ pub async fn get_object(
     let candid = match newest_alert.get_i64("_id") {
         Ok(candid) => candid,
         Err(_) => {
-            return response::ok("no candid found", serde_json::Value::Null);
+            return response::internal_error("error getting candid from newest alert");
         }
     };
     let cutouts = match cutout_collection
@@ -126,7 +123,7 @@ pub async fn get_object(
     {
         Ok(Some(cutouts)) => cutouts,
         Ok(None) => {
-            return response::ok("no cutouts found", serde_json::Value::Null);
+            return response::not_found(&format!("no cutouts found for candid {}", candid));
         }
         Err(error) => {
             return response::internal_error(&format!("error getting documents: {}", error));
@@ -155,7 +152,10 @@ pub async fn get_object(
         Ok(entry) => match entry {
             Some(doc) => doc,
             None => {
-                return response::ok("no aux entry found", serde_json::Value::Null);
+                return response::not_found(&format!(
+                    "no aux entry found for object id {}",
+                    object_id
+                ));
             }
         },
         Err(error) => {
@@ -172,19 +172,19 @@ pub async fn get_object(
     let cutout_science = match cutouts.get_binary_generic("cutoutScience") {
         Ok(cutout) => cutout,
         Err(_) => {
-            return response::ok("no cutoutScience found", serde_json::Value::Null);
+            return response::internal_error("error getting cutoutScience from cutouts");
         }
     };
     let cutout_template = match cutouts.get_binary_generic("cutoutTemplate") {
         Ok(cutout) => cutout,
         Err(_) => {
-            return response::ok("no cutoutTemplate found", serde_json::Value::Null);
+            return response::internal_error("error getting cutoutTemplate from cutouts");
         }
     };
     let cutout_difference = match cutouts.get_binary_generic("cutoutDifference") {
         Ok(cutout) => cutout,
         Err(_) => {
-            return response::ok("no cutoutDifference found", serde_json::Value::Null);
+            return response::internal_error("error getting cutoutDifference from cutouts");
         }
     };
     let resp = Obj {
