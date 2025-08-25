@@ -6,7 +6,7 @@ use crate::{
     conf,
     utils::{
         db::{mongify, update_timeseries_op},
-        o11y::as_error,
+        o11y::logging::as_error,
         spatial::xmatch,
     },
 };
