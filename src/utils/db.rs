@@ -87,6 +87,9 @@ pub async fn initialize_survey_indexes(
     Ok(())
 }
 
+/// This function updates a timeseries array by appending new values
+/// while deduplicating based on a time field
+/// (so we have only one measurement per epoch).
 pub fn update_timeseries_op(
     array_field: &str,
     time_field: &str,
@@ -96,7 +99,13 @@ pub fn update_timeseries_op(
         "$sortArray": {
             "input": {
                 "$reduce": {
-                    "input": { "$concatArrays": [array_field, value] },
+                    "input": {
+                        "$concatArrays": [
+                            // handle the case where the array_field is not present
+                            { "$ifNull": [format!("${}", array_field), []] },
+                            value
+                        ]
+                    },
                     "initialValue": [],
                     "in": {
                         "$cond": {

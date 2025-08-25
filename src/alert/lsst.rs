@@ -6,12 +6,11 @@ use crate::{
     utils::{
         conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         db::{mongify, update_timeseries_op},
-        o11y::as_error,
+        o11y::logging::as_error,
         spatial::xmatch,
     },
 };
 
-use apache_avro::{from_avro_datum, from_value};
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -25,7 +24,6 @@ pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
-const _MAGIC_BYTE: u8 = 0;
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
 #[serde_as]
@@ -811,30 +809,6 @@ impl AlertWorker for LsstAlertWorker {
         format!("{}_alerts_filter_queue", self.stream_name)
     }
 
-    #[instrument(skip_all, err)]
-    async fn alert_from_avro_bytes(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<LsstAlert, AlertError> {
-        let magic = avro_bytes[0];
-        if magic != _MAGIC_BYTE {
-            Err(AlertError::MagicBytesError)?;
-        }
-        let schema_id =
-            u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
-        let schema = self
-            .schema_registry
-            .get_schema("alert-packet", schema_id)
-            .await?;
-
-        let mut slice = &avro_bytes[5..];
-        let value = from_avro_datum(&schema, &mut slice, None)?;
-
-        let alert: LsstAlert = from_value::<LsstAlert>(&value)?;
-
-        Ok(alert)
-    }
-
     #[instrument(
         skip(
             self,
@@ -891,15 +865,15 @@ impl AlertWorker for LsstAlertWorker {
         _survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_doc = doc! {
+        let update_pipeline = vec![doc! {
             "$set": {
                 "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
                 "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
                 "updated_at": now,
             }
-        };
+        }];
         self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_doc)
+            .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
         Ok(())
     }
@@ -910,7 +884,8 @@ impl AlertWorker for LsstAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut alert = self
+        let mut alert: LsstAlert = self
+            .schema_registry
             .alert_from_avro_bytes(avro_bytes)
             .await
             .inspect_err(as_error!())?;
@@ -999,5 +974,76 @@ impl AlertWorker for LsstAlertWorker {
         }
 
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::{
+        enums::Survey,
+        testing::{lsst_alert_worker, AlertRandomizer},
+    };
+
+    #[tokio::test]
+    async fn test_lsst_alert_from_avro_bytes() {
+        let mut alert_worker = lsst_alert_worker().await;
+
+        let (candid, object_id, ra, dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Lsst).get().await;
+        let alert = alert_worker
+            .schema_registry
+            .alert_from_avro_bytes(&bytes_content)
+            .await;
+        assert!(alert.is_ok());
+
+        // validate the alert
+        let alert: LsstAlert = alert.unwrap();
+        assert_eq!(alert.candid, candid);
+        assert_eq!(alert.candidate.object_id, object_id);
+        assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
+        assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
+        assert!((alert.candidate.dia_source.jd - 2457454.829282).abs() < 1e-6);
+        assert!((alert.candidate.magpsf - 23.146893).abs() < 1e-6);
+        assert!((alert.candidate.sigmapsf - 0.039097).abs() < 1e-6);
+        assert!((alert.candidate.diffmaglim - 25.00841).abs() < 1e-5);
+        assert!(alert.candidate.snr - 27.770037 < 1e-6);
+        assert_eq!(alert.candidate.isdiffpos, true);
+        assert_eq!(alert.candidate.dia_source.band.unwrap(), "g");
+
+        // verify that the prv_candidates are present
+        assert!(!alert.prv_candidates.is_none());
+        let prv_candidates = alert.prv_candidates.unwrap();
+        assert_eq!(prv_candidates.len(), 2);
+
+        // validate the first prv_candidate
+        let prv_candidate = prv_candidates.get(0).unwrap();
+
+        assert!((prv_candidate.dia_source.jd - 2457454.7992).abs() < 1e-6);
+        assert!((prv_candidate.magpsf - 24.763279).abs() < 1e-6);
+        assert!((prv_candidate.sigmapsf - 0.329765).abs() < 1e-6);
+        assert!((prv_candidate.diffmaglim - 24.309652).abs() < 1e-6);
+        assert!(prv_candidate.snr - 3.292455 < 1e-6);
+        assert_eq!(prv_candidate.isdiffpos, true);
+        assert_eq!(prv_candidate.dia_source.band.clone().unwrap(), "g");
+
+        // same for the fp_hists
+        assert!(!alert.fp_hists.is_none());
+        let fp_hists = alert.fp_hists.unwrap();
+        assert_eq!(fp_hists.len(), 3);
+
+        // validate the first fp_hist
+        let fp_hist = fp_hists.get(0).unwrap();
+
+        assert!((fp_hist.dia_forced_source.jd - 2457454.7992).abs() < 1e-6);
+        assert!((fp_hist.magpsf.unwrap() - 24.735056).abs() < 1e-6);
+        assert!((fp_hist.sigmapsf.unwrap() - 0.329754).abs() < 1e-6);
+        assert!((fp_hist.diffmaglim - 24.281467).abs() < 1e-6);
+        assert!((fp_hist.snr.unwrap() - 3.292566).abs() < 1e-6);
+        assert_eq!(fp_hist.isdiffpos.unwrap(), true);
+        assert_eq!(fp_hist.dia_forced_source.band.clone().unwrap(), "g");
+
+        // validate the non detections
+        // TODO: add back later once these are available in the schema
     }
 }

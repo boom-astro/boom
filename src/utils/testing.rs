@@ -26,27 +26,27 @@ async fn test_db() -> mongodb::Database {
     db
 }
 
-async fn init_indexes(survey: &Survey) -> Result<(), Box<dyn std::error::Error>> {
-    let db = test_db().await;
-    initialize_survey_indexes(survey, &db).await?;
-    Ok(())
-}
-
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Ztf).await.unwrap();
+    initialize_survey_indexes(&Survey::Ztf, &test_db().await)
+        .await
+        .unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Lsst).await.unwrap();
+    initialize_survey_indexes(&Survey::Lsst, &test_db().await)
+        .await
+        .unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn decam_alert_worker() -> DecamAlertWorker {
     // initialize the ZTF indexes
-    init_indexes(&Survey::Decam).await.unwrap();
+    initialize_survey_indexes(&Survey::Decam, &test_db().await)
+        .await
+        .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
@@ -112,14 +112,14 @@ const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
-    filter_id: i32,
+    filter_id: &str,
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = conf::load_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
-        .delete_many(doc! {"filter_id": filter_id, "catalog": &format!("{}_alerts", survey)})
+        .delete_many(doc! {"_id": filter_id, "catalog": &format!("{}_alerts", survey)})
         .await;
 
     Ok(())
@@ -130,8 +130,8 @@ pub async fn remove_test_filter(
 pub async fn insert_test_filter(
     survey: &Survey,
     use_prv_candidates: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let filter_id = rand::random::<i32>();
+) -> Result<String, Box<dyn std::error::Error>> {
+    let filter_id = uuid::Uuid::new_v4().to_string();
     let catalog = format!("{}_alerts", survey);
     let pipeline = match (survey, use_prv_candidates) {
         (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
@@ -146,9 +146,7 @@ pub async fn insert_test_filter(
     };
 
     let filter_obj: mongodb::bson::Document = doc! {
-        "_id": mongodb::bson::oid::ObjectId::new(),
-        "group_id": 41,
-        "filter_id": filter_id,
+        "_id": &filter_id,
         "catalog": catalog,
         "permissions": [1],
         "active": true,
@@ -216,19 +214,14 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf => {
-                let payload = fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-                let reader = Reader::new(&payload[..]).unwrap();
-                let schema = reader.writer_schema().clone();
-                (
-                    Some(Self::randomize_object_id(&survey)),
-                    Some(payload),
-                    Some(schema),
-                    None,
-                )
-            }
-            Survey::Decam => {
-                let payload = fs::read("tests/data/alerts/decam/alert.avro").unwrap();
+            Survey::Ztf | Survey::Decam => {
+                let payload = match survey {
+                    Survey::Ztf => {
+                        fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
+                    }
+                    Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    _ => unreachable!(),
+                };
                 let reader = Reader::new(&payload[..]).unwrap();
                 let schema = reader.writer_schema().clone();
                 (
