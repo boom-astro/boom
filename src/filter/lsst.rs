@@ -245,6 +245,7 @@ impl FilterWorker for LsstFilterWorker {
                             0
                         ]
                     },
+                    // TODO: uncomment once added to the schema again
                     // "prv_nondetections": {
                     //     "$arrayElemAt": [
                     //         "$aux.prv_nondetections",
@@ -322,6 +323,7 @@ impl FilterWorker for LsstFilterWorker {
         }
 
         // next we do the non detections
+        // TODO: uncomment once added to the schema again
         // for doc in alert_document.get_array("prv_nondetections")?.iter() {
         //     let doc = match doc.as_document() {
         //         Some(doc) => doc,

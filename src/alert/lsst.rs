@@ -564,7 +564,7 @@ pub struct LsstAlert {
     #[serde(rename = "prvDiaForcedSources")]
     #[serde(deserialize_with = "deserialize_prv_forced_sources")]
     pub fp_hists: Option<Vec<ForcedPhot>>,
-    // NOTE: the prv_nondetections is missing in version 8 of the schema,
+    // NOTE: the prv_nondetections is missing in version 9 of the schema,
     // and will be reintroduced in a future version
     // #[serde(rename = "prvDiaNondetectionLimits")]
     // #[serde(deserialize_with = "deserialize_prv_nondetections")]
