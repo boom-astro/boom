@@ -173,8 +173,6 @@ pub struct DiaSource {
     pub band: Option<String>,
     /// Source well fit by a dipole.
     pub is_dipole: Option<bool>,
-    /// Time when the image was processed and this DiaSource record was generated (timestamp-micros).
-    pub time_processed: Option<i64>,
     /// General pixel flags failure; set if anything went wrong when setting pixels flags from this footprint's mask. This implies that some pixelFlags for this source may be incorrectly set to False.
     #[serde(rename = "pixelFlags")]
     pub pixel_flags: Option<bool>,
@@ -255,9 +253,10 @@ pub struct DiaObject {
     #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
     #[serde(deserialize_with = "deserialize_objid")]
     pub object_id: String,
-    /// Processing time when validity of this diaObject starts (timestamp-micros).
-    #[serde(rename = "validityStart")]
-    pub validity_start: Option<i64>,
+    /// Processing time when validity of this diaObject starts, expressed as Modified Julian Date, International Atomic Time.
+    #[serde(rename(deserialize = "validityStartMjdTai", serialize = "validity_start_jd"))]
+    #[serde(deserialize_with = "deserialize_mjd")]
+    pub validity_start_jd: f64,
     /// Right ascension coordinate of the position of the object at time radecMjdTai.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -494,8 +493,6 @@ pub struct DiaForcedSource {
     pub science_flux_err: Option<f32>,
     /// Filter band this source was observed with.
     pub band: Option<String>,
-    /// Time when this record was generated (timestamp-micros).
-    pub time_processed: Option<i64>,
 }
 
 #[serde_as]
