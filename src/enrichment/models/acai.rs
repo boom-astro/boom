@@ -1,4 +1,4 @@
-use crate::feature::models::{load_model, Model, ModelError};
+use crate::enrichment::models::{load_model, Model, ModelError};
 use mongodb::bson::Document;
 use ndarray::{Array, Dim};
 use ort::{inputs, session::Session, value::TensorRef};

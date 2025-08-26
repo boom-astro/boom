@@ -1,12 +1,12 @@
-use crate::feature::models::{AcaiModel, BtsBotModel, Model};
-use crate::feature::{FeatureWorker, FeatureWorkerError};
+use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
+use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-pub struct ZtfFeatureWorker {
+pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
@@ -21,9 +21,9 @@ pub struct ZtfFeatureWorker {
 }
 
 #[async_trait::async_trait]
-impl FeatureWorker for ZtfFeatureWorker {
+impl EnrichmentWorker for ZtfEnrichmentWorker {
     #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, FeatureWorkerError> {
+    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
@@ -43,7 +43,7 @@ impl FeatureWorker for ZtfFeatureWorker {
         // we load the btsbot model (different architecture, and input/output then ACAI)
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
 
-        Ok(ZtfFeatureWorker {
+        Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
             client,
@@ -70,7 +70,7 @@ impl FeatureWorker for ZtfFeatureWorker {
     async fn fetch_alerts(
         &self,
         candids: &[i64], // this is a slice of candids to process
-    ) -> Result<Vec<Document>, FeatureWorkerError> {
+    ) -> Result<Vec<Document>, EnrichmentWorkerError> {
         let mut alert_cursor = self
             .alert_collection
             .aggregate(vec![
@@ -217,7 +217,10 @@ impl FeatureWorker for ZtfFeatureWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alerts(&mut self, candids: &[i64]) -> Result<Vec<String>, FeatureWorkerError> {
+    async fn process_alerts(
+        &mut self,
+        candids: &[i64],
+    ) -> Result<Vec<String>, EnrichmentWorkerError> {
         let alerts = self.fetch_alerts(&candids).await?;
 
         if alerts.len() != candids.len() {

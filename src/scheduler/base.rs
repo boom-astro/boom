@@ -1,6 +1,6 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
-    feature::{run_feature_worker, ZtfFeatureWorker},
+    enrichment::{run_enrichment_worker, ZtfEnrichmentWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     utils::{
         enums::Survey,
@@ -222,7 +222,7 @@ impl Worker {
                     info!("starting feature worker");
                     debug!(?config_path);
                     let run = match survey_name {
-                        Survey::Ztf => run_feature_worker::<ZtfFeatureWorker>,
+                        Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
                         _ => {
                             error!(
                                 "Feature worker not implemented for survey: {:?}",

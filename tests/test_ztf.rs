@@ -4,7 +4,7 @@ use boom::{
         ZTF_LSST_XMATCH_RADIUS,
     },
     conf,
-    feature::{FeatureWorker, ZtfFeatureWorker},
+    enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     utils::{
         enums::Survey,
@@ -295,7 +295,7 @@ async fn test_process_ztf_alert_xmatch() {
 }
 
 #[tokio::test]
-async fn test_feature_ztf_alert() {
+async fn test_enrich_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     // we only randomize the candid and object_id here, since the ra/dec
@@ -308,8 +308,8 @@ async fn test_feature_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let mut feature_worker = ZtfFeatureWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = feature_worker.process_alerts(&[candid]).await;
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
 
     // the result should be a vec of String, for ZTF with the format
@@ -393,8 +393,8 @@ async fn test_filter_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     // then run the feature worker to get the classifications
-    let mut feature_worker = ZtfFeatureWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = feature_worker.process_alerts(&[candid]).await;
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects

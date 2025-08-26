@@ -1,6 +1,6 @@
 pub mod alert;
 pub mod conf;
-pub mod feature;
+pub mod enrichment;
 pub mod filter;
 pub mod kafka;
 pub mod scheduler;
