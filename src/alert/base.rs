@@ -701,7 +701,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
                 continue;
             }
             Err(e) => {
-                error!(?e, "failed to retrieve avro bytes");
+                log_error!(e, "failed to retrieve avro bytes");
                 let attributes = &alert_worker_input_error_attrs;
                 ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
                 ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
