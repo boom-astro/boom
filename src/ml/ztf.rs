@@ -11,6 +11,7 @@ pub struct ZtfMLWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
     acai_h_model: AcaiModel,
     acai_n_model: AcaiModel,
     acai_v_model: AcaiModel,
@@ -27,6 +28,7 @@ impl MLWorker for ZtfMLWorker {
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
+        let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
 
         let input_queue = "ZTF_alerts_classifier_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
@@ -46,6 +48,7 @@ impl MLWorker for ZtfMLWorker {
             output_queue,
             client,
             alert_collection,
+            alert_cutout_collection,
             acai_h_model,
             acai_n_model,
             acai_v_model,
@@ -88,14 +91,6 @@ impl MLWorker for ZtfMLWorker {
                         "localField": "objectId",
                         "foreignField": "_id",
                         "as": "aux"
-                    }
-                },
-                doc! {
-                    "$lookup": {
-                        "from": "ZTF_alerts_cutouts",
-                        "localField": "_id",
-                        "foreignField": "_id",
-                        "as": "object"
                     }
                 },
                 doc! {
@@ -168,19 +163,49 @@ impl MLWorker for ZtfMLWorker {
                         "prv_candidates.magpsf": 1,
                         "prv_candidates.sigmapsf": 1,
                         "prv_candidates.band": 1,
-                        "cutoutScience": 1,
-                        "cutoutTemplate": 1,
-                        "cutoutDifference": 1
                     }
                 },
             ])
             .await?;
 
         let mut alerts: Vec<Document> = Vec::new();
+        let mut candid_to_idx = std::collections::HashMap::new();
+        let mut count = 0;
         while let Some(result) = alert_cursor.next().await {
             match result {
                 Ok(document) => {
                     alerts.push(document);
+                    let candid = alerts[count].get_i64("_id")?;
+                    candid_to_idx.insert(candid, count);
+                    count += 1;
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+
+        // next we fetch cutouts from the cutout collection
+        let mut cutout_cursor = self
+            .alert_cutout_collection
+            .find(doc! {
+                "_id": {"$in": candids}
+            })
+            .await?;
+        while let Some(result) = cutout_cursor.next().await {
+            match result {
+                Ok(cutout_doc) => {
+                    let candid = cutout_doc.get_i64("_id")?;
+                    if let Some(idx) = candid_to_idx.get(&candid) {
+                        alerts[*idx]
+                            .insert("cutoutScience", cutout_doc.get("cutoutScience").unwrap());
+                        alerts[*idx]
+                            .insert("cutoutTemplate", cutout_doc.get("cutoutTemplate").unwrap());
+                        alerts[*idx].insert(
+                            "cutoutDifference",
+                            cutout_doc.get("cutoutDifference").unwrap(),
+                        );
+                    }
                 }
                 _ => {
                     continue;
