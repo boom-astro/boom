@@ -239,7 +239,7 @@ impl FeatureWorker for ZtfFeatureWorker {
         for i in 0..alerts.len() {
             let candid = alerts[i].get_i64("_id")?;
 
-            // next we compute "properties" to store in the alert
+            // Compute numerical and boolean features from lightcurve and candidate analysis
             let candidate = alerts[i].get_document("candidate")?;
 
             let jd = candidate.get_f64("jd")?;
@@ -280,6 +280,7 @@ impl FeatureWorker for ZtfFeatureWorker {
 
             let programid = candidate.get_i32("programid")?;
 
+            // Now, prepare inputs for ML models and run inference
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
             let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1])?;
 
