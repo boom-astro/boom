@@ -17,7 +17,32 @@ impl Model for BtsBotModel {
     }
 
     #[instrument(skip_all, err)]
-    fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
+    fn predict(
+        &mut self,
+        metadata_features: &Array<f32, Dim<[usize; 2]>>,
+        image_features: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<Vec<f32>, ModelError> {
+        let model_inputs = inputs! {
+            "triplet" => TensorRef::from_array_view(image_features)?,
+            "metadata" => TensorRef::from_array_view(metadata_features)?,
+        };
+
+        let outputs = self.model.run(model_inputs)?;
+
+        match outputs["fc_out"].try_extract_tensor::<f32>() {
+            Ok((_, scores)) => Ok(scores.to_vec()),
+            Err(_) => Err(ModelError::ModelOutputToVecError),
+        }
+    }
+}
+
+impl BtsBotModel {
+    #[instrument(skip_all, err)]
+    pub fn get_metadata(
+        &self,
+        alerts: &[Document],
+        alert_properties: &[Document],
+    ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
         for alert in alerts {
@@ -48,41 +73,16 @@ impl Model for BtsBotModel {
             let scorr = candidate.get_f64("scorr")? as f32;
             let sky = candidate.get_f64("sky")? as f32;
 
-            // next, we compute some custom features based on the lightcurve
-            let jd = candidate.get_f64("jd")?;
-            let mut firstdet_jd = jd;
-            let mut peakmag_jd = jd;
-            let mut peakmag = magpsf;
-            let mut maxmag = magpsf;
+            // alert properties already computed from lightcurve analysis
+            let peakmag = alert_properties[0].get_f64("peak_mag").unwrap();
+            let peakjd = alert_properties[0].get_f64("peak_jd").unwrap();
+            let faintestmag = alert_properties[0].get_f64("faintest_mag").unwrap();
+            let firstjd = alert_properties[0].get_f64("first_jd").unwrap();
+            let lastjd = alert_properties[0].get_f64("last_jd").unwrap();
 
-            match alert.get_array("prv_candidates") {
-                Ok(prv_candidates) => {
-                    for prv_cand in prv_candidates {
-                        match prv_cand.as_document() {
-                            Some(prv_cand) => {
-                                let prv_cand_magpsf = prv_cand.get_f64("magpsf")?;
-                                let prv_cand_jd = prv_cand.get_f64("jd")?;
-                                if prv_cand_magpsf < peakmag {
-                                    peakmag = prv_cand_magpsf;
-                                    peakmag_jd = prv_cand_jd;
-                                }
-                                if prv_cand_magpsf > maxmag {
-                                    maxmag = prv_cand_magpsf;
-                                }
-                                if prv_cand_jd < firstdet_jd {
-                                    firstdet_jd = prv_cand_jd;
-                                }
-                            }
-                            None => {}
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
-
-            let days_since_peak = (jd - peakmag_jd) as f32;
-            let days_to_peak = (peakmag_jd - firstdet_jd) as f32;
-            let age = (firstdet_jd - jd) as f32;
+            let days_since_peak = (lastjd - peakjd) as f32;
+            let days_to_peak = (peakjd - firstjd) as f32;
+            let age = (firstjd - lastjd) as f32;
 
             let nnondet = ncovhist - ndethist;
 
@@ -111,7 +111,7 @@ impl Model for BtsBotModel {
                 sharpnr,
                 scorr,
                 sky,
-                maxmag as f32,
+                faintestmag as f32,
             ];
 
             features_batch.extend(alert_features);
@@ -119,24 +119,5 @@ impl Model for BtsBotModel {
 
         let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)?;
         Ok(features_array)
-    }
-
-    #[instrument(skip_all, err)]
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError> {
-        let model_inputs = inputs! {
-            "triplet" => TensorRef::from_array_view(image_features)?,
-            "metadata" => TensorRef::from_array_view(metadata_features)?,
-        };
-
-        let outputs = self.model.run(model_inputs)?;
-
-        match outputs["fc_out"].try_extract_tensor::<f32>() {
-            Ok((_, scores)) => Ok(scores.to_vec()),
-            Err(_) => Err(ModelError::ModelOutputToVecError),
-        }
     }
 }

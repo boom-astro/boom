@@ -415,7 +415,6 @@ pub trait AlertWorker {
         ra: f64,
         dec: f64,
         candidate_doc: &Document,
-        properties: &Document,
         now: f64,
         collection: &mongodb::Collection<Document>,
     ) -> Result<ProcessAlertStatus, AlertError> {
@@ -424,7 +423,6 @@ pub trait AlertWorker {
             "objectId": object_id,
             "candidate": candidate_doc,
             "coordinates": get_coordinates(ra, dec),
-            "properties": properties,
             "created_at": now,
             "updated_at": now,
         };

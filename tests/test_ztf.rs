@@ -346,6 +346,41 @@ async fn test_ml_ztf_alert() {
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
     assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
+
+    // the ml worker also adds "properties" to the alert
+    let properties = alert.get_document("properties").unwrap();
+    assert_eq!(properties.get_bool("rock").unwrap(), false);
+    assert_eq!(properties.get_bool("star").unwrap(), true);
+    assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
+    assert_eq!(properties.get_bool("stationary").unwrap(), true);
+    // the properties also include "photstats, a document with bands as keys and
+    // as values the rate of evolution (mag/day) before and after peak
+    let photstats = properties.get_document("photstats").unwrap();
+    assert!(photstats.contains_key("g"));
+    let g_stats = photstats.get_document("g").unwrap();
+    let peak_mag = g_stats.get_f64("peak_mag").unwrap();
+    let peak_jd = g_stats.get_f64("peak_jd").unwrap();
+    let rising = g_stats.get_document("rising").unwrap();
+    let fading = g_stats.get_document("fading").unwrap();
+    let rising_rate = rising.get_f64("rate").unwrap();
+    let fading_rate = fading.get_f64("rate").unwrap();
+    assert!((peak_mag - 15.6940).abs() < 1e-6);
+    assert!((peak_jd - 2460441.971956).abs() < 1e-6);
+    assert!((rising_rate + 0.019685).abs() < 1e-6);
+    assert!((fading_rate - 0.037152).abs() < 1e-6);
+
+    assert!(photstats.contains_key("r"));
+    let r_stats = photstats.get_document("r").unwrap();
+    let peak_mag = r_stats.get_f64("peak_mag").unwrap();
+    let peak_jd = r_stats.get_f64("peak_jd").unwrap();
+    let rising = r_stats.get_document("rising").unwrap();
+    let fading = r_stats.get_document("fading").unwrap();
+    let rising_rate = rising.get_f64("rate").unwrap();
+    let fading_rate = fading.get_f64("rate").unwrap();
+    assert!((peak_mag - 14.3987).abs() < 1e-6);
+    assert!((peak_jd - 2460441.922303).abs() < 1e-6);
+    assert!((rising_rate + 0.133773).abs() < 1e-6);
+    assert!((fading_rate - 0.063829).abs() < 1e-6);
 }
 
 #[tokio::test]

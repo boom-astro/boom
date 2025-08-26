@@ -41,7 +41,6 @@ pub trait Model {
     fn new(path: &str) -> Result<Self, ModelError>
     where
         Self: Sized;
-    fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError>;
     #[instrument(skip_all, err)]
     fn get_triplet(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));

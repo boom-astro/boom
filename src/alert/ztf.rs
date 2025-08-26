@@ -6,9 +6,7 @@ use crate::{
     conf,
     utils::{
         db::{mongify, update_timeseries_op},
-        lightcurves::{
-            analyze_photometry, flux2mag, fluxerr2diffmaglim, parse_photometry, PhotometryMag, SNT,
-        },
+        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT},
         o11y::as_error,
         spatial::xmatch,
     },
@@ -393,80 +391,6 @@ impl Alert for ZtfAlert {
     }
 }
 
-// "rock" is true if 0 <= ssdistnr <= 12 AND ssmagnr >= 0
-fn is_rock(candidate: &Candidate) -> bool {
-    candidate.ssdistnr.is_some()
-        && candidate.ssmagnr.is_some()
-        && candidate.ssdistnr.unwrap() >= 0.0
-        && candidate.ssdistnr.unwrap() <= 12.0
-        && candidate.ssmagnr.unwrap() >= 0.0
-}
-// "star" is true if sgscore >= 0.76 AND distpsnr1 <= 2.0
-fn is_star(candidate: &Candidate) -> bool {
-    candidate.sgscore1.is_some()
-        && candidate.distpsnr1.is_some()
-        && candidate.sgscore1.unwrap() >= 0.76
-        && candidate.distpsnr1.unwrap() >= 0.0
-        && candidate.distpsnr1.unwrap() <= 2.0
-}
-// "near_brightstar" is true if one of the following is true:
-// - distpsnr1 <= 20.0 AND sgscore1 > 0.49 AND 0 < srmag <= 15.0
-// - distpsnr2 <= 20.0 AND sgscore2 > 0.49 AND 0 < srmag <= 15.0
-// - distpsnr3 <= 20.0 AND sgscore3 > 0.49 AND 0 < srmag <= 15.0
-// - sgscore1 == 0.5 AND distpsnr1 < 0.5 AND (sgmag1 < 17 OR srmag1 < 17 OR simag1 < 17)
-fn is_near_brightstar(candidate: &Candidate) -> bool {
-    let distpsnr1 = candidate.distpsnr1.unwrap_or(f32::INFINITY);
-    let distpsnr2 = candidate.distpsnr2.unwrap_or(f32::INFINITY);
-    let distpsnr3 = candidate.distpsnr3.unwrap_or(f32::INFINITY);
-    let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
-    let sgscore2 = candidate.sgscore2.unwrap_or(0.0);
-    let sgscore3 = candidate.sgscore3.unwrap_or(0.0);
-    let srmag1 = candidate.srmag1.unwrap_or(f32::INFINITY);
-    let srmag2 = candidate.srmag2.unwrap_or(f32::INFINITY);
-    let srmag3 = candidate.srmag3.unwrap_or(f32::INFINITY);
-    let sgmag1 = candidate.sgmag1.unwrap_or(f32::INFINITY);
-    let simag1 = candidate.simag1.unwrap_or(f32::INFINITY);
-
-    if sgscore1 > 0.49 && distpsnr1 <= 20.0 && srmag1 > 0.0 && srmag1 <= 15.0 {
-        return true;
-    }
-    if sgscore2 > 0.49 && distpsnr2 <= 20.0 && srmag2 > 0.0 && srmag2 <= 15.0 {
-        return true;
-    }
-    if sgscore3 > 0.49 && distpsnr3 <= 20.0 && srmag3 > 0.0 && srmag3 <= 15.0 {
-        return true;
-    }
-    if sgscore1 == 0.5 && distpsnr1 < 0.5 && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0) {
-        return true;
-    }
-
-    false
-}
-
-// "stationary" is true if there is at least one prv_candidate where:
-// - alert.candidate.jd - prv_candidate.jd > 0.007
-// - isdiffpos == true
-// - ssdistnr < 0 OR ssdistnr > 12.0
-fn is_stationary(candidate: &Candidate, prv_candidates: &Vec<PrvCandidate>) -> bool {
-    let candidate_jd = candidate.jd;
-    for prv_candidate in prv_candidates {
-        if candidate_jd - prv_candidate.jd < 0.007 {
-            continue;
-        }
-        if !prv_candidate.isdiffpos.unwrap_or(false) {
-            continue;
-        }
-        if let Some(ssdistnr) = prv_candidate.ssdistnr {
-            if ssdistnr >= 0.0 || ssdistnr <= 12.0 {
-                continue;
-            }
-        }
-        // if we reach here, it means the candidate is stationary
-        return true;
-    }
-    false
-}
-
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
@@ -775,8 +699,6 @@ impl AlertWorker for ZtfAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        let mut updated_aux = false;
-
         if !alert_aux_exists {
             let result = self
                 .insert_aux(
@@ -801,7 +723,6 @@ impl AlertWorker for ZtfAlertWorker {
                 )
                 .await
                 .inspect_err(as_error!())?;
-                updated_aux = true;
             } else {
                 result.inspect_err(as_error!())?;
             }
@@ -816,83 +737,7 @@ impl AlertWorker for ZtfAlertWorker {
             )
             .await
             .inspect_err(as_error!())?;
-            updated_aux = true;
         }
-
-        // now, we want to get the full lightcurve. If we updated the aux, we
-        // need to get the full lightcurve from the aux collection
-        // otherwise, we can just use the prv_candidates and fp_hist
-        let full_lightcurve = if updated_aux {
-            // query the aux collection for the full lightcurve
-            // in the projection only include the prv_candidates for now
-            // we'll worry about the fp_hists later
-            let aux_doc = self
-                .alert_aux_collection
-                .find_one(doc! { "_id": &object_id })
-                .await
-                .inspect_err(as_error!())?;
-            let aux_doc = aux_doc.ok_or(AlertError::AlertAuxNotFound)?;
-            let lightcurve = parse_photometry(
-                aux_doc
-                    .get_array("prv_candidates")
-                    .inspect_err(as_error!("failed to get prv_candidates from aux"))?,
-                "jd",
-                "magpsf",
-                "sigmapsf",
-                "band",
-                alert.candidate.jd,
-            );
-
-            lightcurve
-        } else {
-            // make a vec of PhotometryMag
-            // let lightcurve = prv_candidates
-            //     .iter()
-            //     .map(|prv| PhotometryMag {
-            //         time: prv.jd,
-            //         mag: prv.magpsf.unwrap(),
-            //         mag_err: prv.sigmapsf.unwrap(),
-            //         band: prv.band.clone(),
-            //     })
-            //     .collect::<Vec<_>>();
-            // skip theose where magpsf is None
-            let lightcurve = prv_candidates
-                .iter()
-                .filter_map(|prv| {
-                    if let Some(magpsf) = prv.magpsf {
-                        Some(PhotometryMag {
-                            time: prv.jd,
-                            mag: magpsf,
-                            mag_err: prv.sigmapsf.unwrap_or(0.0),
-                            band: prv.band.clone(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            lightcurve
-        };
-
-        // let's compute some quantities for the alert
-        // - "real" (bool)
-        // - "rock" (bool)
-        // - "star" (bool)
-        // - "near_brightstar" (bool)
-        // - "stationary" (bool)
-        // compute these quantities
-        let is_rock = is_rock(&alert.candidate);
-        let is_star = is_star(&alert.candidate);
-        let is_near_brightstar = is_near_brightstar(&alert.candidate);
-        let is_stationary = is_stationary(&alert.candidate, &prv_candidates);
-        let lc_stats = analyze_photometry(full_lightcurve);
-        let properties = doc! {
-            "rock": is_rock,
-            "star": is_star,
-            "near_brightstar": is_near_brightstar,
-            "stationary": is_stationary,
-            "photstats": lc_stats,
-        };
 
         // insert the alert
         let status = self
@@ -902,7 +747,6 @@ impl AlertWorker for ZtfAlertWorker {
                 ra,
                 dec,
                 &candidate_doc,
-                &properties,
                 now,
                 &self.alert_collection,
             )

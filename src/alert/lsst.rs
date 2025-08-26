@@ -955,7 +955,6 @@ impl AlertWorker for LsstAlertWorker {
                 ra,
                 dec,
                 &candidate_doc,
-                &doc! {},
                 now,
                 &self.alert_collection,
             )

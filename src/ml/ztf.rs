@@ -1,5 +1,6 @@
 use crate::ml::models::{AcaiModel, BtsBotModel, Model};
 use crate::ml::{MLWorker, MLWorkerError};
+use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -212,7 +213,47 @@ impl MLWorker for ZtfMLWorker {
         let mut processed_alerts = Vec::new();
         for i in 0..alerts.len() {
             let candid = alerts[i].get_i64("_id")?;
-            let programid = alerts[i].get_document("candidate")?.get_i32("programid")?;
+
+            // next we compute "properties" to store in the alert
+            let candidate = alerts[i].get_document("candidate")?;
+
+            let jd = candidate.get_f64("jd")?;
+            let ssdistnr = candidate.get_f64("ssdistnr").unwrap_or(-999.0);
+            let ssmagnr = candidate.get_f64("ssmagnr").unwrap_or(-999.0);
+
+            let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
+
+            let sgscore1 = candidate.get_f64("sgscore1").unwrap_or(0.0);
+            let sgscore2 = candidate.get_f64("sgscore2").unwrap_or(0.0);
+            let sgscore3 = candidate.get_f64("sgscore3").unwrap_or(0.0);
+            let distpsnr1 = candidate.get_f64("distpsnr1").unwrap_or(f64::INFINITY);
+            let distpsnr2 = candidate.get_f64("distpsnr2").unwrap_or(f64::INFINITY);
+            let distpsnr3 = candidate.get_f64("distpsnr3").unwrap_or(f64::INFINITY);
+
+            let srmag1 = candidate.get_f64("srmag1").unwrap_or(f64::INFINITY);
+            let srmag2 = candidate.get_f64("srmag2").unwrap_or(f64::INFINITY);
+            let srmag3 = candidate.get_f64("srmag3").unwrap_or(f64::INFINITY);
+            let sgmag1 = candidate.get_f64("sgmag1").unwrap_or(f64::INFINITY);
+            let simag1 = candidate.get_f64("simag1").unwrap_or(f64::INFINITY);
+
+            let is_star = sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0;
+
+            let is_near_brightstar =
+                (sgscore1 > 0.49 && distpsnr1 <= 20.0 && srmag1 > 0.0 && srmag1 <= 15.0)
+                    || (sgscore2 > 0.49 && distpsnr2 <= 20.0 && srmag2 > 0.0 && srmag2 <= 15.0)
+                    || (sgscore3 > 0.49 && distpsnr3 <= 20.0 && srmag3 > 0.0 && srmag3 <= 15.0)
+                    || (sgscore1 == 0.5
+                        && distpsnr1 < 0.5
+                        && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
+
+            let prv_candidates = alerts[i].get_array("prv_candidates")?;
+
+            let lightcurve =
+                parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
+
+            let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve, jd);
+
+            let programid = candidate.get_i32("programid")?;
 
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
             let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1])?;
@@ -223,7 +264,9 @@ impl MLWorker for ZtfMLWorker {
             let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
             let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
 
-            let metadata_btsbot = self.btsbot_model.get_metadata(&alerts[i..i + 1])?;
+            let metadata_btsbot = self
+                .btsbot_model
+                .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
             let find_document = doc! {
@@ -232,12 +275,19 @@ impl MLWorker for ZtfMLWorker {
 
             let update_alert_document = doc! {
                 "$set": {
+                    // ML scores
                     "classifications.acai_h": acai_h_scores[0],
                     "classifications.acai_n": acai_n_scores[0],
                     "classifications.acai_v": acai_v_scores[0],
                     "classifications.acai_o": acai_o_scores[0],
                     "classifications.acai_b": acai_b_scores[0],
-                    "classifications.btsbot": btsbot_scores[0]
+                    "classifications.btsbot": btsbot_scores[0],
+                    // properties
+                    "properties.rock": is_rock,
+                    "properties.star": is_star,
+                    "properties.near_brightstar": is_near_brightstar,
+                    "properties.stationary": stationary,
+                    "properties.photstats": photstats,
                 }
             };
 

@@ -72,18 +72,30 @@ pub struct PhotometryProperties {
 }
 
 // we want a function that takes a Vec of PhotometryMag and:
-// - sort by time
+// - sort by time (ascending)
 // - divide it by band
 // - identifies the index of the peak (minimum magnitude) for each band
 // - for each band, do a linear fit of the data before the peak and after the peak independently
 // - return a vec of PhotometryProperties
-pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> Document {
+pub fn analyze_photometry(photometry: Vec<PhotometryMag>, jd: f64) -> (Document, Document, bool) {
     // first sort by time
     let mut sorted_photometry = photometry;
     sorted_photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
 
     // deduplicate by time
     sorted_photometry.dedup_by(|a, b| a.time == b.time);
+
+    let stationary = sorted_photometry.len() > 0 && (jd - sorted_photometry[0].time) > 0.01;
+    let mut global_peak_index = 0;
+    let mut global_peak_jd = sorted_photometry[0].time;
+    let mut global_peak_mag = sorted_photometry[0].mag;
+    let mut global_peak_mag_err = sorted_photometry[0].mag_err;
+    let mut global_faintest_index = 0;
+    let mut global_faintest_jd = sorted_photometry[0].time;
+    let mut global_faintest_mag = sorted_photometry[0].mag;
+    let mut global_faintest_mag_err = sorted_photometry[0].mag_err;
+    let first_jd = sorted_photometry[0].time;
+    let last_jd = sorted_photometry.last().unwrap().time;
 
     // group by band
     let mut bands: std::collections::HashMap<String, Vec<PhotometryMag>> =
@@ -97,42 +109,74 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> Document {
 
     let mut results = doc! {};
     for (band, mags) in bands {
-        if mags.len() < 3 {
+        if mags.is_empty() {
+            continue;
+        }
+        // find the peak index (minimum magnitude) and faintest index (maximum magnitude)
+        let (peak_index, faintest_index) =
+            mags.iter()
+                .enumerate()
+                .fold((0, 0), |(peak, faintest), (i, mag)| {
+                    if mag.mag < mags[peak].mag {
+                        (i, faintest)
+                    } else if mag.mag > mags[faintest].mag {
+                        (peak, i)
+                    } else {
+                        (peak, faintest)
+                    }
+                });
+
+        let peak_jd = mags[peak_index].time;
+        let peak_mag = mags[peak_index].mag;
+        let peak_mag_err = mags[peak_index].mag_err;
+
+        if peak_mag < global_peak_mag {
+            global_peak_index = peak_index;
+            global_peak_jd = peak_jd;
+            global_peak_mag = peak_mag;
+            global_peak_mag_err = peak_mag_err;
+        }
+
+        let faintest_jd = mags[faintest_index].time;
+        let faintest_mag = mags[faintest_index].mag;
+        let faintest_mag_err = mags[faintest_index].mag_err;
+
+        if faintest_mag > global_faintest_mag {
+            global_faintest_index = faintest_index;
+            global_faintest_jd = faintest_jd;
+            global_faintest_mag = faintest_mag;
+            global_faintest_mag_err = faintest_mag_err;
+        }
+
+        if mags.len() < 2 {
             // not enough data to analyze
             continue;
         }
-        // find the peak index (minimum magnitude)
-        let peak_index = mags
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.mag.partial_cmp(&b.mag).unwrap())
-            .map(|(i, _)| i)
-            .unwrap();
+        let mut properties_per_band = doc! {
+            "peak_index": peak_index as i32,
+            "peak_jd": peak_jd,
+            "peak_mag": peak_mag,
+            "peak_mag_err": peak_mag_err,
+        };
 
         // before is from 0 to peak_index inclusive, after is from peak_index inclusive to the end
         let before = &mags[0..=peak_index];
         let after = &mags[peak_index..];
 
-        // get the min time for the before and after segments
-        let before_min_time = before
-            .iter()
-            .map(|m| m.time)
-            .fold(f64::INFINITY, |a, b| a.min(b));
-        let after_min_time = after
-            .iter()
-            .map(|m| m.time)
-            .fold(f64::INFINITY, |a, b| a.min(b));
-
-        let mut before_time = Vec::new();
-        let mut before_mag = Vec::new();
-        let mut before_mag_err = Vec::new();
-        let mut min_mag = f32::INFINITY;
-        let mut min_mag_err = f32::INFINITY;
-        let mut max_mag = f32::NEG_INFINITY;
-        let mut max_mag_err = f32::NEG_INFINITY;
         // if there isn't enough time separation between the first and last point, we cannot do a linear fit
         // so we will just return empty arrays
-        if before.len() > 0 && before.last().unwrap().time - before.first().unwrap().time > 0.01 {
+        if before.len() > 1 && before.last().unwrap().time - before.first().unwrap().time > 0.01 {
+            let mut before_time = Vec::new();
+            let mut before_mag = Vec::new();
+            let mut before_mag_err = Vec::new();
+            let mut min_mag = f32::INFINITY;
+            let mut min_mag_err = f32::INFINITY;
+            let mut max_mag = f32::NEG_INFINITY;
+            let mut max_mag_err = f32::NEG_INFINITY;
+
+            // get the min time for the before and after segments
+            let before_min_time = before[0].time;
+
             for m in before {
                 before_time.push((m.time - before_min_time) as f32);
                 before_mag.push(m.mag);
@@ -154,18 +198,33 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> Document {
                 before_mag.clear();
                 before_mag_err.clear();
             }
+
+            let linear_fit_before = linear_fit(before_time, before_mag, before_mag_err);
+            if let Some(lfb) = linear_fit_before {
+                properties_per_band.insert(
+                    "rising",
+                    doc! {
+                        "rate": lfb.slope,
+                        // "intercept": lfb.intercept,
+                        "r_squared": lfb.r_squared,
+                        "nb_data": lfb.nb_data,
+                    },
+                );
+            }
         }
 
-        let mut after_time = Vec::new();
-        let mut after_mag = Vec::new();
-        let mut after_mag_err = Vec::new();
-        let mut min_mag = f32::INFINITY;
-        let mut min_mag_err = f32::INFINITY;
-        let mut max_mag = f32::NEG_INFINITY;
-        let mut max_mag_err = f32::NEG_INFINITY;
-
         // same for after
-        if after.len() > 0 && after.last().unwrap().time - after.first().unwrap().time > 0.01 {
+        if after.len() > 1 && after.last().unwrap().time - after.first().unwrap().time > 0.01 {
+            let mut after_time = Vec::new();
+            let mut after_mag = Vec::new();
+            let mut after_mag_err = Vec::new();
+            let mut min_mag = f32::INFINITY;
+            let mut min_mag_err = f32::INFINITY;
+            let mut max_mag = f32::NEG_INFINITY;
+            let mut max_mag_err = f32::NEG_INFINITY;
+
+            let after_min_time = after[0].time;
+
             for m in after {
                 after_time.push((m.time - after_min_time) as f32);
                 after_mag.push(m.mag);
@@ -187,46 +246,38 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> Document {
                 after_mag.clear();
                 after_mag_err.clear();
             }
+
+            let linear_fit_after = linear_fit(after_time, after_mag, after_mag_err);
+            if let Some(lfa) = linear_fit_after {
+                properties_per_band.insert(
+                    "fading",
+                    doc! {
+                        "rate": lfa.slope,
+                        // "intercept": lfa.intercept,
+                        "r_squared": lfa.r_squared,
+                        "nb_data": lfa.nb_data,
+                    },
+                );
+            }
         }
 
-        // perform linear fit on before and after
-        let linear_fit_before = linear_fit(before_time, before_mag, before_mag_err);
-        let linear_fit_after = linear_fit(after_time, after_mag, after_mag_err);
-
-        let mut properties = doc! {
-            "peak_index": peak_index as i32,
-            "peak_jd": mags[peak_index].time,
-            "peak_mag": mags[peak_index].mag,
-            "peak_mag_err": mags[peak_index].mag_err,
-        };
-        // add linear fit results
-        if let Some(lfb) = linear_fit_before {
-            properties.insert(
-                "rising",
-                doc! {
-                    "rate": lfb.slope,
-                    // "intercept": lfb.intercept,
-                    "r_squared": lfb.r_squared,
-                    "nb_data": lfb.nb_data,
-                },
-            );
-        }
-        if let Some(lfa) = linear_fit_after {
-            properties.insert(
-                "fading",
-                doc! {
-                    "rate": lfa.slope,
-                    // "intercept": lfa.intercept,
-                    "r_squared": lfa.r_squared,
-                    "nb_data": lfa.nb_data,
-                },
-            );
-        }
-
-        results.insert(band, properties);
+        results.insert(band, properties_per_band);
     }
 
-    results
+    let all_bands_properties = doc! {
+        "peak_index": global_peak_index as i32,
+        "peak_jd": global_peak_jd,
+        "peak_mag": global_peak_mag,
+        "peak_mag_err": global_peak_mag_err,
+        "faintest_index": global_faintest_index as i32,
+        "faintest_jd": global_faintest_jd,
+        "faintest_mag": global_faintest_mag,
+        "faintest_mag_err": global_faintest_mag_err,
+        "first_jd": first_jd,
+        "last_jd": last_jd,
+    };
+
+    (results, all_bands_properties, stationary)
 }
 
 struct LinearFitResult {
