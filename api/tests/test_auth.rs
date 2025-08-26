@@ -78,7 +78,7 @@ mod tests {
         // query the user from the database to check that it exists
         let user = database
             .collection::<boom_api::routes::users::User>("users")
-            .find_one(doc! { "id": user_id })
+            .find_one(doc! { "_id": user_id })
             .await
             .unwrap();
 

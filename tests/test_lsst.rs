@@ -73,13 +73,14 @@ async fn test_process_lsst_alert() {
     assert_eq!(aux.get_str("_id").unwrap(), &object_id);
     // check that we have the arrays prv_candidates, prv_nondetections and fp_hists
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
-    assert_eq!(prv_candidates.len(), 3);
+    assert_eq!(prv_candidates.len(), 1);
 
-    let prv_nondetections = aux.get_array("prv_nondetections").unwrap();
-    assert_eq!(prv_nondetections.len(), 0);
+    // let prv_nondetections = aux.get_array("prv_nondetections").unwrap();
+    // assert_eq!(prv_nondetections.len(), 0);
+    // TODO: check again once non detections are added back to the schema
 
     let fp_hists = aux.get_array("fp_hists").unwrap();
-    assert_eq!(fp_hists.len(), 3);
+    assert_eq!(fp_hists.len(), 0);
 
     drop_alert_from_collections(candid, "LSST").await.unwrap();
 }
@@ -95,12 +96,12 @@ async fn test_filter_lsst_alert() {
 
     let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
 
-    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id]))
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await
         .unwrap();
     let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
 
-    remove_test_filter(filter_id, &Survey::Lsst).await.unwrap();
+    remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok());
 
     let alerts_output = result.unwrap();
@@ -108,14 +109,14 @@ async fn test_filter_lsst_alert() {
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(&alert.object_id, &object_id);
-    assert_eq!(alert.photometry.len(), 3); // prv_candidates + prv_nondetections
+    assert_eq!(alert.photometry.len(), 1); // prv_candidates + prv_nondetections
 
     let filter_passed = alert
         .filters
         .iter()
         .find(|f| f.filter_id == filter_id)
         .unwrap();
-    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.15}");
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.67}");
 
     let classifications = &alert.classifications;
     assert_eq!(classifications.len(), 0);

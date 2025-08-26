@@ -7,7 +7,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         lightcurves::{flux2mag, fluxerr2diffmaglim, SNT},
-        o11y::as_error,
+        o11y::logging::as_error,
         spatial::xmatch,
     },
 };
