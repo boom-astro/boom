@@ -659,13 +659,23 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id);
     let alert_worker_active_attrs = [worker_id_attr.clone()];
-    let alert_worker_added_attrs = [worker_id_attr.clone(), KeyValue::new("status", "added")];
-    let alert_worker_exists_attrs = [worker_id_attr.clone(), KeyValue::new("status", "exists")];
-    let alert_worker_process_error_attrs = [
+    let alert_worker_added_attrs = vec![worker_id_attr.clone(), KeyValue::new("status", "added")];
+    let alert_worker_exists_attrs = vec![worker_id_attr.clone(), KeyValue::new("status", "exists")];
+    let alert_worker_input_error_attrs = vec![
         worker_id_attr.clone(),
-        KeyValue::new("status", "process_error"),
+        KeyValue::new("status", "error"),
+        KeyValue::new("error.type", "input_queue"),
     ];
-    let alert_worker_queue_error_attrs = [worker_id_attr, KeyValue::new("status", "queue_error")];
+    let alert_worker_process_error_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("error.type", "processing"),
+    ];
+    let alert_worker_output_error_attrs = vec![
+        worker_id_attr,
+        KeyValue::new("status", "error"),
+        KeyValue::new("error.type", "output_queue"),
+    ];
     loop {
         // check for command from threadpool
         if command_check_countdown == 0 {
@@ -692,7 +702,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
             Err(e) => {
                 error!(?e, "failed to retrieve avro bytes");
+                let attributes = &alert_worker_input_error_attrs;
                 ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
+                ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
+                ALERT_WORKER_PROCESSED.add(1, attributes);
                 continue;
             }
         };
@@ -713,7 +726,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to handle process result"));
         if let Err(_) = handle_result {
-            attributes = &alert_worker_queue_error_attrs;
+            attributes = &alert_worker_output_error_attrs;
         }
 
         ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
