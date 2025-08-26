@@ -661,7 +661,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let alert_worker_active_attrs = [worker_id_attr.clone()];
     let alert_worker_added_attrs = [worker_id_attr.clone(), KeyValue::new("status", "added")];
     let alert_worker_exists_attrs = [worker_id_attr.clone(), KeyValue::new("status", "exists")];
-    let alert_worker_error_attrs = [worker_id_attr, KeyValue::new("status", "error")];
+    let alert_worker_process_error_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "process_error"),
+    ];
+    let alert_worker_queue_error_attrs = [worker_id_attr, KeyValue::new("status", "queue_error")];
     loop {
         let alert_start = std::time::Instant::now();
 
@@ -695,10 +699,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
         };
 
         let process_result = alert_processor.process_alert(&avro_bytes).await;
-        let attributes = match process_result {
+        let mut attributes = match process_result {
             Ok(ProcessAlertStatus::Added(_)) => &alert_worker_added_attrs,
             Ok(ProcessAlertStatus::Exists(_)) => &alert_worker_exists_attrs,
-            Err(_) => &alert_worker_error_attrs,
+            Err(_) => &alert_worker_process_error_attrs,
         };
         let handle_result = handle_process_result(
             &mut con,
@@ -709,6 +713,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
         )
         .await
         .inspect_err(as_error!("failed to handle process result"));
+        if let Err(_) = handle_result {
+            attributes = &alert_worker_queue_error_attrs;
+        }
 
         ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
         ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
