@@ -667,8 +667,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
     ];
     let alert_worker_queue_error_attrs = [worker_id_attr, KeyValue::new("status", "queue_error")];
     loop {
-        let alert_start = std::time::Instant::now();
-
         // check for command from threadpool
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -679,6 +677,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
         command_check_countdown -= 1;
 
+        let alert_start = std::time::Instant::now();
         ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
