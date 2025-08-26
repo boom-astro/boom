@@ -1,7 +1,7 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
+    feature::{run_feature_worker, ZtfFeatureWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
-    ml::{run_ml_worker, ZtfMLWorker},
     utils::{
         enums::Survey,
         o11y::logging::{as_error, INFO},
@@ -218,17 +218,20 @@ impl Worker {
             }),
             WorkerType::ML => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "ml worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting ml worker");
+                span!(INFO, "feature worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting feature worker");
                     debug!(?config_path);
                     let run = match survey_name {
-                        Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
+                        Survey::Ztf => run_feature_worker::<ZtfFeatureWorker>,
                         _ => {
-                            error!("ML worker not implemented for survey: {:?}", survey_name);
+                            error!(
+                                "Feature worker not implemented for survey: {:?}",
+                                survey_name
+                            );
                             return;
                         }
                     };
-                    run(receiver, &config_path).unwrap_or_else(as_error!("ml worker failed"));
+                    run(receiver, &config_path).unwrap_or_else(as_error!("feature worker failed"));
                 })
             }),
         };

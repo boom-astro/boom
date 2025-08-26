@@ -4,8 +4,8 @@ use boom::{
         ZTF_LSST_XMATCH_RADIUS,
     },
     conf,
+    feature::{FeatureWorker, ZtfFeatureWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
-    ml::{MLWorker, ZtfMLWorker},
     utils::{
         enums::Survey,
         testing::{
@@ -295,7 +295,7 @@ async fn test_process_ztf_alert_xmatch() {
 }
 
 #[tokio::test]
-async fn test_ml_ztf_alert() {
+async fn test_feature_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     // we only randomize the candid and object_id here, since the ra/dec
@@ -308,8 +308,8 @@ async fn test_ml_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let mut ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = ml_worker.process_alerts(&[candid]).await;
+    let mut feature_worker = ZtfFeatureWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = feature_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
 
     // the result should be a vec of String, for ZTF with the format
@@ -392,15 +392,15 @@ async fn test_filter_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    // then run the ML worker to get the classifications
-    let mut ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = ml_worker.process_alerts(&[candid]).await;
+    // then run the feature worker to get the classifications
+    let mut feature_worker = ZtfFeatureWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = feature_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
-    let ml_output = result.unwrap();
-    assert_eq!(ml_output.len(), 1);
-    let candid_programid_str = &ml_output[0];
+    let feature_output = result.unwrap();
+    assert_eq!(feature_output.len(), 1);
+    let candid_programid_str = &feature_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();

@@ -1,12 +1,12 @@
-use crate::ml::models::{AcaiModel, BtsBotModel, Model};
-use crate::ml::{MLWorker, MLWorkerError};
+use crate::feature::models::{AcaiModel, BtsBotModel, Model};
+use crate::feature::{FeatureWorker, FeatureWorkerError};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-pub struct ZtfMLWorker {
+pub struct ZtfFeatureWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
@@ -21,9 +21,9 @@ pub struct ZtfMLWorker {
 }
 
 #[async_trait::async_trait]
-impl MLWorker for ZtfMLWorker {
+impl FeatureWorker for ZtfFeatureWorker {
     #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, MLWorkerError> {
+    async fn new(config_path: &str) -> Result<Self, FeatureWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
@@ -43,7 +43,7 @@ impl MLWorker for ZtfMLWorker {
         // we load the btsbot model (different architecture, and input/output then ACAI)
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
 
-        Ok(ZtfMLWorker {
+        Ok(ZtfFeatureWorker {
             input_queue,
             output_queue,
             client,
@@ -70,7 +70,7 @@ impl MLWorker for ZtfMLWorker {
     async fn fetch_alerts(
         &self,
         candids: &[i64], // this is a slice of candids to process
-    ) -> Result<Vec<Document>, MLWorkerError> {
+    ) -> Result<Vec<Document>, FeatureWorkerError> {
         let mut alert_cursor = self
             .alert_collection
             .aggregate(vec![
@@ -217,12 +217,12 @@ impl MLWorker for ZtfMLWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alerts(&mut self, candids: &[i64]) -> Result<Vec<String>, MLWorkerError> {
+    async fn process_alerts(&mut self, candids: &[i64]) -> Result<Vec<String>, FeatureWorkerError> {
         let alerts = self.fetch_alerts(&candids).await?;
 
         if alerts.len() != candids.len() {
             warn!(
-                "ML WORKER: only {} alerts fetched from {} candids",
+                "FEATURE WORKER: only {} alerts fetched from {} candids",
                 alerts.len(),
                 candids.len()
             );
