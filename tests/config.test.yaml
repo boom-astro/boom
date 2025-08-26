@@ -17,6 +17,8 @@ kafka:
     LSST: "usdf-alert-stream-dev.lsst.cloud:9094" # LSST alert consumer
     DECAM: "localhost:9092" # DECam alert consumer
   producer: "localhost:9092" # Only one global producer for now (filter worker output)
+  schema_registry:
+    LSST: "https://usdf-alert-schemas-dev.slac.stanford.edu" # LSST schema registry URL
 workers:
   ZTF:
     command_interval: 500
