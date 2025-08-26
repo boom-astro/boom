@@ -666,7 +666,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         KeyValue::new("status", "error"),
         KeyValue::new("error.type", "input_queue"),
     ];
-    let alert_worker_process_error_attrs = vec![
+    let alert_worker_processing_error_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("error.type", "processing"),
@@ -714,7 +714,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         let mut attributes = match process_result {
             Ok(ProcessAlertStatus::Added(_)) => &alert_worker_added_attrs,
             Ok(ProcessAlertStatus::Exists(_)) => &alert_worker_exists_attrs,
-            Err(_) => &alert_worker_process_error_attrs,
+            Err(_) => &alert_worker_processing_error_attrs,
         };
         let handle_result = handle_process_result(
             &mut con,

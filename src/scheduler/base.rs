@@ -228,7 +228,9 @@ impl Worker {
                             return;
                         }
                     };
-                    run(receiver, &config_path).unwrap_or_else(as_error!("ml worker failed"));
+                    let worker_id = format!("{tid:?}");
+                    run(receiver, &config_path, worker_id)
+                        .unwrap_or_else(as_error!("ml worker failed"));
                 })
             }),
         };
