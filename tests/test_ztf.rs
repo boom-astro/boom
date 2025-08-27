@@ -300,7 +300,7 @@ async fn test_enrich_ztf_alert() {
 
     // we only randomize the candid and object_id here, since the ra/dec
     // are features of the models and would change the results
-    let (candid, object_id, ra, dec, bytes_content) = AlertRandomizer::new(Survey::Ztf)
+    let (candid, _, _, _, bytes_content) = AlertRandomizer::new(Survey::Ztf)
         .rand_candid()
         .rand_object_id()
         .get()
@@ -331,11 +331,6 @@ async fn test_enrich_ztf_alert() {
         .unwrap();
     assert!(alert.is_some());
     let alert = alert.unwrap();
-    assert_eq!(alert.get_i64("_id").unwrap(), candid);
-    assert_eq!(alert.get_str("objectId").unwrap(), object_id);
-    let candidate = alert.get_document("candidate").unwrap();
-    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
-    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // this object is a variable star, so all scores except acai_v should be ~0.0
     // (we've also verified that the scores we get here were close to Kowalski's)

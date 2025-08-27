@@ -566,7 +566,7 @@ impl AlertWorker for ZtfAlertWorker {
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_classifier_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
     #[instrument(

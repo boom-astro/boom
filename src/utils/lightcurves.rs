@@ -86,14 +86,15 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>, jd: f64) -> (Document,
     sorted_photometry.dedup_by(|a, b| a.time == b.time);
 
     let stationary = sorted_photometry.len() > 0 && (jd - sorted_photometry[0].time) > 0.01;
-    let mut global_peak_index = 0;
+
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;
     let mut global_peak_mag_err = sorted_photometry[0].mag_err;
-    let mut global_faintest_index = 0;
+    let mut global_peak_band = sorted_photometry[0].band.clone();
     let mut global_faintest_jd = sorted_photometry[0].time;
     let mut global_faintest_mag = sorted_photometry[0].mag;
     let mut global_faintest_mag_err = sorted_photometry[0].mag_err;
+    let mut global_faintest_band = sorted_photometry[0].band.clone();
     let first_jd = sorted_photometry[0].time;
     let last_jd = sorted_photometry.last().unwrap().time;
 
@@ -131,10 +132,10 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>, jd: f64) -> (Document,
         let peak_mag_err = mags[peak_index].mag_err;
 
         if peak_mag < global_peak_mag {
-            global_peak_index = peak_index;
             global_peak_jd = peak_jd;
             global_peak_mag = peak_mag;
             global_peak_mag_err = peak_mag_err;
+            global_peak_band = band.clone();
         }
 
         let faintest_jd = mags[faintest_index].time;
@@ -142,18 +143,13 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>, jd: f64) -> (Document,
         let faintest_mag_err = mags[faintest_index].mag_err;
 
         if faintest_mag > global_faintest_mag {
-            global_faintest_index = faintest_index;
             global_faintest_jd = faintest_jd;
             global_faintest_mag = faintest_mag;
             global_faintest_mag_err = faintest_mag_err;
+            global_faintest_band = band.clone();
         }
 
-        if mags.len() < 2 {
-            // not enough data to analyze
-            continue;
-        }
         let mut properties_per_band = doc! {
-            "peak_index": peak_index as i32,
             "peak_jd": peak_jd,
             "peak_mag": peak_mag,
             "peak_mag_err": peak_mag_err,
@@ -265,14 +261,14 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>, jd: f64) -> (Document,
     }
 
     let all_bands_properties = doc! {
-        "peak_index": global_peak_index as i32,
         "peak_jd": global_peak_jd,
         "peak_mag": global_peak_mag,
         "peak_mag_err": global_peak_mag_err,
-        "faintest_index": global_faintest_index as i32,
+        "peak_band": global_peak_band,
         "faintest_jd": global_faintest_jd,
         "faintest_mag": global_faintest_mag,
         "faintest_mag_err": global_faintest_mag_err,
+        "faintest_band": global_faintest_band,
         "first_jd": first_jd,
         "last_jd": last_jd,
     };

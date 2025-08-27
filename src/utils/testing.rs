@@ -200,11 +200,15 @@ pub struct AlertRandomizer {
 
 impl AlertRandomizer {
     pub fn new(survey: Survey) -> Self {
+        let schema_registry = match survey {
+            Survey::Lsst => Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+            _ => None,
+        };
         Self {
             survey,
             payload: None,
             schema: None,
-            schema_registry: None,
+            schema_registry,
             candid: None,
             object_id: None,
             ra: None,
