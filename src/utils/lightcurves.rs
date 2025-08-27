@@ -321,8 +321,7 @@ fn linear_fit(time: Vec<f32>, mag: Vec<f32>, mag_err: Vec<f32>) -> Option<Linear
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_flux2mag() {
+    fn test_flux2mag() {
         let flux = 200.0;
         let flux_err = 20.0;
         let zp = 23.9;
@@ -343,16 +342,14 @@ mod tests {
         assert!(mag_err.is_infinite());
     }
 
-    #[tokio::test]
-    async fn test_fluxerr2diffmaglim() {
+    fn test_fluxerr2diffmaglim() {
         let zp = 23.9;
         let flux_err = 20.0;
         let diffmaglim = fluxerr2diffmaglim(flux_err, zp);
         assert!((diffmaglim - 18.9).abs() < 1e-5);
     }
 
-    #[tokio::test]
-    async fn test_parse_photometry() {
+    fn test_parse_photometry() {
         let docs = vec![
             doc! { // a valid detection
                 "jd": 2459000.5,
@@ -384,8 +381,7 @@ mod tests {
         assert_eq!(photometry[0].band, "r");
     }
 
-    #[tokio::test]
-    async fn test_analyze_photometry() {
+    fn test_analyze_photometry() {
         // Test case 1: only one data point
         let data = vec![PhotometryMag {
             time: 2459000.5,
