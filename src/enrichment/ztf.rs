@@ -259,7 +259,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
             ));
 
-            let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve, jd);
+            let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve);
 
             let programid = candidate.get_i32("programid")?;
 

@@ -175,7 +175,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                 fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
             ));
 
-            let (photstats, _, stationary) = analyze_photometry(lightcurve, jd);
+            let (photstats, _, stationary) = analyze_photometry(lightcurve);
 
             let find_document = doc! {
                 "_id": candid

@@ -16,6 +16,7 @@ pub fn fluxerr2diffmaglim(flux_err: f32, zp: f32) -> f32 {
     -2.5 * (5.0 * flux_err).log10() + zp
 }
 
+#[derive(Debug, Clone)]
 pub struct PhotometryMag {
     pub time: f64,
     pub mag: f32,
@@ -77,15 +78,16 @@ pub struct PhotometryProperties {
 // - identifies the index of the peak (minimum magnitude) for each band
 // - for each band, do a linear fit of the data before the peak and after the peak independently
 // - return a vec of PhotometryProperties
-pub fn analyze_photometry(photometry: Vec<PhotometryMag>, jd: f64) -> (Document, Document, bool) {
+pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> (Document, Document, bool) {
     // first sort by time
     let mut sorted_photometry = photometry;
     sorted_photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
 
-    // deduplicate by time
-    sorted_photometry.dedup_by(|a, b| a.time == b.time);
+    // deduplicate by time and band, keeping the first occurrence
+    sorted_photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
 
-    let stationary = sorted_photometry.len() > 0 && (jd - sorted_photometry[0].time) > 0.01;
+    let stationary = sorted_photometry.len() > 0
+        && (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
 
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;
@@ -313,4 +315,389 @@ fn linear_fit(time: Vec<f32>, mag: Vec<f32>, mag_err: Vec<f32>) -> Option<Linear
         r_squared,
         nb_data: n as i32,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_flux2mag() {
+        let flux = 200.0;
+        let flux_err = 20.0;
+        let zp = 23.9;
+        let (mag, mag_err) = flux2mag(flux, flux_err, zp);
+        assert!((mag - 18.147425).abs() < 1e-5);
+        assert!((mag_err - 0.108574).abs() < 1e-5);
+
+        // let's change the zp to make sure that it is being used correctly
+        let zp = 25.0;
+        let (mag, mag_err) = flux2mag(flux, flux_err, zp);
+        assert!((mag - 19.247425).abs() < 1e-5);
+        assert!((mag_err - 0.108574).abs() < 1e-5);
+
+        // test with flux = 0, should return inf
+        let flux = 0.0;
+        let (mag, mag_err) = flux2mag(flux, flux_err, zp);
+        assert!(mag.is_infinite());
+        assert!(mag_err.is_infinite());
+    }
+
+    #[tokio::test]
+    async fn test_fluxerr2diffmaglim() {
+        let zp = 23.9;
+        let flux_err = 20.0;
+        let diffmaglim = fluxerr2diffmaglim(flux_err, zp);
+        assert!((diffmaglim - 18.9).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn test_parse_photometry() {
+        let docs = vec![
+            doc! { // a valid detection
+                "jd": 2459000.5,
+                "magpsf": 20.0,
+                "sigmapsf": 0.1,
+                "band": "r",
+            },
+            doc! { // NOT a valid detection
+                "jd": 2459001.5,
+                "sigmapsf": 0.2,
+                "band": "r",
+            },
+        ];
+        let photometry = parse_photometry(
+            &docs
+                .iter()
+                .map(|d| mongodb::bson::Bson::Document(d.clone()))
+                .collect::<Vec<_>>(),
+            "jd",
+            "magpsf",
+            "sigmapsf",
+            "band",
+            2459001.0,
+        );
+        assert_eq!(photometry.len(), 1);
+        assert_eq!(photometry[0].time, 2459000.5);
+        assert_eq!(photometry[0].mag, 20.0);
+        assert_eq!(photometry[0].mag_err, 0.1);
+        assert_eq!(photometry[0].band, "r");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_photometry() {
+        // Test case 1: only one data point
+        let data = vec![PhotometryMag {
+            time: 2459000.5,
+            mag: 20.0,
+            mag_err: 0.1,
+            band: "r".to_string(),
+        }];
+        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+
+        // Verify results
+        assert_eq!(stationary, false);
+        assert_eq!(results.len(), 1);
+        let r_stats = results.get_document("r").unwrap();
+        let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
+        let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
+        let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
+        assert!((data[0].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[0].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[0].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert_eq!(r_stats.contains_key("rising"), false);
+        assert_eq!(r_stats.contains_key("fading"), false);
+
+        // the all band properties should also just match the one data point we have
+        let peak_jd = all_bands_props.get_f64("peak_jd").unwrap();
+        let peak_mag = all_bands_props.get_f64("peak_mag").unwrap() as f32;
+        let peak_mag_err = all_bands_props.get_f64("peak_mag_err").unwrap() as f32;
+        let peak_band = all_bands_props.get_str("peak_band").unwrap();
+        assert!((data[0].time - peak_jd).abs() < 1e-6);
+        assert!((data[0].mag - peak_mag).abs() < 1e-6);
+        assert!((data[0].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[0].band, peak_band);
+
+        // Test case 2: 2 data points in the same band, rising
+        let data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+        ];
+        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+
+        // Verify results
+        assert_eq!(stationary, true);
+        assert_eq!(results.len(), 1);
+        let r_stats = results.get_document("r").unwrap();
+        let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
+        let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
+        let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
+        assert!((data[1].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert_eq!(r_stats.contains_key("rising"), true);
+        assert_eq!(r_stats.contains_key("fading"), false);
+        let rising_stats = r_stats.get_document("rising").unwrap();
+        let rising_rate = rising_stats.get_f64("rate").unwrap();
+        let r_squared = rising_stats.get_f64("r_squared").unwrap();
+        let nb_data = rising_stats.get_i32("nb_data").unwrap();
+        assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
+        assert!((r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(nb_data, 2);
+
+        // the all band properties should also just match the one data point we have
+        let peak_jd = all_bands_props.get_f64("peak_jd").unwrap();
+        let peak_mag = all_bands_props.get_f64("peak_mag").unwrap() as f32;
+        let peak_mag_err = all_bands_props.get_f64("peak_mag_err").unwrap() as f32;
+        let peak_band = all_bands_props.get_str("peak_band").unwrap();
+        assert!((data[1].time - peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[1].band, peak_band);
+
+        // Test case 3: 2 data points in the same band, fading
+        let data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+        ];
+        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+
+        // Verify results
+        assert_eq!(stationary, true);
+        assert_eq!(results.len(), 1);
+        let r_stats = results.get_document("r").unwrap();
+        let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
+        let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
+        let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
+        assert!((data[0].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[0].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[0].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert_eq!(r_stats.contains_key("rising"), false);
+        assert_eq!(r_stats.contains_key("fading"), true);
+        let fading_stats = r_stats.get_document("fading").unwrap();
+        let fading_rate = fading_stats.get_f64("rate").unwrap();
+        let r_squared = fading_stats.get_f64("r_squared").unwrap();
+        let nb_data = fading_stats.get_i32("nb_data").unwrap();
+        assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
+        assert!((r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(nb_data, 2);
+        // the all band properties should also just match the one data point we have
+        let peak_jd = all_bands_props.get_f64("peak_jd").unwrap();
+        let peak_mag = all_bands_props.get_f64("peak_mag").unwrap() as f32;
+        let peak_mag_err = all_bands_props.get_f64("peak_mag_err").unwrap() as f32;
+        let peak_band = all_bands_props.get_str("peak_band").unwrap();
+        assert!((data[0].time - peak_jd).abs() < 1e-6);
+        assert!((data[0].mag - peak_mag).abs() < 1e-6);
+        assert!((data[0].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[0].band, peak_band);
+
+        // Test case 4: 3 data points in the same band, rising then fading
+        let data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459002.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+        ];
+        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+
+        // Verify results
+        assert_eq!(stationary, true);
+        assert_eq!(results.len(), 1);
+        let r_stats = results.get_document("r").unwrap();
+        let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
+        let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
+        let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
+        assert!((data[1].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert_eq!(r_stats.contains_key("rising"), true);
+        assert_eq!(r_stats.contains_key("fading"), true);
+        let rising_stats = r_stats.get_document("rising").unwrap();
+        let rising_rate = rising_stats.get_f64("rate").unwrap();
+        let rising_r_squared = rising_stats.get_f64("r_squared").unwrap();
+        let rising_nb_data = rising_stats.get_i32("nb_data").unwrap();
+        assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
+        assert!((rising_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(rising_nb_data, 2);
+        let fading_stats = r_stats.get_document("fading").unwrap();
+        let fading_rate = fading_stats.get_f64("rate").unwrap();
+        let fading_r_squared = fading_stats.get_f64("r_squared").unwrap();
+        let fading_nb_data = fading_stats.get_i32("nb_data").unwrap();
+        assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
+        assert!((fading_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(fading_nb_data, 2);
+        // the all band properties should also just match the one data point we have
+        let peak_jd = all_bands_props.get_f64("peak_jd").unwrap();
+        let peak_mag = all_bands_props.get_f64("peak_mag").unwrap() as f32;
+        let peak_mag_err = all_bands_props.get_f64("peak_mag_err").unwrap() as f32;
+        let peak_band = all_bands_props.get_str("peak_band").unwrap();
+        assert!((data[1].time - peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[1].band, peak_band);
+
+        // Test case 5: multiple bands
+        // - rising and fading in r band (3 points)
+        // - only rising in g band (2 points)
+        let data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459002.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: "g".to_string(),
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "g".to_string(),
+            },
+        ];
+        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+
+        // Verify results
+        assert_eq!(stationary, true);
+        assert_eq!(results.len(), 2);
+        // r band
+        let r_stats = results.get_document("r").unwrap();
+        let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
+        let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
+        let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
+        assert!((data[1].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert_eq!(r_stats.contains_key("rising"), true);
+        assert_eq!(r_stats.contains_key("fading"), true);
+        // check the rising stats in r band
+        let rising_stats = r_stats.get_document("rising").unwrap();
+        let rising_rate = rising_stats.get_f64("rate").unwrap();
+        let rising_r_squared = rising_stats.get_f64("r_squared").unwrap();
+        let rising_nb_data = rising_stats.get_i32("nb_data").unwrap();
+        assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
+        assert!((rising_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(rising_nb_data, 2);
+        // check the fading stats in r band
+        let fading_stats = r_stats.get_document("fading").unwrap();
+        let fading_rate = fading_stats.get_f64("rate").unwrap();
+        let fading_r_squared = fading_stats.get_f64("r_squared").unwrap();
+        let fading_nb_data = fading_stats.get_i32("nb_data").unwrap();
+        assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
+        assert!((fading_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(fading_nb_data, 2);
+        // g band
+        let g_stats = results.get_document("g").unwrap();
+        let g_peak_jd = g_stats.get_f64("peak_jd").unwrap();
+        let g_peak_mag = g_stats.get_f64("peak_mag").unwrap() as f32;
+        let g_peak_mag_err = g_stats.get_f64("peak_mag_err").unwrap() as f32;
+        assert!((data[4].time - g_peak_jd).abs() < 1e-6);
+        assert!((data[4].mag - g_peak_mag).abs() < 1e-6);
+        assert!((data[4].mag_err - g_peak_mag_err).abs() < 1e-6);
+        assert_eq!(g_stats.contains_key("rising"), true);
+        assert_eq!(g_stats.contains_key("fading"), false);
+        // check the rising stats in g band
+        let rising_stats = g_stats.get_document("rising").unwrap();
+        let rising_rate = rising_stats.get_f64("rate").unwrap();
+        let rising_r_squared = rising_stats.get_f64("r_squared").unwrap();
+        let rising_nb_data = rising_stats.get_i32("nb_data").unwrap();
+        assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
+        assert!((rising_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert_eq!(rising_nb_data, 2);
+
+        // the all band properties should match the peak in r band
+        let peak_jd = all_bands_props.get_f64("peak_jd").unwrap();
+        let peak_mag = all_bands_props.get_f64("peak_mag").unwrap() as f32;
+        let peak_mag_err = all_bands_props.get_f64("peak_mag_err").unwrap() as f32;
+        let peak_band = all_bands_props.get_str("peak_band").unwrap();
+        assert!((data[1].time - peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[1].band, peak_band);
+
+        // Edge case 1: duplicated points (same time and band)
+        let data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            // duplicate of the first point
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.5,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            },
+        ];
+        let (results, _, stationary) = analyze_photometry(data.clone());
+        // make sure that only 2 points were used (the duplicate should be removed)
+        assert_eq!(stationary, true);
+        assert_eq!(results.len(), 1);
+        let r_stats = results.get_document("r").unwrap();
+        let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
+        let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
+        assert!((data[2].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[2].mag - r_peak_mag).abs() < 1e-6);
+        let rising_stats = r_stats.get_document("rising").unwrap();
+        let rising_nb_data = rising_stats.get_i32("nb_data").unwrap();
+        assert_eq!(rising_nb_data, 2);
+    }
 }

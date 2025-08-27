@@ -152,7 +152,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
             let lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
 
-            let (photstats, _, stationary) = analyze_photometry(lightcurve, jd);
+            let (photstats, _, stationary) = analyze_photometry(lightcurve);
 
             let find_document = doc! {
                 "_id": candid
