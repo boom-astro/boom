@@ -161,21 +161,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             let candid = alerts[i].get_i64("_id")?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let candidate = alerts[i].get_document("candidate")?;
-
-            let jd = candidate.get_f64("jd")?;
-
-            let is_rock = candidate.get_bool("is_sso").unwrap_or(false);
-
-            let prv_candidates = alerts[i].get_array("prv_candidates")?;
-            let fp_hists = alerts[i].get_array("fp_hists")?;
-            let mut lightcurve =
-                parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
-            lightcurve.extend(parse_photometry(
-                fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
-            ));
-
-            let (photstats, _, stationary) = analyze_photometry(lightcurve);
+            let properties = self.get_alert_properties(&alerts[i]).await?;
 
             let find_document = doc! {
                 "_id": candid
@@ -183,10 +169,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             let update_alert_document = doc! {
                 "$set": {
-                    // properties
-                    "properties.rock": is_rock,
-                    "properties.stationary": stationary,
-                    "properties.photstats": photstats,
+                    "properties": properties,
                 }
             };
 
@@ -205,5 +188,37 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
         Ok(processed_alerts)
+    }
+}
+
+impl LsstEnrichmentWorker {
+    async fn get_alert_properties(
+        &self,
+        alert: &Document,
+    ) -> Result<Document, EnrichmentWorkerError> {
+        // Compute numerical and boolean features from lightcurve and candidate analysis
+        let candidate = alert.get_document("candidate")?;
+
+        let jd = candidate.get_f64("jd")?;
+
+        let is_rock = candidate.get_bool("is_sso").unwrap_or(false);
+
+        let prv_candidates = alert.get_array("prv_candidates")?;
+        let fp_hists = alert.get_array("fp_hists")?;
+        let mut lightcurve =
+            parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
+        lightcurve.extend(parse_photometry(
+            fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
+        ));
+
+        let (photstats, _, stationary) = analyze_photometry(lightcurve);
+
+        let properties = doc! {
+            // properties
+            "rock": is_rock,
+            "stationary": stationary,
+            "photstats": photstats,
+        };
+        Ok(properties)
     }
 }

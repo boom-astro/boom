@@ -143,16 +143,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         for i in 0..alerts.len() {
             let candid = alerts[i].get_i64("_id")?;
 
-            // Compute numerical and boolean features from lightcurve and candidate analysis
-            let candidate = alerts[i].get_document("candidate")?;
-
-            let jd = candidate.get_f64("jd")?;
-
-            let fp_hists = alerts[i].get_array("fp_hists")?;
-
-            let lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
-
-            let (photstats, _, stationary) = analyze_photometry(lightcurve);
+            let properties = self.get_alert_properties(&alerts[i]).await?;
 
             let find_document = doc! {
                 "_id": candid
@@ -160,9 +151,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
             let update_alert_document = doc! {
                 "$set": {
-                    // properties
-                    "properties.stationary": stationary,
-                    "properties.photstats": photstats,
+                    "properties": properties,
                 }
             };
 
@@ -181,5 +170,28 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
         Ok(processed_alerts)
+    }
+}
+
+impl DecamEnrichmentWorker {
+    async fn get_alert_properties(
+        &self,
+        alert: &Document,
+    ) -> Result<Document, EnrichmentWorkerError> {
+        // Compute numerical and boolean features from lightcurve and candidate analysis
+        let candidate = alert.get_document("candidate")?;
+
+        let jd = candidate.get_f64("jd")?;
+
+        let fp_hists = alert.get_array("fp_hists")?;
+        let lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
+
+        let (photstats, _, stationary) = analyze_photometry(lightcurve);
+
+        let properties = doc! {
+            "stationary": stationary,
+            "photstats": photstats,
+        };
+        Ok(properties)
     }
 }
