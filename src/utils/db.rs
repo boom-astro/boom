@@ -142,15 +142,10 @@ pub fn fetch_timeseries_op(
                 time_window
             ]
         },
-        doc! {
-            "$gte": [
-                {
-                    "$subtract": [
-                        format!("${}", candidate_jd_field),
-                        "$$x.jd"
-                    ]
-                },
-                0
+        doc! { // only datapoints up to (and including) current alert
+            "$lte": [
+                "$$x.jd",
+                format!("${}", candidate_jd_field),
             ]
         },
     ];

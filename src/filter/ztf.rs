@@ -9,6 +9,7 @@ use crate::filter::{
     validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
     FilterWorker, FilterWorkerError, Origin, Photometry,
 };
+use crate::utils::db::fetch_timeseries_op;
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 #[derive(Debug)]
@@ -62,6 +63,7 @@ impl Filter for ZtfFilter {
                     "objectId": 1,
                     "candidate": 1,
                     "classifications": 1,
+                    "properties": 1,
                     "coordinates": 1,
                 }
             },
@@ -87,95 +89,56 @@ impl Filter for ZtfFilter {
         let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
         let use_prv_nondetections_index =
             uses_field_in_filter(filter_pipeline, "prv_nondetections");
+        let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
         let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
 
         if use_prv_candidates_index.is_some() {
             // insert it in aux addFields stage
             aux_add_fields.insert(
                 "prv_candidates".to_string(),
-                doc! {
-                    "$filter": doc! {
-                        "input": doc! {
-                            "$arrayElemAt": [
-                                "$aux.prv_candidates",
-                                0
-                            ]
-                        },
-                        "as": "x",
-                        "cond": doc! {
-                            "$and": [
-                                { // apply ZTF alert stream permissions
-                                    "$in": [
-                                        "$$x.programid",
-                                        &permissions
-                                    ]
-                                },
-                                { // maximum 1 year of past data
-                                    "$lt": [
-                                        {
-                                            "$subtract": [
-                                                "$candidate.jd",
-                                                "$$x.jd"
-                                            ]
-                                        },
-                                        365
-                                    ]
-                                },
-                                { // only datapoints up to (and including) current alert
-                                    "$lte": [
-                                        "$$x.jd",
-                                        "$candidate.jd"
-                                    ]
-                                }
-
-                            ]
-                        }
-                    }
-                },
+                fetch_timeseries_op(
+                    "aux.prv_candidates",
+                    "candidate.jd",
+                    365,
+                    Some(vec![doc! {
+                        "$in": [
+                            "$$x.programid",
+                            &permissions
+                        ]
+                    }]),
+                ),
             );
         }
         if use_prv_nondetections_index.is_some() {
             aux_add_fields.insert(
                 "prv_nondetections".to_string(),
-                doc! {
-                    "$filter": doc! {
-                        "input": doc! {
-                            "$arrayElemAt": [
-                                "$aux.prv_nondetections",
-                                0
-                            ]
-                        },
-                        "as": "x",
-                        "cond": doc! {
-                            "$and": [
-                                { // ZTF alert stream permissions
-                                    "$in": [
-                                        "$$x.programid",
-                                        &permissions
-                                    ]
-                                },
-                                { // maximum 1 year of past data
-                                    "$lt": [
-                                        {
-                                            "$subtract": [
-                                                "$candidate.jd",
-                                                "$$x.jd"
-                                            ]
-                                        },
-                                        365
-                                    ]
-                                },
-                                { // only datapoints up to (and including) current alert
-                                    "$lte": [
-                                        "$$x.jd",
-                                        "$candidate.jd"
-                                    ]
-                                }
-
-                            ]
-                        }
-                    }
-                },
+                fetch_timeseries_op(
+                    "aux.prv_nondetections",
+                    "candidate.jd",
+                    365,
+                    Some(vec![doc! {
+                        "$in": [
+                            "$$x.programid",
+                            &permissions
+                        ]
+                    }]),
+                ),
+            );
+        }
+        if use_fp_hists_index.is_some() {
+            aux_add_fields.insert(
+                "fp_hists".to_string(),
+                fetch_timeseries_op(
+                    "aux.fp_hists",
+                    "candidate.jd",
+                    365,
+                    Some(vec![doc! {
+                        "$in": [
+                            "$$x.programid",
+                            &permissions
+                        ]
+                    }]),
+                ),
             );
         }
         if use_cross_matches_index.is_some() {
