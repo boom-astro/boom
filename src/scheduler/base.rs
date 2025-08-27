@@ -212,7 +212,8 @@ impl Worker {
                         }
                     };
                     let key = uuid::Uuid::new_v4().to_string();
-                    run(key, receiver, &config_path)
+                    let worker_id = format!("{tid:?}");
+                    run(key, receiver, &config_path, worker_id)
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),

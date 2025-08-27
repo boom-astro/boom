@@ -140,7 +140,6 @@ pub async fn run_ml_worker<T: MLWorker>(
             continue;
         }
 
-        let batch_size = candids.len() as u64;
         let processed_alerts = ml_worker.process_alerts(&candids).await.inspect_err(|_| {
             ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
             ML_WORKER_BATCH_PROCESSED.add(1, &ml_worker_processing_error_attrs);
@@ -157,7 +156,7 @@ pub async fn run_ml_worker<T: MLWorker>(
         let attributes = &ml_worker_ok_attrs;
         ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
         ML_WORKER_BATCH_PROCESSED.add(1, attributes);
-        ML_WORKER_PROCESSED.add(batch_size, attributes);
+        ML_WORKER_PROCESSED.add(candids.len() as u64, attributes);
     }
 
     Ok(())
