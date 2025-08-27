@@ -14,3 +14,4 @@ scripts/convert2onnx/models_output/
 tests/throughput/config.yaml
 tests/throughput/cats150.json
 logs
+.idea
