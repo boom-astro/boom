@@ -415,7 +415,7 @@ async fn test_filter_ztf_alert() {
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.object_id, object_id);
-    assert_eq!(alert.photometry.len(), 11); // prv_candidates + prv_nondetections
+    assert_eq!(alert.photometry.len(), 21); // prv_candidates + prv_nondetections + fp_hists
 
     let filter_passed = alert
         .filters
