@@ -233,7 +233,7 @@ impl Worker {
                         }
                     };
                     run(receiver, &config_path)
-                        .unwrap_or_else(as_error!("enrichment     worker failed"));
+                        .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
         };

@@ -387,15 +387,15 @@ async fn test_filter_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    // then run the feature worker to get the classifications
+    // then run the enrichment worker to get the classifications
     let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
-    let feature_output = result.unwrap();
-    assert_eq!(feature_output.len(), 1);
-    let candid_programid_str = &feature_output[0];
+    let enrichment_output = result.unwrap();
+    assert_eq!(enrichment_output.len(), 1);
+    let candid_programid_str = &enrichment_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
