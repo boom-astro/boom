@@ -6,7 +6,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-pub struct LsstEnrichmentWorker {
+pub struct DecamEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
@@ -15,13 +15,16 @@ pub struct LsstEnrichmentWorker {
 }
 
 #[async_trait::async_trait]
-impl EnrichmentWorker for LsstEnrichmentWorker {
+impl EnrichmentWorker for DecamEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
-        let alert_collection = db.collection("LSST_alerts");
+        let alert_collection = db.collection("DECAM_alerts");
+
+        let input_queue = "DECAM_alerts_enrichment_queue".to_string();
+        let output_queue = "DECAM_alerts_filter_queue".to_string();
 
         let alert_pipeline = vec![
             doc! {
@@ -37,7 +40,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             },
             doc! {
                 "$lookup": {
-                    "from": "LSST_alerts_aux",
+                    "from": "DECAM_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -47,8 +50,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                 "$project": doc! {
                     "objectId": 1,
                     "candidate": 1,
-                    "prv_candidates": fetch_timeseries_op(
-                        "aux.prv_candidates",
+                    "fp_hists": fetch_timeseries_op(
+                        "aux.fp_hists",
                         "candidate.jd",
                         365,
                         None
@@ -59,18 +62,15 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                 "$project": doc! {
                     "objectId": 1,
                     "candidate": 1,
-                    "prv_candidates.jd": 1,
-                    "prv_candidates.magpsf": 1,
-                    "prv_candidates.sigmapsf": 1,
-                    "prv_candidates.band": 1,
+                    "fp_hists.jd": 1,
+                    "fp_hists.magap": 1,
+                    "fp_hists.sigmagap": 1,
+                    "fp_hists.band": 1,
                 }
             },
         ];
 
-        let input_queue = "LSST_alerts_enrichment_queue".to_string();
-        let output_queue = "LSST_alerts_filter_queue".to_string();
-
-        Ok(LsstEnrichmentWorker {
+        Ok(DecamEnrichmentWorker {
             input_queue,
             output_queue,
             client,
@@ -148,12 +148,9 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             let jd = candidate.get_f64("jd")?;
 
-            let is_rock = candidate.get_bool("is_sso").unwrap_or(false);
+            let fp_hists = alerts[i].get_array("fp_hists")?;
 
-            let prv_candidates = alerts[i].get_array("prv_candidates")?;
-
-            let lightcurve =
-                parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
+            let lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
 
             let (photstats, _, stationary) = analyze_photometry(lightcurve, jd);
 
@@ -164,7 +161,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             let update_alert_document = doc! {
                 "$set": {
                     // properties
-                    "properties.rock": is_rock,
                     "properties.stationary": stationary,
                     "properties.photstats": photstats,
                 }

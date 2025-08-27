@@ -1,5 +1,6 @@
 use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
+use crate::utils::db::fetch_timeseries_op;
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -12,6 +13,7 @@ pub struct ZtfEnrichmentWorker {
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_pipeline: Vec<Document>,
     acai_h_model: AcaiModel,
     acai_n_model: AcaiModel,
     acai_v_model: AcaiModel,
@@ -29,6 +31,50 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
         let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
+
+        let alert_pipeline = vec![
+            doc! {
+                "$match": {
+                    "_id": {"$in": []}
+                }
+            },
+            doc! {
+                "$project": {
+                    "objectId": 1,
+                    "candidate": 1,
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "ZTF_alerts_aux",
+                    "localField": "objectId",
+                    "foreignField": "_id",
+                    "as": "aux"
+                }
+            },
+            doc! {
+                "$project": doc! {
+                    "objectId": 1,
+                    "candidate": 1,
+                    "prv_candidates": fetch_timeseries_op(
+                        "aux.prv_candidates",
+                        "candidate.jd",
+                        365,
+                        None
+                    )
+                }
+            },
+            doc! {
+                "$project": doc! {
+                    "objectId": 1,
+                    "candidate": 1,
+                    "prv_candidates.jd": 1,
+                    "prv_candidates.magpsf": 1,
+                    "prv_candidates.sigmapsf": 1,
+                    "prv_candidates.band": 1,
+                }
+            },
+        ];
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
@@ -49,6 +95,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             client,
             alert_collection,
             alert_cutout_collection,
+            alert_pipeline,
             acai_h_model,
             acai_n_model,
             acai_v_model,
@@ -71,84 +118,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         &self,
         candids: &[i64], // this is a slice of candids to process
     ) -> Result<Vec<Document>, EnrichmentWorkerError> {
-        let mut alert_cursor = self
-            .alert_collection
-            .aggregate(vec![
-                doc! {
-                    "$match": {
-                        "_id": {"$in": candids}
-                    }
-                },
-                doc! {
-                    "$project": {
-                        "objectId": 1,
-                        "candidate": 1,
-                    }
-                },
-                doc! {
-                    "$lookup": {
-                        "from": "ZTF_alerts_aux",
-                        "localField": "objectId",
-                        "foreignField": "_id",
-                        "as": "aux"
-                    }
-                },
-                doc! {
-                    "$project": doc! {
-                        "objectId": 1,
-                        "candidate": 1,
-                        "prv_candidates": doc! {
-                            "$filter": doc! {
-                                "input": doc! {
-                                    "$arrayElemAt": [
-                                        "$aux.prv_candidates",
-                                        0
-                                    ]
-                                },
-                                "as": "x",
-                                "cond": doc! {
-                                    "$and": [
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$subtract": [
-                                                        "$candidate.jd",
-                                                        "$$x.jd"
-                                                    ]
-                                                },
-                                                365
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$subtract": [
-                                                        "$candidate.jd",
-                                                        "$$x.jd"
-                                                    ]
-                                                },
-                                                0
-                                            ]
-                                        },
-
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                },
-                doc! {
-                    "$project": doc! {
-                        "objectId": 1,
-                        "candidate": 1,
-                        "prv_candidates.jd": 1,
-                        "prv_candidates.magpsf": 1,
-                        "prv_candidates.sigmapsf": 1,
-                        "prv_candidates.band": 1,
-                    }
-                },
-            ])
-            .await?;
+        let mut alert_pipeline = self.alert_pipeline.clone();
+        if let Some(first_stage) = alert_pipeline.first_mut() {
+            *first_stage = doc! {
+                "$match": {
+                    "_id": {"$in": candids}
+                }
+            };
+        }
+        let mut alert_cursor = self.alert_collection.aggregate(alert_pipeline).await?;
 
         let mut alerts: Vec<Document> = Vec::new();
         let mut candid_to_idx = std::collections::HashMap::new();

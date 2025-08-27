@@ -120,3 +120,55 @@ pub fn update_timeseries_op(
         }
     }
 }
+
+/// This function generates a MongoDB aggregation operation
+/// that filters an array field based on a time window relative to a candidate's jd field.
+/// It can also include optional conditions for filtering.
+pub fn fetch_timeseries_op(
+    array_field: &str,
+    candidate_jd_field: &str,
+    time_window: i64,
+    optional_conditions: Option<Vec<Document>>,
+) -> Document {
+    let mut conditions = vec![
+        doc! {
+            "$lt": [
+                {
+                    "$subtract": [
+                        format!("${}", candidate_jd_field),
+                        "$$x.jd"
+                    ]
+                },
+                time_window
+            ]
+        },
+        doc! {
+            "$gte": [
+                {
+                    "$subtract": [
+                        format!("${}", candidate_jd_field),
+                        "$$x.jd"
+                    ]
+                },
+                0
+            ]
+        },
+    ];
+    if let Some(mut opts) = optional_conditions {
+        conditions.append(&mut opts);
+    }
+    doc! {
+        "$filter": doc! {
+            "input": doc! {
+                "$arrayElemAt": [
+                    format!("${}", array_field),
+                    0
+                ]
+            },
+            "as": "x",
+            "cond": doc! {
+                "$and": conditions
+            }
+        }
+    }
+}
