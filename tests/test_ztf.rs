@@ -361,7 +361,7 @@ async fn test_enrich_ztf_alert() {
     let fading_rate = fading.get_f64("rate").unwrap();
     assert!((peak_mag - 15.6940).abs() < 1e-6);
     assert!((peak_jd - 2460441.971956).abs() < 1e-6);
-    assert!((rising_rate + 0.019685).abs() < 1e-6);
+    assert!((rising_rate + 0.252037).abs() < 1e-6);
     assert!((fading_rate - 0.037152).abs() < 1e-6);
 
     assert!(photstats.contains_key("r"));

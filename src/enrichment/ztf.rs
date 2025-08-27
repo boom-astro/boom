@@ -1,6 +1,6 @@
 use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::fetch_timeseries_op;
+use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -61,7 +61,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         "candidate.jd",
                         365,
                         None
-                    )
+                    ),
+                    "fp_hists": fetch_timeseries_op(
+                        "aux.fp_hists",
+                        "candidate.jd",
+                        365,
+                        Some(vec![doc! {
+                            "$gte": [
+                                "$$x.snr",
+                                3.0
+                            ]
+                        }]),
+                    ),
+                    "aliases": get_array_element("aux.aliases"),
                 }
             },
             doc! {
@@ -72,6 +84,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "prv_candidates.magpsf": 1,
                     "prv_candidates.sigmapsf": 1,
                     "prv_candidates.band": 1,
+                    "fp_hists.jd": 1,
+                    "fp_hists.magpsf": 1,
+                    "fp_hists.sigmapsf": 1,
+                    "fp_hists.band": 1,
+                    "fp_hists.snr": 1,
                 }
             },
         ];
@@ -185,7 +202,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         if alerts.len() != candids.len() {
             warn!(
-                "FEATURE WORKER: only {} alerts fetched from {} candids",
+                "only {} alerts fetched from {} candids",
                 alerts.len(),
                 candids.len()
             );
@@ -203,45 +220,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let candid = alerts[i].get_i64("_id")?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let candidate = alerts[i].get_document("candidate")?;
-
-            let jd = candidate.get_f64("jd")?;
-            let ssdistnr = candidate.get_f64("ssdistnr").unwrap_or(-999.0);
-            let ssmagnr = candidate.get_f64("ssmagnr").unwrap_or(-999.0);
-
-            let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
-
-            let sgscore1 = candidate.get_f64("sgscore1").unwrap_or(0.0);
-            let sgscore2 = candidate.get_f64("sgscore2").unwrap_or(0.0);
-            let sgscore3 = candidate.get_f64("sgscore3").unwrap_or(0.0);
-            let distpsnr1 = candidate.get_f64("distpsnr1").unwrap_or(f64::INFINITY);
-            let distpsnr2 = candidate.get_f64("distpsnr2").unwrap_or(f64::INFINITY);
-            let distpsnr3 = candidate.get_f64("distpsnr3").unwrap_or(f64::INFINITY);
-
-            let srmag1 = candidate.get_f64("srmag1").unwrap_or(f64::INFINITY);
-            let srmag2 = candidate.get_f64("srmag2").unwrap_or(f64::INFINITY);
-            let srmag3 = candidate.get_f64("srmag3").unwrap_or(f64::INFINITY);
-            let sgmag1 = candidate.get_f64("sgmag1").unwrap_or(f64::INFINITY);
-            let simag1 = candidate.get_f64("simag1").unwrap_or(f64::INFINITY);
-
-            let is_star = sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0;
-
-            let is_near_brightstar =
-                (sgscore1 > 0.49 && distpsnr1 <= 20.0 && srmag1 > 0.0 && srmag1 <= 15.0)
-                    || (sgscore2 > 0.49 && distpsnr2 <= 20.0 && srmag2 > 0.0 && srmag2 <= 15.0)
-                    || (sgscore3 > 0.49 && distpsnr3 <= 20.0 && srmag3 > 0.0 && srmag3 <= 15.0)
-                    || (sgscore1 == 0.5
-                        && distpsnr1 < 0.5
-                        && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
-
-            let prv_candidates = alerts[i].get_array("prv_candidates")?;
-
-            let lightcurve =
-                parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
-
-            let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve, jd);
-
-            let programid = candidate.get_i32("programid")?;
+            let (properties, all_bands_properties, programid) =
+                self.get_alert_properties(&alerts[i]).await?;
 
             // Now, prepare inputs for ML models and run inference
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
@@ -272,11 +252,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "classifications.acai_b": acai_b_scores[0],
                     "classifications.btsbot": btsbot_scores[0],
                     // properties
-                    "properties.rock": is_rock,
-                    "properties.star": is_star,
-                    "properties.near_brightstar": is_near_brightstar,
-                    "properties.stationary": stationary,
-                    "properties.photstats": photstats,
+                    "properties": properties,
                 }
             };
 
@@ -295,5 +271,65 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
         Ok(processed_alerts)
+    }
+}
+
+impl ZtfEnrichmentWorker {
+    async fn get_alert_properties(
+        &self,
+        alert: &Document,
+    ) -> Result<(Document, Document, i32), EnrichmentWorkerError> {
+        let candidate = alert.get_document("candidate")?;
+        let jd = candidate.get_f64("jd")?;
+        let programid = candidate.get_i32("programid")?;
+        let ssdistnr = candidate.get_f64("ssdistnr").unwrap_or(-999.0);
+        let ssmagnr = candidate.get_f64("ssmagnr").unwrap_or(-999.0);
+
+        let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
+
+        let sgscore1 = candidate.get_f64("sgscore1").unwrap_or(0.0);
+        let sgscore2 = candidate.get_f64("sgscore2").unwrap_or(0.0);
+        let sgscore3 = candidate.get_f64("sgscore3").unwrap_or(0.0);
+        let distpsnr1 = candidate.get_f64("distpsnr1").unwrap_or(f64::INFINITY);
+        let distpsnr2 = candidate.get_f64("distpsnr2").unwrap_or(f64::INFINITY);
+        let distpsnr3 = candidate.get_f64("distpsnr3").unwrap_or(f64::INFINITY);
+
+        let srmag1 = candidate.get_f64("srmag1").unwrap_or(f64::INFINITY);
+        let srmag2 = candidate.get_f64("srmag2").unwrap_or(f64::INFINITY);
+        let srmag3 = candidate.get_f64("srmag3").unwrap_or(f64::INFINITY);
+        let sgmag1 = candidate.get_f64("sgmag1").unwrap_or(f64::INFINITY);
+        let simag1 = candidate.get_f64("simag1").unwrap_or(f64::INFINITY);
+
+        let is_star = sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0;
+
+        let is_near_brightstar =
+            (sgscore1 > 0.49 && distpsnr1 <= 20.0 && srmag1 > 0.0 && srmag1 <= 15.0)
+                || (sgscore2 > 0.49 && distpsnr2 <= 20.0 && srmag2 > 0.0 && srmag2 <= 15.0)
+                || (sgscore3 > 0.49 && distpsnr3 <= 20.0 && srmag3 > 0.0 && srmag3 <= 15.0)
+                || (sgscore1 == 0.5
+                    && distpsnr1 < 0.5
+                    && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
+
+        let prv_candidates = alert.get_array("prv_candidates")?;
+        let fp_hists = alert.get_array("fp_hists")?;
+        let mut lightcurve =
+            parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
+        lightcurve.extend(parse_photometry(
+            fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
+        ));
+
+        let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve);
+
+        Ok((
+            doc! {
+                "rock": is_rock,
+                "star": is_star,
+                "near_brightstar": is_near_brightstar,
+                "stationary": stationary,
+                "photstats": photstats,
+            },
+            all_bands_properties,
+            programid,
+        ))
     }
 }
