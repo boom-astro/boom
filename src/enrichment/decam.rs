@@ -126,7 +126,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
         if alerts.len() != candids.len() {
             warn!(
-                "FEATURE WORKER: only {} alerts fetched from {} candids",
+                "only {} alerts fetched from {} candids",
                 alerts.len(),
                 candids.len()
             );

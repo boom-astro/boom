@@ -1,6 +1,6 @@
 use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::fetch_timeseries_op;
+use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -61,7 +61,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         "candidate.jd",
                         365,
                         None
-                    )
+                    ),
+                    "fp_hists": fetch_timeseries_op(
+                        "aux.fp_hists",
+                        "candidate.jd",
+                        365,
+                        Some(vec![doc! {
+                            "$gte": [
+                                "$$x.snr",
+                                3.0
+                            ]
+                        }]),
+                    ),
+                    "aliases": get_array_element("aux.aliases"),
                 }
             },
             doc! {
@@ -72,6 +84,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "prv_candidates.magpsf": 1,
                     "prv_candidates.sigmapsf": 1,
                     "prv_candidates.band": 1,
+                    "fp_hists.jd": 1,
+                    "fp_hists.magpsf": 1,
+                    "fp_hists.sigmapsf": 1,
+                    "fp_hists.band": 1,
+                    "fp_hists.snr": 1,
                 }
             },
         ];
@@ -185,7 +202,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         if alerts.len() != candids.len() {
             warn!(
-                "FEATURE WORKER: only {} alerts fetched from {} candids",
+                "only {} alerts fetched from {} candids",
                 alerts.len(),
                 candids.len()
             );
@@ -235,9 +252,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
 
             let prv_candidates = alerts[i].get_array("prv_candidates")?;
-
-            let lightcurve =
+            let fp_hists = alerts[i].get_array("fp_hists")?;
+            let mut lightcurve =
                 parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
+            lightcurve.extend(parse_photometry(
+                fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
+            ));
 
             let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve, jd);
 

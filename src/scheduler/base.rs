@@ -216,23 +216,24 @@ impl Worker {
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),
-            WorkerType::ML => thread::spawn(move || {
+            WorkerType::Enrichment => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "feature worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting feature worker");
+                span!(INFO, "enrichment worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting enrichment worker");
                     debug!(?config_path);
                     let run = match survey_name {
                         Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
                         Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
                         _ => {
                             error!(
-                                "Feature worker not implemented for survey: {:?}",
+                                "Enrichment worker not implemented for survey: {:?}",
                                 survey_name
                             );
                             return;
                         }
                     };
-                    run(receiver, &config_path).unwrap_or_else(as_error!("feature worker failed"));
+                    run(receiver, &config_path)
+                        .unwrap_or_else(as_error!("enrichment     worker failed"));
                 })
             }),
         };
