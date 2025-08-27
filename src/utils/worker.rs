@@ -40,8 +40,8 @@ pub fn get_check_command_interval(conf: Config, stream_name: &str) -> i64 {
 #[derive(Clone, Debug)]
 pub enum WorkerType {
     Alert,
+    Enrichment,
     Filter,
-    ML,
 }
 
 impl Copy for WorkerType {}
@@ -54,7 +54,7 @@ impl fmt::Display for WorkerType {
                 enum_str = "Alert";
             }
             WorkerType::Filter => enum_str = "Filter",
-            WorkerType::ML => enum_str = "ML",
+            WorkerType::Enrichment => enum_str = "Enrichment",
         }
         write!(f, "{}", enum_str)
     }
