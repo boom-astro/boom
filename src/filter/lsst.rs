@@ -102,8 +102,10 @@ impl Filter for LsstFilter {
             );
         }
 
-        let mut insert_aux_pipeline =
-            use_prv_candidates_index.is_some() || use_cross_matches_index.is_some();
+        let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
+            || use_fp_hists_index.is_some()
+            || use_cross_matches_index.is_some()
+            || use_aliases_index.is_some();
 
         let mut insert_aux_index = usize::MAX;
         if let Some(index) = use_prv_candidates_index {
