@@ -1,6 +1,7 @@
 use crate::{
     conf,
     utils::{
+        db::get_array_element,
         enums::Survey,
         worker::{should_terminate, WorkerCmd},
     },
@@ -408,12 +409,7 @@ pub async fn get_filter_object(
             },
             doc! {
                 "$project": doc! {
-                    "pipeline": doc! {
-                        "$arrayElemAt": [
-                            "$fv.pipeline",
-                            0
-                        ]
-                    },
+                    "pipeline": get_array_element("fv.pipeline"),
                     "group_id": 1,
                     "permissions": 1,
                     "catalog": 1

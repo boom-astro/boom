@@ -7,7 +7,7 @@ use crate::filter::{
     get_filter_object, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert, Filter,
     FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
 };
-use crate::utils::db::fetch_timeseries_op;
+use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;
 
 pub struct LsstFilter {
@@ -82,24 +82,11 @@ impl Filter for LsstFilter {
         if use_cross_matches_index.is_some() {
             aux_add_fields.insert(
                 "cross_matches".to_string(),
-                doc! {
-                    "$arrayElemAt": [
-                        "$aux.cross_matches",
-                        0
-                    ]
-                },
+                get_array_element("aux.cross_matches"),
             );
         }
         if use_aliases_index.is_some() {
-            aux_add_fields.insert(
-                "aliases".to_string(),
-                doc! {
-                    "$arrayElemAt": [
-                        "$aux.aliases",
-                        0
-                    ]
-                },
-            );
+            aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
         }
 
         let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
@@ -254,9 +241,6 @@ impl FilterWorker for LsstFilterWorker {
                     "jd": "$candidate.jd",
                     "ra": "$candidate.ra",
                     "dec": "$candidate.dec",
-                    "cutoutScience": 1,
-                    "cutoutTemplate": 1,
-                    "cutoutDifference": 1
                 }
             },
             doc! {
@@ -281,36 +265,11 @@ impl FilterWorker for LsstFilterWorker {
                     "jd": 1,
                     "ra": 1,
                     "dec": 1,
-                    "prv_candidates": {
-                        "$arrayElemAt": [
-                            "$aux.prv_candidates",
-                            0
-                        ]
-                    },
-                    "fp_hists": {
-                        "$arrayElemAt": [
-                            "$aux.fp_hists",
-                            0
-                        ]
-                    },
-                    "cutoutScience": {
-                        "$arrayElemAt": [
-                            "$cutouts.cutoutScience",
-                            0
-                        ]
-                    },
-                    "cutoutTemplate": {
-                        "$arrayElemAt": [
-                            "$cutouts.cutoutTemplate",
-                            0
-                        ]
-                    },
-                    "cutoutDifference": {
-                        "$arrayElemAt": [
-                            "$cutouts.cutoutDifference",
-                            0
-                        ]
-                    }
+                    "prv_candidates": get_array_element("aux.prv_candidates"),
+                    "fp_hists": get_array_element("aux.fp_hists"),
+                    "cutoutScience": get_array_element("cutouts.cutoutScience"),
+                    "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
+                    "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
                 }
             },
         ];

@@ -9,7 +9,7 @@ use crate::filter::{
     validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
     FilterWorker, FilterWorkerError, Origin, Photometry,
 };
-use crate::utils::db::fetch_timeseries_op;
+use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 #[derive(Debug)]
@@ -145,24 +145,11 @@ impl Filter for ZtfFilter {
         if use_cross_matches_index.is_some() {
             aux_add_fields.insert(
                 "cross_matches".to_string(),
-                doc! {
-                    "$arrayElemAt": [
-                        "$aux.cross_matches",
-                        0
-                    ]
-                },
+                get_array_element("aux.cross_matches"),
             );
         }
         if use_aliases_index.is_some() {
-            aux_add_fields.insert(
-                "aliases".to_string(),
-                doc! {
-                    "$arrayElemAt": [
-                        "$aux.aliases",
-                        0
-                    ]
-                },
-            );
+            aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
         }
 
         let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
@@ -336,9 +323,6 @@ impl FilterWorker for ZtfFilterWorker {
                     "jd": "$candidate.jd",
                     "ra": "$candidate.ra",
                     "dec": "$candidate.dec",
-                    "cutoutScience": 1,
-                    "cutoutTemplate": 1,
-                    "cutoutDifference": 1,
                     "classifications": 1,
                 }
             },
@@ -364,42 +348,12 @@ impl FilterWorker for ZtfFilterWorker {
                     "jd": 1,
                     "ra": 1,
                     "dec": 1,
-                    "prv_candidates": {
-                        "$arrayElemAt": [
-                            "$aux.prv_candidates",
-                            0
-                        ]
-                    },
-                    "prv_nondetections": {
-                        "$arrayElemAt": [
-                            "$aux.prv_nondetections",
-                            0
-                        ]
-                    },
-                    "fp_hists": {
-                        "$arrayElemAt": [
-                            "$aux.fp_hists",
-                            0
-                        ]
-                    },
-                    "cutoutScience": {
-                        "$arrayElemAt": [
-                            "$cutouts.cutoutScience",
-                            0
-                        ]
-                    },
-                    "cutoutTemplate": {
-                        "$arrayElemAt": [
-                            "$cutouts.cutoutTemplate",
-                            0
-                        ]
-                    },
-                    "cutoutDifference": {
-                        "$arrayElemAt": [
-                            "$cutouts.cutoutDifference",
-                            0
-                        ]
-                    },
+                    "prv_candidates": get_array_element("aux.prv_candidates"),
+                    "prv_nondetections": get_array_element("aux.prv_nondetections"),
+                    "fp_hists": get_array_element("aux.fp_hists"),
+                    "cutoutScience": get_array_element("cutouts.cutoutScience"),
+                    "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
+                    "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
                     "classifications": 1,
                 }
             },

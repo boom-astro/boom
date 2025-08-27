@@ -121,6 +121,15 @@ pub fn update_timeseries_op(
     }
 }
 
+pub fn get_array_element(field: &str) -> Document {
+    doc! {
+        "$arrayElemAt": [
+            format!("${}", field),
+            0
+        ]
+    }
+}
+
 /// This function generates a MongoDB aggregation operation
 /// that filters an array field based on a time window relative to a candidate's jd field.
 /// It can also include optional conditions for filtering.
@@ -154,12 +163,7 @@ pub fn fetch_timeseries_op(
     }
     doc! {
         "$filter": doc! {
-            "input": doc! {
-                "$arrayElemAt": [
-                    format!("${}", array_field),
-                    0
-                ]
-            },
+            "input": get_array_element(array_field),
             "as": "x",
             "cond": doc! {
                 "$and": conditions
