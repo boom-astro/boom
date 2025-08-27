@@ -64,6 +64,7 @@ impl Filter for LsstFilter {
         let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
         let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
         let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+        let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
         if use_prv_candidates_index.is_some() {
             // insert it in aux addFields stage
@@ -89,6 +90,17 @@ impl Filter for LsstFilter {
                 },
             );
         }
+        if use_aliases_index.is_some() {
+            aux_add_fields.insert(
+                "aliases".to_string(),
+                doc! {
+                    "$arrayElemAt": [
+                        "$aux.aliases",
+                        0
+                    ]
+                },
+            );
+        }
 
         let mut insert_aux_pipeline =
             use_prv_candidates_index.is_some() || use_cross_matches_index.is_some();
@@ -97,7 +109,13 @@ impl Filter for LsstFilter {
         if let Some(index) = use_prv_candidates_index {
             insert_aux_index = insert_aux_index.min(index);
         }
+        if let Some(index) = use_fp_hists_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
         if let Some(index) = use_cross_matches_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
+        if let Some(index) = use_aliases_index {
             insert_aux_index = insert_aux_index.min(index);
         }
 
@@ -368,6 +386,9 @@ impl FilterWorker for LsstFilterWorker {
                 dec,
             });
         }
+
+        // sort the photometry by jd ascending
+        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
         let alert = Alert {
             candid,

@@ -91,6 +91,7 @@ impl Filter for ZtfFilter {
             uses_field_in_filter(filter_pipeline, "prv_nondetections");
         let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
         let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+        let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
         if use_prv_candidates_index.is_some() {
             // insert it in aux addFields stage
@@ -152,10 +153,23 @@ impl Filter for ZtfFilter {
                 },
             );
         }
+        if use_aliases_index.is_some() {
+            aux_add_fields.insert(
+                "aliases".to_string(),
+                doc! {
+                    "$arrayElemAt": [
+                        "$aux.aliases",
+                        0
+                    ]
+                },
+            );
+        }
 
         let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
             || use_prv_nondetections_index.is_some()
-            || use_cross_matches_index.is_some();
+            || use_cross_matches_index.is_some()
+            || use_fp_hists_index.is_some()
+            || use_aliases_index.is_some();
 
         let mut insert_aux_index = usize::MAX;
         if let Some(index) = use_prv_candidates_index {
@@ -164,7 +178,13 @@ impl Filter for ZtfFilter {
         if let Some(index) = use_prv_nondetections_index {
             insert_aux_index = insert_aux_index.min(index);
         }
+        if let Some(index) = use_fp_hists_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
         if let Some(index) = use_cross_matches_index {
+            insert_aux_index = insert_aux_index.min(index);
+        }
+        if let Some(index) = use_aliases_index {
             insert_aux_index = insert_aux_index.min(index);
         }
 
@@ -356,6 +376,12 @@ impl FilterWorker for ZtfFilterWorker {
                             0
                         ]
                     },
+                    "fp_hists": {
+                        "$arrayElemAt": [
+                            "$aux.fp_hists",
+                            0
+                        ]
+                    },
                     "cutoutScience": {
                         "$arrayElemAt": [
                             "$cutouts.cutoutScience",
@@ -462,7 +488,43 @@ impl FilterWorker for ZtfFilterWorker {
             });
         }
 
-        // we ignore the forced photometry for now, but will add it later
+        for doc in alert_document.get_array("fp_hists")?.iter() {
+            let doc = match doc.as_document() {
+                Some(doc) => doc,
+                None => continue, // skip if not a document
+            };
+            let jd = doc.get_f64("jd")?;
+            let flux = match doc.get_f64("forcediffimflux") {
+                Ok(flux) => Some(flux),
+                Err(_) => None,
+            };
+            let flux_err = match doc.get_f64("forcediffimfluxunc") {
+                Ok(flux_err) => flux_err,
+                Err(_) => {
+                    let diffmaglim = doc.get_f64("diffmaglim")?;
+                    limmag_to_fluxerr(diffmaglim, 23.9, 5.0)
+                }
+            };
+            let band = doc.get_str("band")?.to_string();
+            let programid = doc.get_i32("programid")?;
+            let zero_point = 23.9;
+
+            photometry.push(Photometry {
+                jd,
+                flux,
+                flux_err,
+                band: format!("ztf{}", band),
+                zero_point,
+                origin: Origin::ForcedPhot,
+                programid,
+                survey: Survey::Ztf,
+                ra: None,
+                dec: None,
+            });
+        }
+
+        // sort the photometry by jd ascending
+        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
         // last but not least, we need to get the classifications
         let mut classifications = Vec::new();
