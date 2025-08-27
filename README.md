@@ -132,10 +132,14 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 - What you should definitely see is a lot of `heart beat (MAIN)` messages, which means that the scheduler is running and managing the workers correctly.
 
 Metrics are available in the Prometheus instance at <http://localhost:9090>.
-Click [here][example-queries] to load Prometheus with a collection of useful
-queries already entered in the UI.
+Here some links to the Prometheus UI with useful queries already entered:
 
-[example-queries]: http://localhost:9090/query?g0.expr=alert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=15m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=15m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=avg+by+%28status%29+%28irate%28alert_worker_alert_duration_seconds_sum%5B5m%5D%29+%2F+irate%28alert_worker_alert_duration_seconds_count%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=15m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%7D%29+by+%28le%29+%2F+scalar%28sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%2C+le%3D%22%2BInf%22%7D%29%29&g3.show_tree=0&g3.tab=graph&g3.range_input=15m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
+* [Alert workers][alert-worker-queries]
+* [ML workers][ml-worker-queries]
+
+[alert-worker-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+alert+workers%0Aalert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Asum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0
+
+[ml-worker-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+ML+workers%0Aml_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=1h&g0.res_type=auto&g0.res_density=medium&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Asum+by+%28status%29+%28irate%28ml_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+sum+by+%28status%29+%28irate%28ml_worker_alert_processed_total%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=%23+Number+of+alerts+per+batch%0Airate%28ml_worker_alert_processed_total%5B5m%5D%29+%2F+irate%28ml_worker_batch_processed_total%5B5m%5D%29&g3.show_tree=0&g3.tab=graph&g3.range_input=30m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
 
 ## Stopping BOOM:
 

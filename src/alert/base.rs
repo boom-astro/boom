@@ -20,7 +20,7 @@ use mongodb::{
     Collection,
 };
 use opentelemetry::{
-    metrics::{Counter, Histogram, UpDownCounter},
+    metrics::{Counter, UpDownCounter},
     KeyValue,
 };
 use redis::AsyncCommands;
@@ -43,21 +43,6 @@ static ALERT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
         .i64_up_down_counter("alert_worker.active")
         .with_unit("{alert}")
         .with_description("Number of alerts currently being processed by the alert worker.")
-        .build()
-});
-
-// Histogram for the times taken by the alert workers to process each alert.
-static ALERT_WORKER_DURATION: LazyLock<Histogram<f64>> = LazyLock::new(|| {
-    let start = 0.01;
-    let factor: f64 = 2.0;
-    let n_buckets = 10;
-    let mut boundaries: Vec<f64> = (0..n_buckets).map(|n| start * factor.powi(n)).collect();
-    boundaries.insert(0, 0.0);
-    SCHEDULER_METER
-        .f64_histogram("alert_worker.alert.duration")
-        .with_unit("s")
-        .with_description("Distribution of times taken by the alert worker to process each alert.")
-        .with_boundaries(boundaries)
         .build()
 });
 
@@ -687,7 +672,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
         command_check_countdown -= 1;
 
-        let alert_start = std::time::Instant::now();
         ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
@@ -702,10 +686,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
             Err(e) => {
                 log_error!(e, "failed to retrieve avro bytes");
-                let attributes = &alert_worker_input_error_attrs;
                 ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
-                ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
-                ALERT_WORKER_PROCESSED.add(1, attributes);
+                ALERT_WORKER_PROCESSED.add(1, &alert_worker_input_error_attrs);
                 continue;
             }
         };
@@ -730,7 +712,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
 
         ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
-        ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
         ALERT_WORKER_PROCESSED.add(1, attributes);
 
         handle_result?;

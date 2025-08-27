@@ -12,37 +12,31 @@ use std::{num::NonZero, sync::LazyLock};
 
 use mongodb::bson::Document;
 use opentelemetry::{
-    metrics::{Counter, Histogram, UpDownCounter},
+    metrics::{Counter, UpDownCounter},
     KeyValue,
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, instrument};
 
 // NOTE: Global instruments are defined here because reusing instruments is
 // considered a best practice. See boom::alert::base.
 
-// UpDownCounter for the number of alerts currently being processed by the ML workers.
+// UpDownCounter for the number of alert batches currently being processed by the ML workers.
 static ML_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .i64_up_down_counter("ml_worker.active")
-        .with_unit("{alert}")
-        .with_description("Number of alerts currently being processed by the ML worker.")
+        .with_unit("{batch}")
+        .with_description("Number of alert batches currently being processed by the ML worker.")
         .build()
 });
 
-// Histogram for the times taken by the ML workers to process each alert.
-static ML_WORKER_DURATION: LazyLock<Histogram<f64>> = LazyLock::new(|| {
-    let start = 0.01;
-    let factor: f64 = 2.0;
-    let n_buckets = 10;
-    let mut boundaries: Vec<f64> = (0..n_buckets).map(|n| start * factor.powi(n)).collect();
-    boundaries.insert(0, 0.0);
+// Counter for the number of alert batches processed by the ML workers.
+static ML_WORKER_BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
-        .f64_histogram("ml_worker.alert.duration")
-        .with_unit("s")
-        .with_description("Distribution of times taken by the ML worker to process each alert.")
-        .with_boundaries(boundaries)
+        .u64_counter("ml_worker.batch.processed")
+        .with_unit("{batch}")
+        .with_description("Number of alert batches processed by the ML worker.")
         .build()
 });
 
@@ -130,47 +124,40 @@ pub async fn run_ml_worker<T: MLWorker>(
             command_check_countdown = command_interval;
         }
 
-        let alert_start = std::time::Instant::now();
         ML_WORKER_ACTIVE.add(1, &ml_worker_active_attrs);
         let candids: Vec<i64> = con
             .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
             .await
             .inspect_err(|_| {
-                let attributes = &ml_worker_input_error_attrs;
                 ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
-                ML_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
-                ML_WORKER_PROCESSED.add(1, attributes);
+                ML_WORKER_BATCH_PROCESSED.add(1, &ml_worker_input_error_attrs);
             })?;
 
         if candids.is_empty() {
-            info!("queue is empty");
             ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
         }
 
+        let batch_size = candids.len() as u64;
         let processed_alerts = ml_worker.process_alerts(&candids).await.inspect_err(|_| {
-            let attributes = &ml_worker_processing_error_attrs;
             ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
-            ML_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
-            ML_WORKER_PROCESSED.add(1, attributes);
+            ML_WORKER_BATCH_PROCESSED.add(1, &ml_worker_processing_error_attrs);
         })?;
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await
             .inspect_err(|_| {
-                let attributes = &ml_worker_output_error_attrs;
                 ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
-                ML_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
-                ML_WORKER_PROCESSED.add(1, attributes);
+                ML_WORKER_BATCH_PROCESSED.add(1, &ml_worker_output_error_attrs);
             })?;
 
         let attributes = &ml_worker_ok_attrs;
         ML_WORKER_ACTIVE.add(-1, &ml_worker_active_attrs);
-        ML_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
-        ML_WORKER_PROCESSED.add(1, attributes);
+        ML_WORKER_BATCH_PROCESSED.add(1, attributes);
+        ML_WORKER_PROCESSED.add(batch_size, attributes);
     }
 
     Ok(())
