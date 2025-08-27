@@ -127,7 +127,7 @@ pub fn update_timeseries_op(
 pub fn fetch_timeseries_op(
     array_field: &str,
     candidate_jd_field: &str,
-    time_window: i64,
+    time_window: i32,
     optional_conditions: Option<Vec<Document>>,
 ) -> Document {
     let mut conditions = vec![
