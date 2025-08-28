@@ -109,7 +109,7 @@ pub async fn drop_alert_from_collections(
 
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
-const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.5}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
     filter_id: &str,
@@ -200,11 +200,15 @@ pub struct AlertRandomizer {
 
 impl AlertRandomizer {
     pub fn new(survey: Survey) -> Self {
+        let schema_registry = match survey {
+            Survey::Lsst => Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+            _ => None,
+        };
         Self {
             survey,
             payload: None,
             schema: None,
-            schema_registry: None,
+            schema_registry,
             candid: None,
             object_id: None,
             ra: None,
@@ -232,7 +236,7 @@ impl AlertRandomizer {
                 )
             }
             Survey::Lsst => {
-                let payload = fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap();
+                let payload = fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap();
                 (
                     Some(Self::randomize_object_id(&survey)),
                     Some(payload),
@@ -357,20 +361,24 @@ impl AlertRandomizer {
     // For LSST, similar logic for diaSource
     fn update_diasource_fields(
         candidate_record: &mut Vec<(String, Value)>,
+        candid: &mut Option<i64>,
         object_id: &mut Option<String>,
         ra: &mut Option<f64>,
         dec: &mut Option<f64>,
     ) {
         for (key, value) in candidate_record.iter_mut() {
             match key.as_str() {
-                "diaSourceId" | "diaObjectId" => {
+                "diaSourceId" => {
+                    if let Some(id) = candid {
+                        *value = Value::Long(*id);
+                    } else {
+                        *candid = Some(Self::value_to_i64(value));
+                    }
+                }
+                "diaObjectId" => {
                     if let Some(ref id) = object_id {
                         let id_i64 = id.parse::<i64>().unwrap();
-                        if key == "diaSourceId" {
-                            *value = Value::Long(id_i64);
-                        } else {
-                            *value = Value::Union(1_u32, Box::new(Value::Long(id_i64)));
-                        }
+                        *value = Value::Union(1_u32, Box::new(Value::Long(id_i64)));
                     } else {
                         *object_id = Some(Self::value_to_i64(value).to_string());
                     }
@@ -479,7 +487,7 @@ impl AlertRandomizer {
                 let mut dec = self.dec;
                 let payload = match self.payload {
                     Some(payload) => payload,
-                    None => fs::read("tests/data/alerts/lsst/25409136044802067.avro").unwrap(),
+                    None => fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap(),
                 };
                 let header = payload[0..5].to_vec();
                 let magic = header[0];
@@ -501,7 +509,7 @@ impl AlertRandomizer {
                 for i in 0..record.len() {
                     let (key, value) = &mut record[i];
                     match key.as_str() {
-                        "alertId" => {
+                        "diaSourceId" => {
                             if let Some(id) = candid {
                                 *value = Value::Long(id);
                             } else {
@@ -512,6 +520,7 @@ impl AlertRandomizer {
                             if let Value::Record(candidate_record) = value {
                                 Self::update_diasource_fields(
                                     candidate_record,
+                                    &mut candid,
                                     &mut object_id,
                                     &mut ra,
                                     &mut dec,

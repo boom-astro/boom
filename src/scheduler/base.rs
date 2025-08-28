@@ -1,7 +1,7 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
+    enrichment::{run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
-    ml::{run_ml_worker, ZtfMLWorker},
     utils::{
         enums::Survey,
         o11y::logging::{as_error, INFO},
@@ -218,19 +218,24 @@ impl Worker {
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),
-            WorkerType::ML => thread::spawn(move || {
+            WorkerType::Enrichment => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "ml worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting ml worker");
+                span!(INFO, "enrichment worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting enrichment worker");
                     debug!(?config_path);
                     let run = match survey_name {
-                        Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
+                        Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
+                        Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
                         _ => {
-                            error!("ML worker not implemented for survey: {:?}", survey_name);
+                            error!(
+                                "Enrichment worker not implemented for survey: {:?}",
+                                survey_name
+                            );
                             return;
                         }
                     };
-                    run(receiver, &config_path, id).unwrap_or_else(as_error!("ml worker failed"));
+                    run(receiver, &config_path, id)
+                        .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
         };

@@ -1,6 +1,7 @@
 use crate::{
     conf,
     utils::{
+        db::get_array_element,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
@@ -260,6 +261,7 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
+#[instrument(skip_all)]
 pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     // we consider a value is a match with field if it is:
     // - equal to the field
@@ -291,6 +293,7 @@ pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     false
 }
 
+#[instrument(skip_all)]
 pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) -> Option<usize> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
         if uses_field_in_stage(stage, field) {
@@ -300,6 +303,7 @@ pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) 
     None
 }
 
+#[instrument(skip_all, err)]
 pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result<(), FilterError> {
     // mongodb aggregation pipelines have project stages that can include or exclude fields,
     // (not both at the same time), and unset stages that remove fields.
@@ -442,12 +446,7 @@ pub async fn get_filter_object(
             },
             doc! {
                 "$project": doc! {
-                    "pipeline": doc! {
-                        "$arrayElemAt": [
-                            "$fv.pipeline",
-                            0
-                        ]
-                    },
+                    "pipeline": get_array_element("fv.pipeline"),
                     "group_id": 1,
                     "permissions": 1,
                     "catalog": 1

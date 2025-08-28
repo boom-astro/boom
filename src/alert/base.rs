@@ -218,6 +218,8 @@ pub enum AlertError {
     MissingMagZPSci,
     #[error("could not find avro magic bytes")]
     MagicBytesError,
+    #[error("missing alert aux")]
+    AlertAuxNotFound,
 }
 
 #[derive(Debug, PartialEq)]
@@ -499,7 +501,7 @@ pub trait AlertWorker {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
         collection: &Collection<Document>,
-    ) -> Result<(), AlertError> {
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let cutout_doc = doc! {
             "_id": &candid,
             "cutoutScience": cutout2bsonbinary(cutout_science),
@@ -507,8 +509,17 @@ pub trait AlertWorker {
             "cutoutDifference": cutout2bsonbinary(cutout_difference),
         };
 
-        collection.insert_one(cutout_doc).await?;
-        Ok(())
+        let status = collection
+            .insert_one(cutout_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
     }
     #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
     async fn get_matches(
