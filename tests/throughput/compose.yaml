@@ -35,7 +35,7 @@ services:
     volumes:
       - ${PWD}/tests/throughput/mongo-init.sh:/mongo-init.sh
       - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
-      - ${PWD}/tests/throughput/cats150.json:/cats150.json
+      - ${PWD}/tests/throughput/cats150.filter.json:/cats150.filter.json
     environment:
       - DB_NAME=boom-benchmarking
       - DB_ADD_URI=
