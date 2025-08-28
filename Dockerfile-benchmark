@@ -32,9 +32,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsasl2-2 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy in the ML models
-COPY data/models /app/data/models
-
 # Copy the built executables from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
