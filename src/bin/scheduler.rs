@@ -129,6 +129,9 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 async fn main() {
     let args = Cli::parse();
 
+    // DUMMY code change to force a new build
+    println!("Boom scheduler starting up...");
+
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
