@@ -22,6 +22,7 @@ use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace, warn};
+use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
 // considered a best practice. See boom::alert::base.
@@ -561,7 +562,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     key: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
-    worker_id: String,
+    worker_id: Uuid,
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
 
@@ -588,7 +589,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
-    let worker_id_attr = KeyValue::new("worker.id", worker_id);
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let filter_worker_active_attrs = [worker_id_attr.clone()];
     let filter_worker_ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
     let filter_worker_input_error_attrs = [

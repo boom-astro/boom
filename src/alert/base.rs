@@ -27,6 +27,7 @@ use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
+use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
 
@@ -621,7 +622,7 @@ async fn handle_process_result(
 pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
-    worker_id: String,
+    worker_id: Uuid,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
@@ -642,7 +643,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut count = 0;
 
     let start = std::time::Instant::now();
-    let worker_id_attr = KeyValue::new("worker.id", worker_id);
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let alert_worker_active_attrs = [worker_id_attr.clone()];
     let alert_worker_added_attrs = vec![worker_id_attr.clone(), KeyValue::new("status", "added")];
     let alert_worker_exists_attrs = vec![worker_id_attr.clone(), KeyValue::new("status", "exists")];

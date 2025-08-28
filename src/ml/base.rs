@@ -18,6 +18,7 @@ use opentelemetry::{
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
 use tracing::{debug, error, instrument};
+use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
 // considered a best practice. See boom::alert::base.
@@ -84,7 +85,7 @@ pub trait MLWorker {
 pub async fn run_ml_worker<T: MLWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
-    worker_id: String,
+    worker_id: Uuid,
 ) -> Result<(), MLWorkerError> {
     debug!(?config_path);
     let mut ml_worker = T::new(config_path).await?;
@@ -98,7 +99,7 @@ pub async fn run_ml_worker<T: MLWorker>(
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
-    let worker_id_attr = KeyValue::new("worker.id", worker_id);
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let ml_worker_active_attrs = [worker_id_attr.clone()];
     let ml_worker_ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
     let ml_worker_input_error_attrs = [
