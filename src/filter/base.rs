@@ -29,7 +29,7 @@ use uuid::Uuid;
 // considered a best practice. See boom::alert::base.
 
 // UpDownCounter for the number of alerts currently being processed by the filter workers.
-static FILTER_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .i64_up_down_counter("filter_worker.active")
         .with_unit("{alert}")
@@ -38,7 +38,7 @@ static FILTER_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
 });
 
 // Counter for the number of alert batches processed by the filter workers.
-static FILTER_WORKER_BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("filter_worker.batch.processed")
         .with_unit("{batch}")
@@ -47,7 +47,7 @@ static FILTER_WORKER_BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| 
 });
 
 // Counter for the number of alerts processed by the filter workers.
-static FILTER_WORKER_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("filter_worker.alert.processed")
         .with_unit("{alert}")
@@ -589,32 +589,32 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let filter_worker_active_attrs = [worker_id_attr.clone()];
-    let filter_worker_ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
-    let filter_worker_included_attrs = [
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let ok_included_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "included"),
     ];
-    let filter_worker_excluded_attrs = [
+    let ok_excluded_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "excluded"),
     ];
-    let filter_worker_input_error_attrs = [
+    let input_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
-    let filter_worker_processing_error_attrs = [
+    let processing_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
-    let filter_worker_output_error_attrs = [
+    let output_error_attrs = [
         worker_id_attr,
         KeyValue::new("status", "error"),
-        KeyValue::new("reason", "output_queue"),
+        KeyValue::new("reason", "kafka_send"),
     ];
     loop {
         if command_check_countdown == 0 {
@@ -624,17 +624,17 @@ pub async fn run_filter_worker<T: FilterWorker>(
             command_check_countdown = command_interval + 1;
         }
 
-        FILTER_WORKER_ACTIVE.add(1, &filter_worker_active_attrs);
+        ACTIVE.add(1, &active_attrs);
         let alerts: Vec<String> = con
             .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
             .await
             .inspect_err(|_| {
-                FILTER_WORKER_ACTIVE.add(-1, &filter_worker_active_attrs);
-                FILTER_WORKER_BATCH_PROCESSED.add(1, &filter_worker_input_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &input_error_attrs);
             })?;
 
         if alerts.is_empty() {
-            FILTER_WORKER_ACTIVE.add(-1, &filter_worker_active_attrs);
+            ACTIVE.add(-1, &active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
@@ -644,24 +644,24 @@ pub async fn run_filter_worker<T: FilterWorker>(
             .process_alerts(&alerts)
             .await
             .inspect_err(|_| {
-                FILTER_WORKER_ACTIVE.add(-1, &filter_worker_active_attrs);
-                FILTER_WORKER_BATCH_PROCESSED.add(1, &filter_worker_processing_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        FILTER_WORKER_BATCH_PROCESSED.add(1, &filter_worker_ok_attrs);
-        FILTER_WORKER_PROCESSED.add(
+        BATCH_PROCESSED.add(1, &ok_attrs);
+        ALERT_PROCESSED.add(
             (alerts.len() - alerts_output.len()) as u64,
-            &filter_worker_excluded_attrs,
+            &ok_excluded_attrs,
         );
         for alert in alerts_output {
             send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key)
                 .await
                 .inspect_err(|_| {
-                    let attributes = &filter_worker_output_error_attrs;
-                    FILTER_WORKER_ACTIVE.add(-1, &filter_worker_active_attrs);
-                    FILTER_WORKER_BATCH_PROCESSED.add(1, attributes);
-                    FILTER_WORKER_PROCESSED.add(1, attributes);
+                    let attributes = &output_error_attrs;
+                    ACTIVE.add(-1, &active_attrs);
+                    BATCH_PROCESSED.add(1, attributes);
+                    ALERT_PROCESSED.add(1, attributes);
                 })?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
@@ -670,10 +670,10 @@ pub async fn run_filter_worker<T: FilterWorker>(
             );
             // Incrementing by alerts_output.len() outside this loop may be more
             // efficient, but incrementing by 1 here is more accurate.
-            FILTER_WORKER_PROCESSED.add(1, &filter_worker_included_attrs);
+            ALERT_PROCESSED.add(1, &ok_included_attrs);
         }
 
-        FILTER_WORKER_ACTIVE.add(-1, &filter_worker_active_attrs);
+        ACTIVE.add(-1, &active_attrs);
     }
 
     Ok(())

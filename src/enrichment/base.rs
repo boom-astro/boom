@@ -24,7 +24,7 @@ use uuid::Uuid;
 // considered a best practice. See boom::alert::base.
 
 // UpDownCounter for the number of alert batches currently being processed by the enrichment workers.
-static ENRICHMENT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .i64_up_down_counter("enrichment_worker.active")
         .with_unit("{batch}")
@@ -35,7 +35,7 @@ static ENRICHMENT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(||
 });
 
 // Counter for the number of alert batches processed by the enrichment workers.
-static ENRICHMENT_WORKER_BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("enrichment_worker.batch.processed")
         .with_unit("{batch}")
@@ -44,7 +44,7 @@ static ENRICHMENT_WORKER_BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new
 });
 
 // Counter for the number of alerts processed by the enrichment workers.
-static ENRICHMENT_WORKER_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("enrichment_worker.alert.processed")
         .with_unit("{alert}")
@@ -105,19 +105,19 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let enrichment_worker_active_attrs = [worker_id_attr.clone()];
-    let enrichment_worker_ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
-    let enrichment_worker_input_error_attrs = [
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let input_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
-    let enrichment_worker_processing_error_attrs = [
+    let processing_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
-    let enrichment_worker_output_error_attrs = [
+    let output_error_attrs = [
         worker_id_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "output_queue"),
@@ -130,17 +130,17 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             command_check_countdown = command_interval;
         }
 
-        ENRICHMENT_WORKER_ACTIVE.add(1, &enrichment_worker_active_attrs);
+        ACTIVE.add(1, &active_attrs);
         let candids: Vec<i64> = con
             .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
             .await
             .inspect_err(|_| {
-                ENRICHMENT_WORKER_ACTIVE.add(-1, &enrichment_worker_active_attrs);
-                ENRICHMENT_WORKER_BATCH_PROCESSED.add(1, &enrichment_worker_input_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &input_error_attrs);
             })?;
 
         if candids.is_empty() {
-            ENRICHMENT_WORKER_ACTIVE.add(-1, &enrichment_worker_active_attrs);
+            ACTIVE.add(-1, &active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
@@ -150,22 +150,22 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             .process_alerts(&candids)
             .await
             .inspect_err(|_| {
-                ENRICHMENT_WORKER_ACTIVE.add(-1, &enrichment_worker_active_attrs);
-                ENRICHMENT_WORKER_BATCH_PROCESSED.add(1, &enrichment_worker_processing_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await
             .inspect_err(|_| {
-                ENRICHMENT_WORKER_ACTIVE.add(-1, &enrichment_worker_active_attrs);
-                ENRICHMENT_WORKER_BATCH_PROCESSED.add(1, &enrichment_worker_output_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &output_error_attrs);
             })?;
 
-        let attributes = &enrichment_worker_ok_attrs;
-        ENRICHMENT_WORKER_ACTIVE.add(-1, &enrichment_worker_active_attrs);
-        ENRICHMENT_WORKER_BATCH_PROCESSED.add(1, attributes);
-        ENRICHMENT_WORKER_PROCESSED.add(candids.len() as u64, attributes);
+        let attributes = &ok_attrs;
+        ACTIVE.add(-1, &active_attrs);
+        BATCH_PROCESSED.add(1, attributes);
+        ALERT_PROCESSED.add(candids.len() as u64, attributes);
     }
 
     Ok(())

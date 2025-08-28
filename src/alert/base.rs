@@ -39,7 +39,7 @@ const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
 // initialized once.
 
 // UpDownCounter for the number of alerts currently being processed by the alert workers.
-static ALERT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .i64_up_down_counter("alert_worker.active")
         .with_unit("{alert}")
@@ -48,7 +48,7 @@ static ALERT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
 });
 
 // Counter for the number of alerts processed by the alert workers.
-static ALERT_WORKER_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("alert_worker.alert.processed")
         .with_unit("{alert}")
@@ -655,28 +655,28 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let alert_worker_active_attrs = [worker_id_attr.clone()];
-    let alert_worker_added_attrs = vec![
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_added_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "added"),
     ];
-    let alert_worker_exists_attrs = vec![
+    let ok_exists_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "exists"),
     ];
-    let alert_worker_input_error_attrs = vec![
+    let input_error_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
-    let alert_worker_processing_error_attrs = vec![
+    let processing_error_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
-    let alert_worker_output_error_attrs = vec![
+    let output_error_attrs = vec![
         worker_id_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "output_queue"),
@@ -692,31 +692,31 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
         command_check_countdown -= 1;
 
-        ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
+        ACTIVE.add(1, &active_attrs);
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 info!("queue is empty");
-                ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
+                ACTIVE.add(-1, &active_attrs);
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 command_check_countdown = 0;
                 continue;
             }
             Err(e) => {
                 log_error!(e, "failed to retrieve avro bytes");
-                ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
-                ALERT_WORKER_PROCESSED.add(1, &alert_worker_input_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                ALERT_PROCESSED.add(1, &input_error_attrs);
                 continue;
             }
         };
 
         let process_result = alert_processor.process_alert(&avro_bytes).await;
         let mut attributes = match process_result {
-            Ok(ProcessAlertStatus::Added(_)) => &alert_worker_added_attrs,
-            Ok(ProcessAlertStatus::Exists(_)) => &alert_worker_exists_attrs,
-            Err(_) => &alert_worker_processing_error_attrs,
+            Ok(ProcessAlertStatus::Added(_)) => &ok_added_attrs,
+            Ok(ProcessAlertStatus::Exists(_)) => &ok_exists_attrs,
+            Err(_) => &processing_error_attrs,
         };
         let handle_result = handle_process_result(
             &mut con,
@@ -728,11 +728,11 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to handle process result"));
         if let Err(_) = handle_result {
-            attributes = &alert_worker_output_error_attrs;
+            attributes = &output_error_attrs;
         }
 
-        ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
-        ALERT_WORKER_PROCESSED.add(1, attributes);
+        ACTIVE.add(-1, &active_attrs);
+        ALERT_PROCESSED.add(1, attributes);
 
         handle_result?;
         if count > 0 && count % 1000 == 0 {
