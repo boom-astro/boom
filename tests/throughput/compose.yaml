@@ -113,6 +113,7 @@ services:
     volumes:
       - ${PWD}/data/alerts:/app/data/alerts
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${PWD}/target/release/kafka_producer:/app/kafka_producer
   # TODO: Add a prestart script here to load in some filters and have others
   # depend on its "service_completed_successfully" healthcheck
   consumer:
@@ -137,6 +138,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${PWD}/target/release/kafka_consumer:/app/kafka_consumer
   scheduler:
     image: boom/boom-benchmarking:latest
     hostname: scheduler
@@ -162,3 +164,4 @@ services:
         condition: service_healthy
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${PWD}/target/release/scheduler:/app/scheduler

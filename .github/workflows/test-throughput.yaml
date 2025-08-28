@@ -62,7 +62,21 @@ jobs:
         with:
           path: ./data/alerts/ztf/public/20250311
           key: ztf-alerts-v1
-      - name: Run test
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config bc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache: cargo
+          cache-path: target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      # build all the binaries to cache dependencies
+      - name: Build all binaries to cache dependencies
+        run: cargo build --all --release
+      - name: Run throughput test
         run: |
           uv run tests/throughput/run.py
       - name: Upload logs (including wall time) as artifact
