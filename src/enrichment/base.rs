@@ -23,32 +23,32 @@ use uuid::Uuid;
 // NOTE: Global instruments are defined here because reusing instruments is
 // considered a best practice. See boom::alert::base.
 
-// UpDownCounter for the number of alert batches currently being processed by the enricment workers.
+// UpDownCounter for the number of alert batches currently being processed by the enrichment workers.
 static ENRICHMENT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
-        .i64_up_down_counter("enricment_worker.active")
+        .i64_up_down_counter("enrichment_worker.active")
         .with_unit("{batch}")
         .with_description(
-            "Number of alert batches currently being processed by the enricment worker.",
+            "Number of alert batches currently being processed by the enrichment worker.",
         )
         .build()
 });
 
-// Counter for the number of alert batches processed by the enricment workers.
+// Counter for the number of alert batches processed by the enrichment workers.
 static ENRICHMENT_WORKER_BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
-        .u64_counter("enricment_worker.batch.processed")
+        .u64_counter("enrichment_worker.batch.processed")
         .with_unit("{batch}")
-        .with_description("Number of alert batches processed by the enricment worker.")
+        .with_description("Number of alert batches processed by the enrichment worker.")
         .build()
 });
 
-// Counter for the number of alerts processed by the enricment workers.
+// Counter for the number of alerts processed by the enrichment workers.
 static ENRICHMENT_WORKER_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
-        .u64_counter("enricment_worker.alert.processed")
+        .u64_counter("enrichment_worker.alert.processed")
         .with_unit("{alert}")
-        .with_description("Number of alerts processed by the enricment worker.")
+        .with_description("Number of alerts processed by the enrichment worker.")
         .build()
 });
 
