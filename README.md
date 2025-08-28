@@ -44,21 +44,13 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-1. Copy the default config file, `config.default.yaml`, to `config.yaml`:
-    ```bash
-    cp config.default.yaml config.yaml
-    ```
-2. Same for the `docker-compose.yaml` file:
-    ```bash
-    cp docker-compose.default.yaml docker-compose.yaml
-    ```
-3. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
@@ -130,6 +122,12 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 - You should then see some `ML WORKER <worker_id>: received alerts len: <nb_alerts>` messages, which means that the ML worker is processing the alerts successfully.
 - You should not see anything related to the filter worker. **This is normal, as we did not define any filters yet!** The next version of the README will include instructions on how to upload a dummy filter to the system for testing purposes.
 - What you should definitely see is a lot of `heart beat (MAIN)` messages, which means that the scheduler is running and managing the workers correctly.
+
+Metrics are available in the Prometheus instance at <http://localhost:9090>.
+Click [here][example-queries] to load Prometheus with a collection of useful
+queries already entered in the UI.
+
+[example-queries]: http://localhost:9090/query?g0.expr=alert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=15m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=15m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=avg+by+%28status%29+%28irate%28alert_worker_alert_duration_seconds_sum%5B5m%5D%29+%2F+irate%28alert_worker_alert_duration_seconds_count%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=15m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%7D%29+by+%28le%29+%2F+scalar%28sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%2C+le%3D%22%2BInf%22%7D%29%29&g3.show_tree=0&g3.tab=graph&g3.range_input=15m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
 
 ## Stopping BOOM:
 

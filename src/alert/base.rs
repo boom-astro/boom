@@ -3,24 +3,72 @@ use crate::{
     conf,
     utils::{
         db::{cutout2bsonbinary, get_coordinates},
-        o11y::{as_error, log_error, WARN},
+        o11y::{
+            logging::{as_error, log_error, WARN},
+            metrics::SCHEDULER_METER,
+        },
         spatial::XmatchError,
         worker::should_terminate,
     },
 };
+
+use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
+
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
 use mongodb::{
     bson::{doc, Document},
     Collection,
 };
+use opentelemetry::{
+    metrics::{Counter, Histogram, UpDownCounter},
+    KeyValue,
+};
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize};
-use std::io::Read;
-use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
+
+// NOTE: Global instruments are defined here because reusing instruments is
+// considered a best practice. According to the `opentelemetry` crate,
+// "Instruments are designed for reuse. Avoid creating new instruments
+// repeatedly." One solution is to clone (cloning instruments is cheap). Another
+// is to use static items, with `LazyLock` to ensure each one is only
+// initialized once.
+
+// UpDownCounter for the number of alerts currently being processed by the alert workers.
+static ALERT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .i64_up_down_counter("alert_worker.active")
+        .with_unit("{alert}")
+        .with_description("Number of alerts currently being processed by the alert worker.")
+        .build()
+});
+
+// Histogram for the times taken by the alert workers to process each alert.
+static ALERT_WORKER_DURATION: LazyLock<Histogram<f64>> = LazyLock::new(|| {
+    let start = 0.01;
+    let factor: f64 = 2.0;
+    let n_buckets = 10;
+    let mut boundaries: Vec<f64> = (0..n_buckets).map(|n| start * factor.powi(n)).collect();
+    boundaries.insert(0, 0.0);
+    SCHEDULER_METER
+        .f64_histogram("alert_worker.alert.duration")
+        .with_unit("s")
+        .with_description("Distribution of times taken by the alert worker to process each alert.")
+        .with_boundaries(boundaries)
+        .build()
+});
+
+// Counter for the number of alerts processed by the alert workers.
+static ALERT_WORKER_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("alert_worker.alert.processed")
+        .with_unit("{alert}")
+        .with_description("Number of alerts processed by the alert worker.")
+        .build()
+});
 
 #[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
@@ -184,6 +232,8 @@ pub enum AlertError {
     MissingMagZPSci,
     #[error("could not find avro magic bytes")]
     MagicBytesError,
+    #[error("missing alert aux")]
+    AlertAuxNotFound,
 }
 
 #[derive(Debug, PartialEq)]
@@ -465,7 +515,7 @@ pub trait AlertWorker {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
         collection: &Collection<Document>,
-    ) -> Result<(), AlertError> {
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let cutout_doc = doc! {
             "_id": &candid,
             "cutoutScience": cutout2bsonbinary(cutout_science),
@@ -473,8 +523,17 @@ pub trait AlertWorker {
             "cutoutDifference": cutout2bsonbinary(cutout_difference),
         };
 
-        collection.insert_one(cutout_doc).await?;
-        Ok(())
+        let status = collection
+            .insert_one(cutout_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
     }
     #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
     async fn get_matches(
@@ -520,7 +579,7 @@ pub trait AlertWorker {
 }
 
 #[instrument(skip_all)]
-fn report_progress(start: &std::time::Instant, stream: &str, count: u64, message: &str) {
+fn report_progress(start: &Instant, stream: &str, count: u64, message: &str) {
     let elapsed = start.elapsed().as_secs();
     info!(
         stream,
@@ -588,6 +647,7 @@ async fn handle_process_result(
 pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
+    worker_id: String,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
@@ -608,7 +668,14 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut count = 0;
 
     let start = std::time::Instant::now();
+    let worker_id_attr = KeyValue::new("worker.id", worker_id);
+    let alert_worker_active_attrs = [worker_id_attr.clone()];
+    let alert_worker_added_attrs = [worker_id_attr.clone(), KeyValue::new("status", "added")];
+    let alert_worker_exists_attrs = [worker_id_attr.clone(), KeyValue::new("status", "exists")];
+    let alert_worker_error_attrs = [worker_id_attr, KeyValue::new("status", "error")];
     loop {
+        let alert_start = std::time::Instant::now();
+
         // check for command from threadpool
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -620,6 +687,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         command_check_countdown -= 1;
 
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
+        ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
@@ -635,16 +703,27 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         };
 
-        let result = alert_processor.process_alert(&avro_bytes).await;
-        handle_process_result(
+        let process_result = alert_processor.process_alert(&avro_bytes).await;
+        let attributes = match process_result {
+            Ok(ProcessAlertStatus::Added(_)) => &alert_worker_added_attrs,
+            Ok(ProcessAlertStatus::Exists(_)) => &alert_worker_exists_attrs,
+            Err(_) => &alert_worker_error_attrs,
+        };
+        let handle_result = handle_process_result(
             &mut con,
             &temp_queue_name,
             &output_queue_name,
             avro_bytes,
-            result,
+            process_result,
         )
         .await
-        .inspect_err(as_error!("failed to handle process result"))?;
+        .inspect_err(as_error!("failed to handle process result"));
+
+        ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
+        ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
+        ALERT_WORKER_PROCESSED.add(1, attributes);
+
+        handle_result?;
         if count > 0 && count % 1000 == 0 {
             report_progress(&start, &stream_name, count, "progress");
         }

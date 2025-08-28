@@ -131,7 +131,7 @@ async fn test_build_filter() {
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
         doc! { "$match": { "_id": { "$in": [] } } },
-        doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+        doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1 } },
         doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
         doc! {
             "$addFields": {
@@ -141,9 +141,9 @@ async fn test_build_filter() {
                         "as": "x",
                         "cond": {
                             "$and": [
-                                { "$in": ["$$x.programid", [1_i32]] },
                                 { "$lt": [{ "$subtract": ["$candidate.jd", "$$x.jd"] }, 365] },
-                                { "$lte": ["$$x.jd", "$candidate.jd"]}
+                                { "$lte": ["$$x.jd", "$candidate.jd"]},
+                                { "$in": ["$$x.programid", [1_i32]] },
                             ]
                         }
                     }

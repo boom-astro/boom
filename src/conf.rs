@@ -1,4 +1,4 @@
-use crate::utils::{enums::Survey, o11y::as_error};
+use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
@@ -314,6 +314,7 @@ pub fn build_xmatch_configs(
 pub struct SurveyKafkaConfig {
     pub consumer: String, // URL of the Kafka broker for the consumer (alert worker input)
     pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
+    pub schema_registry: Option<String>, // URL of the schema registry (if any)
 }
 
 impl SurveyKafkaConfig {
@@ -332,15 +333,27 @@ impl SurveyKafkaConfig {
             .unwrap_or_default()
             .into_table()?
             .get(&survey.to_string())
-            .and_then(|host| host.clone().into_string().ok())
+            .and_then(|c| c.clone().into_string().ok())
             .unwrap_or_else(|| "localhost:9092".to_string());
 
         let producer = kafka_conf
             .get("producer")
-            .and_then(|host| host.clone().into_string().ok())
+            .and_then(|p| p.clone().into_string().ok())
             .unwrap_or_else(|| "localhost:9092".to_string());
 
-        Ok(SurveyKafkaConfig { consumer, producer })
+        let schema_registry = kafka_conf
+            .get("schema_registry")
+            .cloned()
+            .unwrap_or_default()
+            .into_table()?
+            .get(&survey.to_string())
+            .and_then(|sr| sr.clone().into_string().ok());
+
+        Ok(SurveyKafkaConfig {
+            consumer,
+            producer,
+            schema_registry,
+        })
     }
 }
 
