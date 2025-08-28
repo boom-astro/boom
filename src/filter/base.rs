@@ -591,20 +591,30 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let filter_worker_active_attrs = [worker_id_attr.clone()];
     let filter_worker_ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let filter_worker_included_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "included"),
+    ];
+    let filter_worker_excluded_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "excluded"),
+    ];
     let filter_worker_input_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "input_queue"),
+        KeyValue::new("reason", "input_queue"),
     ];
     let filter_worker_processing_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "processing"),
+        KeyValue::new("reason", "processing"),
     ];
     let filter_worker_output_error_attrs = [
         worker_id_attr,
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "output_queue"),
+        KeyValue::new("reason", "output_queue"),
     ];
     loop {
         if command_check_countdown == 0 {
@@ -639,7 +649,11 @@ pub async fn run_filter_worker<T: FilterWorker>(
             })?;
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        let attributes = &filter_worker_ok_attrs;
+        FILTER_WORKER_BATCH_PROCESSED.add(1, &filter_worker_ok_attrs);
+        FILTER_WORKER_PROCESSED.add(
+            (alerts.len() - alerts_output.len()) as u64,
+            &filter_worker_excluded_attrs,
+        );
         for alert in alerts_output {
             send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key)
                 .await
@@ -654,11 +668,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 &alert.candid,
                 &output_topic
             );
-            FILTER_WORKER_PROCESSED.add(1, attributes);
+            // Incrementing by alerts_output.len() outside this loop may be more
+            // efficient, but incrementing by 1 here is more accurate.
+            FILTER_WORKER_PROCESSED.add(1, &filter_worker_included_attrs);
         }
 
         FILTER_WORKER_ACTIVE.add(-1, &filter_worker_active_attrs);
-        FILTER_WORKER_BATCH_PROCESSED.add(1, attributes);
     }
 
     Ok(())

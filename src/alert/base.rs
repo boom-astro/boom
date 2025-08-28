@@ -656,22 +656,30 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let alert_worker_active_attrs = [worker_id_attr.clone()];
-    let alert_worker_added_attrs = vec![worker_id_attr.clone(), KeyValue::new("status", "added")];
-    let alert_worker_exists_attrs = vec![worker_id_attr.clone(), KeyValue::new("status", "exists")];
+    let alert_worker_added_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "added"),
+    ];
+    let alert_worker_exists_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "exists"),
+    ];
     let alert_worker_input_error_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "input_queue"),
+        KeyValue::new("reason", "input_queue"),
     ];
     let alert_worker_processing_error_attrs = vec![
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "processing"),
+        KeyValue::new("reason", "processing"),
     ];
     let alert_worker_output_error_attrs = vec![
         worker_id_attr,
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "output_queue"),
+        KeyValue::new("reason", "output_queue"),
     ];
     loop {
         // check for command from threadpool

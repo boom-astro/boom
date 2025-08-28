@@ -110,17 +110,17 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let enrichment_worker_input_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "input_queue"),
+        KeyValue::new("reason", "input_queue"),
     ];
     let enrichment_worker_processing_error_attrs = [
         worker_id_attr.clone(),
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "processing"),
+        KeyValue::new("reason", "processing"),
     ];
     let enrichment_worker_output_error_attrs = [
         worker_id_attr,
         KeyValue::new("status", "error"),
-        KeyValue::new("error.type", "output_queue"),
+        KeyValue::new("reason", "output_queue"),
     ];
     loop {
         if command_check_countdown == 0 {
