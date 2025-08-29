@@ -2,17 +2,33 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
-    use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_default_auth};
-    use boom_api::conf::AppConfig;
+    use actix_web::{test, web, App};
+    use boom_api::auth::{auth_middleware, AuthProvider};
+    use boom_api::conf::{load_dotenv, AppConfig};
     use boom_api::db::get_default_db;
     use boom_api::routes;
     use mongodb::Database;
 
+    fn get_test_config() -> AppConfig {
+        load_dotenv(); // Load environment variables for tests
+        AppConfig::from_path("tests/data/test_config.yaml")
+    }
+
+    async fn get_test_db() -> Database {
+        // For now, use the default DB function but we'll load test env vars
+        load_dotenv();
+        get_default_db().await
+    }
+
+    async fn get_test_auth(db: &Database) -> AuthProvider {
+        let config = get_test_config();
+        AuthProvider::new(config.auth, db).await.unwrap()
+    }
+
     /// Test GET /users
     #[actix_rt::test]
     async fn test_get_users() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
 
         let app = test::init_service(
             App::new()
@@ -39,9 +55,9 @@ mod tests {
     /// Test POST /users and DELETE /users/{username}
     #[actix_rt::test]
     async fn test_post_and_delete_user() {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
-        let auth_config = AppConfig::default().auth;
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await;
+        let auth_config = get_test_config().auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

@@ -1,8 +1,8 @@
 use crate::routes;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::Components;
 use utoipa::Modify;
 use utoipa::OpenApi;
-use utoipa::openapi::Components;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 
 struct SecurityAddon;
 

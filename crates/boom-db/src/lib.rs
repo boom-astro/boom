@@ -1,18 +1,123 @@
-// Database related functionality
-use crate::{
-    conf::{AppConfig, AuthConfig},
-    routes::users::User,
-};
-
+use boom_config::{AppConfig, AuthConfig, BoomConfigError, DatabaseConfig, RedisConfig};
 use mongodb::bson::doc;
 use mongodb::{Client, Database};
+use serde::{Deserialize, Serialize};
+use tracing::instrument;
+
+#[derive(thiserror::Error, Debug)]
+pub enum BoomDbError {
+    #[error("failed to connect to database using config")]
+    ConnectMongoError(#[from] mongodb::error::Error),
+    #[error("failed to connect to redis using config")]
+    ConnectRedisError(#[from] redis::RedisError),
+    #[error("configuration error")]
+    ConfigError(#[from] BoomConfigError),
+}
+
+/// User model for database operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct User {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub username: String,
+    pub password: String, // This should be hashed
+    pub email: String,
+    pub is_admin: bool,
+}
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
 pub const PROTECTED_COLLECTION_NAMES: [&str; 2] = ["users", "filters"];
 
-async fn init_api_admin_user(
-    auth_config: AuthConfig,
+#[instrument(skip_all, err)]
+pub async fn build_db_from_config(config: &DatabaseConfig) -> Result<Database, BoomDbError> {
+    let use_srv = config.srv.unwrap_or(false);
+    let prefix = match use_srv {
+        true => "mongodb+srv://",
+        false => "mongodb://",
+    };
+
+    let mut uri = prefix.to_string();
+
+    let using_auth = config.username.is_some() && config.password.is_some();
+
+    if using_auth {
+        uri.push_str(config.username.as_ref().unwrap());
+        uri.push(':');
+        uri.push_str(config.password.as_ref().unwrap());
+        uri.push('@');
+    }
+
+    uri.push_str(&config.host);
+    uri.push(':');
+    uri.push_str(&config.port.to_string());
+
+    uri.push('/');
+    uri.push_str(&config.name);
+
+    uri.push_str("?directConnection=true");
+
+    if using_auth {
+        uri.push_str("&authSource=admin");
+    }
+
+    if let Some(ref replica_set) = config.replica_set {
+        uri.push_str(&format!("&replicaSet={}", replica_set));
+    }
+
+    if let Some(max_pool_size) = config.max_pool_size {
+        uri.push_str(&format!("&maxPoolSize={}", max_pool_size));
+    }
+
+    let client_mongo = Client::with_uri_str(&uri).await?;
+    let db = client_mongo.database(&config.name);
+
+    Ok(db)
+}
+
+#[instrument(skip_all, err)]
+pub async fn build_redis_from_config(
+    config: &RedisConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomDbError> {
+    let uri = format!("redis://{}:{}/", config.host, config.port);
+
+    let client_redis = redis::Client::open(uri)?;
+    let con = client_redis.get_multiplexed_async_connection().await?;
+
+    Ok(con)
+}
+
+/// Build database connection from app config
+pub async fn build_db(app_config: &AppConfig) -> Result<Database, BoomDbError> {
+    build_db_from_config(&app_config.database).await
+}
+
+/// Build Redis connection from app config (if Redis config exists)
+pub async fn build_redis(
+    app_config: &AppConfig,
+) -> Result<Option<redis::aio::MultiplexedConnection>, BoomDbError> {
+    if let Some(ref redis_config) = app_config.redis {
+        Ok(Some(build_redis_from_config(redis_config).await?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Convenience function to get database from default config path
+pub async fn get_db() -> Result<Database, BoomDbError> {
+    let config = AppConfig::from_default_path()?;
+    build_db(&config).await
+}
+
+/// Convenience function to get database from specific config path
+pub async fn get_db_from_path(config_path: &str) -> Result<Database, BoomDbError> {
+    let config = AppConfig::from_path(config_path)?;
+    build_db(&config).await
+}
+
+/// Initialize API admin user in the database
+pub async fn init_api_admin_user(
+    auth_config: &AuthConfig,
     users_collection: &mongodb::Collection<User>,
 ) -> Result<(), std::io::Error> {
     let username = auth_config.admin_username.clone();
@@ -102,17 +207,9 @@ async fn init_api_admin_user(
     Ok(())
 }
 
-async fn db_from_config(config: AppConfig) -> Database {
-    let db_config = config.database;
-    let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
-        format!(
-            "mongodb://{}:{}@{}:{}",
-            db_config.username, db_config.password, db_config.host, db_config.port
-        )
-        .into()
-    });
-    let client = Client::with_uri_str(uri).await.expect("failed to connect");
-    let db = client.database(&db_config.name);
+/// Build database with API-specific initialization (users collection, admin user)
+pub async fn db_from_config(config: &AppConfig) -> Result<Database, BoomDbError> {
+    let db = build_db(config).await?;
 
     let users_collection: mongodb::Collection<User> = db.collection("users");
     // Create a unique index for username and id in the users collection
@@ -130,20 +227,19 @@ async fn db_from_config(config: AppConfig) -> Database {
         .expect("failed to create username index on users collection");
 
     // Initialize the API admin user if it does not exist
-    if let Err(e) = init_api_admin_user(config.auth, &users_collection).await {
-        eprintln!("Failed to initialize API admin user: {}", e);
+    if let Some(ref auth_config) = config.auth {
+        if let Err(e) = init_api_admin_user(auth_config, &users_collection).await {
+            eprintln!("Failed to initialize API admin user: {}", e);
+        }
+    } else {
+        println!("No auth config found - skipping admin user initialization");
     }
 
-    db
+    Ok(db)
 }
 
-pub async fn get_db() -> Database {
-    // Read the config file
-    let config = AppConfig::from_default_path();
-    db_from_config(config).await
-}
-
-pub async fn get_default_db() -> Database {
-    let config = AppConfig::from_default_path();
-    db_from_config(config).await
+/// Get database from default config with API-specific initialization
+pub async fn get_default_db() -> Result<Database, BoomDbError> {
+    let config = AppConfig::from_default_path()?;
+    db_from_config(&config).await
 }

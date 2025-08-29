@@ -2,8 +2,8 @@ use crate::{conf::AppConfig, conf::AuthConfig, routes::users::User};
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
-use actix_web::{Error, HttpMessage, web};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use actix_web::{web, Error, HttpMessage};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 

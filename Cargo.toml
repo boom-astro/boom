@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["api"]
+members = [
+    "crates/boom-config",
+    "crates/boom-db",
+    "crates/boom-api"
+]
 
 [package]
 name = "boom"

@@ -2,18 +2,34 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
-    use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_default_auth};
-    use boom_api::conf::AppConfig;
+    use actix_web::{test, web, App};
+    use boom_api::auth::{auth_middleware, AuthProvider};
+    use boom_api::conf::{load_dotenv, AppConfig};
     use boom_api::db::get_default_db;
     use boom_api::routes;
-    use mongodb::{Database, bson::doc};
+    use mongodb::{bson::doc, Database};
+
+    fn get_test_config() -> AppConfig {
+        load_dotenv(); // Load environment variables for tests
+        AppConfig::from_path("tests/data/test_config.yaml")
+    }
+
+    async fn get_test_db() -> Database {
+        // For now, use the default DB function but we'll load test env vars
+        load_dotenv();
+        get_default_db().await
+    }
+
+    async fn get_test_auth(db: &Database) -> AuthProvider {
+        let config = get_test_config();
+        AuthProvider::new(config.auth, db).await.unwrap()
+    }
 
     /// Test POST /auth
     #[actix_rt::test]
     async fn test_post_auth() {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -25,7 +41,7 @@ mod tests {
         // On initialization of the db connection, an admin user for the API
         // should be created if it does not exist yet, and updated if it does
         // but the password and/or email have changed.
-        let auth_config = AppConfig::default().auth;
+        let auth_config = get_test_config().auth;
         let admin_username = auth_config.admin_username;
         let admin_password = auth_config.admin_password;
 
@@ -97,9 +113,9 @@ mod tests {
     /// Test POST /auth
     #[actix_rt::test]
     async fn test_auth_middleware() {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
-        let auth_config = AppConfig::default().auth;
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await;
+        let auth_config = get_test_config().auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

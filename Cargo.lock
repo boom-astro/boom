@@ -441,6 +441,19 @@ checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
 name = "bcrypt"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b1866ecef4f2d06a0bb77880015fdf2b89e25a1c2e5addacb87e459c86dc67e"
+dependencies = [
+ "base64 0.22.1",
+ "blowfish",
+ "getrandom 0.2.16",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "bcrypt"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92758ad6077e4c76a6cadbce5005f666df70d4f13b19976b1a8062eef880040f"
@@ -561,24 +574,48 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "base64 0.22.1",
- "bcrypt",
+ "bcrypt 0.17.0",
+ "boom-config",
+ "boom-db",
  "chrono",
- "config",
- "dotenvy",
  "env_logger",
  "flare",
  "futures",
  "jsonwebtoken",
  "mongodb",
- "regex",
  "serde",
  "serde_json",
  "serde_with",
- "tempfile",
- "thiserror 2.0.12",
  "tracing",
  "utoipa",
  "utoipa-scalar",
+ "uuid",
+]
+
+[[package]]
+name = "boom-config"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "dotenvy",
+ "regex",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tracing",
+]
+
+[[package]]
+name = "boom-db"
+version = "0.1.0"
+dependencies = [
+ "bcrypt 0.16.0",
+ "boom-config",
+ "mongodb",
+ "redis",
+ "serde",
+ "thiserror 2.0.12",
+ "tracing",
  "uuid",
 ]
 

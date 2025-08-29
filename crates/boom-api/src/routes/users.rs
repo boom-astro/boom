@@ -1,7 +1,7 @@
 use crate::models::response;
-use actix_web::{HttpResponse, delete, get, post, web};
+use actix_web::{delete, get, post, web, HttpResponse};
 use futures::stream::StreamExt;
-use mongodb::{Collection, Database, bson::doc};
+use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;

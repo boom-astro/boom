@@ -1,5 +1,5 @@
 use crate::models::response;
-use actix_web::{HttpResponse, get, web};
+use actix_web::{get, web, HttpResponse};
 
 /// Check the health of the API server
 #[utoipa::path(

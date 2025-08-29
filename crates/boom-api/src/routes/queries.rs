@@ -3,14 +3,14 @@ use crate::catalogs::catalog_exists;
 use crate::filters::{parse_filter, parse_optional_filter};
 use crate::models::response;
 
-use actix_web::{HttpResponse, post, web};
+use actix_web::{post, web, HttpResponse};
 use futures::StreamExt;
 use futures::TryStreamExt;
-use mongodb::{Database, bson::doc};
+use mongodb::{bson::doc, Database};
 use std::collections::HashMap;
 use std::fmt;
-use utoipa::openapi::RefOr;
 use utoipa::openapi::schema::{ObjectBuilder, Schema};
+use utoipa::openapi::RefOr;
 use utoipa::{PartialSchema, ToSchema};
 
 #[derive(serde::Deserialize, Clone, ToSchema)]

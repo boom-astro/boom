@@ -1,0 +1,15 @@
+[package]
+name = "boom-db"
+version = "0.1.0"
+edition = "2021"
+description = "Database utilities for BOOM"
+
+[dependencies]
+boom-config = { path = "../boom-config" }
+mongodb = "3.2.0"
+redis = { version = "0.28.2", features = ["tokio-comp"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.11"
+tracing = "0.1.41"
+uuid = { version = "1.8.0", features = ["v4"] }
+bcrypt = "0.16.0"

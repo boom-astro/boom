@@ -1,5 +1,5 @@
 use actix_web::middleware::from_fn;
-use actix_web::{App, HttpServer, middleware::Logger, web};
+use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom_api::auth::{auth_middleware, get_auth};
 use boom_api::conf::load_dotenv;
 use boom_api::db::get_db;

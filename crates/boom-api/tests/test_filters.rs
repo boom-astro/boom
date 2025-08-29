@@ -3,18 +3,34 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
-    use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_default_auth};
-    use boom_api::conf::AppConfig;
+    use actix_web::{test, web, App};
+    use boom_api::auth::{auth_middleware, AuthProvider};
+    use boom_api::conf::{load_dotenv, AppConfig};
     use boom_api::db::get_default_db;
     use boom_api::routes;
-    use mongodb::bson::{Document, doc};
+    use mongodb::bson::{doc, Document};
     use mongodb::{Collection, Database};
+
+    fn get_test_config() -> AppConfig {
+        load_dotenv(); // Load environment variables for tests
+        AppConfig::from_path("tests/data/test_config.yaml")
+    }
+
+    async fn get_test_db() -> Database {
+        // For now, use the default DB function but we'll load test env vars
+        load_dotenv();
+        get_default_db().await
+    }
+
+    async fn get_test_auth(db: &Database) -> AuthProvider {
+        let config = get_test_config();
+        AuthProvider::new(config.auth, db).await.unwrap()
+    }
 
     /// Helper function to create an auth token for the admin user
     async fn create_admin_token(database: &Database) -> String {
-        let auth_app_data = get_default_auth(database).await.unwrap();
-        let auth_config = AppConfig::default().auth;
+        let auth_app_data = get_test_auth(database).await;
+        let auth_config = get_test_config().auth;
         let (token, _) = auth_app_data
             .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
             .await
@@ -33,9 +49,9 @@ mod tests {
 
     /// Helper function to create a test filter and return its ID and token
     async fn create_test_filter() -> (String, String, Database) {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
         let token = create_admin_token(&database).await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_app_data = get_test_auth(&database).await;
 
         let app = test::init_service(
             App::new()
@@ -71,8 +87,8 @@ mod tests {
 
     // let's make a helper function that takes a filter_id, GETs the filter and returns it
     async fn get_test_filter(filter_id: &str, token: &str) -> serde_json::Value {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -105,8 +121,8 @@ mod tests {
         token: &str,
         new_version: &serde_json::Value,
     ) -> String {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -164,9 +180,9 @@ mod tests {
     /// Test GET /filters
     #[actix_rt::test]
     async fn test_get_filters() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
         let token = create_admin_token(&database).await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_app_data = get_test_auth(&database).await;
 
         let app = test::init_service(
             App::new()
@@ -218,11 +234,9 @@ mod tests {
         let active_fid = filter["active_fid"].as_str().unwrap();
         assert_eq!(active_fid, active_fid_after);
         let versions = filter["fv"].as_array().unwrap();
-        assert!(
-            versions
-                .iter()
-                .any(|v| v["fid"].as_str().unwrap() == active_fid_after)
-        );
+        assert!(versions
+            .iter()
+            .any(|v| v["fid"].as_str().unwrap() == active_fid_after));
 
         // Post another version, but don't set it as active
         let new_version = serde_json::json!({
@@ -239,11 +253,9 @@ mod tests {
         let active_fid = filter["active_fid"].as_str().unwrap();
         assert_eq!(active_fid, active_fid_after); // should still be the same
         let versions = filter["fv"].as_array().unwrap();
-        assert!(
-            versions
-                .iter()
-                .any(|v| v["fid"].as_str().unwrap() == active_fid_after2)
-        );
+        assert!(versions
+            .iter()
+            .any(|v| v["fid"].as_str().unwrap() == active_fid_after2));
 
         // Clean up the filter
         cleanup_test_filter(&database, &filter_id).await;
@@ -254,7 +266,7 @@ mod tests {
     async fn test_patch_filter() {
         let (filter_id, token, database) = create_test_filter().await;
         // Create app for PATCH testing
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_app_data = get_test_auth(&database).await;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
