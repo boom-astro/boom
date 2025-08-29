@@ -103,7 +103,7 @@ services:
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     volumes:
-      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml
+      - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     ports:
       - 4317:4317 # OTLP gRPC receiver (from Rust OTLP exporter)
       - 55679:55679 # zpages extension
@@ -116,7 +116,7 @@ services:
       - --web.enable-otlp-receiver # [^2]
       - --config.file=/etc/prometheus/prometheus.yaml
     volumes:
-      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml
+      - ./config/prometheus.yaml:/etc/prometheus/prometheus.yaml
     ports:
       - 9090:9090
     networks:

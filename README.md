@@ -44,7 +44,7 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
     ```bash
     docker compose up -d
     ```
