@@ -1,4 +1,68 @@
 use config::{Config, File};
+use regex::Regex;
+use std::collections::HashMap;
+use std::env;
+use tracing::{debug, warn};
+
+#[derive(thiserror::Error, Debug)]
+pub enum ExpandError {
+    #[error("Missing environment variable '{var_name}' for placeholder '{placeholder}'")]
+    MissingVariable {
+        var_name: String,
+        placeholder: String,
+    },
+}
+
+/// Expands environment variable placeholders in a string.
+/// Supports both ${VAR_NAME} and ${VAR_NAME:-default_value} syntax.
+///
+/// Examples:
+/// - "${BOOM_DB_PASSWORD}" -> reads from BOOM_DB_PASSWORD env var
+/// - "${BOOM_DB_PASSWORD:-defaultpass}" -> reads from BOOM_DB_PASSWORD, falls back to "defaultpass"
+fn expand_env_vars(input: &str) -> Result<String, ExpandError> {
+    let re = Regex::new(r"\$\{([^}:]+)(?::-(.*?))?\}").unwrap();
+    let mut result = input.to_string();
+    let mut replacements: HashMap<String, String> = HashMap::new();
+
+    for capture in re.captures_iter(input) {
+        let full_match = capture.get(0).unwrap().as_str();
+        let var_name = capture.get(1).unwrap().as_str();
+        let default_value = capture.get(2).map(|m| m.as_str());
+
+        // Check if we already processed this variable
+        if let Some(replacement) = replacements.get(full_match) {
+            result = result.replace(full_match, replacement);
+            continue;
+        }
+
+        // Get the environment variable value
+        let env_value = match env::var(var_name) {
+            Ok(value) => {
+                debug!("Expanded environment variable: {} = [REDACTED]", var_name);
+                value
+            }
+            Err(_) => {
+                if let Some(default) = default_value {
+                    warn!(
+                        "Environment variable {} not found, using default value",
+                        var_name
+                    );
+                    default.to_string()
+                } else {
+                    return Err(ExpandError::MissingVariable {
+                        var_name: var_name.to_string(),
+                        placeholder: full_match.to_string(),
+                    });
+                }
+            }
+        };
+
+        replacements.insert(full_match.to_string(), env_value.clone());
+        result = result.replace(full_match, &env_value);
+    }
+
+    Ok(result)
+}
 
 pub struct AuthConfig {
     pub secret_key: String,
@@ -67,8 +131,21 @@ impl Default for AppConfig {
 pub fn load_config(config_path: Option<&str>) -> AppConfig {
     let config_fpath = config_path.unwrap_or("config.yaml");
     let default_config = AppConfig::default();
+
+    // Read and expand environment variables in the config file
+    let file_content = std::fs::read_to_string(config_fpath)
+        .unwrap_or_else(|_| panic!("config file {} should exist", config_fpath));
+
+    let expanded_content = expand_env_vars(&file_content)
+        .unwrap_or_else(|e| panic!("Failed to expand environment variables: {}", e));
+
+    // Write to a temporary file and load
+    let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temporary file");
+
+    std::fs::write(temp_file.path(), expanded_content).expect("Failed to write to temporary file");
+
     let config = Config::builder()
-        .add_source(File::with_name(config_fpath))
+        .add_source(File::from(temp_file.path()))
         .build()
         .expect("a config.yaml file should exist");
 
