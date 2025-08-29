@@ -15,7 +15,7 @@ mod tests {
         load_dotenv();
 
         // Clear users collection for clean test BEFORE setting up the database
-        let config = AppConfig::from_path("../config.yaml");
+        let config = AppConfig::from_path("../tests/config.test.yaml");
         let db_config = config.database;
         let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
             format!(
@@ -47,7 +47,7 @@ mod tests {
         // On initialization of the db connection, an admin user for the API
         // should be created if it does not exist yet, and updated if it does
         // but the password and/or email have changed.
-        let auth_config = AppConfig::from_path("../config.yaml").auth;
+        let auth_config = AppConfig::from_path("../tests/config.test.yaml").auth;
         let admin_username = auth_config.admin_username.clone();
         let admin_password = auth_config.admin_password.clone();
 
@@ -123,7 +123,7 @@ mod tests {
         load_dotenv();
 
         // Clear users collection for clean test BEFORE setting up the database
-        let config = AppConfig::from_path("../config.yaml");
+        let config = AppConfig::from_path("../tests/config.test.yaml");
         let db_config = config.database;
         let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
             format!(
@@ -144,7 +144,7 @@ mod tests {
         // Now set up the database, which will create the admin user
         let database: Database = get_test_db().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
-        let auth_config = AppConfig::from_path("../config.yaml").auth;
+        let auth_config = AppConfig::from_path("../tests/config.test.yaml").auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
