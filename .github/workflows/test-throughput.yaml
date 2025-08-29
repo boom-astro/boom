@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TOLERANCE_PERCENTAGE: 5.0 # 5% tolerance for wall time increase
+  BOOM_ADMIN_PASSWORD: adminsecret
+  BOOM_JWT_SECRET: "1234"
+  BOOM_DB_PASSWORD: mongoadminsecret
 
 jobs:
   test:
@@ -125,4 +128,3 @@ jobs:
             echo "Wall time increased by $percentage_diff%, which is more than the allowed $TOLERANCE_PERCENTAGE%."
             exit 1
           fi
-          

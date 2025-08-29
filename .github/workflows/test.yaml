@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  BOOM_ADMIN_PASSWORD: adminsecret
+  BOOM_JWT_SECRET: "1234"
+  BOOM_DB_PASSWORD: mongoadminsecret
 
 jobs:
   test:
