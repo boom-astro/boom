@@ -1,7 +1,7 @@
 database:
   host: localhost
   port: 27017
-  name: boom
+  name: ${BOOM_DB_NAME:-boom}
   max_pool_size: 200
   replica_set: null
   username: ${BOOM_DB_USERNAME:-mongoadmin}
