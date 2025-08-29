@@ -727,7 +727,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         )
         .await
         .inspect_err(as_error!("failed to handle process result"));
-        if let Err(_) = handle_result {
+        if handle_result.is_err() {
             attributes = &output_error_attrs;
         }
 
