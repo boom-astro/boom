@@ -41,10 +41,12 @@ while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoa
 done
 
 # Wait until we've filtered all alerts
-# We'll have log lines like `0/2 alerts passed`, from which we want to sum
-# the denominators
 echo "$(current_datetime) - Waiting for filters to run on all alerts"
-while [ $(docker compose -f $COMPOSE_CONFIG logs scheduler | grep "passed filter $N_FILTERS" | awk -F'/' '{sum += $NF} END {print sum}') -lt $EXPECTED_ALERTS ]; do
+PASSED_ALERTS=0
+while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
+    PASSED_ALERTS=$(docker compose -f $COMPOSE_CONFIG logs scheduler | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
+    PASSED_ALERTS=${PASSED_ALERTS:-0}
+    PASSED_ALERTS=$((PASSED_ALERTS / N_FILTERS))
     sleep 1
 done
 

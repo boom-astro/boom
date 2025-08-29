@@ -162,3 +162,4 @@ services:
         condition: service_healthy
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models
