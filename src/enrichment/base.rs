@@ -3,14 +3,54 @@ use crate::{
     enrichment::models::ModelError,
     utils::{
         fits::CutoutError,
+        o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
     },
 };
+
+use std::{num::NonZero, sync::LazyLock};
+
 use mongodb::bson::Document;
+use opentelemetry::{
+    metrics::{Counter, UpDownCounter},
+    KeyValue,
+};
 use redis::AsyncCommands;
-use std::num::NonZero;
 use tokio::sync::mpsc;
 use tracing::{debug, error, instrument};
+use uuid::Uuid;
+
+// NOTE: Global instruments are defined here because reusing instruments is
+// considered a best practice. See boom::alert::base.
+
+// UpDownCounter for the number of alert batches currently being processed by the enrichment workers.
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .i64_up_down_counter("enrichment_worker.active")
+        .with_unit("{batch}")
+        .with_description(
+            "Number of alert batches currently being processed by the enrichment worker.",
+        )
+        .build()
+});
+
+// Counter for the number of alert batches processed by the enrichment workers.
+static BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("enrichment_worker.batch.processed")
+        .with_unit("{batch}")
+        .with_description("Number of alert batches processed by the enrichment worker.")
+        .build()
+});
+
+// Counter for the number of alerts processed by the enrichment workers.
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("enrichment_worker.alert.processed")
+        .with_unit("{alert}")
+        .with_description("Number of alerts processed by the enrichment worker.")
+        .build()
+});
 
 #[derive(thiserror::Error, Debug)]
 pub enum EnrichmentWorkerError {
@@ -50,6 +90,7 @@ pub trait EnrichmentWorker {
 pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
+    worker_id: Uuid,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
     let mut enrichment_worker = T::new(config_path).await?;
@@ -63,6 +104,24 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let input_error_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "input_queue"),
+    ];
+    let processing_error_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "processing"),
+    ];
+    let output_error_attrs = [
+        worker_id_attr,
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "output_queue"),
+    ];
     loop {
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -71,21 +130,42 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             command_check_countdown = command_interval;
         }
 
+        ACTIVE.add(1, &active_attrs);
         let candids: Vec<i64> = con
             .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
-            .await?;
+            .await
+            .inspect_err(|_| {
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &input_error_attrs);
+            })?;
 
         if candids.is_empty() {
+            ACTIVE.add(-1, &active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
         }
 
-        let processed_alerts = enrichment_worker.process_alerts(&candids).await?;
+        let processed_alerts: Vec<String> = enrichment_worker
+            .process_alerts(&candids)
+            .await
+            .inspect_err(|_| {
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &processing_error_attrs);
+            })?;
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
-            .await?;
+            .await
+            .inspect_err(|_| {
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &output_error_attrs);
+            })?;
+
+        let attributes = &ok_attrs;
+        ACTIVE.add(-1, &active_attrs);
+        BATCH_PROCESSED.add(1, attributes);
+        ALERT_PROCESSED.add(candids.len() as u64, attributes);
     }
 
     Ok(())

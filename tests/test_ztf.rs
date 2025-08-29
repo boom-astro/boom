@@ -342,7 +342,7 @@ async fn test_enrich_ztf_alert() {
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
     assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
 
-    // the ml worker also adds "properties" to the alert
+    // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();
     assert_eq!(properties.get_bool("rock").unwrap(), false);
     assert_eq!(properties.get_bool("star").unwrap(), true);

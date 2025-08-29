@@ -14,6 +14,7 @@ use std::thread;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, error, info, instrument, span, warn};
+use uuid::Uuid;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
@@ -166,6 +167,7 @@ pub struct Worker {
     // Needs to be Option because JoinHandle::join() consumes the handle.
     handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<WorkerCmd>,
+    _id: Uuid,
 }
 
 impl Worker {
@@ -178,6 +180,7 @@ impl Worker {
     /// config_path: path to the config file we are working with
     #[instrument]
     fn new(worker_type: WorkerType, survey_name: Survey, config_path: String) -> Worker {
+        let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(1);
         let handle = match worker_type {
             WorkerType::Alert => thread::spawn(move || {
@@ -190,8 +193,7 @@ impl Worker {
                         Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                         Survey::Decam => run_alert_worker::<DecamAlertWorker>,
                     };
-                    let worker_id = format!("{tid:?}");
-                    run(receiver, &config_path, worker_id)
+                    run(receiver, &config_path, id)
                         .unwrap_or_else(as_error!("alert worker failed"));
                 })
             }),
@@ -212,7 +214,7 @@ impl Worker {
                         }
                     };
                     let key = uuid::Uuid::new_v4().to_string();
-                    run(key, receiver, &config_path)
+                    run(key, receiver, &config_path, id)
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),
@@ -232,7 +234,7 @@ impl Worker {
                             return;
                         }
                     };
-                    run(receiver, &config_path)
+                    run(receiver, &config_path, id)
                         .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
@@ -241,6 +243,7 @@ impl Worker {
         Worker {
             handle: Some(handle),
             sender,
+            _id: id,
         }
     }
 
