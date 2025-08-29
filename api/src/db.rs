@@ -13,29 +13,34 @@ pub const PROTECTED_COLLECTION_NAMES: [&str; 2] = ["users", "filters"];
 
 async fn init_api_admin_user(
     auth_config: AuthConfig,
-    users_collection: &mongodb::Collection<User>,
+    database: &mongodb::Database,
 ) -> Result<(), std::io::Error> {
-    let username = auth_config.admin_username.clone();
-    let email = auth_config.admin_email.clone();
-    let password = auth_config.admin_password.clone();
-    // Check if the admin user already exists
-    let mut existing_user = users_collection
-        .find_one(doc! { "username": &username })
+    let admin_username = auth_config.admin_username.clone();
+    let admin_password = auth_config.admin_password.clone();
+    let admin_email = auth_config.admin_email.clone();
+
+    let users_collection: mongodb::Collection<User> = database.collection("users");
+    let users_doc_collection: mongodb::Collection<mongodb::bson::Document> =
+        database.collection("users");
+
+    // Check if the admin user already exists (use Document collection to avoid deserialization issues)
+    let existing_user_doc = users_doc_collection
+        .find_one(doc! { "username": &admin_username })
         .await
         .expect("failed to query users collection");
 
-    if existing_user.is_none() {
+    if existing_user_doc.is_none() {
         // Create the admin user if it does not exist
         println!(
             "Admin user does not exist, creating a new one with username: {}",
-            username
+            admin_username
         );
         let admin_user = User {
             id: uuid::Uuid::new_v4().to_string(),
-            username: username.clone(),
-            password: bcrypt::hash(&password, bcrypt::DEFAULT_COST)
+            username: admin_username.clone(),
+            password: bcrypt::hash(&admin_password, bcrypt::DEFAULT_COST)
                 .expect("failed to hash password"),
-            email: email.clone(),
+            email: admin_email.clone(),
             is_admin: true, // Set the user as an admin
         };
         match users_collection.insert_one(admin_user).await {
@@ -59,11 +64,11 @@ async fn init_api_admin_user(
                     println!(
                         "Admin user already exists, but was created in another instance. Updating the user."
                     );
-                    existing_user = users_collection
-                        .find_one(doc! { "username": &username })
+                    let existing_user_doc = users_doc_collection
+                        .find_one(doc! { "username": &admin_username })
                         .await
                         .expect("failed to query users collection");
-                    if existing_user.is_none() {
+                    if existing_user_doc.is_none() {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             "Admin user not found after creation attempt",
@@ -76,27 +81,34 @@ async fn init_api_admin_user(
 
     // if the admin user exists, check that the password matches and email matches
     // if one of them does not, update the user
-    let existing_user = existing_user.unwrap();
-    if !bcrypt::verify(&password, &existing_user.password).unwrap_or(false)
-        || existing_user.email != email
-        || existing_user.is_admin != true
-    {
-        println!(
-            "Admin user already exists, but password or email does not match with the one in the config. Updating the user."
-        );
-        // Update the existing user with the new password and email
-        let updated_user = User {
-            id: existing_user.id.clone(),
-            username: existing_user.username,
-            password: bcrypt::hash(&password, bcrypt::DEFAULT_COST)
-                .expect("failed to hash password"),
-            email: email,
-            is_admin: true, // Ensure the user remains an admin
-        };
-        users_collection
-            .replace_one(doc! { "_id": &existing_user.id }, updated_user)
-            .await
-            .expect("failed to update admin user");
+    if let Some(existing_user_doc) = existing_user_doc {
+        // Convert the document to a User struct manually or update using the document
+        let existing_user_id = existing_user_doc.get_str("_id").unwrap_or("").to_string();
+        let existing_password = existing_user_doc.get_str("password").unwrap_or("");
+        let existing_email = existing_user_doc.get_str("email").unwrap_or("");
+        let existing_is_admin = existing_user_doc.get_bool("is_admin").unwrap_or(false);
+
+        if !bcrypt::verify(&admin_password, existing_password).unwrap_or(false)
+            || existing_email != admin_email
+            || !existing_is_admin
+        {
+            println!(
+                "Admin user already exists, but password or email does not match with the one in the config. Updating the user."
+            );
+            // Update the existing user with the new password and email
+            let updated_user = User {
+                id: existing_user_id.clone(),
+                username: admin_username.clone(),
+                password: bcrypt::hash(&admin_password, bcrypt::DEFAULT_COST)
+                    .expect("failed to hash password"),
+                email: admin_email.clone(),
+                is_admin: true, // Ensure the user remains an admin
+            };
+            users_collection
+                .replace_one(doc! { "_id": &existing_user_id }, updated_user)
+                .await
+                .expect("failed to update admin user");
+        }
     }
 
     Ok(())
@@ -130,7 +142,7 @@ async fn db_from_config(config: AppConfig) -> Database {
         .expect("failed to create username index on users collection");
 
     // Initialize the API admin user if it does not exist
-    if let Err(e) = init_api_admin_user(config.auth, &users_collection).await {
+    if let Err(e) = init_api_admin_user(config.auth, &db).await {
         eprintln!("Failed to initialize API admin user: {}", e);
     }
 
@@ -145,5 +157,10 @@ pub async fn get_db() -> Database {
 
 pub async fn get_default_db() -> Database {
     let config = AppConfig::from_default_path();
+    db_from_config(config).await
+}
+
+pub async fn get_test_db() -> Database {
+    let config = AppConfig::from_path("../config.yaml");
     db_from_config(config).await
 }

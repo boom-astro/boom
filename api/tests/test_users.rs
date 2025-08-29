@@ -3,16 +3,17 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_default_auth};
-    use boom_api::conf::AppConfig;
-    use boom_api::db::get_default_db;
+    use boom_api::auth::{auth_middleware, get_test_auth};
+    use boom_api::conf::{AppConfig, load_dotenv};
+    use boom_api::db::get_test_db;
     use boom_api::routes;
     use mongodb::Database;
 
     /// Test GET /users
     #[actix_rt::test]
     async fn test_get_users() {
-        let database: Database = get_default_db().await;
+        load_dotenv();
+        let database: Database = get_test_db().await;
 
         let app = test::init_service(
             App::new()
@@ -39,9 +40,10 @@ mod tests {
     /// Test POST /users and DELETE /users/{username}
     #[actix_rt::test]
     async fn test_post_and_delete_user() {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
-        let auth_config = AppConfig::default().auth;
+        load_dotenv();
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let auth_config = AppConfig::from_path("../config.yaml").auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

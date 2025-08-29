@@ -138,7 +138,8 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
         .unwrap_or_else(|e| panic!("Failed to expand environment variables: {}", e));
 
     // Write to a temporary file and load
-    let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temporary file");
+    let temp_file =
+        tempfile::NamedTempFile::with_suffix(".yaml").expect("Failed to create temporary file");
 
     std::fs::write(temp_file.path(), expanded_content).expect("Failed to write to temporary file");
 

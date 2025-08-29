@@ -3,14 +3,16 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::{App, test, web};
-    use boom_api::db::get_default_db;
+    use boom_api::conf::load_dotenv;
+    use boom_api::db::get_test_db;
     use boom_api::routes;
     use mongodb::Database;
 
     /// Test GET /catalogs
     #[actix_rt::test]
     async fn test_get_catalogs() {
-        let database: Database = get_default_db().await;
+        load_dotenv();
+        let database: Database = get_test_db().await;
 
         let app = test::init_service(
             App::new()
