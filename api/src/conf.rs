@@ -72,36 +72,12 @@ pub struct AuthConfig {
     pub admin_email: String,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        AuthConfig {
-            secret_key: "1234".to_string(),
-            token_expiration: 0,
-            admin_username: "admin".to_string(),
-            admin_password: "adminsecret".to_string(),
-            admin_email: "admin@example.com".to_string(),
-        }
-    }
-}
-
 pub struct DatabaseConfig {
     pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: String,
-}
-
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        DatabaseConfig {
-            name: "boom".to_string(),
-            host: "localhost".to_string(),
-            port: 27017,
-            username: "mongoadmin".to_string(),
-            password: "mongoadminsecret".to_string(),
-        }
-    }
 }
 
 pub struct AppConfig {
@@ -119,18 +95,8 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        AppConfig {
-            auth: AuthConfig::default(),
-            database: DatabaseConfig::default(),
-        }
-    }
-}
-
 pub fn load_config(config_path: Option<&str>) -> AppConfig {
     let config_fpath = config_path.unwrap_or("config.yaml");
-    let default_config = AppConfig::default();
 
     // Read and expand environment variables in the config file
     let file_content = std::fs::read_to_string(config_fpath)
@@ -154,47 +120,52 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
         .get_table("api")
         .expect("an api table should exist in the config file");
 
-    // Load Auth configuration
+    // Load Auth configuration - all values required
     let auth_conf = api_conf
         .get("auth")
         .and_then(|auth| auth.clone().into_table().ok())
         .expect("an auth table should exist in the config file");
-    let secret_key = match auth_conf.get("secret_key") {
-        Some(secret_key) => secret_key
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid secret_key: {}", e)),
-        None => default_config.auth.secret_key.clone(),
-    };
-    let token_expiration = match auth_conf.get("token_expiration") {
-        Some(token_expiration) => token_expiration
-            .clone()
-            .into_int()
-            .unwrap_or_else(|e| panic!("Invalid token_expiration: {}", e))
-            as usize,
-        None => default_config.auth.token_expiration,
-    };
-    let admin_username = match auth_conf.get("admin_username") {
-        Some(admin_username) => admin_username
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid admin_username: {}", e)),
-        None => default_config.auth.admin_username.clone(),
-    };
-    let admin_password = match auth_conf.get("admin_password") {
-        Some(admin_password) => admin_password
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid admin_password: {}", e)),
-        None => default_config.auth.admin_password.clone(),
-    };
-    let admin_email = match auth_conf.get("admin_email") {
-        Some(admin_email) => admin_email
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid admin_email: {}", e)),
-        None => default_config.auth.admin_email.clone(),
-    };
+
+    let secret_key = auth_conf
+        .get("secret_key")
+        .expect("secret_key must be set in config")
+        .clone()
+        .into_string()
+        .unwrap_or_else(|e| panic!("Invalid secret_key: {}", e));
+
+    let token_expiration = auth_conf
+        .get("token_expiration")
+        .map(|te| {
+            te.clone()
+                .into_int()
+                .unwrap_or_else(|e| panic!("Invalid token_expiration: {}", e)) as usize
+        })
+        .unwrap_or(0); // Token expiration can default to 0 (disabled)
+
+    let admin_username = auth_conf
+        .get("admin_username")
+        .map(|au| {
+            au.clone()
+                .into_string()
+                .unwrap_or_else(|e| panic!("Invalid admin_username: {}", e))
+        })
+        .unwrap_or_else(|| "admin".to_string()); // Username can have a reasonable default
+
+    let admin_password = auth_conf
+        .get("admin_password")
+        .expect("admin_password must be set in config")
+        .clone()
+        .into_string()
+        .unwrap_or_else(|e| panic!("Invalid admin_password: {}", e));
+
+    let admin_email = auth_conf
+        .get("admin_email")
+        .map(|ae| {
+            ae.clone()
+                .into_string()
+                .unwrap_or_else(|e| panic!("Invalid admin_email: {}", e))
+        })
+        .unwrap_or_else(|| "admin@example.com".to_string()); // Email can have a reasonable default
     let auth = AuthConfig {
         secret_key,
         token_expiration,
@@ -203,39 +174,57 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
         admin_email,
     };
 
+    // Validate critical auth settings
+    if auth.secret_key.is_empty() {
+        panic!("SECRET_KEY must be set - cannot run with empty JWT secret");
+    }
+    if auth.admin_password.is_empty() {
+        panic!("ADMIN_PASSWORD must be set - cannot run with empty admin password");
+    }
+
     // Load DB configuration
     let db_conf = config
         .get_table("database")
         .expect("a database table should exist in the config file");
-    let host = match db_conf.get("host") {
-        Some(host) => host
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid host: {}", e)),
-        None => default_config.database.host.clone(),
-    };
-    let port = match db_conf.get("port") {
-        Some(port) => port
-            .clone()
-            .into_int()
-            .unwrap_or_else(|e| panic!("Invalid port: {}", e)) as u16,
-        None => default_config.database.port,
-    };
-    let name = match db_conf.get("name") {
-        Some(name) => name
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid name: {}", e)),
-        None => default_config.database.name.clone(),
-    };
+
+    let host = db_conf
+        .get("host")
+        .map(|h| {
+            h.clone()
+                .into_string()
+                .unwrap_or_else(|e| panic!("Invalid host: {}", e))
+        })
+        .unwrap_or_else(|| "localhost".to_string()); // Host can have a reasonable default
+
+    let port = db_conf
+        .get("port")
+        .map(|p| {
+            p.clone()
+                .into_int()
+                .unwrap_or_else(|e| panic!("Invalid port: {}", e)) as u16
+        })
+        .unwrap_or(27017); // Port can have a reasonable default
+
+    let name = db_conf
+        .get("name")
+        .map(|n| {
+            n.clone()
+                .into_string()
+                .unwrap_or_else(|e| panic!("Invalid name: {}", e))
+        })
+        .unwrap_or_else(|| "boom".to_string()); // Database name can have a reasonable default
+
     let username = db_conf
         .get("username")
         .and_then(|username| username.clone().into_string().ok())
-        .unwrap_or(default_config.database.username);
+        .unwrap_or_else(|| "mongoadmin".to_string()); // Username can have a reasonable default
+
     let password = db_conf
         .get("password")
-        .and_then(|password| password.clone().into_string().ok())
-        .unwrap_or(default_config.database.password);
+        .expect("database password must be set in config")
+        .clone()
+        .into_string()
+        .unwrap_or_else(|e| panic!("Invalid database password: {}", e));
 
     let database = DatabaseConfig {
         name,
@@ -244,6 +233,11 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
         username,
         password,
     };
+
+    // Validate critical database settings
+    if database.password.is_empty() {
+        panic!("DATABASE_PASSWORD must be set - cannot run with empty database password");
+    }
 
     AppConfig { auth, database }
 }

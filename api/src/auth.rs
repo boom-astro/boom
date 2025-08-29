@@ -150,7 +150,7 @@ pub async fn get_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::E
 }
 
 pub async fn get_default_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::default().auth;
+    let config = AppConfig::from_default_path().auth;
     AuthProvider::new(config, db).await
 }
 

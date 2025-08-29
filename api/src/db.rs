@@ -144,6 +144,6 @@ pub async fn get_db() -> Database {
 }
 
 pub async fn get_default_db() -> Database {
-    let config = AppConfig::default();
+    let config = AppConfig::from_default_path();
     db_from_config(config).await
 }
