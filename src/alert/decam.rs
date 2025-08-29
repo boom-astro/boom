@@ -186,7 +186,7 @@ impl AlertWorker for DecamAlertWorker {
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_filter_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
     #[instrument(

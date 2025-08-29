@@ -1,6 +1,7 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf,
+    enrichment::{EnrichmentWorker, LsstEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::{
         enums::Survey,
@@ -83,6 +84,60 @@ async fn test_process_lsst_alert() {
     assert_eq!(fp_hists.len(), 0);
 
     drop_alert_from_collections(candid, "LSST").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_enrich_lsst_alert() {
+    let mut alert_worker = lsst_alert_worker().await;
+
+    // we only randomize the candid and object_id here, since the ra/dec
+    // are features of the models and would change the results
+    let (candid, _, _, _, bytes_content) = AlertRandomizer::new(Survey::Lsst)
+        .rand_candid()
+        .rand_object_id()
+        .get()
+        .await;
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+    let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
+    assert!(result.is_ok());
+
+    // the result should be a vec of String, for ZTF with the format
+    // "programid,candid" which is what the filter worker expects
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert, &format!("{}", candid));
+
+    // check that the alert was inserted in the DB, and ML scores added later
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
+    let alert_collection_name = "LSST_alerts";
+    let filter = doc! {"_id": candid};
+    let alert = db
+        .collection::<mongodb::bson::Document>(alert_collection_name)
+        .find_one(filter.clone())
+        .await
+        .unwrap();
+    assert!(alert.is_some());
+    let alert = alert.unwrap();
+
+    // the ml worker also adds "properties" to the alert
+    let properties = alert.get_document("properties").unwrap();
+    assert_eq!(properties.get_bool("rock").unwrap(), false);
+    assert_eq!(properties.get_bool("stationary").unwrap(), false);
+    // the properties also include "photstats, a document with bands as keys and
+    // as values the rate of evolution (mag/day) before and after peak
+    let photstats = properties.get_document("photstats").unwrap();
+
+    assert!(photstats.contains_key("r"));
+    let r_stats = photstats.get_document("r").unwrap();
+    let peak_mag = r_stats.get_f64("peak_mag").unwrap();
+    let peak_jd = r_stats.get_f64("peak_jd").unwrap();
+    assert!((peak_mag - 23.674994).abs() < 1e-6);
+    assert!((peak_jd - 2460961.733092).abs() < 1e-6);
 }
 
 #[tokio::test]
