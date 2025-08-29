@@ -87,6 +87,7 @@ BOOM uses environment variables for sensitive configuration like passwords and A
 
 1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
 1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
+1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
     ```bash
     docker compose up -d
     ```
