@@ -4,16 +4,16 @@ database:
   name: boom
   max_pool_size: 200
   replica_set: null
-  username: mongoadmin
-  password: mongoadminsecret
+  username: ${BOOM_DB_USERNAME:-mongoadmin}
+  password: ${BOOM_DB_PASSWORD}
   srv: false
 api:
   auth:
-    secret_key: "1234" # Secret key for JWT authentication, change it to a strong secret
+    secret_key: ${BOOM_JWT_SECRET} # Required - no default, must be set in environment
     token_expiration: 0 # jwt token expiration in seconds, 0 to disable. Should NOT be 0 in production
-    admin_username: admin # Admin username for the API
-    admin_password: adminsecret # Admin password for the API
-    admin_email: admin@example.com # Admin email for the API
+    admin_username: ${BOOM_ADMIN_USERNAME:-admin}
+    admin_password: ${BOOM_ADMIN_PASSWORD}
+    admin_email: ${BOOM_ADMIN_EMAIL:-admin@example.com}
 redis:
   host: localhost
   port: 6379
@@ -99,7 +99,7 @@ crossmatch:
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      projection: 
+      projection:
         _id: 0
         ra: 1
         dec: 1
