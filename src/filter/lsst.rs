@@ -4,11 +4,182 @@ use std::collections::HashMap;
 use tracing::{info, instrument};
 
 use crate::filter::{
-    get_filter_object, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert, Filter,
-    FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin, Photometry,
+    get_filter_object, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin,
+    Photometry,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;
+
+#[instrument(skip_all, err)]
+pub async fn build_lsst_alerts(
+    alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
+    alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+) -> Result<Vec<Alert>, FilterWorkerError> {
+    // deduplication of candids
+    let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
+    let pipeline = vec![
+        doc! {
+            "$match": {
+                "_id": { "$in": &candids }
+            }
+        },
+        doc! {
+            "$project": {
+                "objectId": 1,
+                "jd": "$candidate.jd",
+                "ra": "$candidate.ra",
+                "dec": "$candidate.dec",
+                "reliability": "$candidate.reliability",
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_aux",
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_cutouts",
+                "localField": "_id",
+                "foreignField": "_id",
+                "as": "cutouts"
+            }
+        },
+        doc! {
+            "$project": {
+                "objectId": 1,
+                "jd": 1,
+                "ra": 1,
+                "dec": 1,
+                "prv_candidates": get_array_element("aux.prv_candidates"),
+                "fp_hists": get_array_element("aux.fp_hists"),
+                "cutoutScience": get_array_element("cutouts.cutoutScience"),
+                "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
+                "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
+            }
+        },
+    ];
+
+    // Execute the aggregation pipeline
+    let mut cursor = alert_collection.aggregate(pipeline).await?;
+
+    let mut alerts = Vec::new();
+    while let Some(alert_document) = cursor.next().await {
+        let alert_document = alert_document?;
+        alerts.push(alert_document);
+    }
+
+    if candids.len() != alerts.len() {
+        return Err(FilterWorkerError::AlertNotFound);
+    }
+
+    let mut alerts_output = Vec::new();
+
+    for alert_document in alerts {
+        let candid = alert_document.get_i64("_id")?;
+        let object_id = alert_document.get_str("objectId")?.to_string();
+        let jd = alert_document.get_f64("jd")?;
+        let ra = alert_document.get_f64("ra")?;
+        let dec = alert_document.get_f64("dec")?;
+        let cutout_science = alert_document.get_binary_generic("cutoutScience")?.to_vec();
+        let cutout_template = alert_document
+            .get_binary_generic("cutoutTemplate")?
+            .to_vec();
+        let cutout_difference = alert_document
+            .get_binary_generic("cutoutDifference")?
+            .to_vec();
+
+        // let's create the array of photometry (non forced phot only for now)
+        let mut photometry = Vec::new();
+        for doc in alert_document.get_array("prv_candidates")?.iter() {
+            let doc = match doc.as_document() {
+                Some(doc) => doc,
+                None => continue, // skip if not a document
+            };
+            let jd = doc.get_f64("jd")?;
+            let flux = doc.get_f64("psfFlux")?;
+            let flux_err = doc.get_f64("psfFluxErr")?;
+            let band = doc.get_str("band")?.to_string();
+            let ra = doc.get_f64("ra").ok(); // optional, might not be present
+            let dec = doc.get_f64("dec").ok(); // optional, might not be present
+
+            photometry.push(Photometry {
+                jd,
+                flux: Some(flux),
+                flux_err,
+                band: format!("lsst{}", band),
+                zero_point: 8.9,
+                origin: Origin::Alert,
+                programid: 1, // only one public stream for LSST
+                survey: Survey::Lsst,
+                ra,
+                dec,
+            });
+        }
+
+        for doc in alert_document.get_array("fp_hists")?.iter() {
+            let doc = match doc.as_document() {
+                Some(doc) => doc,
+                None => continue, // skip if not a document
+            };
+            let jd = doc.get_f64("jd")?;
+            let flux = doc.get_f64("psfFlux")?;
+            let flux_err = doc.get_f64("psfFluxErr")?;
+            let band = doc.get_str("band")?.to_string();
+            let ra = doc.get_f64("ra").ok(); // optional, might not be present
+            let dec = doc.get_f64("dec").ok(); // optional, might not be present
+
+            photometry.push(Photometry {
+                jd,
+                flux: Some(flux),
+                flux_err,
+                band: format!("lsst{}", band),
+                zero_point: 8.9,
+                origin: Origin::ForcedPhot,
+                programid: 1, // only one public stream for LSST
+                survey: Survey::Lsst,
+                ra,
+                dec,
+            });
+        }
+
+        // sort the photometry by jd ascending
+        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+
+        let mut classifications = Vec::new();
+        if let Some(rb) = alert_document.get_f64("reliability").ok() {
+            classifications.push(Classification {
+                classifier: "reliability".to_string(),
+                score: rb,
+            });
+        }
+
+        let alert = Alert {
+            candid,
+            object_id,
+            jd,
+            ra,
+            dec,
+            filters: alerts_with_filter_results
+                .get(&candid)
+                .cloned()
+                .unwrap_or_else(Vec::new),
+            classifications,
+            photometry,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
+            survey: Survey::Lsst,
+        };
+        alerts_output.push(alert);
+    }
+
+    Ok(alerts_output)
+}
 
 pub struct LsstFilter {
     id: String,
@@ -223,151 +394,6 @@ impl FilterWorker for LsstFilterWorker {
         !self.filters.is_empty()
     }
 
-    #[instrument(skip(self, filter_results), err)]
-    async fn build_alert(
-        &self,
-        candid: i64,
-        filter_results: Vec<FilterResults>,
-    ) -> Result<Alert, FilterWorkerError> {
-        let pipeline = vec![
-            doc! {
-                "$match": {
-                    "_id": candid
-                }
-            },
-            doc! {
-                "$project": {
-                    "objectId": 1,
-                    "jd": "$candidate.jd",
-                    "ra": "$candidate.ra",
-                    "dec": "$candidate.dec",
-                }
-            },
-            doc! {
-                "$lookup": {
-                    "from": "LSST_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
-                "$lookup": {
-                    "from": "LSST_alerts_cutouts",
-                    "localField": "_id",
-                    "foreignField": "_id",
-                    "as": "cutouts"
-                }
-            },
-            doc! {
-                "$project": {
-                    "objectId": 1,
-                    "jd": 1,
-                    "ra": 1,
-                    "dec": 1,
-                    "prv_candidates": get_array_element("aux.prv_candidates"),
-                    "fp_hists": get_array_element("aux.fp_hists"),
-                    "cutoutScience": get_array_element("cutouts.cutoutScience"),
-                    "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
-                    "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
-                }
-            },
-        ];
-
-        // Execute the aggregation pipeline
-        let mut cursor = self.alert_collection.aggregate(pipeline).await?;
-
-        let alert_document = cursor
-            .next()
-            .await
-            .ok_or(FilterWorkerError::AlertNotFound)??;
-
-        let object_id = alert_document.get_str("objectId")?.to_string();
-        let jd = alert_document.get_f64("jd")?;
-        let ra = alert_document.get_f64("ra")?;
-        let dec = alert_document.get_f64("dec")?;
-        let cutout_science = alert_document.get_binary_generic("cutoutScience")?.to_vec();
-        let cutout_template = alert_document
-            .get_binary_generic("cutoutTemplate")?
-            .to_vec();
-        let cutout_difference = alert_document
-            .get_binary_generic("cutoutDifference")?
-            .to_vec();
-
-        // let's create the array of photometry (non forced phot only for now)
-        let mut photometry = Vec::new();
-        for doc in alert_document.get_array("prv_candidates")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?;
-            let flux_err = doc.get_f64("psfFluxErr")?;
-            let band = doc.get_str("band")?.to_string();
-            let ra = doc.get_f64("ra").ok(); // optional, might not be present
-            let dec = doc.get_f64("dec").ok(); // optional, might not be present
-
-            photometry.push(Photometry {
-                jd,
-                flux: Some(flux),
-                flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
-                origin: Origin::Alert,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
-                ra,
-                dec,
-            });
-        }
-
-        for doc in alert_document.get_array("fp_hists")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?;
-            let flux_err = doc.get_f64("psfFluxErr")?;
-            let band = doc.get_str("band")?.to_string();
-            let ra = doc.get_f64("ra").ok(); // optional, might not be present
-            let dec = doc.get_f64("dec").ok(); // optional, might not be present
-
-            photometry.push(Photometry {
-                jd,
-                flux: Some(flux),
-                flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
-                origin: Origin::ForcedPhot,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
-                ra,
-                dec,
-            });
-        }
-
-        // sort the photometry by jd ascending
-        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
-
-        let alert = Alert {
-            candid,
-            object_id,
-            jd,
-            ra,
-            dec,
-            filters: filter_results,
-            classifications: Vec::new(), // LSST does not have classifications in the alerts, yet!
-            photometry,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
-        };
-
-        Ok(alert)
-    }
-
     #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
@@ -418,13 +444,8 @@ impl FilterWorker for LsstFilterWorker {
             }
         }
 
-        // now we've basically combined the filter results for each candid
-        // we build the alert output and send it to Kafka
-        for (candid, filter_results) in &results_map {
-            let alert = self.build_alert(*candid, filter_results.clone()).await?;
-
-            alerts_output.push(alert);
-        }
+        let alerts = build_lsst_alerts(&results_map, &self.alert_collection).await?;
+        alerts_output.extend(alerts);
 
         Ok(alerts_output)
     }
