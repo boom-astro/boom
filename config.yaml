@@ -10,7 +10,7 @@ database:
 api:
   auth:
     secret_key: ${BOOM_JWT_SECRET} # Required - no default, must be set in environment
-    token_expiration: 0 # jwt token expiration in seconds, 0 to disable. Should NOT be 0 in production
+    token_expiration: 604800 # JWT token expiration in seconds (7 days) -- must be > 0
     admin_username: ${BOOM_ADMIN_USERNAME:-admin}
     admin_password: ${BOOM_ADMIN_PASSWORD}
     admin_email: ${BOOM_ADMIN_EMAIL:-admin@example.com}

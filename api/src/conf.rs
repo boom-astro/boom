@@ -173,7 +173,7 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
                 .into_int()
                 .unwrap_or_else(|e| panic!("Invalid token_expiration: {}", e)) as usize
         })
-        .unwrap_or(0); // Token expiration can default to 0 (disabled)
+        .unwrap_or(604800); // Default to 7 days (604800 seconds) if not specified
 
     let admin_username = auth_conf
         .get("admin_username")
@@ -213,6 +213,11 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
     }
     if auth.admin_password.is_empty() {
         panic!("ADMIN_PASSWORD must be set - cannot run with empty admin password");
+    }
+    if auth.token_expiration <= 0 {
+        panic!(
+            "TOKEN_EXPIRATION must be greater than 0 - tokens with unlimited lifetime are not allowed for security reasons"
+        );
     }
 
     // Load DB configuration

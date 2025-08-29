@@ -11,7 +11,7 @@ database:
 api:
   auth:
     secret_key: "1234"
-    token_expiration: 0
+    token_expiration: 604800
     admin_username: admin
     admin_password: adminsecret
     admin_email: admin@example.com
