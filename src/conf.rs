@@ -4,11 +4,12 @@ use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
 use config::File;
+use dotenvy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
@@ -33,6 +34,37 @@ pub enum ExpandError {
         var_name: String,
         placeholder: String,
     },
+}
+
+/// Loads environment variables from a .env file if it exists.
+/// This function should be called early in the application startup,
+/// typically before any configuration loading.
+///
+/// The function looks for .env files in this order:
+/// 1. .env in the current working directory
+/// 2. .env in the parent directory (useful when running from subdirs)
+/// 3. If none found, continues without error (env vars may be set by system)
+pub fn load_dotenv() {
+    // Try current directory first
+    if std::path::Path::new(".env").exists() {
+        match dotenvy::dotenv() {
+            Ok(_) => info!("Loaded environment variables from .env file"),
+            Err(e) => warn!("Found .env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // Try parent directory (useful when running from subdirectories like api/)
+    if std::path::Path::new("../.env").exists() {
+        match dotenvy::from_path("../.env") {
+            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // No .env file found - this is fine, environment variables may be set by the system
+    debug!("No .env file found, using system environment variables only");
 }
 
 /// Expands environment variable placeholders in a string.

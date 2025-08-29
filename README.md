@@ -44,12 +44,57 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
+### Environment Configuration
+
+BOOM uses environment variables for sensitive configuration like passwords and API keys. **You must set up your environment variables before running BOOM.**
+
+1. **Copy the example environment file:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Edit the `.env` file with your actual values:**
+   ```bash
+   # Edit .env with your preferred editor
+   nano .env
+   # or
+   vim .env
+   # or
+   code .env
+   ```
+
+3. **Required variables to set:**
+   - `BOOM_DB_PASSWORD` - Database password (used by both Docker Compose and BOOM)
+   - `BOOM_JWT_SECRET` - JWT secret key for API authentication (generate a strong random key)
+   - `BOOM_ADMIN_PASSWORD` - Admin password for API access
+
+   **⚠️ Important:** Never commit the `.env` file to version control - it's already in `.gitignore`.
+
+4. **Example `.env` contents:**
+   ```bash
+   # Database configuration (used by both Docker Compose and BOOM application)
+   BOOM_DB_USERNAME=mongoadmin
+   BOOM_DB_PASSWORD=your-secure-mongo-password-here
+
+   # API configuration
+   BOOM_JWT_SECRET=your-super-secret-jwt-key-here  # Generate a strong random key!
+   BOOM_ADMIN_USERNAME=admin
+   BOOM_ADMIN_PASSWORD=your-secure-admin-password-here
+   BOOM_ADMIN_EMAIL=admin@yourcompany.com
+   ```
+
+### Docker and Build Setup
+
+1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
 1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
+
+    **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+
 2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
@@ -167,5 +212,5 @@ RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- 
 
 ## Contributing
 
-We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information. 
+We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information.
 We rely on [GitHub issues](https://github.com/boom-astro/boom/issues) to track bugs and feature requests.
