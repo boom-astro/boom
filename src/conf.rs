@@ -134,8 +134,10 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
     let expanded_content = expand_env_vars(&file_content)?;
 
     // Write to a temporary file and reload
-    let temp_file =
-        tempfile::NamedTempFile::new().map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
+    let temp_file = tempfile::Builder::new()
+        .suffix(".yaml")
+        .tempfile()
+        .map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
 
     std::fs::write(temp_file.path(), expanded_content)
         .map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
