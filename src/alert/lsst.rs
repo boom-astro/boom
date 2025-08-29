@@ -1,6 +1,9 @@
 use crate::{
-    alert::base::{
-        Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+    alert::{
+        base::{
+            Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+        },
+        decam, ztf,
     },
     conf,
     utils::{
@@ -25,6 +28,12 @@ pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
+
+pub const LSST_ZTF_XMATCH_RADIUS: f64 =
+    (LSST_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
+pub const LSST_DECAM_XMATCH_RADIUS: f64 =
+    (LSST_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
+
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
 #[serde_as]
@@ -690,9 +699,39 @@ pub struct LsstAlertWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_aux_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
+    ztf_alert_aux_collection: mongodb::Collection<Document>,
+    decam_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl LsstAlertWorker {
+    #[instrument(skip(self), err)]
+    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
+        let ztf_matches = self
+            .get_matches(
+                ra,
+                dec,
+                ztf::ZTF_DEC_RANGE,
+                LSST_ZTF_XMATCH_RADIUS,
+                &self.ztf_alert_aux_collection,
+            )
+            .await?;
+
+        let decam_matches = self
+            .get_matches(
+                ra,
+                dec,
+                decam::DECAM_DEC_RANGE,
+                LSST_DECAM_XMATCH_RADIUS,
+                &self.decam_alert_aux_collection,
+            )
+            .await?;
+
+        Ok(doc! {
+            "ZTF": ztf_matches,
+            "DECAM": decam_matches,
+        })
+    }
+
     #[instrument(skip(self, prv_candidates_doc, fp_hist_doc, xmatches,), err)]
     async fn insert_alert_aux(
         &self,
@@ -702,6 +741,7 @@ impl LsstAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
         xmatches: Document,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let alert_aux_doc = doc! {
@@ -709,6 +749,7 @@ impl LsstAlertWorker {
             "prv_candidates": prv_candidates_doc,
             "fp_hists": fp_hist_doc,
             "cross_matches": xmatches,
+            "aliases": survey_matches,
             "created_at": now,
             "updated_at": now,
             "coordinates": {
@@ -791,6 +832,12 @@ impl AlertWorker for LsstAlertWorker {
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
+        let ztf_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&ztf::ALERT_AUX_COLLECTION);
+
+        let decam_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&decam::ALERT_AUX_COLLECTION);
+
         let worker = LsstAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             schema_registry: SchemaRegistry::new(schema_registry_url),
@@ -799,6 +846,8 @@ impl AlertWorker for LsstAlertWorker {
             alert_collection,
             alert_aux_collection,
             alert_cutout_collection,
+            ztf_alert_aux_collection,
+            decam_alert_aux_collection,
         };
         Ok(worker)
     }
@@ -823,7 +872,7 @@ impl AlertWorker for LsstAlertWorker {
             prv_candidates_doc,
             _prv_nondetections_doc,
             fp_hist_doc,
-            _survey_matches
+            survey_matches
         ),
         err
     )]
@@ -835,7 +884,7 @@ impl AlertWorker for LsstAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         _prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        _survey_matches: &Option<Document>,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
@@ -846,6 +895,7 @@ impl AlertWorker for LsstAlertWorker {
             prv_candidates_doc,
             fp_hist_doc,
             xmatches,
+            survey_matches,
             now,
         )
         .await?;
@@ -858,7 +908,7 @@ impl AlertWorker for LsstAlertWorker {
             prv_candidates_doc,
             _prv_nondetections_doc,
             fp_hist_doc,
-            _survey_matches
+            survey_matches
         ),
         err
     )]
@@ -868,13 +918,14 @@ impl AlertWorker for LsstAlertWorker {
         prv_candidates_doc: &Vec<Document>,
         _prv_nondetections_doc: &Vec<Document>,
         fp_hist_doc: &Vec<Document>,
-        _survey_matches: &Option<Document>,
+        survey_matches: &Option<Document>,
         now: f64,
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {
             "$set": {
                 "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
                 "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
+                "aliases": survey_matches,
                 "updated_at": now,
             }
         }];
@@ -939,6 +990,12 @@ impl AlertWorker for LsstAlertWorker {
         let (prv_candidates_doc, fp_hist_doc) =
             self.format_prv_candidates_and_fp_hist(prv_candidates, candidate_doc, fp_hist);
 
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
+        );
+
         if !alert_aux_exists {
             let result = self
                 .insert_aux(
@@ -948,7 +1005,7 @@ impl AlertWorker for LsstAlertWorker {
                     &prv_candidates_doc,
                     &Vec::new(),
                     &fp_hist_doc,
-                    &None,
+                    &survey_matches,
                     now,
                 )
                 .await;
@@ -958,7 +1015,7 @@ impl AlertWorker for LsstAlertWorker {
                     &prv_candidates_doc,
                     &Vec::new(),
                     &fp_hist_doc,
-                    &None,
+                    &survey_matches,
                     now,
                 )
                 .await
@@ -972,7 +1029,7 @@ impl AlertWorker for LsstAlertWorker {
                 &prv_candidates_doc,
                 &Vec::new(),
                 &fp_hist_doc,
-                &None,
+                &survey_matches,
                 now,
             )
             .await

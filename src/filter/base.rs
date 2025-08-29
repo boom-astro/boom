@@ -74,7 +74,8 @@ const ALERT_SCHEMA: &str = r#"
         }},
         {"name":"cutoutScience","type":{"type":"bytes"}},
         {"name":"cutoutTemplate","type":{"type":"bytes"}},
-        {"name":"cutoutDifference","type":{"type":"bytes"}}
+        {"name":"cutoutDifference","type":{"type":"bytes"}},
+        {"name":"survey","type":"string"}
     ]
 }
 "#;
@@ -117,13 +118,13 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     None
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     Alert,
     ForcedPhot,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
     pub flux: Option<f64>,
@@ -150,7 +151,7 @@ pub struct FilterResults {
     pub annotations: String,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Alert {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -167,19 +168,27 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
+    pub survey: Survey,
 }
 
-pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
-    let schema = Schema::parse_str(ALERT_SCHEMA)
-        .inspect_err(|e| error!("Failed to parse alert schema: {}", e))?;
+pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
+    let schema =
+        Schema::parse_str(schema_str).inspect_err(|e| error!("Failed to parse schema: {}", e))?;
 
     Ok(schema)
 }
 
-#[instrument(skip(alert, schema), fields(candid = alert.candid, object_id = alert.object_id), err)]
-pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
+pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
+    load_schema(ALERT_SCHEMA)
+}
+
+#[instrument(skip_all, err)]
+pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError>
+where
+    T: serde::Serialize,
+{
     let mut writer = Writer::new(schema, Vec::new());
-    writer.append_ser(alert).inspect_err(|e| {
+    writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
     let encoded = writer.into_inner().inspect_err(|e| {
@@ -189,13 +198,28 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
     Ok(encoded)
 }
 
+#[instrument(skip(alert, schema), fields(candid = alert.candid, object_id = alert.object_id), err)]
+pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
+    to_avro_bytes(alert, schema)
+}
+
 // TODO, use the config file to get the kafka server
 pub async fn create_producer(
     kafka_config: &conf::SurveyKafkaConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
+        // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+        // .set("debug", "broker,topic,msg")
         .set("bootstrap.servers", &kafka_config.producer)
         .set("message.timeout.ms", "5000")
+        // it's best to increase batch.size if the cluster
+        // is running on another machine. Locally, lower means less
+        // latency, since we are not limited by network speed anyways
+        .set("batch.size", "16384")
+        .set("linger.ms", "5")
+        .set("acks", "1")
+        .set("max.in.flight.requests.per.connection", "5")
+        .set("retries", "3")
         .create()?;
 
     Ok(producer)
@@ -207,11 +231,10 @@ pub async fn send_alert_to_kafka(
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-    key: &str,
 ) -> Result<(), FilterWorkerError> {
     let encoded = alert_to_avro_bytes(alert, schema)?;
 
-    let record = FutureRecord::to(&topic).key(key).payload(&encoded);
+    let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
 
     producer
         .send(record, std::time::Duration::from_secs(0))
@@ -510,18 +533,12 @@ pub trait FilterWorker {
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
     fn survey() -> crate::utils::enums::Survey;
-    async fn build_alert(
-        &self,
-        candid: i64,
-        filter_results: Vec<FilterResults>,
-    ) -> Result<Alert, FilterWorkerError>;
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
 #[tokio::main]
 #[instrument(skip_all, err)]
 pub async fn run_filter_worker<T: FilterWorker>(
-    key: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
 ) -> Result<(), FilterWorkerError> {
@@ -583,7 +600,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
         command_check_countdown -= nb_alerts - 1; // As if iterated this many times
 
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key).await?;
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic).await?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
                 &alert.candid,
