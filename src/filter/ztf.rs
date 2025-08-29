@@ -17,7 +17,6 @@ pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
     alert_collection: &mongodb::Collection<mongodb::bson::Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
-    // deduplication of candids
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
         doc! {
@@ -72,19 +71,9 @@ pub async fn build_ztf_alerts(
     // Execute the aggregation pipeline
     let mut cursor = alert_collection.aggregate(pipeline).await?;
 
-    let mut alerts = Vec::new();
+    let mut alerts_output = Vec::new();
     while let Some(alert_document) = cursor.next().await {
         let alert_document = alert_document?;
-        alerts.push(alert_document);
-    }
-
-    if candids.len() != alerts.len() {
-        return Err(FilterWorkerError::AlertNotFound);
-    }
-
-    let mut alerts_output = Vec::new();
-
-    for alert_document in alerts {
         let candid = alert_document.get_i64("_id")?;
         let object_id = alert_document.get_str("objectId")?.to_string();
         let jd = alert_document.get_f64("jd")?;
@@ -247,6 +236,10 @@ pub async fn build_ztf_alerts(
         };
 
         alerts_output.push(alert);
+    }
+
+    if candids.len() != alerts_output.len() {
+        return Err(FilterWorkerError::AlertNotFound);
     }
 
     Ok(alerts_output)
