@@ -44,9 +44,12 @@ config["workers"]["ZTF"]["ml"]["n_workers"] = args.n_ml_workers
 config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["host"] = "mongo"
+config["database"]["password"] = "mongoadminsecret"
 config["kafka"]["consumer"]["ZTF"] = "broker:29092"
 config["kafka"]["producer"] = "broker:29092"
 config["redis"]["host"] = "valkey"
+config["api"]["auth"]["secret_key"] = "1234"
+config["api"]["auth"]["admin_password"] = "adminsecret"
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
