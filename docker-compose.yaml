@@ -15,8 +15,8 @@ services:
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=mongoadmin
-      - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
+      - MONGO_INITDB_ROOT_USERNAME=${BOOM_DB_USERNAME:-mongoadmin}
+      - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DB_PASSWORD:?BOOM_DB_PASSWORD must be set and non-empty}
     volumes:
       - mongodb:/data/db
     restart: always
