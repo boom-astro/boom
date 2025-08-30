@@ -44,44 +44,19 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-### Environment Configuration
+### Environment configuration
 
-BOOM uses environment variables for sensitive configuration like passwords and API keys. **You must set up your environment variables before running BOOM.**
+BOOM uses environment variables for sensitive configuration like passwords
+and API keys.
+For local development, you can use the defaults in `.env.example`
+by copying it to `.env`:
 
-1. **Copy the example environment file:**
-   ```bash
-   cp .env.example .env
-   ```
+```sh
+cp .env.example .env
+```
 
-2. **Edit the `.env` file with your actual values:**
-   ```bash
-   # Edit .env with your preferred editor
-   nano .env
-   # or
-   vim .env
-   # or
-   code .env
-   ```
-
-3. **Required variables to set:**
-   - `BOOM_DB_PASSWORD` - Database password (used by both Docker Compose and BOOM)
-   - `BOOM_JWT_SECRET` - JWT secret key for API authentication (generate a strong random key)
-   - `BOOM_ADMIN_PASSWORD` - Admin password for API access
-
-   **⚠️ Important:** Never commit the `.env` file to version control - it's already in `.gitignore`.
-
-4. **Example `.env` contents:**
-   ```bash
-   # Database configuration (used by both Docker Compose and BOOM application)
-   BOOM_DB_USERNAME=mongoadmin
-   BOOM_DB_PASSWORD=your-secure-mongo-password-here
-
-   # API configuration
-   BOOM_JWT_SECRET=your-super-secret-jwt-key-here  # Generate a strong random key!
-   BOOM_ADMIN_USERNAME=admin
-   BOOM_ADMIN_PASSWORD=your-secure-admin-password-here
-   BOOM_ADMIN_EMAIL=admin@yourcompany.com
-   ```
+**Note:** Do not commit `.env` to Git or use the example values
+in production.
 
 ### Docker and Build Setup
 
