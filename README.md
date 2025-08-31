@@ -58,7 +58,7 @@ cp .env.example .env
 **Note:** Do not commit `.env` to Git or use the example values
 in production.
 
-### Docker and Build Setup
+### Start services for local development
 
 1. Launch `Valkey`, `MongoDB`, and `Kafka` using Docker, with the provided `docker-compose.yaml` file:
     ```bash
