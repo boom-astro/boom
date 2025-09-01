@@ -1,0 +1,9 @@
+Bootstrap: docker
+From: mongo:8.0
+
+%environment
+    export MONGO_INITDB_ROOT_USERNAME=mongoadmin
+    export MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
+
+%post
+    mkdir -p /data/db
