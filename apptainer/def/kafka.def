@@ -4,22 +4,22 @@ From: apache/kafka:latest
 %environment
     export KAFKA_BROKER_ID=1
     export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
-    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
     export KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
     export KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
     export KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
     export KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
     export KAFKA_PROCESS_ROLES=broker,controller
     export KAFKA_NODE_ID=1
-    export KAFKA_CONTROLLER_QUORUM_VOTERS=1@broker:29093
-    export KAFKA_LISTENERS=PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
+    export KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:29093
+    export KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
     export KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
     export KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-    export KAFKA_LOG_DIRS=/var/lib/kafka/data
+    export KAFKA_LOG_DIRS=/opt/kafka/logs
     export KAFKA_NUM_PARTITIONS=15
 
 %post
-    mkdir -p /var/lib/kafka/data
+    mkdir -p /data/kafka/logs
 
-%runscript
+%startscript
     exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
