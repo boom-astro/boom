@@ -5,7 +5,7 @@
 BOOM is an alert broker. What sets it apart from other alert brokers is that it is written to be modular, scalable, and performant. Essentially, the pipeline is composed of multiple types of workers, each with a specific task:
 1. The `Kafka` consumer(s), reading alerts from astronomical surveys' `Kafka` topics to transfer them to `Redis`/`Valkey` in-memory queues.
 2. The Alert Ingestion workers, reading alerts from the `Redis`/`Valkey` queues, responsible of formatting them to BSON documents, and enriching them with crossmatches from archival astronomical catalogs and other surveys before writing the formatted alert packets to a `MongoDB` database.
-3. The ML workers, running alerts through a series of ML classifiers, and writing the results back to the `MongoDB` database.
+3. The enrichment workers, running alerts through a series of enrichment classifiers, and writing the results back to the `MongoDB` database.
 4. The Filter workers, running user-defined filters on the alerts, and sending the results to Kafka topics for other services to consume.
 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
@@ -138,15 +138,25 @@ cargo run --release --bin scheduler ztf
 
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
-- You should then see some `ML WORKER <worker_id>: received alerts len: <nb_alerts>` messages, which means that the ML worker is processing the alerts successfully.
+- You should then see some `received alerts len: <nb_alerts>` messages, which means that the enrichment worker is processing the alerts successfully.
 - You should not see anything related to the filter worker. **This is normal, as we did not define any filters yet!** The next version of the README will include instructions on how to upload a dummy filter to the system for testing purposes.
 - What you should definitely see is a lot of `heart beat (MAIN)` messages, which means that the scheduler is running and managing the workers correctly.
 
 Metrics are available in the Prometheus instance at <http://localhost:9090>.
-Click [here][example-queries] to load Prometheus with a collection of useful
-queries already entered in the UI.
+Here some links to the Prometheus UI with useful queries already entered:
 
-[example-queries]: http://localhost:9090/query?g0.expr=alert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=15m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g1.show_tree=0&g1.tab=graph&g1.range_input=15m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=avg+by+%28status%29+%28irate%28alert_worker_alert_duration_seconds_sum%5B5m%5D%29+%2F+irate%28alert_worker_alert_duration_seconds_count%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=15m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%7D%29+by+%28le%29+%2F+scalar%28sum%28alert_worker_alert_duration_seconds_bucket%7Bstatus%3D%22added%22%2C+le%3D%22%2BInf%22%7D%29%29&g3.show_tree=0&g3.tab=graph&g3.range_input=15m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
+* [Kakfa consumer][kafka-consumer-queries]
+* [Alert workers][alert-worker-queries]
+* [Enrichment workers][enrichment-worker-queries]
+* [Filter workers][filter-worker-queries]
+
+[kafka-consumer-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+alert+workers%0Akafka_consumer_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Airate%28kafka_consumer_alert_processed_total%5B5m%5D%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+sum+by+%28status%29+%28irate%28kafka_consumer_alert_processed_total%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0
+
+[alert-worker-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+alert+workers%0Aalert_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Airate%28alert_worker_alert_processed_total%5B5m%5D%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+sum+by+%28status%29+%28irate%28alert_worker_alert_processed_total%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0
+
+[enrichment-worker-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+enrichment+workers%0Aenrichment_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Airate%28enrichment_worker_alert_processed_total%5B5m%5D%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+sum+by+%28status%29+%28irate%28enrichment_worker_alert_processed_total%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=%23+Number+of+alerts+per+batch%2C+averaged+over+the+collection+interval%0Airate%28enrichment_worker_alert_processed_total%5B5m%5D%29+%2F+irate%28enrichment_worker_batch_processed_total%5B5m%5D%29&g3.show_tree=0&g3.tab=graph&g3.range_input=30m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
+
+[filter-worker-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+filter+workers%0Afilter_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Airate%28filter_worker_alert_processed_total%5B5m%5D%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+irate%28filter_worker_alert_processed_total%5B5m%5D%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=%23+Number+of+alerts+per+batch%2C+averaged+over+the+collection+interval%0Airate%28filter_worker_alert_processed_total%5B5m%5D%29+%2F+ignoring%28reason%29+group_left+irate%28filter_worker_batch_processed_total%5B5m%5D%29%0A%23+irate%28filter_worker_alert_processed_total%5B5m%5D%29%0A%23+irate%28filter_worker_batch_processed_total%5B5m%5D%29&g3.show_tree=0&g3.tab=graph&g3.range_input=30m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
 
 ## Stopping BOOM:
 

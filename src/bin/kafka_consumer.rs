@@ -3,13 +3,18 @@ use boom::{
     kafka::{AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, ZtfAlertConsumer},
     utils::{
         enums::{ProgramId, Survey},
-        o11y::logging::build_subscriber,
+        o11y::{
+            logging::{build_subscriber, log_error, WARN},
+            metrics::init_metrics,
+        },
     },
 };
 
 use chrono::{NaiveDate, NaiveDateTime};
 use clap::Parser;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tracing::{error, info, instrument};
+use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
@@ -42,6 +47,15 @@ struct Cli {
     /// 15000
     #[arg(long, value_name = "MAX", default_value_t = 15000)]
     max_in_queue: usize,
+
+    /// UUID associated with this instance of the consumer, generated
+    /// automatically if not provided
+    #[arg(long, env = "BOOM_CONSUMER_INSTANCE_ID")]
+    instance_id: Option<Uuid>,
+
+    /// Name of the environment where this instance is deployed
+    #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
+    deployment_env: String,
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate, String> {
@@ -51,7 +65,7 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli) {
+async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let timestamp = NaiveDateTime::from(args.date.unwrap_or_else(|| {
         chrono::Utc::now()
             .date_naive()
@@ -132,6 +146,10 @@ async fn run(args: Cli) {
             };
         }
     }
+
+    if let Err(error) = meter_provider.shutdown() {
+        log_error!(WARN, error, "failed to shut down the meter provider");
+    }
 }
 
 #[tokio::main]
@@ -142,5 +160,14 @@ async fn main() {
     let args = Cli::parse();
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
-    run(args).await;
+
+    let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
+    let meter_provider = init_metrics(
+        String::from("consumer"),
+        instance_id,
+        args.deployment_env.clone(),
+    )
+    .expect("failed to initialize metrics");
+
+    run(args, meter_provider).await;
 }

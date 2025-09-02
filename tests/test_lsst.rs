@@ -124,7 +124,7 @@ async fn test_enrich_lsst_alert() {
     assert!(alert.is_some());
     let alert = alert.unwrap();
 
-    // the ml worker also adds "properties" to the alert
+    // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();
     assert_eq!(properties.get_bool("rock").unwrap(), false);
     assert_eq!(properties.get_bool("stationary").unwrap(), false);
