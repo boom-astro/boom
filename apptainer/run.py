@@ -43,7 +43,7 @@ with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
 # Reformat filter for insertion into database
-with open("tests/throughput/cats150.boom.json", "r") as f:
+with open("tests/throughput/cats150.pipeline.json", "r") as f:
     cats150 = json.load(f)
 for_insert = {
     "_id": str(uuid.uuid4()),
@@ -59,7 +59,7 @@ for_insert = {
         }
     ],
 }
-with open("tests/throughput/cats150.json", "w") as f:
+with open("tests/throughput/cats150.filter.json", "w") as f:
     json.dump(for_insert, f)
 
 logs_dir = os.path.join(

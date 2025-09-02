@@ -44,7 +44,7 @@ apptainer exec \
     --bind "$DATA_DIR/mongodb:/data/db" \
     --bind "$DATA_DIR/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
     --bind "$TESTS_DIR/mongo-init-apptainer.sh:/mongo-init.sh" \
-    --bind "$TESTS_DIR/cats150.json:/cats150.json" \
+    --bind "$TESTS_DIR/cats150.filter.json:/cats150.filter.json" \
     --env DB_NAME=boom-benchmarking \
     --env MONGO_INITDB_ROOT_USERNAME=mongoadmin \
     --env MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret \
