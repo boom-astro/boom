@@ -108,7 +108,7 @@ echo "$(current_datetime) - Starting Producer"
 apptainer exec \
   --bind "$DATA_DIR/alerts:/app/data/alerts" \
   --bind "$CONFIG_FILE:/app/config.yaml" \
-  "$SIF_DIR/boom-benchmarking.sif"
+  "$SIF_DIR/boom-benchmarking.sif" \
   /bin/sh -c "/app/kafka_producer ztf 20250311 public" \
   > "$LOGS_DIR/producer.log" 2>&1 &
 
