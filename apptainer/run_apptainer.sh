@@ -3,17 +3,16 @@
 SIF_DIR="$HOME/boom/apptainer/sif"
 DATA_DIR="$HOME/boom/data"
 TESTS_DIR="$HOME/boom/tests/throughput"
+CONFIG_FILE="$CONFIG_FILE"
 LOGS_DIR=${1:-$HOME/boom/logs/boom}
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
-CONFIG_FILE="$TESTS_DIR/config.yaml"
-
-mkdir -p "$LOGS_DIR"
 
 # Clean up old data
 rm -rf data/valkey/*
 
+mkdir -p "$LOGS_DIR"
 touch "$LOGS_DIR/producer.log"
 touch "$LOGS_DIR/consumer.log"
 touch "$LOGS_DIR/scheduler.log"
@@ -108,17 +107,17 @@ echo "$(current_datetime) - Kafka broker is ready"
 echo "$(current_datetime) - Starting Producer"
 apptainer exec
   --bind "$DATA_DIR/alerts:/app/data/alerts" \
-  --bind "$TESTS_DIR/config.yaml:/app/config.yaml" \
+  --bind "$CONFIG_FILE:/app/config.yaml" \
   "$SIF_DIR/boom-benchmarking.sif"
   /bin/sh -c "/app/kafka_producer ztf 20250311 public" \
-  > "$LOGS_DIR/producer.log" 2>&1
+  > "$LOGS_DIR/producer.log" 2>&1 &
 
 # -----------------------------
 # 5. Consumer
 # -----------------------------
 echo "$(current_datetime) - Starting Consumer"
 apptainer exec \
-    --bind "$TESTS_DIR/config.yaml:/app/config.yaml" \
+    --bind "$CONFIG_FILE:/app/config.yaml" \
     "$SIF_DIR/boom-benchmarking.sif" \
     /bin/sh -c "/app/kafka_consumer ztf 20250311 public" \
     > "$LOGS_DIR/consumer.log" 2>&1 &
@@ -129,7 +128,7 @@ apptainer exec \
 echo "$(current_datetime) - Starting Scheduler"
 apptainer exec \
     --bind "$DATA_DIR/models:/app/models" \
-    --bind "$TESTS_DIR/config.yaml:/app/config.yaml" \
+    --bind "$CONFIG_FILE:/app/config.yaml" \
     --env RUST_LOG=debug,ort=error \
     "$SIF_DIR/boom-benchmarking.sif" \
     /app/scheduler ztf \
