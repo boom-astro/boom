@@ -4,9 +4,9 @@ use crate::{
     },
     conf,
     utils::{
-        conversions::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         db::{mongify, update_timeseries_op},
         enums::Survey,
+        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
         o11y::logging::as_error,
         spatial::xmatch,
     },
@@ -812,7 +812,7 @@ impl AlertWorker for LsstAlertWorker {
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_filter_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
     #[instrument(

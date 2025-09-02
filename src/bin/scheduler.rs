@@ -88,7 +88,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         config_path.clone(),
     );
     let ml_pool = ThreadPool::new(
-        WorkerType::ML,
+        WorkerType::Enrichment,
         n_ml as usize,
         args.survey.clone(),
         config_path.clone(),

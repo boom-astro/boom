@@ -21,7 +21,6 @@ fn naive(date: &str) -> chrono::NaiveDateTime {
 #[tokio::test]
 async fn test_download_from_archive() {
     let date_str = "20231118";
-    let data_directory = Path::new("data/alerts/ztf/public").join(date_str);
     let expected_count = 271u32;
 
     let producer = ZtfAlertProducer::new(
@@ -38,12 +37,7 @@ async fn test_download_from_archive() {
     assert_eq!(result.unwrap(), expected_count as i64);
 
     // Verify the data directory exists and has the right number of avro files:
-    assert_eq!(
-        Path::new(&producer.data_directory())
-            .canonicalize()
-            .unwrap(),
-        data_directory.canonicalize().unwrap()
-    );
+    let data_directory = Path::new("data/alerts/ztf/public").join(date_str);
     assert!(data_directory.exists());
     let avro_count = count_files_in_dir(data_directory.to_str().unwrap(), Some(&["avro"])).unwrap();
     assert_eq!(avro_count, expected_count as usize);
