@@ -3,7 +3,7 @@
 SIF_DIR="$HOME/boom/apptainer/sif"
 DATA_DIR="$HOME/boom/data"
 TESTS_DIR="$HOME/boom/tests/throughput"
-CONFIG_FILE="$CONFIG_FILE"
+CONFIG_FILE="$TESTS_DIR/config.yaml"
 LOGS_DIR=${1:-$HOME/boom/logs/boom}
 
 EXPECTED_ALERTS=29142
