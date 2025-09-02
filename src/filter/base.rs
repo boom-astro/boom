@@ -3,20 +3,57 @@ use crate::{
     utils::{
         db::get_array_element,
         enums::Survey,
+        o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
     },
 };
+
+use std::{num::NonZero, sync::LazyLock};
 
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
+use opentelemetry::{
+    metrics::{Counter, UpDownCounter},
+    KeyValue,
+};
 use rdkafka::producer::FutureProducer;
 use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
-use std::num::NonZero;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace, warn};
+use uuid::Uuid;
+
+// NOTE: Global instruments are defined here because reusing instruments is
+// considered a best practice. See boom::alert::base.
+
+// UpDownCounter for the number of alerts currently being processed by the filter workers.
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .i64_up_down_counter("filter_worker.active")
+        .with_unit("{alert}")
+        .with_description("Number of alerts currently being processed by the filter worker.")
+        .build()
+});
+
+// Counter for the number of alert batches processed by the filter workers.
+static BATCH_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("filter_worker.batch.processed")
+        .with_unit("{batch}")
+        .with_description("Number of alert batches processed by the filter worker.")
+        .build()
+});
+
+// Counter for the number of alerts processed by the filter workers.
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("filter_worker.alert.processed")
+        .with_unit("{alert}")
+        .with_description("Number of alerts processed by the filter worker.")
+        .build()
+});
 
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
@@ -74,7 +111,8 @@ const ALERT_SCHEMA: &str = r#"
         }},
         {"name":"cutoutScience","type":{"type":"bytes"}},
         {"name":"cutoutTemplate","type":{"type":"bytes"}},
-        {"name":"cutoutDifference","type":{"type":"bytes"}}
+        {"name":"cutoutDifference","type":{"type":"bytes"}},
+        {"name":"survey","type":"string"}
     ]
 }
 "#;
@@ -117,13 +155,13 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     None
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     Alert,
     ForcedPhot,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
     pub flux: Option<f64>,
@@ -150,7 +188,7 @@ pub struct FilterResults {
     pub annotations: String,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Alert {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -167,19 +205,27 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
+    pub survey: Survey,
 }
 
-pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
-    let schema = Schema::parse_str(ALERT_SCHEMA)
-        .inspect_err(|e| error!("Failed to parse alert schema: {}", e))?;
+pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
+    let schema =
+        Schema::parse_str(schema_str).inspect_err(|e| error!("Failed to parse schema: {}", e))?;
 
     Ok(schema)
 }
 
-#[instrument(skip(alert, schema), fields(candid = alert.candid, object_id = alert.object_id), err)]
-pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
+pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
+    load_schema(ALERT_SCHEMA)
+}
+
+#[instrument(skip_all, err)]
+pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError>
+where
+    T: serde::Serialize,
+{
     let mut writer = Writer::new(schema, Vec::new());
-    writer.append_ser(alert).inspect_err(|e| {
+    writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
     let encoded = writer.into_inner().inspect_err(|e| {
@@ -189,13 +235,28 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
     Ok(encoded)
 }
 
+#[instrument(skip(alert, schema), fields(candid = alert.candid, object_id = alert.object_id), err)]
+pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, FilterWorkerError> {
+    to_avro_bytes(alert, schema)
+}
+
 // TODO, use the config file to get the kafka server
 pub async fn create_producer(
     kafka_config: &conf::SurveyKafkaConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
+        // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+        // .set("debug", "broker,topic,msg")
         .set("bootstrap.servers", &kafka_config.producer)
         .set("message.timeout.ms", "5000")
+        // it's best to increase batch.size if the cluster
+        // is running on another machine. Locally, lower means less
+        // latency, since we are not limited by network speed anyways
+        .set("batch.size", "16384")
+        .set("linger.ms", "5")
+        .set("acks", "1")
+        .set("max.in.flight.requests.per.connection", "5")
+        .set("retries", "3")
         .create()?;
 
     Ok(producer)
@@ -207,11 +268,10 @@ pub async fn send_alert_to_kafka(
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-    key: &str,
 ) -> Result<(), FilterWorkerError> {
     let encoded = alert_to_avro_bytes(alert, schema)?;
 
-    let record = FutureRecord::to(&topic).key(key).payload(&encoded);
+    let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
 
     producer
         .send(record, std::time::Duration::from_secs(0))
@@ -510,20 +570,15 @@ pub trait FilterWorker {
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
     fn survey() -> crate::utils::enums::Survey;
-    async fn build_alert(
-        &self,
-        candid: i64,
-        filter_results: Vec<FilterResults>,
-    ) -> Result<Alert, FilterWorkerError>;
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
 #[tokio::main]
 #[instrument(skip_all, err)]
 pub async fn run_filter_worker<T: FilterWorker>(
-    key: String,
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
+    worker_id: Uuid,
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
 
@@ -550,46 +605,92 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let ok_included_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "included"),
+    ];
+    let ok_excluded_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "excluded"),
+    ];
+    let input_error_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "input_queue"),
+    ];
+    let processing_error_attrs = [
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "processing"),
+    ];
+    let output_error_attrs = [
+        worker_id_attr,
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "kafka_send"),
+    ];
     loop {
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 break;
-            } else {
-                command_check_countdown = command_interval + 1;
             }
+            command_check_countdown = command_interval + 1;
         }
-        command_check_countdown -= 1;
-        // if the queue is empty, wait for a bit and continue the loop
-        let queue_len: i64 = con.llen(&input_queue).await?;
-        if queue_len == 0 {
+
+        ACTIVE.add(1, &active_attrs);
+        let alerts: Vec<String> = con
+            .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
+            .await
+            .inspect_err(|_| {
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &input_error_attrs);
+            })?;
+
+        if alerts.is_empty() {
+            ACTIVE.add(-1, &active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
         }
 
-        // get candids from redis
-        let alerts: Vec<String> = con
-            .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
-            .await?;
+        let alerts_output = filter_worker
+            .process_alerts(&alerts)
+            .await
+            .inspect_err(|_| {
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &processing_error_attrs);
+            })?;
+        command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        let nb_alerts = alerts.len();
-        if nb_alerts == 0 {
-            // sleep for a bit if no alerts were found
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            continue;
-        }
-
-        let alerts_output = filter_worker.process_alerts(&alerts).await?;
-        command_check_countdown -= nb_alerts - 1; // As if iterated this many times
-
+        BATCH_PROCESSED.add(1, &ok_attrs);
+        ALERT_PROCESSED.add(
+            (alerts.len() - alerts_output.len()) as u64,
+            &ok_excluded_attrs,
+        );
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic, &key).await?;
+            send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
+                .await
+                .inspect_err(|_| {
+                    let attributes = &output_error_attrs;
+                    ACTIVE.add(-1, &active_attrs);
+                    BATCH_PROCESSED.add(1, attributes);
+                    ALERT_PROCESSED.add(1, attributes);
+                })?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
                 &alert.candid,
                 &output_topic
             );
+            // Incrementing by alerts_output.len() outside this loop may be more
+            // efficient, but incrementing by 1 here is more accurate.
+            ALERT_PROCESSED.add(1, &ok_included_attrs);
         }
+
+        ACTIVE.add(-1, &active_attrs);
     }
 
     Ok(())

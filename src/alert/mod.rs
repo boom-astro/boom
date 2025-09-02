@@ -7,5 +7,9 @@ pub use base::{
     AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry, SchemaRegistryError,
 };
 pub use decam::{DecamAlert, DecamAlertWorker, DECAM_DEC_RANGE};
-pub use lsst::{LsstAlert, LsstAlertWorker, LSST_DEC_RANGE, LSST_SCHEMA_REGISTRY_URL};
-pub use ztf::{ZtfAlert, ZtfAlertWorker, ZTF_DECAM_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS};
+pub use lsst::{
+    LsstAlert, LsstAlertWorker, LSST_DEC_RANGE, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
+};
+pub use ztf::{
+    ZtfAlert, ZtfAlertWorker, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS,
+};
