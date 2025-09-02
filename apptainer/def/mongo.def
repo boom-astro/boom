@@ -4,6 +4,7 @@ From: mongo:8.0
 %environment
     export MONGO_INITDB_ROOT_USERNAME=mongoadmin
     export MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
+    export DB_NAME=boom-benchmarking
     export PORT=27017
 
 %startscript

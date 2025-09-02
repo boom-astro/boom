@@ -18,8 +18,5 @@ From: apache/kafka:latest
     export KAFKA_LOG_DIRS=/opt/kafka/logs
     export KAFKA_NUM_PARTITIONS=15
 
-%post
-    mkdir -p /data/kafka/logs
-
 %startscript
     exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties

@@ -88,13 +88,13 @@ boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
 with open(boom_consumer_log_fpath) as f:
     line = f.readline()
     t1_b = pd.to_datetime(
-        line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
+        line.split()[0].replace("\x1b[2m", "").replace("\x1b[0m", "")
     )
 with open(boom_scheduler_log_fpath) as f:
     lines = f.readlines()
     line = lines[-3]
     t2_b = pd.to_datetime(
-        line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
+        line.split()[0].replace("\x1b[2m", "").replace("\x1b[0m", "")
     )
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
