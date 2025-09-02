@@ -52,8 +52,8 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     // get num workers from config file
     let n_alert = get_num_workers(&config, &args.survey, "alert")
         .expect("could not retrieve number of alert workers");
-    let n_ml = get_num_workers(&config, &args.survey, "ml")
-        .expect("could not retrieve number of ml workers");
+    let n_enrichment = get_num_workers(&config, &args.survey, "enrichment")
+        .expect("could not retrieve number of enrichment workers");
     let n_filter = get_num_workers(&config, &args.survey, "filter")
         .expect("could not retrieve number of filter workers");
 
@@ -87,9 +87,9 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         args.survey.clone(),
         config_path.clone(),
     );
-    let ml_pool = ThreadPool::new(
+    let enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
-        n_ml as usize,
+        n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
     );
@@ -118,7 +118,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     info!("shutting down");
     heartbeat_handle.abort();
     drop(alert_pool);
-    drop(ml_pool);
+    drop(enrichment_pool);
     drop(filter_pool);
     if let Err(error) = meter_provider.shutdown() {
         log_error!(WARN, error, "failed to shut down the meter provider");
