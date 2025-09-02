@@ -59,7 +59,7 @@ for_insert = {
         }
     ],
 }
-with open("tests/throughput/cats150.filter.json", "w") as f:
+with open("tests/throughput/cats150.json", "w") as f:
     json.dump(for_insert, f)
 
 logs_dir = os.path.join(

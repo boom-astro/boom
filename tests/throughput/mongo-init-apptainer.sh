@@ -47,7 +47,7 @@ echo "Ingesting $N_FILTERS copies of the cats150 filter into filters collection"
 for i in $(seq 1 $N_FILTERS); do
     echo "Inserting cats150 filter with filter_id $i into filters collection"
     # the file contains one document, so we read and edit the filter_id field
-    EDITED_FILTER_CONTENT=$(jq --arg id "$(generate_uuid)" '._id = $id' /cats150.filter.json)
+    EDITED_FILTER_CONTENT=$(jq --arg id "$(generate_uuid)" '._id = $id' /cats150.json)
     ADDED=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
         --eval "db.filters.insertOne($EDITED_FILTER_CONTENT)")
     if [ $? -ne 0 ]; then
