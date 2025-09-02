@@ -64,9 +64,6 @@ apptainer instance start \
 
 sleep 15
 
-#apptainer exec --bind "data/valkey:/data" "apptainer/sif/valkey.sif" \
-#  valkey-server --save "" --appendonly no --port 6379 --bind 0.0.0.0 --dbfilename ""
-
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
@@ -109,23 +106,12 @@ echo "$(current_datetime) - Kafka broker is ready"
 # 4. Producer
 # -----------------------------
 echo "$(current_datetime) - Starting Producer"
-#apptainer exec \
-#    --bind "$DATA_DIR/alerts:/app/data/alerts" \
-#    --bind "$TESTS_DIR/config.yaml:/app/config.yaml" \
-#    "$SIF_DIR/boom-benchmarking.sif" \
-#    /bin/sh -c "/app/kafka_producer ztf 20250311 public"
-
-# Start producer instance
-apptainer instance start \
+apptainer exec
   --bind "$DATA_DIR/alerts:/app/data/alerts" \
   --bind "$TESTS_DIR/config.yaml:/app/config.yaml" \
-  "$SIF_DIR/boom-benchmarking.sif" producer \
-  /bin/sh -c "sleep 0.1"
-
-sleep 5
-
-# Run producer command in the instance and redirect output to log file
-apptainer exec instance://producer /app/kafka_producer ztf 20250311 public > "$LOGS_DIR/producer.log" 2>&1
+  "$SIF_DIR/boom-benchmarking.sif"
+  /bin/sh -c "/app/kafka_producer ztf 20250311 public" \
+  > "$LOGS_DIR/producer.log" 2>&1
 
 # -----------------------------
 # 5. Consumer
@@ -134,14 +120,8 @@ echo "$(current_datetime) - Starting Consumer"
 apptainer exec \
     --bind "$TESTS_DIR/config.yaml:/app/config.yaml" \
     "$SIF_DIR/boom-benchmarking.sif" \
-    /bin/sh -c "sleep 5 && /app/kafka_consumer ztf 20250311 public" \
+    /bin/sh -c "/app/kafka_consumer ztf 20250311 public" \
     > "$LOGS_DIR/consumer.log" 2>&1 &
-
-#
-#apptainer exec \
-#    --bind "tests/throughput/config.yaml:/app/config.yaml" \
-#    "apptainer/sif/boom-benchmarking.sif" \
-#    /bin/sh -c "/app/kafka_consumer ztf 20250311 public"
 
 # -----------------------------
 # 6. Scheduler
