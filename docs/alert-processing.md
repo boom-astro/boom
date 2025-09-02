@@ -31,7 +31,7 @@ graph TB
 
     subgraph Valkey
         AlertQueue[Alert queue]
-        MLQueue[ML queue]
+        EnrichmentQueue[Enrichment queue]
         FilterQueue[Filter queue]
     end
 
@@ -46,7 +46,7 @@ graph TB
         KafkaConsumer[Kafka consumer]
         subgraph Scheduler
             AlertWorker[Alert worker]
-            MLWorker[ML worker]
+            EnrichmentWorker[Enrichment worker]
             FilterWorker[Filter worker]
         end
     end
@@ -54,12 +54,12 @@ graph TB
     Input --> KafkaConsumer
     KafkaConsumer -- Alert Avro --> AlertQueue
     AlertQueue -- Alert Avro --> AlertWorker
-    AlertWorker -- Candidate ID --> MLQueue
+    AlertWorker -- Candidate ID --> EnrichmentQueue
     AlertWorker -- Alert, object, images --> MongoDB
-    MLQueue -- Candidate ID --> MLWorker
-    MLWorker -- Candidate ID --> FilterQueue
-    MLWorker -- Alert ML scores --> AlertCollection
-    MongoDB -- Alert, object, images --> MLWorker
+    EnrichmentQueue -- Candidate ID --> EnrichmentWorker
+    EnrichmentWorker -- Candidate ID --> FilterQueue
+    EnrichmentWorker -- Alert Enrichment scores --> AlertCollection
+    MongoDB -- Alert, object, images --> EnrichmentWorker
     FilterQueue -- Candidate ID --> FilterWorker
     MongoDB -- Enriched alert --> FilterWorker
     FilterWorker -- Enriched alert that passed at least one filter --> Output
@@ -73,8 +73,8 @@ each one will have its own:
 - Kafka consumer
 - Alert queue
 - Alert workers
-- ML queue
-- ML workers
+- Enrichment queue
+- Enrichment workers
 - Filter queue
 - Filter workers
 - Alert collection
