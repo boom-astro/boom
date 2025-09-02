@@ -13,9 +13,10 @@ N_FILTERS=25
 rm -rf data/valkey/*
 
 mkdir -p "$LOGS_DIR"
-touch "$LOGS_DIR/producer.log"
-touch "$LOGS_DIR/consumer.log"
-touch "$LOGS_DIR/scheduler.log"
+# Clear log files or create them if they don't exist
+: > "$LOGS_DIR/producer.log"
+: > "$LOGS_DIR/consumer.log"
+: > "$LOGS_DIR/scheduler.log"
 
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
@@ -60,9 +61,6 @@ apptainer instance start \
   --bind "$DATA_DIR/valkey:/data" \
   "$SIF_DIR/valkey.sif" valkey
 
-
-sleep 15
-
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
@@ -97,6 +95,7 @@ while ! apptainer exec instance://broker /opt/kafka/bin/kafka-broker-api-version
     fi
     sleep 3
     cpt=$((cpt + 1))
+    echo "$(current_datetime) - Waiting for Kafka broker to be ready..."
 done
 
 echo "$(current_datetime) - Kafka broker is ready"
@@ -105,42 +104,43 @@ echo "$(current_datetime) - Kafka broker is ready"
 # 4. Producer
 # -----------------------------
 echo "$(current_datetime) - Starting Producer"
-apptainer exec \
+apptainer exec --pwd /app \
   --bind "$DATA_DIR/alerts:/app/data/alerts" \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   "$SIF_DIR/boom-benchmarking.sif" \
   /bin/sh -c "/app/kafka_producer ztf 20250311 public" \
   > "$LOGS_DIR/producer.log" 2>&1 &
+PROD_PID=$!
 
 # -----------------------------
 # 5. Consumer
 # -----------------------------
 echo "$(current_datetime) - Starting Consumer"
-apptainer exec \
+apptainer exec --pwd /app \
     --bind "$CONFIG_FILE:/app/config.yaml" \
     "$SIF_DIR/boom-benchmarking.sif" \
     /bin/sh -c "/app/kafka_consumer ztf 20250311 public" \
     > "$LOGS_DIR/consumer.log" 2>&1 &
+CONS_PID=$!
 
 # -----------------------------
 # 6. Scheduler
 # -----------------------------
 echo "$(current_datetime) - Starting Scheduler"
-apptainer exec \
-    --bind "$DATA_DIR/models:/app/models" \
-    --bind "$CONFIG_FILE:/app/config.yaml" \
-    --env RUST_LOG=debug,ort=error \
-    "$SIF_DIR/boom-benchmarking.sif" \
-    /app/scheduler ztf \
+apptainer exec --pwd /app \
+    --bind "data/models:/app/models" \
+    --bind "tests/throughput/config.yaml:/app/config.yaml" \
+    --bind "$LOGS_DIR:/app/logs" \
+    "apptainer/sif/boom-benchmarking.sif" \
+    /bin/sh -c "/app/scheduler ztf" \
     > "$LOGS_DIR/scheduler.log" 2>&1 &
+SCHED_PID=$!
 
 # -----------------------------
 # 7. Wait for alerts ingestion
 # -----------------------------
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 while [ $(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
-    count=$(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()")
-    echo "$(current_datetime) - Alerts ingested so far: $count / $EXPECTED_ALERTS"
     sleep 1
 done
 
@@ -162,6 +162,7 @@ echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
 apptainer instance stop mongo
 apptainer instance stop valkey
 apptainer instance stop broker
+kill $PROD_PID $CONS_PID $SCHED_PID
 
 echo "$(current_datetime) - Done"
 exit 0
