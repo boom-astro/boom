@@ -20,13 +20,14 @@ use mongodb::{
     Collection,
 };
 use opentelemetry::{
-    metrics::{Counter, Histogram, UpDownCounter},
+    metrics::{Counter, UpDownCounter},
     KeyValue,
 };
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
+use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
 
@@ -38,7 +39,7 @@ const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
 // initialized once.
 
 // UpDownCounter for the number of alerts currently being processed by the alert workers.
-static ALERT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .i64_up_down_counter("alert_worker.active")
         .with_unit("{alert}")
@@ -46,23 +47,8 @@ static ALERT_WORKER_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
         .build()
 });
 
-// Histogram for the times taken by the alert workers to process each alert.
-static ALERT_WORKER_DURATION: LazyLock<Histogram<f64>> = LazyLock::new(|| {
-    let start = 0.01;
-    let factor: f64 = 2.0;
-    let n_buckets = 10;
-    let mut boundaries: Vec<f64> = (0..n_buckets).map(|n| start * factor.powi(n)).collect();
-    boundaries.insert(0, 0.0);
-    SCHEDULER_METER
-        .f64_histogram("alert_worker.alert.duration")
-        .with_unit("s")
-        .with_description("Distribution of times taken by the alert worker to process each alert.")
-        .with_boundaries(boundaries)
-        .build()
-});
-
 // Counter for the number of alerts processed by the alert workers.
-static ALERT_WORKER_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("alert_worker.alert.processed")
         .with_unit("{alert}")
@@ -647,7 +633,7 @@ async fn handle_process_result(
 pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
-    worker_id: String,
+    worker_id: Uuid,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
@@ -668,14 +654,34 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut count = 0;
 
     let start = std::time::Instant::now();
-    let worker_id_attr = KeyValue::new("worker.id", worker_id);
-    let alert_worker_active_attrs = [worker_id_attr.clone()];
-    let alert_worker_added_attrs = [worker_id_attr.clone(), KeyValue::new("status", "added")];
-    let alert_worker_exists_attrs = [worker_id_attr.clone(), KeyValue::new("status", "exists")];
-    let alert_worker_error_attrs = [worker_id_attr, KeyValue::new("status", "error")];
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_added_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "added"),
+    ];
+    let ok_exists_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "exists"),
+    ];
+    let input_error_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "input_queue"),
+    ];
+    let processing_error_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "processing"),
+    ];
+    let output_error_attrs = vec![
+        worker_id_attr,
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "output_queue"),
+    ];
     loop {
-        let alert_start = std::time::Instant::now();
-
         // check for command from threadpool
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -686,28 +692,31 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
         command_check_countdown -= 1;
 
+        ACTIVE.add(1, &active_attrs);
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
-        ALERT_WORKER_ACTIVE.add(1, &alert_worker_active_attrs);
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 info!("queue is empty");
+                ACTIVE.add(-1, &active_attrs);
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 command_check_countdown = 0;
                 continue;
             }
             Err(e) => {
-                error!(?e, "failed to retrieve avro bytes");
+                log_error!(e, "failed to retrieve avro bytes");
+                ACTIVE.add(-1, &active_attrs);
+                ALERT_PROCESSED.add(1, &input_error_attrs);
                 continue;
             }
         };
 
         let process_result = alert_processor.process_alert(&avro_bytes).await;
-        let attributes = match process_result {
-            Ok(ProcessAlertStatus::Added(_)) => &alert_worker_added_attrs,
-            Ok(ProcessAlertStatus::Exists(_)) => &alert_worker_exists_attrs,
-            Err(_) => &alert_worker_error_attrs,
+        let mut attributes = match process_result {
+            Ok(ProcessAlertStatus::Added(_)) => &ok_added_attrs,
+            Ok(ProcessAlertStatus::Exists(_)) => &ok_exists_attrs,
+            Err(_) => &processing_error_attrs,
         };
         let handle_result = handle_process_result(
             &mut con,
@@ -718,10 +727,12 @@ pub async fn run_alert_worker<T: AlertWorker>(
         )
         .await
         .inspect_err(as_error!("failed to handle process result"));
+        if handle_result.is_err() {
+            attributes = &output_error_attrs;
+        }
 
-        ALERT_WORKER_ACTIVE.add(-1, &alert_worker_active_attrs);
-        ALERT_WORKER_DURATION.record(alert_start.elapsed().as_secs_f64(), attributes);
-        ALERT_WORKER_PROCESSED.add(1, attributes);
+        ACTIVE.add(-1, &active_attrs);
+        ALERT_PROCESSED.add(1, attributes);
 
         handle_result?;
         if count > 0 && count % 1000 == 0 {

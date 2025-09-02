@@ -30,7 +30,7 @@ workers:
     command_interval: 500
     alert:
       n_workers: 1
-    ml:
+    enrichment:
       n_workers: 1
     filter:
       n_workers: 1
@@ -38,7 +38,7 @@ workers:
     command_interval: 500
     alert:
       n_workers: 1
-    ml:
+    enrichment:
       n_workers: 0
     filter:
       n_workers: 1
@@ -46,7 +46,7 @@ workers:
     command_interval: 500
     alert:
       n_workers: 1
-    ml:
+    enrichment:
       n_workers: 0
     filter:
       n_workers: 1
