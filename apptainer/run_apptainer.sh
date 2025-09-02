@@ -105,7 +105,7 @@ echo "$(current_datetime) - Kafka broker is ready"
 # 4. Producer
 # -----------------------------
 echo "$(current_datetime) - Starting Producer"
-apptainer exec
+apptainer exec \
   --bind "$DATA_DIR/alerts:/app/data/alerts" \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   "$SIF_DIR/boom-benchmarking.sif"
