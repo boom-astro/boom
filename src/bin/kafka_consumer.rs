@@ -1,7 +1,7 @@
 use boom::{
     kafka::{AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, ZtfAlertConsumer},
     utils::{
-        enums::{ProgramId, Survey},
+        enums::ProgramId,
         o11y::{
             logging::{build_subscriber, log_error, WARN},
             metrics::init_metrics,
@@ -10,33 +10,20 @@ use boom::{
 };
 
 use chrono::{NaiveDate, NaiveDateTime};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tracing::{error, info, instrument};
 use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
-    /// Survey to consume alerts from
-    #[arg(value_enum)]
-    survey: Survey,
-
-    /// UTC date for which we want to consume alerts, with format YYYYMMDD
-    /// [default: yesterday's date]
-    #[arg(value_parser = parse_date)]
-    date: Option<NaiveDate>, // Easier to deal with the default value after clap
-
-    /// ID of the program to consume the alerts (ZTF-only)
-    #[arg(default_value_t, value_enum)]
-    program_id: ProgramId,
-
     /// Path to the configuration file
     #[arg(long, value_name = "FILE", default_value = "config.yaml")]
     config: String,
 
-    /// Number of processes to use to read the Kafka stream in parallel
+    /// Number of threads to use to read the Kafka stream in parallel
     #[arg(long, default_value_t = 1)]
-    processes: usize,
+    threads: usize,
 
     /// Clear the in-memory (Valkey) queue of alerts already consumed from Kafka
     #[arg(long)]
@@ -55,6 +42,49 @@ struct Cli {
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
     deployment_env: String,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Consume alerts from DECam
+    Decam(DecamArgs),
+
+    /// Consume alerts from LSST
+    Lsst(LsstArgs),
+
+    /// Consume alerts from ZTF
+    Ztf(ZtfArgs),
+}
+
+#[derive(Args)]
+struct DecamArgs {
+    /// UTC date for which we want to consume alerts, with format YYYYMMDD
+    /// [default: yesterday's date]
+    #[arg(value_parser = parse_date)]
+    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+}
+
+#[derive(Args)]
+struct LsstArgs {
+    /// UTC date for which we want to consume alerts, with format YYYYMMDD
+    /// [default: yesterday's date]
+    #[arg(value_parser = parse_date)]
+    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+}
+
+#[derive(Args)]
+struct ZtfArgs {
+    /// UTC date for which we want to consume alerts, with format YYYYMMDD
+    /// [default: yesterday's date]
+    #[arg(value_parser = parse_date)]
+    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+
+    /// ID of the program to consume the alerts (ZTF-only)
+    #[arg(default_value_t, value_enum)]
+    program_id: ProgramId,
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate, String> {
@@ -63,35 +93,31 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
     Ok(date)
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli, meter_provider: SdkMeterProvider) {
-    let timestamp = NaiveDateTime::from(args.date.unwrap_or_else(|| {
+fn parse_timestamp(date: Option<NaiveDate>) -> i64 {
+    NaiveDateTime::from(date.unwrap_or_else(|| {
         chrono::Utc::now()
             .date_naive()
             .pred_opt()
             .expect("previous date is not representable")
     }))
     .and_utc()
-    .timestamp();
+    .timestamp()
+}
 
-    // TODO: let the user specify if they want to consume real or simulated LSST data
-    let simulated = match args.survey {
-        Survey::Lsst => true,
-        _ => false,
-    };
-
-    match args.survey {
-        Survey::Ztf => {
-            let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
+#[instrument(skip_all)]
+async fn run(args: Cli, meter_provider: SdkMeterProvider) {
+    match args.command {
+        Commands::Ztf(sub_args) => {
+            let consumer = ZtfAlertConsumer::new(None, Some(sub_args.program_id));
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config);
             }
             match consumer
                 .consume(
-                    timestamp,
+                    parse_timestamp(sub_args.date),
                     &args.config,
                     false,
-                    Some(args.processes),
+                    Some(args.threads),
                     Some(args.max_in_queue),
                     None,
                     None,
@@ -102,17 +128,19 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                 Err(e) => error!("Failed to consume alerts: {}", e),
             };
         }
-        Survey::Lsst => {
+        Commands::Lsst(sub_args) => {
+            // TODO: let the user specify if they want to consume real or simulated LSST data
+            let simulated = true;
             let consumer = LsstAlertConsumer::new(None, simulated);
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config);
             }
             match consumer
                 .consume(
-                    timestamp,
+                    parse_timestamp(sub_args.date),
                     &args.config,
                     false,
-                    Some(args.processes),
+                    Some(args.threads),
                     Some(args.max_in_queue),
                     None,
                     None,
@@ -123,17 +151,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                 Err(e) => error!("Failed to consume alerts: {}", e),
             };
         }
-        Survey::Decam => {
+        Commands::Decam(sub_args) => {
             let consumer = DecamAlertConsumer::new(None);
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config);
             }
             match consumer
                 .consume(
-                    timestamp,
+                    parse_timestamp(sub_args.date),
                     &args.config,
                     false,
-                    Some(args.processes),
+                    Some(args.threads),
                     Some(args.max_in_queue),
                     None,
                     None,
