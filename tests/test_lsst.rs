@@ -1,5 +1,5 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus},
+    alert::{AlertWorker, ProcessAlertStatus, LSST_ZTF_XMATCH_RADIUS, ZTF_DEC_RANGE},
     conf,
     enrichment::{EnrichmentWorker, LsstEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
@@ -7,7 +7,7 @@ use boom::{
         enums::Survey,
         testing::{
             drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
-            AlertRandomizer, TEST_CONFIG_FILE,
+            ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
@@ -87,6 +87,52 @@ async fn test_process_lsst_alert() {
 }
 
 #[tokio::test]
+async fn test_process_lsst_alert_xmatch() {
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let db = conf::build_db(&config).await.unwrap();
+
+    let mut alert_worker = lsst_alert_worker().await;
+    let lsst_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Lsst).dec(ZTF_DEC_RANGE.1 - 10.0);
+
+    let (_, object_id, ra, dec, _) = lsst_alert_randomizer.clone().get().await;
+    let aux_collection_name = "LSST_alerts_aux";
+    let filter_aux = doc! {"_id": &object_id};
+
+    // ZTF setup
+    let mut ztf_alert_worker = ztf_alert_worker().await;
+
+    // 1. nearby ZTF alert, LSST alert should have a ZTF alias
+    let (_, ztf_object_id, _, _, ztf_bytes_content) = AlertRandomizer::new_randomized(Survey::Ztf)
+        .ra(ra)
+        .dec(dec + 0.9 * LSST_ZTF_XMATCH_RADIUS.to_degrees())
+        .get()
+        .await;
+    ztf_alert_worker
+        .process_alert(&ztf_bytes_content)
+        .await
+        .unwrap();
+
+    let (_, _, _, _, bytes_content) = lsst_alert_randomizer.clone().rand_candid().get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+    let aux = db
+        .collection::<mongodb::bson::Document>(aux_collection_name)
+        .find_one(filter_aux.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let ztf_matches = aux
+        .get_document("aliases")
+        .unwrap()
+        .get_array("ZTF")
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ztf_matches, vec![ztf_object_id.clone()]);
+}
+
+#[tokio::test]
 async fn test_enrich_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
@@ -124,7 +170,7 @@ async fn test_enrich_lsst_alert() {
     assert!(alert.is_some());
     let alert = alert.unwrap();
 
-    // the ml worker also adds "properties" to the alert
+    // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();
     assert_eq!(properties.get_bool("rock").unwrap(), false);
     assert_eq!(properties.get_bool("stationary").unwrap(), false);

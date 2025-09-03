@@ -2,13 +2,17 @@ use crate::{
     conf::{self, SurveyKafkaConfig},
     utils::{
         data::count_files_in_dir,
-        o11y::logging::{as_error, log_error},
+        o11y::{
+            logging::{as_error, log_error},
+            metrics::CONSUMER_METER,
+        },
     },
 };
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
 use indicatif::ProgressBar;
+use opentelemetry::{metrics::Counter, KeyValue};
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
@@ -20,6 +24,18 @@ use rdkafka::{
 };
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace, warn};
+
+// NOTE: Global instruments are defined here because reusing instruments is
+// considered a best practice. See boom::alert::base.
+
+// Counter for the number of alerts processed by the kafka consumer.
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    CONSUMER_METER
+        .u64_counter("kafka_consumer.alert.processed")
+        .with_unit("{alert}")
+        .with_description("Number of alerts processed by the kafka consumer.")
+        .build()
+});
 
 const MAX_RETRIES_PRODUCER: usize = 6;
 
@@ -540,9 +556,39 @@ pub async fn consume_partitions(
 
     let mut total = 0;
 
+    // OTel attributes informed by https://opentelemetry.io/docs/specs/semconv/messaging/kafka/
+    let consumer_attrs = [
+        KeyValue::new("messaging.system", "kafka"),
+        KeyValue::new("messaging.destination.name", topic.to_string()),
+        KeyValue::new("messaging.consumer.group.name", group_id.to_string()),
+        KeyValue::new("messaging.operation.name", "poll"),
+        KeyValue::new("messaging.operation.type", "receive"),
+        KeyValue::new("messaging.client.id", id.to_string()),
+    ];
+    let ok_attrs: Vec<KeyValue> = consumer_attrs
+        .iter()
+        .cloned()
+        .chain([KeyValue::new("status", "ok")])
+        .collect();
+    let input_error_attrs: Vec<KeyValue> = consumer_attrs
+        .iter()
+        .cloned()
+        .chain([
+            KeyValue::new("status", "error"),
+            KeyValue::new("reason", "kafka_poll"),
+        ])
+        .collect();
+    let output_error_attrs: Vec<KeyValue> = consumer_attrs
+        .iter()
+        .cloned()
+        .chain([
+            KeyValue::new("status", "error"),
+            KeyValue::new("reason", "kafka_send"),
+        ])
+        .collect();
     // start timer
     let start = std::time::Instant::now();
-    // poll one message at a time
+    // Poll one message at a time.
     loop {
         if max_in_queue > 0 && total % 1000 == 0 {
             loop {
@@ -566,8 +612,12 @@ pub async fn consume_partitions(
                 let payload = message.payload().unwrap_or_default();
                 con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
                     .await
-                    .inspect_err(as_error!("failed to push message to queue"))?;
+                    .inspect_err(|error| {
+                        log_error!(error, "failed to push message to queue");
+                        ALERT_PROCESSED.add(1, &output_error_attrs);
+                    })?;
                 trace!("Pushed message to redis");
+                ALERT_PROCESSED.add(1, &ok_attrs);
                 total += 1;
                 if total % 1000 == 0 {
                     info!(
@@ -580,6 +630,7 @@ pub async fn consume_partitions(
             }
             Some(Err(e)) => {
                 error!("Error while consuming from Kafka, retrying: {}", e);
+                ALERT_PROCESSED.add(1, &input_error_attrs);
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;
                 continue;
             }
