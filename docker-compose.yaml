@@ -5,6 +5,9 @@ volumes:
 
 networks:
   boom:
+  traefik-public:
+    # Allow setting it to false for testing and local development
+    external: true
 
 services:
   mongo:
@@ -15,8 +18,8 @@ services:
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=mongoadmin
-      - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
+      - MONGO_INITDB_ROOT_USERNAME=${BOOM_DB_USERNAME:-mongoadmin}
+      - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DB_PASSWORD:?BOOM_DB_PASSWORD must be set and non-empty}
     volumes:
       - mongodb:/data/db
     restart: always
@@ -51,6 +54,7 @@ services:
       - 9092:9092
     networks:
       - boom
+      - traefik-public
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
@@ -83,11 +87,12 @@ services:
       target: api
     networks:
       - boom
+      - traefik-public
     profiles:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
-  scheduler:
+  scheduler-ztf:
     image: boom/boom-scheduler:latest
     hostname: scheduler
     build:
@@ -100,6 +105,25 @@ services:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+    command:
+      - /app/scheduler
+      - ztf
+  scheduler-lsst:
+    image: boom/boom-scheduler:latest
+    hostname: scheduler
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: scheduler
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml
+    command:
+      - /app/scheduler
+      - lsst
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     volumes:
@@ -121,6 +145,7 @@ services:
       - 9090:9090
     networks:
       - boom
+      - traefik-public # TODO: Setup auth
 
 # [^1]:
 #   * https://opentelemetry.io/docs/collector/quick-start/

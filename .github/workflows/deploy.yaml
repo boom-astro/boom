@@ -1,0 +1,36 @@
+name: Deploy to production
+
+concurrency: production
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy (tag, branch, or commit SHA)'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  deploy:
+    environment: production
+    runs-on:
+      - self-hosted
+      - production
+    env:
+      ENVIRONMENT: production
+      BOOM_DB_PASSWORD: ${{ secrets.BOOM_DB_PASSWORD }}
+      BOOM_ADMIN_USERNAME: ${{ vars.BOOM_ADMIN_USERNAME }}
+      BOOM_ADMIN_EMAIL: ${{ vars.BOOM_ADMIN_EMAIL }}
+      BOOM_ADMIN_PASSWORD: ${{ secrets.BOOM_ADMIN_PASSWORD }}
+      BOOM_JWT_SECRET: ${{ secrets.BOOM_JWT_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.version || github.ref }}
+      - run: docker compose --profile prod -f docker-compose.yml build
+      - run: docker compose --profile prod -f docker-compose.yml up -d

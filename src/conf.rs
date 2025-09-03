@@ -4,8 +4,12 @@ use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
 use config::File;
+use dotenvy;
+use regex::Regex;
+use std::collections::HashMap;
+use std::env;
 use std::path::Path;
-use tracing::{error, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
@@ -19,6 +23,99 @@ pub enum BoomConfigError {
     ConfigFileNotFound,
     #[error("missing key in config")]
     MissingKeyError,
+    #[error("environment variable expansion error")]
+    EnvExpansionError(#[from] ExpandError),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ExpandError {
+    #[error("Missing environment variable '{var_name}' for placeholder '{placeholder}'")]
+    MissingVariable {
+        var_name: String,
+        placeholder: String,
+    },
+}
+
+/// Loads environment variables from a .env file if it exists.
+/// This function should be called early in the application startup,
+/// typically before any configuration loading.
+///
+/// The function looks for .env files in this order:
+/// 1. .env in the current working directory
+/// 2. .env in the parent directory (useful when running from subdirs)
+/// 3. If none found, continues without error (env vars may be set by system)
+pub fn load_dotenv() {
+    // Try current directory first
+    if std::path::Path::new(".env").exists() {
+        match dotenvy::dotenv() {
+            Ok(_) => info!("Loaded environment variables from .env file"),
+            Err(e) => warn!("Found .env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // Try parent directory (useful when running from subdirectories like api/)
+    if std::path::Path::new("../.env").exists() {
+        match dotenvy::from_path("../.env") {
+            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // No .env file found - this is fine, environment variables may be set by the system
+    debug!("No .env file found, using system environment variables only");
+}
+
+/// Expands environment variable placeholders in a string.
+/// Supports both ${VAR_NAME} and ${VAR_NAME:-default_value} syntax.
+///
+/// Examples:
+/// - "${BOOM_DB_PASSWORD}" -> reads from BOOM_DB_PASSWORD env var
+/// - "${BOOM_DB_PASSWORD:-defaultpass}" -> reads from BOOM_DB_PASSWORD, falls back to "defaultpass"
+fn expand_env_vars(input: &str) -> Result<String, ExpandError> {
+    let re = Regex::new(r"\$\{([^}:]+)(?::-(.*?))?\}").unwrap();
+    let mut result = input.to_string();
+    let mut replacements: HashMap<String, String> = HashMap::new();
+
+    for capture in re.captures_iter(input) {
+        let full_match = capture.get(0).unwrap().as_str();
+        let var_name = capture.get(1).unwrap().as_str();
+        let default_value = capture.get(2).map(|m| m.as_str());
+
+        // Check if we already processed this variable
+        if let Some(replacement) = replacements.get(full_match) {
+            result = result.replace(full_match, replacement);
+            continue;
+        }
+
+        // Get the environment variable value
+        let env_value = match env::var(var_name) {
+            Ok(value) => {
+                debug!("Expanded environment variable: {} = [REDACTED]", var_name);
+                value
+            }
+            Err(_) => {
+                if let Some(default) = default_value {
+                    warn!(
+                        "Environment variable {} not found, using default value",
+                        var_name
+                    );
+                    default.to_string()
+                } else {
+                    return Err(ExpandError::MissingVariable {
+                        var_name: var_name.to_string(),
+                        placeholder: full_match.to_string(),
+                    });
+                }
+            }
+        };
+
+        replacements.insert(full_match.to_string(), env_value.clone());
+        result = result.replace(full_match, &env_value);
+    }
+
+    Ok(result)
 }
 
 #[instrument(err)]
@@ -29,12 +126,28 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
         return Err(BoomConfigError::ConfigFileNotFound);
     }
 
+    // Expand environment variables by reading the raw config as a string
+    // and doing text replacement before parsing
+    let file_content =
+        std::fs::read_to_string(filepath).map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
+
+    let expanded_content = expand_env_vars(&file_content)?;
+
+    // Write to a temporary file and reload
+    let temp_file = tempfile::Builder::new()
+        .suffix(".yaml")
+        .tempfile()
+        .map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
+
+    std::fs::write(temp_file.path(), expanded_content)
+        .map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
+
     let conf = Config::builder()
-        .add_source(File::with_name(filepath))
+        .add_source(File::from(temp_file.path()))
         .build()?;
+
     Ok(conf)
 }
-
 #[instrument(skip_all, err)]
 pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigError> {
     let db_conf = conf.get_table("database")?;
