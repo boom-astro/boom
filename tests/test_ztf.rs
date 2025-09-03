@@ -398,7 +398,7 @@ async fn test_filter_ztf_alert() {
     let candid_programid_str = &enrichment_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
-    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf, true, false).await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await

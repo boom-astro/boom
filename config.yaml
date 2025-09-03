@@ -39,7 +39,7 @@ workers:
     alert:
       n_workers: 1
     enrichment:
-      n_workers: 0
+      n_workers: 1
     filter:
       n_workers: 1
   DECAM:
@@ -47,7 +47,7 @@ workers:
     alert:
       n_workers: 1
     enrichment:
-      n_workers: 0
+      n_workers: 1
     filter:
       n_workers: 1
 crossmatch:

@@ -195,7 +195,9 @@ async fn test_filter_lsst_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Lsst, true, false)
+        .await
+        .unwrap();
 
     let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await
