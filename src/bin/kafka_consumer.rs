@@ -61,47 +61,48 @@ enum Commands {
 
 #[derive(Args)]
 struct DecamArgs {
-    /// UTC date for which we want to consume alerts, with format YYYYMMDD
-    /// [default: yesterday's date]
-    #[arg(value_parser = parse_date)]
-    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+    /// UTC date for which we want to consume alerts, with format YYYYMMDD or
+    /// YYYY-MM-DD
+    #[arg(long, value_parser = parse_date, default_value_t = default_date())]
+    date: NaiveDate,
 }
 
 #[derive(Args)]
 struct LsstArgs {
-    /// UTC date for which we want to consume alerts, with format YYYYMMDD
-    /// [default: yesterday's date]
-    #[arg(value_parser = parse_date)]
-    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+    /// UTC date for which we want to consume alerts, with format YYYYMMDD or
+    /// YYYY-MM-DD
+    #[arg(long, value_parser = parse_date, default_value_t = default_date())]
+    date: NaiveDate,
 }
 
 #[derive(Args)]
 struct ZtfArgs {
-    /// UTC date for which we want to consume alerts, with format YYYYMMDD
-    /// [default: yesterday's date]
-    #[arg(value_parser = parse_date)]
-    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+    /// UTC date for which we want to consume alerts, with format YYYYMMDD or
+    /// YYYY-MM-DD
+    #[arg(long, value_parser = parse_date, default_value_t = default_date())]
+    date: NaiveDate,
 
     /// ID of the program to consume the alerts (ZTF-only)
-    #[arg(default_value_t, value_enum)]
+    #[arg(long, default_value_t, value_enum)]
     program_id: ProgramId,
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate, String> {
-    let date =
-        NaiveDate::parse_from_str(s, "%Y%m%d").map_err(|_| "expected a date in YYYYMMDD format")?;
+    let date = NaiveDate::parse_from_str(s, "%Y%m%d")
+        .or_else(|_| NaiveDate::parse_from_str(s, "%Y-%m-%d"))
+        .map_err(|_| "expected a date in YYYYMMDD or YYYY-MM-DD format")?;
     Ok(date)
 }
 
-fn parse_timestamp(date: Option<NaiveDate>) -> i64 {
-    NaiveDateTime::from(date.unwrap_or_else(|| {
-        chrono::Utc::now()
-            .date_naive()
-            .pred_opt()
-            .expect("previous date is not representable")
-    }))
-    .and_utc()
-    .timestamp()
+fn default_date() -> NaiveDate {
+    chrono::Utc::now()
+        .date_naive()
+        .pred_opt()
+        .expect("previous date is not representable")
+}
+
+fn to_utc_timestamp(date: NaiveDate) -> i64 {
+    NaiveDateTime::from(date).and_utc().timestamp()
 }
 
 #[instrument(skip_all)]
@@ -114,7 +115,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    parse_timestamp(sub_args.date),
+                    to_utc_timestamp(sub_args.date),
                     &args.config,
                     false,
                     Some(args.threads),
@@ -137,7 +138,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    parse_timestamp(sub_args.date),
+                    to_utc_timestamp(sub_args.date),
                     &args.config,
                     false,
                     Some(args.threads),
@@ -158,7 +159,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    parse_timestamp(sub_args.date),
+                    to_utc_timestamp(sub_args.date),
                     &args.config,
                     false,
                     Some(args.threads),
