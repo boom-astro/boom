@@ -40,6 +40,12 @@ services:
     networks:
       - traefik-public
       - default
+  scheduler-ztf:
+    env_file:
+      - .env
+  scheduler-lsst:
+    env_file:
+      - .env
 
 networks:
   traefik-public:
