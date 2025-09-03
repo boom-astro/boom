@@ -1,4 +1,4 @@
-"""Script to benchmark BOOM."""
+"""Script to benchmark BOOM. requires: Python 3.8+, pandas>2, pyyaml"""
 import argparse
 import json
 import os
@@ -17,7 +17,7 @@ parser.add_argument(
     help="Number of alert workers to use for benchmarking.",
 )
 parser.add_argument(
-    "--n-ml-workers",
+    "--n-enrichment-workers",
     type=int,
     default=6,
     help="Number of machine learning workers to use for benchmarking.",
@@ -32,7 +32,7 @@ args = parser.parse_args()
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 config["workers"]["ZTF"]["alert"]["n_workers"] = args.n_alert_workers
-config["workers"]["ZTF"]["ml"]["n_workers"] = args.n_ml_workers
+config["workers"]["ZTF"]["enrichment"]["n_workers"] = args.n_enrichment_workers
 config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["host"] = "localhost"
@@ -67,7 +67,7 @@ logs_dir = os.path.join(
     "boom-"
     + (
         f"na={args.n_alert_workers}-"
-        f"nml={args.n_ml_workers}-"
+        f"ne={args.n_enrichment_workers}-"
         f"nf={args.n_filter_workers}"
     ),
 )
@@ -78,7 +78,7 @@ subprocess.run(["bash", "apptainer/run_apptainer.sh", logs_dir], check=True)
 # Now analyze the logs and raise an error if we're too slow
 boom_config = (
     f"na={args.n_alert_workers}-"
-    f"nml={args.n_ml_workers}-"
+    f"ne={args.n_enrichment_workers}-"
     f"nf={args.n_filter_workers}"
 )
 boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
