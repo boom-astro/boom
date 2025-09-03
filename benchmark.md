@@ -12,7 +12,7 @@
 ```bash
   docker buildx create --use
   docker buildx inspect --bootstrap
-  docker buildx bake -f tests/throughput/compose.yaml
+  docker buildx bake -f tests/throughput/compose.yaml --load
 ```
 
 ### Download Data
