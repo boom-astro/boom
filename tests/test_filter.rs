@@ -147,11 +147,30 @@ async fn test_build_filter() {
                             ]
                         }
                     }
-                }
+                },
+                "aliases": { "$arrayElemAt": ["$aux.aliases", 0] }
             }
         },
         doc! { "$unset": "aux" },
-        doc! { "$match": { "prv_candidates.0": { "$exists": true }, "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
+        doc! { "$lookup": { "from": "LSST_alerts_aux", "localField": "aliases.LSST.0", "foreignField": "_id", "as": "lsst_aux" } },
+        doc! {
+            "$addFields": {
+                "LSST.prv_candidates": {
+                    "$filter": {
+                        "input": { "$arrayElemAt": ["$lsst_aux.prv_candidates", 0] },
+                        "as": "x",
+                        "cond": {
+                            "$and": [
+                                { "$lt": [{ "$subtract": ["$candidate.jd", "$$x.jd"] }, 365] },
+                                { "$lte": ["$$x.jd", "$candidate.jd"]},
+                            ]
+                        }
+                    }
+                },
+            }
+        },
+        doc! { "$unset": "lsst_aux" },
+        doc! { "$match": { "prv_candidates.0": { "$exists": true }, "LSST.prv_candidates.0": { "$exists": true }, "candidate.drb": { "$gt": 0.5 }, "candidate.ndethist": { "$gt": 1_f64 }, "candidate.magpsf": { "$lte": 18.5 } } },
         doc! { "$project": { "objectId": 1_i64, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
     ];
     assert_eq!(pipeline, filter.pipeline);
