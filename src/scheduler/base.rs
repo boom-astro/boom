@@ -213,8 +213,7 @@ impl Worker {
                             return;
                         }
                     };
-                    let key = uuid::Uuid::new_v4().to_string();
-                    run(key, receiver, &config_path, id)
+                    run(receiver, &config_path, id)
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),
