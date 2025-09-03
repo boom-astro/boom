@@ -18,6 +18,9 @@ async fn main() -> std::io::Result<()> {
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
 
+    // get the port from an env variable
+    let port = std::env::var("PORT").unwrap_or_else(|_| "4000".into());
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(database.clone()))
@@ -48,7 +51,7 @@ async fn main() -> std::io::Result<()> {
             )
             .wrap(Logger::default())
     })
-    .bind(("0.0.0.0", 4000))?
+    .bind(("0.0.0.0", port.parse().unwrap()))?
     .run()
     .await
 }
