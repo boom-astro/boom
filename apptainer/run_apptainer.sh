@@ -127,7 +127,7 @@ CONSUMER_PID=$!
 # -----------------------------
 echo "$(current_datetime) - Starting Scheduler"
 apptainer exec --pwd /app \
-    --bind "$DATA_DIR/models:/app/models" \
+    --bind "$DATA_DIR/models:/app/data/models" \
     --bind "$CONFIG_FILE:/app/config.yaml" \
     --bind "$LOGS_DIR:/app/logs" \
     "apptainer/sif/boom-benchmarking.sif" \
