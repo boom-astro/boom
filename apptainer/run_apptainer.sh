@@ -109,7 +109,8 @@ apptainer exec --pwd /app \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   "$SIF_DIR/boom-benchmarking.sif" \
   /app/kafka_producer ztf 20250311 public \
-  > "$LOGS_DIR/producer.log" 2>&1 &
+  > "$LOGS_DIR/producer.log" 2>&1
+echo "$(current_datetime) - Producer finished sending alerts"
 
 # -----------------------------
 # 5. Consumer
