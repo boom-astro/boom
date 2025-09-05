@@ -9,7 +9,7 @@ import pandas as pd
 import yaml
 
 # First, create the config
-parser = argparse.ArgumentParser(description="Benchmark BOOM")
+parser = argparse.ArgumentParser(description="Benchmark BOOM with Apptainer.")
 parser.add_argument(
     "--n-alert-workers",
     type=int,
@@ -42,7 +42,7 @@ config["redis"]["host"] = "localhost"
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
-# Reformat filter for insertion into database
+# Reformat filter for insertion into the database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:
     cats150 = json.load(f)
 for_insert = {
@@ -73,7 +73,7 @@ logs_dir = os.path.join(
 )
 
 # Now run the benchmark
-subprocess.run(["bash", "apptainer/run_apptainer.sh", logs_dir], check=True)
+subprocess.run(["bash", "tests/throughput/apptainer_run.sh", logs_dir], check=True)
 
 # Now analyze the logs and raise an error if we're too slow
 boom_config = (
@@ -83,7 +83,7 @@ boom_config = (
 )
 boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
 boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
-# To calculate BOOM wall time, take first timestamp from the consumer log
+# To calculate BOOM wall time, take the first timestamp from the consumer log
 # as the start and the last timestamp of the scheduler as the end
 with open(boom_consumer_log_fpath) as f:
     line = f.readline()

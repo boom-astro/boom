@@ -11,22 +11,17 @@ LOGS_DIR=${1:-$HOME/boom/logs/boom}
 EXPECTED_ALERTS=29142
 N_FILTERS=25
 
-# Clean up old data
-rm -rf data/valkey/*
-
 mkdir -p "$PERSISTENT_DIR/mongodb"
 mkdir -p "$PERSISTENT_DIR/valkey"
 mkdir -p "$PERSISTENT_DIR/alerts"
 mkdir -p "$PERSISTENT_DIR/kafka"
 
-mkdir -p "$LOGS_DIR"
-mkdir -p "$LOGS_DIR/kafka"
-mkdir -p "$LOGS_DIR/valkey"
-
 # Clear log files or create them if they don't exist
 : > "$LOGS_DIR/producer.log"
 : > "$LOGS_DIR/consumer.log"
 : > "$LOGS_DIR/scheduler.log"
+mkdir -p "$LOGS_DIR/kafka"
+mkdir -p "$LOGS_DIR/valkey"
 
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
@@ -45,7 +40,7 @@ $SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
 echo "$(current_datetime) - Running mongo-init"
 apptainer exec \
     --bind "$DATA_DIR/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
-    --bind "$TESTS_DIR/mongo-init-apptainer.sh:/mongo-init.sh" \
+    --bind "$TESTS_DIR/apptainer_mongo-init.sh:/mongo-init.sh" \
     --bind "$TESTS_DIR/cats150.filter.json:/cats150.filter.json" \
     --env DB_NAME=boom-benchmarking \
     --env DB_ADD_URI= \
@@ -69,7 +64,6 @@ echo "$(current_datetime) - Starting Kafka broker"
 if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then # Generate meta.properties if it doesn't exist
   echo "$(current_datetime) - Generating Kafka meta.properties file"
   apptainer exec \
-  --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
   apptainer/sif/kafka.sif \
   /opt/kafka/bin/kafka-storage.sh format \
     --config /opt/kafka/config/server.properties \
@@ -113,7 +107,6 @@ echo "$(current_datetime) - Starting Scheduler"
 apptainer exec --pwd /app \
     --bind "$DATA_DIR/models:/app/data/models" \
     --bind "$CONFIG_FILE:/app/config.yaml" \
-    --env RUST_LOG="debug,ort=error" \
     "apptainer/sif/boom-benchmarking.sif" \
     /app/scheduler ztf \
     > "$LOGS_DIR/scheduler.log" 2>&1 &

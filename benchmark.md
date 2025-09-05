@@ -1,6 +1,4 @@
-# Start Benchmark
-
-## Setup
+# Running Benchmark
 
 ### Pull LFS files
 ```bash
@@ -13,6 +11,7 @@
   docker buildx create --use
   docker buildx inspect --bootstrap
   docker buildx bake -f tests/throughput/compose.yaml --load
+  # Also needed for Apptainer (To build the SIF file with the image)
 ```
 
 ### Download Data
