@@ -197,7 +197,7 @@ The step to run the benchmark are as follows:
 To build the boom-benchmark SIF files, you will need to have the docker image built first (see previous step).
 If you don't have docker on the system where you want to run the benchmark, you can build the SIF files on another system and transfer them over.
 ```bash
-  ./tests/apptainer/def/build-sif.sh
+  ./tests/apptainer/def/build-tests-sif.sh
 ```
 
 ### Download Data
