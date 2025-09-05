@@ -44,13 +44,18 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
+1. Install lfs and pull the large files:
+    ```bash
+      git lfs install
+      git lfs pull
+    ```
+2. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+3. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
@@ -173,6 +178,44 @@ As a more complete example, the following sets the logging level to DEBUG, with 
 
 ```bash
 RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+```
+
+## Running Benchmark
+
+This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
+This benchmark uses Docker to build the image and run the benchmark, but it can also be run with Apptainer using the same Docker image.
+The step to run the benchmark are as follows:
+
+### Build Docker Image
+```bash
+  docker buildx create --use
+  docker buildx inspect --bootstrap
+  docker buildx bake -f tests/throughput/compose.yaml --load
+```
+
+### Create SIF files (For Apptainer only)
+To build the boom-benchmark SIF files, you will need to have the docker image built first (see previous step).
+If you don't have docker on the system where you want to run the benchmark, you can build the SIF files on another system and transfer them over.
+```bash
+  ./apptainer/def/build-sif.sh
+```
+
+### Download Data
+```bash
+  mkdir -p ./data/alerts/ztf/public/20250311
+  gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+```
+
+### Run Benchmark
+
+Using Docker:
+```bash
+  uv run tests/throughput/run.py
+```
+
+Using Apptainer:
+```bash
+  python apptainer/run.py
 ```
 
 ## Contributing
