@@ -274,7 +274,7 @@ pub async fn send_alert_to_kafka(
     let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
 
     producer
-        .send(record, std::time::Duration::from_secs(0))
+        .send(record, std::time::Duration::from_secs(30))
         .await
         .map_err(|(e, _)| {
             warn!("Failed to send filter result to Kafka: {}", e);
