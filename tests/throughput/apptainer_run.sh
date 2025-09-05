@@ -81,18 +81,20 @@ $SCRIPTS_DIR/kafka-healthcheck.sh # Wait for Kafka to be ready
 # 4. Producer
 # -----------------------------
 echo "$(current_datetime) - Starting Producer"
-apptainer exec --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
+apptainer run --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
   "$SIF_DIR/boom-benchmarking.sif" \
   /app/kafka_producer ztf 20250311 public \
   > "$LOGS_DIR/producer.log" 2>&1
 echo "$(current_datetime) - Producer finished sending alerts"
 
+sleep 5
+
 # -----------------------------
 # 5. Consumer
 # -----------------------------
 echo "$(current_datetime) - Starting Consumer"
-apptainer exec "$SIF_DIR/boom-benchmarking.sif" \
-    /bin/sh -c "sleep 5 && /app/kafka_consumer ztf 20250311 public" \
+apptainer run "$SIF_DIR/boom-benchmarking.sif" \
+    /bin/sh -c "/app/kafka_consumer ztf 20250311 public" \
     > "$LOGS_DIR/consumer.log" 2>&1 &
 CONSUMER_PID=$! # Save the PID to kill it later
 
@@ -100,7 +102,7 @@ CONSUMER_PID=$! # Save the PID to kill it later
 # 6. Scheduler
 # -----------------------------
 echo "$(current_datetime) - Starting Scheduler"
-apptainer exec --bind "$DATA_DIR/models:/app/data/models" \
+apptainer run --bind "$DATA_DIR/models:/app/data/models" \
     "apptainer/sif/boom-benchmarking.sif" \
     /app/scheduler ztf > "$LOGS_DIR/scheduler.log" 2>&1 &
 SCHEDULER_PID=$! # Save the PID to kill it later
