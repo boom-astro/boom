@@ -23,6 +23,9 @@ BOOM runs on macOS and Linux. You'll need:
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
 - If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
 
+*Boom can also be run with `Apptainer` instead of `Docker` for Linux systems.
+This is especially useful for running BOOM on HPC systems where Docker is not available.*
+
 ### Installation steps:
 
 #### macOS
@@ -31,9 +34,11 @@ BOOM runs on macOS and Linux. You'll need:
 - Rust: You can either use [rustup](https://www.rust-lang.org/tools/install) to install Rust, or you can use [Homebrew](https://brew.sh/) to install it. If you choose the latter, you can run `brew install rust` in your terminal. We recommend using rustup, as it allows you to easily switch between different versions of Rust, and to keep your Rust installation up to date. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - System packages are essential for compiling and linking some Rust crates. All those used by BOOM should come with macOS by default, but if you get any errors when compiling it you can try to install them again with Homebrew: `brew install openssl@3 cyrus-sasl gnu-tar`.
 
+*Apptainer is not supported on macOS.*
 #### Linux
 
 - Docker: You can either install Docker Desktop (same instructions as for macOS), or you can just install Docker Engine. The latter is more lightweight. You can follow the [official installation instructions](https://docs.docker.com/engine/install/) for your specific Linux distribution. If you only installed Docker Engine, you'll want to also install [docker compose](https://docs.docker.com/compose/install/). Once installed, you can verify the installation by running `docker --version` in your terminal, and `docker compose version` to check that docker compose is installed as well.
+- Apptainer: You can follow the [installation instructions](https://apptainer.org/docs/admin/main/installation.html#installation-on-linux) for your specific Linux distribution. Once installed, you can verify the installation by running `apptainer --version` in your terminal.
 - Rust: You can use [rustup](https://www.rust-lang.org/tools/install) to install Rust. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - `wget` and `tar`: Most Linux distributions come with `wget` and `tar` pre-installed. If not, you can install them with your package manager.
 - System packages are essential for compiling and linking some Rust crates. On linux, you can install them with your package manager. For example with `apt` on Ubuntu or Debian-based systems, you can run:
@@ -46,8 +51,8 @@ BOOM runs on macOS and Linux. You'll need:
 
 1. Install lfs and pull the large files:
     ```bash
-      git lfs install
-      git lfs pull
+    git lfs install
+    git lfs pull
     ```
 2. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
     ```bash
@@ -55,7 +60,18 @@ BOOM runs on macOS and Linux. You'll need:
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
-3. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+
+3. Launch `Valkey`, `MongoDB`, and `Kafka` using Apptainer:
+    First, build the SIF files. You can do this by running:
+    ```bash
+    ./apptainer/def/build-sif.sh
+    ```
+    Then you can launch the services with:
+    ```bash
+    ./apptainer_compose.sh
+    ```
+    *To check if the instances are running and healthy, run `./apptainer_healthchecks.sh`.*
+4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
@@ -94,6 +110,11 @@ You can leave that running in the background, and start the rest of the pipeline
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
 ```bash
 docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
+```
+*or for Apptainer:*
+```bash
+apptainer exec instance://broker \
+/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
 
 ### Alert Consumption

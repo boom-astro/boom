@@ -30,6 +30,7 @@ echo "$(current_datetime) - Starting BOOM services with Apptainer"
 # -----------------------------
 echo "$(current_datetime) - Starting MongoDB"
 apptainer instance start --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
+sleep 5
 $SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
 
 # -----------------------------
