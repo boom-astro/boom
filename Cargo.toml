@@ -49,7 +49,7 @@ ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
 
 # otherwise, install ort with the cuda feature
 [target.'cfg(target_os = "linux")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
+ort = { version = "=2.0.0-rc.10", features = ["cuda", "download-binaries"] }
 [target.'cfg(target_os = "linux")'.profile.dev]
 rpath = true
 [target.'cfg(target_os = "linux")'.profile.release]
@@ -58,4 +58,3 @@ rpath = true
 [dev-dependencies]
 criterion = "0.5"
 rsgen-avro = "0.15.3"
-

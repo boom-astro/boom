@@ -23,13 +23,30 @@ COPY ./api/src ./api/src
 RUN cargo build --release --workspace
 
 
-## Create a minimal runtime image for binaries
-FROM debian:bookworm-slim
+## Create a minimal runtime image for binaries with CUDA support
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 WORKDIR /app
 
+# Install cuDNN and ONNX Runtime with CUDA support
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsasl2-2 ca-certificates && \
+    libsasl2-2 ca-certificates wget gnupg2 software-properties-common && \
+    # Add NVIDIA's cuDNN repository
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb && \
+    dpkg -i cuda-keyring_1.0-1_all.deb && \
+    apt-get update && \
+    # Install specific cuDNN version that matches ONNX Runtime expectations
+    apt-get install -y --no-install-recommends \
+    libcudnn8=8.9.7.29-1+cuda11.8 \
+    libcudnn8-dev=8.9.7.29-1+cuda11.8 && \
+    # Hold the cuDNN packages to prevent upgrades
+    apt-mark hold libcudnn8 libcudnn8-dev && \
+    # Download and install ONNX Runtime
+    wget https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-gpu-1.18.1.tgz && \
+    tar -xzf onnxruntime-linux-x64-gpu-1.18.1.tgz && \
+    cp onnxruntime-linux-x64-gpu-1.18.1/lib/* /usr/local/lib/ && \
+    rm -rf onnxruntime-linux-x64-gpu-1.18.1* cuda-keyring_1.0-1_all.deb && \
+    ldconfig && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the built executables from the builder stage

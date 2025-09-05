@@ -163,3 +163,10 @@ services:
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
       - ${PWD}/data/models:/app/data/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
