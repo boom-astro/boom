@@ -56,6 +56,7 @@ impl Metadata {
 // MetadataPartition values, neither of which implement Clone. We use a custom
 // Metadata type to capture the topic and partition information from the rdkafka
 // types, which can then can be returned to the caller.
+#[instrument(skip_all, err)]
 fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
     let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(5))?;
     let inner = cluster_metadata
@@ -75,6 +76,7 @@ fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
 }
 
 // check that the topic exists and return the number of partitions
+#[instrument(skip_all, err)]
 pub fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -110,6 +112,7 @@ pub fn check_kafka_topic_partitions(
     Ok(metadata.partition_ids(topic_name).map(|ids| ids.len()))
 }
 
+#[instrument(skip_all, err)]
 pub fn assign_partitions_to_consumers(
     topic_name: &str,
     nb_consumers: usize,
@@ -145,6 +148,7 @@ pub fn assign_partitions_to_consumers(
     Ok(partitions)
 }
 
+#[instrument(skip_all, err)]
 pub async fn initialize_topic(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -192,6 +196,7 @@ pub async fn initialize_topic(
     Ok(nb_partitions)
 }
 
+#[instrument(skip_all, err)]
 pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), KafkaError> {
     let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
@@ -202,6 +207,7 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
     Ok(())
 }
 
+#[instrument(skip_all, err)]
 pub fn count_messages(
     bootstrap_servers: &str,
     topic_name: &str,

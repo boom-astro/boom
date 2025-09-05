@@ -160,23 +160,23 @@ pub async fn build_ztf_alerts(
                 Ok(flux) => Some(flux),
                 Err(_) => None,
             };
+            let magzpsci = doc.get_f64("magzpsci")?;
             let flux_err = match doc.get_f64("forcediffimfluxunc") {
                 Ok(flux_err) => flux_err,
                 Err(_) => {
                     let diffmaglim = doc.get_f64("diffmaglim")?;
-                    limmag_to_fluxerr(diffmaglim, 23.9, 5.0)
+                    limmag_to_fluxerr(diffmaglim, magzpsci, 5.0)
                 }
             };
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
-            let zero_point = 23.9;
 
             photometry.push(Photometry {
                 jd,
                 flux,
                 flux_err,
                 band: format!("ztf{}", band),
-                zero_point,
+                zero_point: magzpsci,
                 origin: Origin::ForcedPhot,
                 programid,
                 survey: Survey::Ztf,
