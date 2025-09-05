@@ -1,0 +1,9 @@
+Bootstrap: docker-daemon
+From: boom/boom-benchmarking:latest
+
+%files
+    tests/throughput/config.yaml /app/config.yaml
+
+%runscript
+    cd /app
+    exec "$@"
