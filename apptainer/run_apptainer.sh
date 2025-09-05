@@ -17,6 +17,7 @@ rm -rf data/valkey/*
 mkdir -p "$PERSISTENT_DIR/mongodb"
 mkdir -p "$PERSISTENT_DIR/valkey"
 mkdir -p "$PERSISTENT_DIR/alerts"
+mkdir -p "$PERSISTENT_DIR/kafka"
 
 mkdir -p "$LOGS_DIR"
 mkdir -p "$LOGS_DIR/kafka"
@@ -64,6 +65,7 @@ $SCRIPTS_DIR/valkey-healthcheck.sh # Wait for Valkey to be ready
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
+echo "$(current_datetime) - Starting Kafka broker"
 if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then # Generate meta.properties if it doesn't exist
   echo "$(current_datetime) - Generating Kafka meta.properties file"
   apptainer exec \
@@ -75,9 +77,9 @@ if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then # Generate meta.pro
     --ignore-formatted \
     --standalone
 fi
-echo "$(current_datetime) - Starting Kafka broker"
 apptainer instance start \
-    --bind "$LOGS_DIR/kafka:/var/lib/kafka/data" \
+    --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
+    --bind "$PERSISTENT_DIR/kafka:/var/lib/kafka/data" \
     "$SIF_DIR/kafka.sif" broker
 $SCRIPTS_DIR/kafka-healthcheck.sh # Wait for Kafka to be ready
 
@@ -89,7 +91,7 @@ apptainer exec --pwd /app \
   --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   "$SIF_DIR/boom-benchmarking.sif" \
-  /app/kafka_producer ztf 20250311 public --server-url localhost:29092 \
+  /app/kafka_producer ztf 20250311 public --server-url localhost:9092 \
   > "$LOGS_DIR/producer.log" 2>&1
 echo "$(current_datetime) - Producer finished sending alerts"
 

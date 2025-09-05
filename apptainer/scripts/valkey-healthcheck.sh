@@ -9,13 +9,7 @@ RETRIES=${RETRIES:-3}      # number of retries
 TIMEOUT=${TIMEOUT:-5}      # timeout for each ping in seconds
 
 attempt=0
-while true; do
-    # Try to ping Valkey
-    if timeout $TIMEOUT apptainer exec instance://valkey redis-cli ping | grep -q PONG; then
-        echo "$(current_datetime) - Valkey is healthy"
-        exit 0
-    fi
-
+until timeout $TIMEOUT apptainer exec instance://valkey redis-cli ping | grep -q PONG; do
     attempt=$((attempt+1))
     if [ "$attempt" -ge "$RETRIES" ]; then
         echo "$(current_datetime) - Valkey remains unhealthy after $RETRIES attempts"
@@ -24,3 +18,6 @@ while true; do
     echo "$(current_datetime) - Valkey unhealthy (attempt $attempt/$RETRIES)"
     sleep $INTERVAL
 done
+
+echo "$(current_datetime) - Valkey is healthy"
+exit 0
