@@ -41,12 +41,10 @@ pub trait Model {
     fn new(path: &str) -> Result<Self, ModelError>
     where
         Self: Sized;
-    fn get_metadata(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError>;
     #[instrument(skip_all, err)]
     fn get_triplet(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
         for i in 0..alerts.len() {
-            // TODO: remove unwrap once the crate::utils::fits dedicated error type is merged to main
             let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
             for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
                 .iter()

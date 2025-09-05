@@ -1,0 +1,9 @@
+# https://prometheus.io/docs/guides/opentelemetry/#configuring-prometheus
+
+otlp:
+  promote_resource_attributes:
+    - service.instance.id
+    - service.name
+    - service.namespace
+    - service.version
+    - deployment.environment.name

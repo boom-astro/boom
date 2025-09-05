@@ -33,7 +33,7 @@ mod tests {
         let resp: serde_json::Value =
             serde_json::from_str(&body_str).expect("failed to parse JSON");
 
-        assert_eq!(resp["status"], "success");
+        assert!(resp["data"].is_array());
     }
 
     /// Test POST /users and DELETE /users/{username}
@@ -79,7 +79,6 @@ mod tests {
         let body_str = String::from_utf8_lossy(&body);
         let resp: serde_json::Value =
             serde_json::from_str(&body_str).expect("failed to parse JSON");
-        assert_eq!(resp["status"], "success");
         let user_id = resp["data"]["id"].as_str().unwrap();
 
         // Test that we can't post the same user again

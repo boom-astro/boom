@@ -5,9 +5,9 @@ use crate::{
     },
     conf,
     utils::{
-        conversions::{flux2mag, fluxerr2diffmaglim, SNT},
         db::{mongify, update_timeseries_op},
-        o11y::as_error,
+        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT},
+        o11y::logging::as_error,
         spatial::xmatch,
     },
 };
@@ -20,6 +20,7 @@ use std::fmt::Debug;
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
+pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
 // Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -497,15 +498,15 @@ impl ZtfAlertWorker {
     #[instrument(skip_all)]
     fn format_prv_candidates_and_fp_hist(
         &self,
-        prv_candidates: Option<Vec<PrvCandidate>>,
+        prv_candidates: &Vec<PrvCandidate>,
         candidate_doc: Document,
-        fp_hist: Option<Vec<ForcedPhot>>,
+        fp_hist: &Vec<ForcedPhot>,
     ) -> (Vec<Document>, Vec<Document>, Vec<Document>) {
         // we split the prv_candidates into detections and non-detections
         let mut prv_candidates_doc = vec![];
         let mut prv_nondetections_doc = vec![];
 
-        for prv_candidate in prv_candidates.unwrap_or(vec![]) {
+        for prv_candidate in prv_candidates {
             if prv_candidate.magpsf.is_some() {
                 prv_candidates_doc.push(mongify(&prv_candidate));
             } else {
@@ -514,11 +515,7 @@ impl ZtfAlertWorker {
         }
         prv_candidates_doc.push(candidate_doc);
 
-        let fp_hist_doc = fp_hist
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
+        let fp_hist_doc = fp_hist.into_iter().map(|x| mongify(&x)).collect::<Vec<_>>();
         (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc)
     }
 }
@@ -570,7 +567,7 @@ impl AlertWorker for ZtfAlertWorker {
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_classifier_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
     #[instrument(
@@ -662,43 +659,40 @@ impl AlertWorker for ZtfAlertWorker {
         let ra = alert.ra();
         let dec = alert.dec();
 
-        let prv_candidates = alert.prv_candidates.take();
-        let fp_hist = alert.fp_hists.take();
+        let prv_candidates = match alert.prv_candidates.take() {
+            Some(candidates) => candidates,
+            None => Vec::new(),
+        };
+        let fp_hist = match alert.fp_hists.take() {
+            Some(hist) => hist,
+            None => Vec::new(),
+        };
 
         let candidate_doc = mongify(&alert.candidate);
 
-        let status = self
-            .format_and_insert_alert(
+        // add the cutouts, skip processing if the cutouts already exist
+        let cutout_status = self
+            .format_and_insert_cutouts(
                 candid,
-                &object_id,
-                ra,
-                dec,
-                &candidate_doc,
-                now,
-                &self.alert_collection,
+                alert.cutout_science,
+                alert.cutout_template,
+                alert.cutout_difference,
+                &self.alert_cutout_collection,
             )
             .await
             .inspect_err(as_error!())?;
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+
+        if let ProcessAlertStatus::Exists(_) = cutout_status {
+            return Ok(cutout_status);
         }
 
-        self.format_and_insert_cutouts(
-            candid,
-            alert.cutout_science,
-            alert.cutout_template,
-            alert.cutout_difference,
-            &self.alert_cutout_collection,
-        )
-        .await
-        .inspect_err(as_error!())?;
         let alert_aux_exists = self
             .check_alert_aux_exists(&object_id)
             .await
             .inspect_err(as_error!())?;
 
-        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) =
-            self.format_prv_candidates_and_fp_hist(prv_candidates, candidate_doc, fp_hist);
+        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) = self
+            .format_prv_candidates_and_fp_hist(&prv_candidates, candidate_doc.clone(), &fp_hist);
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -745,6 +739,20 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
         }
+
+        // insert the alert
+        let status = self
+            .format_and_insert_alert(
+                candid,
+                &object_id,
+                ra,
+                dec,
+                &candidate_doc,
+                now,
+                &self.alert_collection,
+            )
+            .await
+            .inspect_err(as_error!())?;
 
         Ok(status)
     }

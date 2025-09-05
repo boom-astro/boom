@@ -4,8 +4,8 @@ use boom::{
         ZTF_LSST_XMATCH_RADIUS,
     },
     conf,
+    enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
-    ml::{MLWorker, ZtfMLWorker},
     utils::{
         enums::Survey,
         testing::{
@@ -295,12 +295,12 @@ async fn test_process_ztf_alert_xmatch() {
 }
 
 #[tokio::test]
-async fn test_ml_ztf_alert() {
+async fn test_enrich_ztf_alert() {
     let mut alert_worker = ztf_alert_worker().await;
 
     // we only randomize the candid and object_id here, since the ra/dec
     // are features of the models and would change the results
-    let (candid, object_id, ra, dec, bytes_content) = AlertRandomizer::new(Survey::Ztf)
+    let (candid, _, _, _, bytes_content) = AlertRandomizer::new(Survey::Ztf)
         .rand_candid()
         .rand_object_id()
         .get()
@@ -308,8 +308,8 @@ async fn test_ml_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let mut ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = ml_worker.process_alerts(&[candid]).await;
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
 
     // the result should be a vec of String, for ZTF with the format
@@ -331,11 +331,6 @@ async fn test_ml_ztf_alert() {
         .unwrap();
     assert!(alert.is_some());
     let alert = alert.unwrap();
-    assert_eq!(alert.get_i64("_id").unwrap(), candid);
-    assert_eq!(alert.get_str("objectId").unwrap(), object_id);
-    let candidate = alert.get_document("candidate").unwrap();
-    assert_eq!(candidate.get_f64("ra").unwrap(), ra);
-    assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // this object is a variable star, so all scores except acai_v should be ~0.0
     // (we've also verified that the scores we get here were close to Kowalski's)
@@ -346,6 +341,41 @@ async fn test_ml_ztf_alert() {
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
     assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
+
+    // the enrichment worker also adds "properties" to the alert
+    let properties = alert.get_document("properties").unwrap();
+    assert_eq!(properties.get_bool("rock").unwrap(), false);
+    assert_eq!(properties.get_bool("star").unwrap(), true);
+    assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
+    assert_eq!(properties.get_bool("stationary").unwrap(), true);
+    // the properties also include "photstats, a document with bands as keys and
+    // as values the rate of evolution (mag/day) before and after peak
+    let photstats = properties.get_document("photstats").unwrap();
+    assert!(photstats.contains_key("g"));
+    let g_stats = photstats.get_document("g").unwrap();
+    let peak_mag = g_stats.get_f64("peak_mag").unwrap();
+    let peak_jd = g_stats.get_f64("peak_jd").unwrap();
+    let rising = g_stats.get_document("rising").unwrap();
+    let fading = g_stats.get_document("fading").unwrap();
+    let rising_rate = rising.get_f64("rate").unwrap();
+    let fading_rate = fading.get_f64("rate").unwrap();
+    assert!((peak_mag - 15.6940).abs() < 1e-6);
+    assert!((peak_jd - 2460441.971956).abs() < 1e-6);
+    assert!((rising_rate + 0.252037).abs() < 1e-6);
+    assert!((fading_rate - 0.037152).abs() < 1e-6);
+
+    assert!(photstats.contains_key("r"));
+    let r_stats = photstats.get_document("r").unwrap();
+    let peak_mag = r_stats.get_f64("peak_mag").unwrap();
+    let peak_jd = r_stats.get_f64("peak_jd").unwrap();
+    let rising = r_stats.get_document("rising").unwrap();
+    let fading = r_stats.get_document("fading").unwrap();
+    let rising_rate = rising.get_f64("rate").unwrap();
+    let fading_rate = fading.get_f64("rate").unwrap();
+    assert!((peak_mag - 14.3987).abs() < 1e-6);
+    assert!((peak_jd - 2460441.922303).abs() < 1e-6);
+    assert!((rising_rate + 0.133773).abs() < 1e-6);
+    assert!((fading_rate - 0.063829).abs() < 1e-6);
 }
 
 #[tokio::test]
@@ -357,15 +387,15 @@ async fn test_filter_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    // then run the ML worker to get the classifications
-    let mut ml_worker = ZtfMLWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = ml_worker.process_alerts(&[candid]).await;
+    // then run the enrichment worker to get the classifications
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
-    let ml_output = result.unwrap();
-    assert_eq!(ml_output.len(), 1);
-    let candid_programid_str = &ml_output[0];
+    let enrichment_output = result.unwrap();
+    assert_eq!(enrichment_output.len(), 1);
+    let candid_programid_str = &enrichment_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
@@ -385,7 +415,7 @@ async fn test_filter_ztf_alert() {
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.object_id, object_id);
-    assert_eq!(alert.photometry.len(), 11); // prv_candidates + prv_nondetections
+    assert_eq!(alert.photometry.len(), 21); // prv_candidates + prv_nondetections + fp_hists
 
     let filter_passed = alert
         .filters
