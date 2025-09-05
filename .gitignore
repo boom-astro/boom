@@ -16,5 +16,4 @@ tests/throughput/cats150.filter.json
 logs
 .idea
 
-**apptainer/persistent
-**apptainer/sif
+**/apptainer/{persistent,sif}
