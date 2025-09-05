@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 SIF_DIR="$HOME/boom/apptainer/sif"
+SCRIPTS_DIR="$HOME/boom/apptainer/scripts"
 PERSISTENT_DIR="$HOME/boom/apptainer/persistent"
 DATA_DIR="$HOME/boom/data"
 TESTS_DIR="$HOME/boom/tests/throughput"
@@ -37,7 +38,7 @@ echo "$(current_datetime) - Starting BOOM services with Apptainer"
 # -----------------------------
 echo "$(current_datetime) - Starting MongoDB"
 apptainer instance start --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
-./scripts/mongodb-healthcheck.sh # Wait for MongoDB to be ready
+$SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
 
 ## Mongo-init
 echo "$(current_datetime) - Running mongo-init"
@@ -58,7 +59,7 @@ apptainer instance start \
   --bind "$PERSISTENT_DIR/valkey:/data" \
   --bind "$LOGS_DIR/valkey:/valkey/logs" \
   "$SIF_DIR/valkey.sif" valkey
-./scripts/valkey-healthcheck.sh # Wait for Valkey to be ready
+$SCRIPTS_DIR/valkey-healthcheck.sh # Wait for Valkey to be ready
 
 # -----------------------------
 # 3. Kafka broker
@@ -78,7 +79,7 @@ echo "$(current_datetime) - Starting Kafka broker"
 apptainer instance start \
     --bind "$LOGS_DIR/kafka:/var/lib/kafka/data" \
     "$SIF_DIR/kafka.sif" broker
-./scripts/kafka-healthcheck.sh # Wait for Kafka to be ready
+$SCRIPTS_DIR/kafka-healthcheck.sh # Wait for Kafka to be ready
 
 # -----------------------------
 # 4. Producer
