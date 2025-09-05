@@ -3,24 +3,58 @@ use crate::{
     conf,
     utils::{
         db::{cutout2bsonbinary, get_coordinates},
-        o11y::{as_error, log_error, WARN},
+        o11y::{
+            logging::{as_error, log_error, WARN},
+            metrics::SCHEDULER_METER,
+        },
         spatial::XmatchError,
         worker::should_terminate,
     },
 };
+
+use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
+
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
 use mongodb::{
     bson::{doc, Document},
     Collection,
 };
+use opentelemetry::{
+    metrics::{Counter, UpDownCounter},
+    KeyValue,
+};
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize};
-use std::io::Read;
-use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
+use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
+
+// NOTE: Global instruments are defined here because reusing instruments is
+// considered a best practice. According to the `opentelemetry` crate,
+// "Instruments are designed for reuse. Avoid creating new instruments
+// repeatedly." One solution is to clone (cloning instruments is cheap). Another
+// is to use static items, with `LazyLock` to ensure each one is only
+// initialized once.
+
+// UpDownCounter for the number of alerts currently being processed by the alert workers.
+static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .i64_up_down_counter("alert_worker.active")
+        .with_unit("{alert}")
+        .with_description("Number of alerts currently being processed by the alert worker.")
+        .build()
+});
+
+// Counter for the number of alerts processed by the alert workers.
+static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("alert_worker.alert.processed")
+        .with_unit("{alert}")
+        .with_description("Number of alerts processed by the alert worker.")
+        .build()
+});
 
 #[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
@@ -184,6 +218,8 @@ pub enum AlertError {
     MissingMagZPSci,
     #[error("could not find avro magic bytes")]
     MagicBytesError,
+    #[error("missing alert aux")]
+    AlertAuxNotFound,
 }
 
 #[derive(Debug, PartialEq)]
@@ -465,7 +501,7 @@ pub trait AlertWorker {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
         collection: &Collection<Document>,
-    ) -> Result<(), AlertError> {
+    ) -> Result<ProcessAlertStatus, AlertError> {
         let cutout_doc = doc! {
             "_id": &candid,
             "cutoutScience": cutout2bsonbinary(cutout_science),
@@ -473,8 +509,17 @@ pub trait AlertWorker {
             "cutoutDifference": cutout2bsonbinary(cutout_difference),
         };
 
-        collection.insert_one(cutout_doc).await?;
-        Ok(())
+        let status = collection
+            .insert_one(cutout_doc)
+            .await
+            .map(|_| ProcessAlertStatus::Added(candid))
+            .or_else(|error| match *error.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
+                _ => Err(error),
+            })?;
+        Ok(status)
     }
     #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
     async fn get_matches(
@@ -520,7 +565,7 @@ pub trait AlertWorker {
 }
 
 #[instrument(skip_all)]
-fn report_progress(start: &std::time::Instant, stream: &str, count: u64, message: &str) {
+fn report_progress(start: &Instant, stream: &str, count: u64, message: &str) {
     let elapsed = start.elapsed().as_secs();
     info!(
         stream,
@@ -588,6 +633,7 @@ async fn handle_process_result(
 pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
+    worker_id: Uuid,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
@@ -608,6 +654,33 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut count = 0;
 
     let start = std::time::Instant::now();
+    let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
+    let active_attrs = [worker_id_attr.clone()];
+    let ok_added_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "added"),
+    ];
+    let ok_exists_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "ok"),
+        KeyValue::new("reason", "exists"),
+    ];
+    let input_error_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "input_queue"),
+    ];
+    let processing_error_attrs = vec![
+        worker_id_attr.clone(),
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "processing"),
+    ];
+    let output_error_attrs = vec![
+        worker_id_attr,
+        KeyValue::new("status", "error"),
+        KeyValue::new("reason", "output_queue"),
+    ];
     loop {
         // check for command from threadpool
         if command_check_countdown == 0 {
@@ -619,32 +692,49 @@ pub async fn run_alert_worker<T: AlertWorker>(
         }
         command_check_countdown -= 1;
 
+        ACTIVE.add(1, &active_attrs);
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 info!("queue is empty");
+                ACTIVE.add(-1, &active_attrs);
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 command_check_countdown = 0;
                 continue;
             }
             Err(e) => {
-                error!(?e, "failed to retrieve avro bytes");
+                log_error!(e, "failed to retrieve avro bytes");
+                ACTIVE.add(-1, &active_attrs);
+                ALERT_PROCESSED.add(1, &input_error_attrs);
                 continue;
             }
         };
 
-        let result = alert_processor.process_alert(&avro_bytes).await;
-        handle_process_result(
+        let process_result = alert_processor.process_alert(&avro_bytes).await;
+        let mut attributes = match process_result {
+            Ok(ProcessAlertStatus::Added(_)) => &ok_added_attrs,
+            Ok(ProcessAlertStatus::Exists(_)) => &ok_exists_attrs,
+            Err(_) => &processing_error_attrs,
+        };
+        let handle_result = handle_process_result(
             &mut con,
             &temp_queue_name,
             &output_queue_name,
             avro_bytes,
-            result,
+            process_result,
         )
         .await
-        .inspect_err(as_error!("failed to handle process result"))?;
+        .inspect_err(as_error!("failed to handle process result"));
+        if handle_result.is_err() {
+            attributes = &output_error_attrs;
+        }
+
+        ACTIVE.add(-1, &active_attrs);
+        ALERT_PROCESSED.add(1, attributes);
+
+        handle_result?;
         if count > 0 && count % 1000 == 0 {
             report_progress(&start, &stream_name, count, "progress");
         }

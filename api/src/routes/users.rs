@@ -100,7 +100,7 @@ pub async fn post_user(
     }
 }
 
-/// Get a list of users
+/// Get multiple users
 #[utoipa::path(
     get,
     path = "/users",

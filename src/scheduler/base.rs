@@ -1,17 +1,20 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
+    enrichment::{run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
-    ml::{run_ml_worker, ZtfMLWorker},
     utils::{
         enums::Survey,
-        o11y::{as_error, INFO},
+        o11y::logging::{as_error, INFO},
         worker::{WorkerCmd, WorkerType},
     },
 };
+
 use std::thread;
+
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, error, info, instrument, span, warn};
+use uuid::Uuid;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
@@ -164,6 +167,7 @@ pub struct Worker {
     // Needs to be Option because JoinHandle::join() consumes the handle.
     handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<WorkerCmd>,
+    _id: Uuid,
 }
 
 impl Worker {
@@ -176,6 +180,7 @@ impl Worker {
     /// config_path: path to the config file we are working with
     #[instrument]
     fn new(worker_type: WorkerType, survey_name: Survey, config_path: String) -> Worker {
+        let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(1);
         let handle = match worker_type {
             WorkerType::Alert => thread::spawn(move || {
@@ -188,7 +193,8 @@ impl Worker {
                         Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                         Survey::Decam => run_alert_worker::<DecamAlertWorker>,
                     };
-                    run(receiver, &config_path).unwrap_or_else(as_error!("alert worker failed"));
+                    run(receiver, &config_path, id)
+                        .unwrap_or_else(as_error!("alert worker failed"));
                 })
             }),
             WorkerType::Filter => thread::spawn(move || {
@@ -207,24 +213,28 @@ impl Worker {
                             return;
                         }
                     };
-                    let key = uuid::Uuid::new_v4().to_string();
-                    run(key, receiver, &config_path)
+                    run(receiver, &config_path, id)
                         .unwrap_or_else(as_error!("filter worker failed"));
                 })
             }),
-            WorkerType::ML => thread::spawn(move || {
+            WorkerType::Enrichment => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "ml worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting ml worker");
+                span!(INFO, "enrichment worker", ?tid, ?survey_name).in_scope(|| {
+                    info!("starting enrichment worker");
                     debug!(?config_path);
                     let run = match survey_name {
-                        Survey::Ztf => run_ml_worker::<ZtfMLWorker>,
+                        Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
+                        Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
                         _ => {
-                            error!("ML worker not implemented for survey: {:?}", survey_name);
+                            error!(
+                                "Enrichment worker not implemented for survey: {:?}",
+                                survey_name
+                            );
                             return;
                         }
                     };
-                    run(receiver, &config_path).unwrap_or_else(as_error!("ml worker failed"));
+                    run(receiver, &config_path, id)
+                        .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
         };
@@ -232,6 +242,7 @@ impl Worker {
         Worker {
             handle: Some(handle),
             sender,
+            _id: id,
         }
     }
 

@@ -25,7 +25,7 @@ parser.add_argument(
     help="Number of alert workers to use for benchmarking.",
 )
 parser.add_argument(
-    "--n-ml-workers",
+    "--n-enrichment-workers",
     type=int,
     default=6,
     help="Number of machine learning workers to use for benchmarking.",
@@ -40,7 +40,7 @@ args = parser.parse_args()
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 config["workers"]["ZTF"]["alert"]["n_workers"] = args.n_alert_workers
-config["workers"]["ZTF"]["ml"]["n_workers"] = args.n_ml_workers
+config["workers"]["ZTF"]["enrichment"]["n_workers"] = args.n_enrichment_workers
 config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["host"] = "mongo"
@@ -51,10 +51,10 @@ with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
 # Reformat filter for insertion into database
-with open("tests/throughput/cats150.boom.json", "r") as f:
+with open("tests/throughput/cats150.pipeline.json", "r") as f:
     cats150 = json.load(f)
 for_insert = {
-    "filter_id": str(uuid.uuid4()),
+    "_id": str(uuid.uuid4()),
     "catalog": "ZTF_alerts",
     "permissions": [1, 2, 3],
     "active": True,
@@ -67,7 +67,7 @@ for_insert = {
         }
     ],
 }
-with open("tests/throughput/cats150.json", "w") as f:
+with open("tests/throughput/cats150.filter.json", "w") as f:
     json.dump(for_insert, f)
 
 logs_dir = os.path.join(
@@ -75,7 +75,7 @@ logs_dir = os.path.join(
     "boom-"
     + (
         f"na={args.n_alert_workers}-"
-        f"nml={args.n_ml_workers}-"
+        f"ne={args.n_enrichment_workers}-"
         f"nf={args.n_filter_workers}"
     ),
 )
@@ -86,7 +86,7 @@ subprocess.run(["bash", "tests/throughput/_run.sh", logs_dir], check=True)
 # Now analyze the logs and raise an error if we're too slow
 boom_config = (
     f"na={args.n_alert_workers}-"
-    f"nml={args.n_ml_workers}-"
+    f"ne={args.n_enrichment_workers}-"
     f"nf={args.n_filter_workers}"
 )
 boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"

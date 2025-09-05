@@ -2,31 +2,46 @@ use boom::{
     conf,
     scheduler::{get_num_workers, ThreadPool},
     utils::{
-        db::initialize_survey_indexes, enums::Survey, o11y::build_subscriber, worker::WorkerType,
+        db::initialize_survey_indexes,
+        enums::Survey,
+        o11y::{
+            logging::{build_subscriber, log_error, WARN},
+            metrics::init_metrics,
+        },
+        worker::WorkerType,
     },
 };
 
 use std::time::Duration;
 
 use clap::Parser;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument, warn, Instrument};
+use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(
-        value_enum,
-        required = true,
-        help = "Name of stream/survey to process alerts for."
-    )]
+    /// Name of stream/survey to process alerts for.
+    #[arg(value_enum)]
     survey: Survey,
 
-    #[arg(long, value_name = "FILE", help = "Path to the configuration file")]
+    /// Path to the configuration file
+    #[arg(long, value_name = "FILE")]
     config: Option<String>,
+
+    /// UUID associated with this instance of the scheduler, generated
+    /// automatically if not provided
+    #[arg(long, env = "BOOM_SCHEDULER_INSTANCE_ID")]
+    instance_id: Option<Uuid>,
+
+    /// Name of the environment where this instance is deployed
+    #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
+    deployment_env: String,
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli) {
+async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -37,8 +52,8 @@ async fn run(args: Cli) {
     // get num workers from config file
     let n_alert = get_num_workers(&config, &args.survey, "alert")
         .expect("could not retrieve number of alert workers");
-    let n_ml = get_num_workers(&config, &args.survey, "ml")
-        .expect("could not retrieve number of ml workers");
+    let n_enrichment = get_num_workers(&config, &args.survey, "enrichment")
+        .expect("could not retrieve number of enrichment workers");
     let n_filter = get_num_workers(&config, &args.survey, "filter")
         .expect("could not retrieve number of filter workers");
 
@@ -72,9 +87,9 @@ async fn run(args: Cli) {
         args.survey.clone(),
         config_path.clone(),
     );
-    let ml_pool = ThreadPool::new(
-        WorkerType::ML,
-        n_ml as usize,
+    let enrichment_pool = ThreadPool::new(
+        WorkerType::Enrichment,
+        n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
     );
@@ -103,14 +118,27 @@ async fn run(args: Cli) {
     info!("shutting down");
     heartbeat_handle.abort();
     drop(alert_pool);
-    drop(ml_pool);
+    drop(enrichment_pool);
     drop(filter_pool);
+    if let Err(error) = meter_provider.shutdown() {
+        log_error!(WARN, error, "failed to shut down the meter provider");
+    }
 }
 
 #[tokio::main]
 async fn main() {
     let args = Cli::parse();
+
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
-    run(args).await;
+
+    let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
+    let meter_provider = init_metrics(
+        String::from("scheduler"),
+        instance_id,
+        args.deployment_env.clone(),
+    )
+    .expect("failed to initialize metrics");
+
+    run(args, meter_provider).await;
 }

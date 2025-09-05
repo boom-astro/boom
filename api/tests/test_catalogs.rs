@@ -31,6 +31,6 @@ mod tests {
         let resp: serde_json::Value =
             serde_json::from_str(&body_str).expect("failed to parse JSON");
 
-        assert_eq!(resp["status"], "success");
+        assert!(resp["data"].is_array());
     }
 }
