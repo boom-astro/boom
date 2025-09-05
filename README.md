@@ -42,6 +42,20 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
 
+- Enabling CUDA GPU support for `ort`:
+
+  In order to use `ort` `CUDA`'s backend with the ML worker (which yields a significant performance boost), you'll need to make sure that:
+  - `CUDA` is installed on the machine. Instructions to install `CUDA` vary from one linux distro to another, so we leave it to the user to decide how to install it on their machine.
+  - Dynamic linking at compile-time needs to be enabled too. This can be done by adding the following lines to your `~/.cargo/config.toml` file (which you may need to create):
+    ```toml
+    [target.x86_64-unknown-linux-gnu]
+    rustflags = [ "-Clink-args=-Wl,-rpath,\\$ORIGIN" ]
+ 
+    # do this for any other Linux targets as well, if you aren't running on amd64
+    ```
+
+  *More detail about `CUDA` backend support can be found in [the official `ort` documentation about Execution providers](https://ort.pyke.io/setup/cargo-features#execution-providers).*
+
 ## Setup
 
 1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
