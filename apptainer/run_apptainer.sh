@@ -15,6 +15,7 @@ rm -rf data/valkey/*
 
 mkdir -p "$PERSISTENT_DIR/mongodb"
 mkdir -p "$PERSISTENT_DIR/valkey"
+mkdir -p "$PERSISTENT_DIR/alerts"
 
 mkdir -p "$LOGS_DIR"
 mkdir -p "$LOGS_DIR/kafka"
@@ -36,22 +37,16 @@ echo "$(current_datetime) - Starting BOOM services with Apptainer"
 # -----------------------------
 echo "$(current_datetime) - Starting MongoDB"
 apptainer instance start --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
-
-# Wait for MongoDB to be healthy
-echo "$(current_datetime) - Waiting for MongoDB to be ready"
-until apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --eval "db.adminCommand('ping')" &>/dev/null; do
-    echo "$(current_datetime) - MongoDB not ready yet..."
-    sleep 1
-done
-echo "$(current_datetime) - MongoDB is ready"
+./scripts/mongodb-healthcheck.sh # Wait for MongoDB to be ready
 
 ## Mongo-init
 echo "$(current_datetime) - Running mongo-init"
 apptainer exec \
-    --bind "$PERSISTENT_DIR/mongodb:/data/db" \
     --bind "$DATA_DIR/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
     --bind "$TESTS_DIR/mongo-init-apptainer.sh:/mongo-init.sh" \
     --bind "$TESTS_DIR/cats150.filter.json:/cats150.filter.json" \
+    --env DB_NAME=boom-benchmarking \
+    --env DB_ADD_URI= \
     "$SIF_DIR/mongo.sif" \
     /bin/bash /mongo-init.sh
 
@@ -63,14 +58,12 @@ apptainer instance start \
   --bind "$PERSISTENT_DIR/valkey:/data" \
   --bind "$LOGS_DIR/valkey:/valkey/logs" \
   "$SIF_DIR/valkey.sif" valkey
+./scripts/valkey-healthcheck.sh # Wait for Valkey to be ready
 
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
-echo "$(current_datetime) - Starting Kafka broker"
-
-# Generate meta.properties file if it doesn't exist
-if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then
+if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then # Generate meta.properties if it doesn't exist
   echo "$(current_datetime) - Generating Kafka meta.properties file"
   apptainer exec \
   --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
@@ -81,34 +74,21 @@ if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then
     --ignore-formatted \
     --standalone
 fi
-
-# Start Kafka broker instance
+echo "$(current_datetime) - Starting Kafka broker"
 apptainer instance start \
-    --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
+    --bind "$LOGS_DIR/kafka:/var/lib/kafka/data" \
     "$SIF_DIR/kafka.sif" broker
-
-cpt=0
-while ! apptainer exec instance://broker /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1; do
-    if [ $cpt -ge 5 ]; then
-        echo "$(current_datetime) - Kafka broker still not ready after 15 seconds; exiting"
-        exit 1
-    fi
-    sleep 3
-    cpt=$((cpt + 1))
-    echo "$(current_datetime) - Waiting for Kafka broker to be ready..."
-done
-
-echo "$(current_datetime) - Kafka broker is ready"
+./scripts/kafka-healthcheck.sh # Wait for Kafka to be ready
 
 # -----------------------------
 # 4. Producer
 # -----------------------------
 echo "$(current_datetime) - Starting Producer"
 apptainer exec --pwd /app \
-  --bind "$DATA_DIR/alerts:/app/data/alerts" \
+  --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   "$SIF_DIR/boom-benchmarking.sif" \
-  /app/kafka_producer ztf 20250311 public \
+  /app/kafka_producer ztf 20250311 public --server-url localhost:29092 \
   > "$LOGS_DIR/producer.log" 2>&1
 echo "$(current_datetime) - Producer finished sending alerts"
 
@@ -119,9 +99,9 @@ echo "$(current_datetime) - Starting Consumer"
 apptainer exec --pwd /app \
     --bind "$CONFIG_FILE:/app/config.yaml" \
     "$SIF_DIR/boom-benchmarking.sif" \
-    /app/kafka_consumer ztf 20250311 public \
+    /bin/sh -c "sleep 5 && /app/kafka_consumer ztf 20250311 public" \
     > "$LOGS_DIR/consumer.log" 2>&1 &
-CONSUMER_PID=$!
+CONSUMER_PID=$! # Save the PID to kill it later
 
 # -----------------------------
 # 6. Scheduler
@@ -130,11 +110,11 @@ echo "$(current_datetime) - Starting Scheduler"
 apptainer exec --pwd /app \
     --bind "$DATA_DIR/models:/app/data/models" \
     --bind "$CONFIG_FILE:/app/config.yaml" \
-    --bind "$LOGS_DIR:/app/logs" \
+    --env RUST_LOG="debug,ort=error" \
     "apptainer/sif/boom-benchmarking.sif" \
     /app/scheduler ztf \
     > "$LOGS_DIR/scheduler.log" 2>&1 &
-SCHEDULER_PID=$!
+SCHEDULER_PID=$! # Save the PID to kill it later
 
 # -----------------------------
 # 7. Wait for alerts ingestion
@@ -157,14 +137,12 @@ while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
     PASSED_ALERTS=$((PASSED_ALERTS / N_FILTERS))
     sleep 1
 done
-# Kill consumer and scheduler processes
-kill $CONSUMER_PID $SCHEDULER_PID
-
-echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
+kill $CONSUMER_PID $SCHEDULER_PID # Kill consumer and scheduler processes
 
 # -----------------------------
 # 8. Stop all instances
 # -----------------------------
+echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
 apptainer instance stop mongo
 apptainer instance stop valkey
 apptainer instance stop broker

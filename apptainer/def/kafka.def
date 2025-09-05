@@ -15,7 +15,7 @@ From: apache/kafka:latest
     export KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
     export KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
     export KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-    export KAFKA_LOG_DIRS=/opt/kafka/logs
+    export KAFKA_LOG_DIRS=/var/lib/kafka/data
     export KAFKA_NUM_PARTITIONS=15
 
 %startscript
