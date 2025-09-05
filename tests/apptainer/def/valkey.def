@@ -1,0 +1,11 @@
+Bootstrap: docker
+From: valkey/valkey:7.2.6
+
+%environment
+    # ALLOW_EMPTY_PASSWORD is recommended only for development.
+    export ALLOW_EMPTY_PASSWORD=yes
+    export VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
+
+%startscript
+    # Disable persistence for benchmarking
+    exec valkey-server --save "" --appendonly no > /valkey/logs/valkey.log 2>&1

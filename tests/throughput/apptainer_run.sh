@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 
-SIF_DIR="$HOME/boom/apptainer/sif"
-SCRIPTS_DIR="$HOME/boom/apptainer/scripts"
-PERSISTENT_DIR="$HOME/boom/apptainer/persistent"
-DATA_DIR="$HOME/boom/data"
-TESTS_DIR="$HOME/boom/tests/throughput"
-CONFIG_FILE="$TESTS_DIR/config.yaml"
-LOGS_DIR=${1:-$HOME/boom/logs/boom}
+BOOM_DIR="$HOME/boom"
+
+LOGS_DIR=${1:-$BOOM_DIR/logs/boom}
+SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
+DATA_DIR="$BOOM_DIR/data"
+TESTS_DIR="$BOOM_DIR/tests"
+
+SIF_DIR="$TESTS_DIR/apptainer/sif"
+PERSISTENT_DIR="$TESTS_DIR/apptainer/persistent"
+CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
@@ -40,8 +43,8 @@ $SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
 echo "$(current_datetime) - Running mongo-init"
 apptainer exec \
     --bind "$DATA_DIR/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
-    --bind "$TESTS_DIR/apptainer_mongo-init.sh:/mongo-init.sh" \
-    --bind "$TESTS_DIR/cats150.filter.json:/cats150.filter.json" \
+    --bind "$TESTS_DIR/throughput/apptainer_mongo-init.sh:/mongo-init.sh" \
+    --bind "$TESTS_DIR/throughput/cats150.filter.json:/cats150.filter.json" \
     --env DB_NAME=boom-benchmarking \
     --env DB_ADD_URI= \
     "$SIF_DIR/mongo.sif" \
@@ -63,8 +66,7 @@ $SCRIPTS_DIR/valkey-healthcheck.sh # Wait for Valkey to be ready
 echo "$(current_datetime) - Starting Kafka broker"
 if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then # Generate meta.properties if it doesn't exist
   echo "$(current_datetime) - Generating Kafka meta.properties file"
-  apptainer exec \
-  apptainer/sif/kafka.sif \
+  apptainer exec "$SIF_DIR/kafka.sif" \
   /opt/kafka/bin/kafka-storage.sh format \
     --config /opt/kafka/config/server.properties \
     --cluster-id "$(uuidgen)" \
