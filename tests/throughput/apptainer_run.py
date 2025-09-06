@@ -40,7 +40,7 @@ config["kafka"]["consumer"]["ZTF"] = "localhost:9092"
 config["kafka"]["producer"] = "localhost:9092"
 config["redis"]["host"] = "localhost"
 with open("tests/throughput/config.yaml", "w") as f:
-    yaml.safe_dump(config, f, default_flow_style=False)
+    yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 # Reformat filter for insertion into the database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:

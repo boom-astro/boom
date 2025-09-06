@@ -48,7 +48,7 @@ config["kafka"]["consumer"]["ZTF"] = "broker:29092"
 config["kafka"]["producer"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 with open("tests/throughput/config.yaml", "w") as f:
-    yaml.safe_dump(config, f, default_flow_style=False)
+    yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 # Reformat filter for insertion into database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:
