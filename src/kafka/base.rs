@@ -58,7 +58,7 @@ impl Metadata {
 // types, which can then can be returned to the caller.
 #[instrument(skip_all, err)]
 fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
-    let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(5))?;
+    let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(10))?;
     let inner = cluster_metadata
         .topics()
         .iter()
@@ -97,8 +97,6 @@ pub fn check_kafka_topic_partitions(
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
-    } else {
-        client_config.set("security.protocol", "PLAINTEXT");
     }
 
     let consumer: BaseConsumer = client_config
@@ -226,7 +224,7 @@ pub fn count_messages(
                         .fetch_watermarks(
                             topic_name,
                             partition_id,
-                            std::time::Duration::from_secs(5),
+                            std::time::Duration::from_secs(10),
                         )
                         .map(|(low, high)| {
                             let count = high - low;
@@ -572,8 +570,6 @@ pub async fn consume_partitions(
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
-    } else {
-        client_config.set("security.protocol", "PLAINTEXT");
     }
 
     let consumer: BaseConsumer = client_config
