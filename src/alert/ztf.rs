@@ -326,9 +326,9 @@ where
     let dia_forced_sources = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?;
     let forced_phots = dia_forced_sources
         .into_iter()
-        .map(ForcedPhot::try_from)
-        .collect::<Result<Vec<ForcedPhot>, AlertError>>()
-        .map_err(serde::de::Error::custom)?;
+        .filter_map(|fp| ForcedPhot::try_from(fp).ok())
+        .collect();
+
     Ok(Some(forced_phots))
 }
 
