@@ -1,9 +1,8 @@
 [
   {
     "$match": {
-      "candidate.reliability": { "$gt": 0.8 },
-      "candidate.snr": { "$gt": 5.0 },
-      "candidate.magpsf": { "$lte": 18.5 }
+      "candidate.reliability": { "$gt": 0.5 },
+      "candidate.magpsf": { "$lte": 21.5 }
     }
   },
   {

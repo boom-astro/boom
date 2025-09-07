@@ -40,7 +40,7 @@ impl AlertConsumer for LsstAlertConsumer {
         if self.simulated {
             "alerts-simulated".to_string()
         } else {
-            "alerts".to_string()
+            "lsst-alerts-v9.0".to_string()
         }
     }
     fn output_queue(&self) -> String {

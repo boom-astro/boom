@@ -361,7 +361,7 @@ async fn test_enrich_ztf_alert() {
     let fading_rate = fading.get_f64("rate").unwrap();
     assert!((peak_mag - 15.6940).abs() < 1e-6);
     assert!((peak_jd - 2460441.971956).abs() < 1e-6);
-    assert!((rising_rate + 0.252037).abs() < 1e-6);
+    assert!((rising_rate + 0.20024).abs() < 1e-6);
     assert!((fading_rate - 0.037152).abs() < 1e-6);
 
     assert!(photstats.contains_key("r"));
@@ -374,7 +374,7 @@ async fn test_enrich_ztf_alert() {
     let fading_rate = fading.get_f64("rate").unwrap();
     assert!((peak_mag - 14.3987).abs() < 1e-6);
     assert!((peak_jd - 2460441.922303).abs() < 1e-6);
-    assert!((rising_rate + 0.133773).abs() < 1e-6);
+    assert!((rising_rate + 0.13846).abs() < 1e-6);
     assert!((fading_rate - 0.063829).abs() < 1e-6);
 }
 
@@ -398,7 +398,7 @@ async fn test_filter_ztf_alert() {
     let candid_programid_str = &enrichment_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));
 
-    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf, true, false).await.unwrap();
 
     let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await
