@@ -8,7 +8,7 @@ if [ "$1" != "stop" ] && [ "$1" != "compose" ] && [ "$1" != "health" ]; then
 fi
 
 if [ "$1" = "compose" ]; then
-  ./apptainer/apptainer_compose.sh
+  ./apptainer/scripts/apptainer_compose.sh
   exit 0
 fi
 
@@ -17,6 +17,7 @@ if [ "$1" == "stop" ]; then
   apptainer instance stop broker
   apptainer instance stop valkey
   apptainer instance stop boom
+  apptainer instance stop kuma
 fi
 
 if [ "$1" == "health" ]; then
