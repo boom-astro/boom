@@ -89,14 +89,16 @@ pub fn check_kafka_topic_partitions(
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", bootstrap_servers)
-        .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id);
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
+            .set("security.protocol", "SASL_PLAINTEXT")
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
+    } else {
+        client_config.set("security.protocol", "PLAINTEXT");
     }
 
     let consumer: BaseConsumer = client_config
@@ -562,14 +564,16 @@ pub async fn consume_partitions(
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", &survey_config.consumer)
-        .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id);
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
+            .set("security.protocol", "SASL_PLAINTEXT")
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
+    } else {
+        client_config.set("security.protocol", "PLAINTEXT");
     }
 
     let consumer: BaseConsumer = client_config
