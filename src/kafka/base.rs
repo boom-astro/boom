@@ -469,7 +469,7 @@ pub trait AlertConsumer: Sized {
         let max_in_queue = max_in_queue.unwrap_or(15000);
         let group_id = group_id.unwrap_or_else(|| {
             format!(
-                "boom_{}_consumer_group",
+                "umn_boom_{}_consumer_group",
                 self.survey().to_string().to_lowercase()
             )
         });
