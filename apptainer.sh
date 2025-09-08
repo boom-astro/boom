@@ -8,7 +8,7 @@ if [ "$1" != "stop" ] && [ "$1" != "compose" ] && [ "$1" != "health" ]; then
 fi
 
 if [ "$1" = "compose" ]; then
-  ./apptainer_compose.sh
+  ./apptainer/apptainer_compose.sh
   exit 0
 fi
 

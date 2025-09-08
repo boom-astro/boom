@@ -18,6 +18,7 @@ mkdir -p "$LOGS_DIR/kafka"
 mkdir -p "$LOGS_DIR/valkey"
 mkdir -p "$LOGS_DIR/otel-collector"
 mkdir -p "$LOGS_DIR/prometheus"
+: > "$LOGS_DIR/consumer.log"
 : > "$LOGS_DIR/scheduler.log"
 : > "$LOGS_DIR/otel-collector/otel-collector.log"
 : > "$LOGS_DIR/prometheus/prometheus.log"
@@ -77,19 +78,19 @@ apptainer instance start \
 # -----------------------------
 # 5. Monitoring services
 # -----------------------------
-echo "$(current_datetime) - Starting Otel Collector"
-apptainer exec \
-  --bind "$BOOM_DIR/config/apptainer-otel-collector-config.yaml:/etc/otelcol/config.yaml" \
-  --bind "$LOGS_DIR/otel-collector:/var/log/otel-collector" \
-  "$SIF_DIR/otel-collector.sif" /otelcol --config /etc/otelcol/config.yaml \
-  > "$LOGS_DIR/otel-collector/otel-collector.log" 2>&1 &
-
-echo "$(current_datetime) - Starting Prometheus"
-apptainer exec \
-  --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
-  --bind "$LOGS_DIR/prometheus:/prometheus" \
-  "$SIF_DIR/prometheus.sif" \
-  /bin/prometheus --web.enable-otlp-receiver --config.file=/etc/prometheus/prometheus.yaml \
-  > "$LOGS_DIR/prometheus/prometheus.log" 2>&1 &
+#echo "$(current_datetime) - Starting Otel Collector"
+#apptainer exec \
+#  --bind "$BOOM_DIR/config/apptainer-otel-collector-config.yaml:/etc/otelcol/config.yaml" \
+#  --bind "$LOGS_DIR/otel-collector:/var/log/otel-collector" \
+#  "$SIF_DIR/otel-collector.sif" /otelcol --config /etc/otelcol/config.yaml \
+#  > "$LOGS_DIR/otel-collector/otel-collector.log" 2>&1 &
+#
+#echo "$(current_datetime) - Starting Prometheus"
+#apptainer exec \
+#  --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
+#  --bind "$LOGS_DIR/prometheus:/prometheus" \
+#  "$SIF_DIR/prometheus.sif" \
+#  /bin/prometheus --web.enable-otlp-receiver --config.file=/etc/prometheus/prometheus.yaml \
+#  > "$LOGS_DIR/prometheus/prometheus.log" 2>&1 &
 
 echo "$(current_datetime) - BOOM services started successfully"
