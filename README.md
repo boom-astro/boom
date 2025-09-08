@@ -86,7 +86,7 @@ then call:
 make api-dev
 ```
 
-## Running BOOM:
+## Running BOOM for development
 
 ### Alert Production (not required for production use)
 
@@ -142,21 +142,36 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
-### Apptainer
+## Running BOOM in production
 
-To run the producer, consumer, or scheduler with Apptainer, you can open a shell in the `boom` instance with:
+### Using Docker
+To run the consumer and the scheduler with Docker, you can open a shell in the `boom` container with:
 ```bash
-apptainer shell --pwd /app instance://boom
+docker exec -it -w /app boom /bin/bash
 ```
 Then you can run the binaries with:
 ```bash
-./kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
 ./scheduler <SURVEY> [CONFIG_PATH]
 ```
 Or you can run them directly with:
 ```bash
-apptainer exec instance://boom /app/kafka_producer <SURVEY> [DATE] [PROGRAMID]
+docker exec -it -w /app boom ./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+docker exec -it -w /app boom ./scheduler <SURVEY> [CONFIG_PATH]
+```
+
+### Using Apptainer
+To run the consumer and the scheduler with Apptainer, you can open a shell in the `boom` instance with:
+```bash
+apptainer shell --pwd /app instance://boom
+```
+Then you can run the binaries with:
+```bash
+./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+./scheduler <SURVEY> [CONFIG_PATH]
+```
+Or you can run them directly with:
+```bash
 apptainer exec instance://boom /app/kafka_consumer <SURVEY> [DATE] [PROGRAMID]
 apptainer exec instance://boom /app/scheduler <SURVEY> [CONFIG_PATH]
 ```
