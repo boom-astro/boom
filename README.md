@@ -61,16 +61,16 @@ This is especially useful for running BOOM on HPC systems where Docker is not av
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
 
-3. Launch `Valkey`, `MongoDB`, and `Kafka` using Apptainer:
+3. Launch `Valkey`, `MongoDB`, `Kafka`, `Otel Collector`, `Prometheus` and `boom` using Apptainer:
     First, build the SIF files. You can do this by running:
     ```bash
     ./apptainer/def/build-sif.sh
     ```
     Then you can launch the services with:
     ```bash
-    ./apptainer_compose.sh
+    ./apptainer.sh compose
     ```
-    *To check if the instances are running and healthy, run `./apptainer_healthchecks.sh`.*
+    *To check if the instances are running and healthy, run `./apptainer.sh health`.*
 4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
@@ -142,6 +142,25 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
+### Apptainer
+
+To run the producer, consumer, or scheduler with Apptainer, you can open a shell in the `boom` instance with:
+```bash
+apptainer shell --pwd /app instance://boom
+```
+Then you can run the binaries with:
+```bash
+./kafka_producer <SURVEY> [DATE] [PROGRAMID]
+./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+./scheduler <SURVEY> [CONFIG_PATH]
+```
+Or you can run them directly with:
+```bash
+apptainer exec instance://boom /app/kafka_producer <SURVEY> [DATE] [PROGRAMID]
+apptainer exec instance://boom /app/kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+apptainer exec instance://boom /app/scheduler <SURVEY> [CONFIG_PATH]
+```
+
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
 - You should then see some `received alerts len: <nb_alerts>` messages, which means that the enrichment worker is processing the alerts successfully.
@@ -170,6 +189,10 @@ To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then s
 You can also stop the docker containers with:
 ```bash
 docker compose down
+```
+Or stop the Apptainer instances with:
+```bash
+./apptainer.sh stop
 ```
 
 When you stop the scheduler, it will attempt to gracefully stop all the workers by sending them interrupt signals.
