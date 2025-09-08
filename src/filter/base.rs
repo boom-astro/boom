@@ -224,7 +224,7 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::new(schema, Vec::new());
+    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
