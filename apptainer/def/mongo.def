@@ -4,7 +4,3 @@ From: mongo:8.0
 %environment
     export MONGO_INITDB_ROOT_USERNAME=mongoadmin
     export MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
-    export PORT=27017
-
-%startscript
-    docker-entrypoint.sh mongod
