@@ -66,7 +66,16 @@ apptainer instance start \
 $SCRIPTS_DIR/kafka-healthcheck.sh # Wait for Kafka to be ready
 
 # -----------------------------
-# 4. Monitoring services
+# 4. Boom
+# -----------------------------
+echo "$(current_datetime) - Starting BOOM instance"
+apptainer instance start \
+  --bind "$CONFIG_FILE:/app/config.yaml" \
+  --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
+  "$SIF_DIR/boom.sif" boom
+
+# -----------------------------
+# 5. Monitoring services
 # -----------------------------
 echo "$(current_datetime) - Starting Otel Collector"
 apptainer exec \
