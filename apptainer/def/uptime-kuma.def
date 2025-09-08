@@ -1,0 +1,6 @@
+Bootstrap: docker
+From: louislam/uptime-kuma:1
+
+%startscript
+    cd /app
+    exec node server/server.js > /app/logs/uptime-kuma.log 2>&1
