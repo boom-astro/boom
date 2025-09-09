@@ -17,7 +17,7 @@ def check_process(process_name):
 # HTTP server to check if the kafka consumer or scheduler are running
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/healthcheck":
+        if self.path == "/health":
             self.respond(200, "ok\n")
         elif self.path == "/consumer_health":
             status = check_process("/app/kafka_consume")
@@ -27,6 +27,10 @@ class HealthHandler(BaseHTTPRequestHandler):
             status = check_process("/app/scheduler")
             self.respond(200 if status else 503,
                          f"scheduler {'is healthy' if status else 'unhealthy'}\n")
+        elif self.path == "/otel_collector_health":
+            status = check_process("/otelcol")
+            self.respond(200 if status else 503,
+                         f"Otel collector {'is healthy' if status else 'unhealthy'}\n")
         else:
             self.respond(404, "unknown endpoint")
 

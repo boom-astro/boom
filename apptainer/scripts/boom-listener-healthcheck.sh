@@ -2,7 +2,7 @@
 
 # Listener health check
 # $1 = NB_RETRIES max retries (empty = unlimited)
-# $2 = URL to check (optional, default: http://localhost:5555/healthcheck)
+# $2 = URL to check (optional, default: http://localhost:5555/health)
 
 current_datetime() {
     date "+%Y-%m-%d %H:%M:%S"
@@ -13,7 +13,7 @@ RED="\e[31m"
 END="\e[0m"
 
 NB_RETRIES=${1:-}
-URL=${2:-http://localhost:5555/healthcheck}
+URL=${2:-http://localhost:5555/health}
 
 cpt=0
 until timeout 3 curl -fs "$URL" >/dev/null 2>&1; do
