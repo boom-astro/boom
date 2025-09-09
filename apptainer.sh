@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to manage Apptainer instances for MongoDB, Kafka, Valkey, and Boom.
-# $1 = action: compose | start | health | stop
+# $1 = action: build | compose | start | health | stop
 # $2-$6 = arguments used only with the 'start' action:
 #   $2 = survey name for the consumer and scheduler
 #   $3 = logs folder for consumer and scheduler (optional, default: $HOME/boom/logs/boom)
@@ -14,9 +14,14 @@ GREEN="\e[32m"
 RED="\e[31m"
 END="\e[0m"
 
-if [ "$1" != "compose" ] && [ "$1" != "start" ] && [ "$1" != "health" ] && [ "$1" != "stop" ]; then
-  echo "Usage: $0 {compose|start|health|stop}"
+if [ "$1" != "build" ] && [ "$1" != "compose" ] && [ "$1" != "start" ] && [ "$1" != "health" ] && [ "$1" != "stop" ]; then
+  echo "Usage: $0 {build|compose|start|health|stop}"
   exit 1
+fi
+
+if [ "$1" = "build" ]; then
+  ./apptainer/def/build-sif.sh
+  exit 0
 fi
 
 if [ "$1" = "compose" ]; then
