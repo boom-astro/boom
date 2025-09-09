@@ -1,9 +1,14 @@
 #!/bin/bash
 
+# Process health check
+# $1 = process name (required)
+# $2 = name to print (optional, defaults to process name)
+
 current_datetime() {
     date "+%Y-%m-%d %H:%M:%S"
 }
 
+GREEN="\e[32m"
 RED="\e[31m"
 END="\e[0m"
 
@@ -16,9 +21,9 @@ if [ -z "$PROCESS" ]; then
 fi
 
 if pgrep -af "$PROCESS" | grep -v "process-healthcheck.sh" > /dev/null; then
-    echo "$(current_datetime) - $NAME is healthy"
+    echo -e "${GREEN}$(current_datetime) - $NAME is healthy${END}"
     exit 0
 fi
 
-echo -e "${RED}$(current_datetime) - $NAME is unhealthy${END}"
+echo -e "${RED}$(current_datetime) - $NAME unhealthy${END}"
 exit 1

@@ -1,26 +1,28 @@
 #!/bin/bash
 
+# Valkey health check
+# $1 = NB_RETRIES max retries (empty = unlimited)
+
 current_datetime() {
     date "+%Y-%m-%d %H:%M:%S"
 }
 
+GREEN="\e[32m"
 RED="\e[31m"
 END="\e[0m"
 
-INTERVAL=${INTERVAL:-10}   # interval between checks in seconds
-RETRIES=${RETRIES:-3}      # number of retries
-TIMEOUT=${TIMEOUT:-5}      # timeout for each ping in seconds
+NB_RETRIES=${1:-}
 
-attempt=0
-until timeout $TIMEOUT apptainer exec instance://valkey redis-cli ping | grep -q PONG; do
-    attempt=$((attempt+1))
-    if [ "$attempt" -ge "$RETRIES" ]; then
-        echo -e "${RED}$(current_datetime) - Valkey remains unhealthy after $RETRIES attempts${END}"
-        exit 1
+cpt=0
+until timeout 3 apptainer exec instance://valkey redis-cli ping 2>/dev/null | grep -q PONG; do
+    echo -e "${RED}$(current_datetime) - Valkey unhealthy${END}"
+    if [ -n "$NB_RETRIES" ] && [ $cpt -ge $NB_RETRIES ]; then
+      exit 1
     fi
-    echo -e "${RED}$(current_datetime) - Valkey unhealthy (attempt $attempt/$RETRIES)${END}"
-    sleep $INTERVAL
+
+    ((cpt++))
+    sleep 1
 done
 
-echo "$(current_datetime) - Valkey is healthy"
+echo -e "${GREEN}$(current_datetime) - Valkey is healthy${END}"
 exit 0
