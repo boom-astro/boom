@@ -74,6 +74,7 @@ apptainer instance start \
   --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
   --bind "$LOGS_DIR/monitoring:/var/log" \
   "$SIF_DIR/prometheus.sif" prometheus
+$SCRIPTS_DIR/prometheus-healthcheck.sh # Wait for Prometheus to be ready
 
 echo && echo "$(current_datetime) - Starting Otel Collector"
 if pgrep -f "otelcol" > /dev/null; then
@@ -92,11 +93,13 @@ if pgrep -f "boom-healthcheck-listener.py" > /dev/null; then
 else
   python "$SCRIPTS_DIR/boom-healthcheck-listener.py" > "$LOGS_DIR/monitoring/boom-healthcheck-listener.log" 2>&1 &
 fi
+$SCRIPTS_DIR/boom-listener-healthcheck.sh # Wait for Boom healthcheck listener to be ready
 
 echo && echo "$(current_datetime) - Starting Uptime Kuma"
 apptainer instance start \
   --bind "$PERSISTENT_DIR/uptime-kuma:/app/data" \
   --bind "$LOGS_DIR/monitoring:/app/logs" \
   "$SIF_DIR/uptime-kuma.sif" kuma
+$SCRIPTS_DIR/kuma-healthcheck.sh # Wait for Uptime Kuma to be ready
 
 echo && echo "$(current_datetime) - BOOM services started successfully"
