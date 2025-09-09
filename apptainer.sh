@@ -37,16 +37,24 @@ if [ "$1" == "start" ]; then
     exit 1
   fi
 
-  ARGS=("$SURVEY")
-  [ -n "$4" ] && ARGS+=("$4") # $4=date
-  [ -n "$5" ] && ARGS+=("$5") # $5=program ID
-  apptainer exec --env-file env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_FOLDER/consumer.log" 2>&1 &
+  if pgrep -f "/app/kafka_consumer" > /dev/null; then
+    echo -e "${RED}Boom consumer already running.${END}"
+  else
+    ARGS=("$SURVEY")
+    [ -n "$4" ] && ARGS+=("$4") # $4=date
+    [ -n "$5" ] && ARGS+=("$5") # $5=program ID
+    apptainer exec --env-file env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_FOLDER/consumer.log" 2>&1 &
+    echo -e "${GREEN}Boom consumer started for survey $SURVEY${END}"
+  fi
 
-  ARGS=("$SURVEY")
-  [ -n "$6" ] && ARGS+=("$6") # $6=config path
-  apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_FOLDER/scheduler.log" 2>&1 &
-
-  echo -e "${GREEN}Boom consumer and scheduler started for survey $SURVEY${END}"
+  if pgrep -f "/app/scheduler" > /dev/null; then
+    echo -e "${RED}Boom scheduler already running.${END}"
+  else
+    ARGS=("$SURVEY")
+    [ -n "$6" ] && ARGS+=("$6") # $6=config path
+    apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_FOLDER/scheduler.log" 2>&1 &
+    echo -e "${GREEN}Boom scheduler started for survey $SURVEY${END}"
+  fi
 fi
 
 if [ "$1" == "stop" ]; then
