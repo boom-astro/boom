@@ -39,6 +39,79 @@ fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
     Some(value)
 }
 
+pub fn catalog_xmatch_pipeline(
+    ra_geojson: f64,
+    dec_geojson: f64,
+    xmatch_config: &conf::CatalogXmatchConfig,
+) -> Vec<mongodb::bson::Document> {
+    match xmatch_config.n_max {
+        Some(n_max) => {
+            vec![
+                doc! {
+                    "$match": {
+                        "coordinates.radec_geojson": {
+                            "$nearSphere": [ra_geojson, dec_geojson],
+                            "$maxDistance": xmatch_config.radius
+                        }
+                    }
+                },
+                doc! {
+                    "$project": &xmatch_config.projection
+                },
+                doc! {
+                    "$limit": n_max
+                },
+                doc! {
+                    "$group": {
+                        "_id": mongodb::bson::Bson::Null,
+                        "matches": {
+                            "$push": "$$ROOT"
+                        }
+                    }
+                },
+                doc! {
+                    "$project": {
+                        "_id": 0,
+                        "matches": 1,
+                        "catalog": &xmatch_config.catalog
+                    }
+                },
+            ]
+        }
+        None => {
+            vec![
+                doc! {
+                    "$match": {
+                        "coordinates.radec_geojson": {
+                            "$geoWithin": {
+                                "$centerSphere": [[ra_geojson, dec_geojson], xmatch_config.radius]
+                            }
+                        }
+                    }
+                },
+                doc! {
+                    "$project": &xmatch_config.projection
+                },
+                doc! {
+                    "$group": {
+                        "_id": mongodb::bson::Bson::Null,
+                        "matches": {
+                            "$push": "$$ROOT"
+                        }
+                    }
+                },
+                doc! {
+                    "$project": {
+                        "_id": 0,
+                        "matches": 1,
+                        "catalog": &xmatch_config.catalog
+                    }
+                },
+            ]
+        }
+    }
+}
+
 #[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
@@ -54,70 +127,16 @@ pub async fn xmatch(
     let ra_geojson = ra - 180.0;
     let dec_geojson = dec;
 
-    let mut x_matches_pipeline = vec![
-        doc! {
-            "$match": {
-                "coordinates.radec_geojson": {
-                    "$geoWithin": {
-                        "$centerSphere": [[ra_geojson, dec_geojson], xmatch_configs[0].radius]
-                    }
-                }
-            }
-        },
-        doc! {
-            "$project": &xmatch_configs[0].projection
-        },
-        doc! {
-            "$group": {
-                "_id": mongodb::bson::Bson::Null,
-                "matches": {
-                    "$push": "$$ROOT"
-                }
-            }
-        },
-        doc! {
-            "$project": {
-                "_id": 0,
-                "matches": 1,
-                "catalog": &xmatch_configs[0].catalog
-            }
-        },
-    ];
+    // first build the aggregation pipeline for the first catalog
+    let mut x_matches_pipeline =
+        catalog_xmatch_pipeline(ra_geojson, dec_geojson, &xmatch_configs[0]);
 
     // then for all the other xmatch_configs, use a unionWith stage
     for xmatch_config in xmatch_configs.iter().skip(1) {
         x_matches_pipeline.push(doc! {
             "$unionWith": {
                 "coll": &xmatch_config.catalog,
-                "pipeline": [
-                    doc! {
-                        "$match": {
-                            "coordinates.radec_geojson": {
-                                "$geoWithin": {
-                                    "$centerSphere": [[ra_geojson, dec_geojson], xmatch_config.radius]
-                                }
-                            }
-                        }
-                    },
-                    doc! {
-                        "$project": &xmatch_config.projection
-                    },
-                    doc! {
-                        "$group": {
-                            "_id": mongodb::bson::Bson::Null,
-                            "matches": {
-                                "$push": "$$ROOT"
-                            }
-                        }
-                    },
-                    doc! {
-                        "$project": {
-                            "_id": 0,
-                            "matches": 1,
-                            "catalog": &xmatch_config.catalog
-                        }
-                    }
-                ]
+                "pipeline": catalog_xmatch_pipeline(ra_geojson, dec_geojson, xmatch_config)
             }
         });
     }

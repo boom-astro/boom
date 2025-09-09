@@ -54,7 +54,6 @@ crossmatch:
   LSST:
     - catalog: NED
       radius: 300.0 # 300 arcseconds
-      use_distance: true
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
@@ -79,7 +78,6 @@ crossmatch:
   DECAM:
     - catalog: NED
       radius: 300.0 # 300 arcseconds
-      use_distance: true
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
@@ -101,10 +99,26 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: LS_StarGalaxy
+      radius: 30.0 # arcseconds
+      n_max: 3
+      projection:
+        _id: 1
+        gMeanPSFMag: 1
+        gMeanPSFMagErr: 1
+        rMeanPSFMag: 1
+        rMeanPSFMagErr: 1
+        iMeanPSFMag: 1
+        iMeanPSFMagErr: 1
+        zMeanPSFMag: 1
+        zMeanPSFMagErr: 1
+        yMeanPSFMag: 1
+        yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
   ZTF:
     - catalog: NED
       radius: 300.0 # 300 arcseconds
-      use_distance: true
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
@@ -128,7 +142,6 @@ crossmatch:
         Mstar_unc: 1
     - catalog: PS1_DR1
       radius: 2.0 # 2 arcseconds
-      use_distance: false
       projection:
         _id: 1
         gMeanPSFMag: 1
@@ -145,7 +158,6 @@ crossmatch:
         dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
-      use_distance: false
       projection:
         _id: 1
         parallax: 1
@@ -157,7 +169,6 @@ crossmatch:
         dec: 1
     - catalog: milliquas_v6
       radius: 2.0 # 2 arcseconds
-      use_distance: false
       projection:
         _id: 1
         Name: 1
