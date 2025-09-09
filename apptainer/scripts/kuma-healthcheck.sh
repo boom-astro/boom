@@ -21,7 +21,7 @@ until timeout 3 curl -sSf http://localhost:3001 > /dev/null 2>&1; do
     fi
 
     ((cpt++))
-    sleep 2
+    sleep 3
 done
 
 echo -e "${GREEN}$(current_datetime) - Uptime Kuma is healthy${END}"
