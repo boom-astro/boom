@@ -22,6 +22,7 @@ mkdir -p "$LOGS_DIR/monitoring"
 : > "$LOGS_DIR/scheduler.log"
 : > "$LOGS_DIR/monitoring/otel-collector.log"
 : > "$LOGS_DIR/monitoring/prometheus.log"
+: > "$LOGS_DIR/monitoring/boom-healthcheck-listener.log"
 : > "$LOGS_DIR/monitoring/uptime-kuma.log"
 
 current_datetime() {
@@ -33,7 +34,7 @@ echo "$(current_datetime) - Starting BOOM services with Apptainer"
 # -----------------------------
 # 1. MongoDB
 # -----------------------------
-echo "$(current_datetime) - Starting MongoDB"
+echo && echo "$(current_datetime) - Starting MongoDB"
 apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
 sleep 5
 $SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
@@ -41,14 +42,14 @@ $SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
 # -----------------------------
 # 2. Valkey
 # -----------------------------
-echo "$(current_datetime) - Starting Valkey"
+echo && echo "$(current_datetime) - Starting Valkey"
 apptainer instance run "$SIF_DIR/valkey.sif" valkey
 $SCRIPTS_DIR/valkey-healthcheck.sh # Wait for Valkey to be ready
 
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
-echo "$(current_datetime) - Starting Kafka broker"
+echo && echo "$(current_datetime) - Starting Kafka broker"
 apptainer instance run \
     --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
     --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
@@ -59,7 +60,7 @@ $SCRIPTS_DIR/kafka-healthcheck.sh # Wait for Kafka to be ready
 # -----------------------------
 # 4. Boom
 # -----------------------------
-echo "$(current_datetime) - Starting BOOM instance"
+echo && echo "$(current_datetime) - Starting BOOM instance"
 apptainer instance start \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
@@ -68,23 +69,34 @@ apptainer instance start \
 # -----------------------------
 # 5. Monitoring services
 # -----------------------------
-echo "$(current_datetime) - Starting Prometheus"
-apptainer exec \
+echo && echo "$(current_datetime) - Starting Prometheus instance"
+apptainer instance start \
   --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
-  "$SIF_DIR/prometheus.sif" \
-  /bin/prometheus --web.enable-otlp-receiver --config.file=/etc/prometheus/prometheus.yaml \
-  > "$LOGS_DIR/monitoring/prometheus.log" 2>&1 &
+  --bind "$LOGS_DIR/monitoring:/var/log" \
+  "$SIF_DIR/prometheus.sif" prometheus
 
-echo "$(current_datetime) - Starting Otel Collector"
-apptainer exec \
-  --bind "$BOOM_DIR/config/apptainer-otel-collector-config.yaml:/etc/otelcol/config.yaml" \
-  --bind "$LOGS_DIR/monitoring:/var/log/otel-collector" \
-  "$SIF_DIR/otel-collector.sif" /otelcol --config /etc/otelcol/config.yaml \
-  > "$LOGS_DIR/monitoring/otel-collector.log" 2>&1 &
+echo && echo "$(current_datetime) - Starting Otel Collector"
+if pgrep -f "otelcol" > /dev/null; then
+  echo "$(current_datetime) - Otel Collector already running"
+else
+  apptainer exec \
+    --bind "$BOOM_DIR/config/apptainer-otel-collector-config.yaml:/etc/otelcol/config.yaml" \
+    --bind "$LOGS_DIR/monitoring:/var/log/otel-collector" \
+    "$SIF_DIR/otel-collector.sif" /otelcol --config /etc/otelcol/config.yaml \
+    > "$LOGS_DIR/monitoring/otel-collector.log" 2>&1 &
+fi
 
+echo && echo "$(current_datetime) - Starting Boom healthcheck listener"
+if pgrep -f "boom-healthcheck-listener.py" > /dev/null; then
+  echo "$(current_datetime) - Boom healthcheck listener already running"
+else
+  python "$SCRIPTS_DIR/boom-healthcheck-listener.py" > "$LOGS_DIR/monitoring/boom-healthcheck-listener.log" 2>&1 &
+fi
+
+echo && echo "$(current_datetime) - Starting Uptime Kuma"
 apptainer instance start \
   --bind "$PERSISTENT_DIR/uptime-kuma:/app/data" \
   --bind "$LOGS_DIR/monitoring:/app/logs" \
   "$SIF_DIR/uptime-kuma.sif" kuma
 
-echo "$(current_datetime) - BOOM services started successfully"
+echo && echo "$(current_datetime) - BOOM services started successfully"

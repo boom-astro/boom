@@ -1,0 +1,6 @@
+Bootstrap: docker
+From: prom/prometheus:latest
+
+%startscript
+    exec /bin/prometheus --web.enable-otlp-receiver --config.file=/etc/prometheus/prometheus.yaml \
+    > "/var/log/prometheus.log" 2>&1
