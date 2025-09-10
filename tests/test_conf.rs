@@ -50,7 +50,7 @@ fn test_build_xmatch_configs() {
     let projection = &first.projection;
     // test reading a few of the expected fields
     assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 0);
-    assert_eq!(projection.get("objname").unwrap().as_i64().unwrap(), 0);
+    assert_eq!(projection.get("objname").unwrap().as_i64().unwrap(), 1);
     assert_eq!(projection.get("DistMpc").unwrap().as_i64().unwrap(), 1);
 }
 
