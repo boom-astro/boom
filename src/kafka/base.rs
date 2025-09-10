@@ -421,7 +421,7 @@ pub trait AlertProducer {
         );
 
         // close producer
-        producer.flush(KAFKA_TIMEOUT_SECS).unwrap();
+        producer.flush(KAFKA_TIMEOUT_SECS)?;
 
         Ok(Some(total_pushed as i64))
     }
