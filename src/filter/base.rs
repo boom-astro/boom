@@ -224,7 +224,7 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::new(schema, Vec::new());
+    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
@@ -274,7 +274,7 @@ pub async fn send_alert_to_kafka(
     let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
 
     producer
-        .send(record, std::time::Duration::from_secs(0))
+        .send(record, std::time::Duration::from_secs(30))
         .await
         .map_err(|(e, _)| {
             warn!("Failed to send filter result to Kafka: {}", e);
