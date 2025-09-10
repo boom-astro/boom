@@ -11,7 +11,7 @@ use crate::{
 use std::{num::NonZero, sync::LazyLock};
 
 use futures::StreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, document::ValueAccessError, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
@@ -123,15 +123,23 @@ pub trait EnrichmentWorker {
                     Ok(cutout_doc) => {
                         let candid = cutout_doc.get_i64("_id")?;
                         if let Some(idx) = candid_to_idx.get(&candid) {
-                            alerts[*idx]
-                                .insert("cutoutScience", cutout_doc.get("cutoutScience").unwrap());
+                            alerts[*idx].insert(
+                                "cutoutScience",
+                                cutout_doc
+                                    .get("cutoutScience")
+                                    .ok_or(ValueAccessError::NotPresent)?,
+                            );
                             alerts[*idx].insert(
                                 "cutoutTemplate",
-                                cutout_doc.get("cutoutTemplate").unwrap(),
+                                cutout_doc
+                                    .get("cutoutTemplate")
+                                    .ok_or(ValueAccessError::NotPresent)?,
                             );
                             alerts[*idx].insert(
                                 "cutoutDifference",
-                                cutout_doc.get("cutoutDifference").unwrap(),
+                                cutout_doc
+                                    .get("cutoutDifference")
+                                    .ok_or(ValueAccessError::NotPresent)?,
                             );
                         }
                     }
