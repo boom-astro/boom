@@ -39,21 +39,19 @@ fn test_build_xmatch_configs() {
 
     let first = &catalog_xmatch_configs[0];
     // verify that its a CatalogXmatchConfig
-    assert_eq!(first.catalog, "PS1_DR1");
-    assert_eq!(first.radius, 2.0 * std::f64::consts::PI / 180.0 / 3600.0);
-    assert_eq!(first.use_distance, false);
-    assert_eq!(first.distance_key, None);
-    assert_eq!(first.distance_max, None);
-    assert_eq!(first.distance_max_near, None);
+    assert_eq!(first.catalog, "NED");
+    assert_eq!(first.radius, 300.0 * std::f64::consts::PI / 180.0 / 3600.0);
+    assert_eq!(first.use_distance, true);
+    assert_eq!(first.distance_key, Some("z".to_string()));
+    assert_eq!(first.distance_max, Some(30.0));
+    assert_eq!(first.distance_max_near, Some(300.0));
+    assert_eq!(first.n_max, None);
 
     let projection = &first.projection;
     // test reading a few of the expected fields
-    assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(projection.get("gMeanPSFMag").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(
-        projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(),
-        1
-    );
+    assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 0);
+    assert_eq!(projection.get("objname").unwrap().as_i64().unwrap(), 1);
+    assert_eq!(projection.get("DistMpc").unwrap().as_i64().unwrap(), 1);
 }
 
 #[tokio::test]
@@ -80,6 +78,7 @@ fn test_catalogxmatchconfig() {
         distance_max: None,
         distance_max_near: None,
         projection: ps1_projection.clone(),
+        n_max: None,
     };
 
     assert_eq!(xmatch_config.catalog, "PS1_DR1");
@@ -91,6 +90,7 @@ fn test_catalogxmatchconfig() {
     assert_eq!(xmatch_config.distance_key, None);
     assert_eq!(xmatch_config.distance_max, None);
     assert_eq!(xmatch_config.distance_max_near, None);
+    assert_eq!(xmatch_config.n_max, None);
 
     let projection = xmatch_config.projection;
     assert_eq!(projection, ps1_projection);

@@ -127,7 +127,7 @@ where
     D: Deserializer<'de>,
 {
     let value: Option<f32> = Option::deserialize(deserializer)?;
-    Ok(value.filter(|&x| x != -9999.0 && !x.is_nan()))
+    Ok(value.filter(|&x| x != -99999.0 && !x.is_nan()))
 }
 
 #[serde_as]
@@ -153,15 +153,19 @@ impl TryFrom<FpHist> for ForcedPhot {
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
 
         let (magpsf, sigmapsf, isdiffpos, snr) = match fp_hist.forcediffimflux {
-            Some(psf_flux) if (psf_flux / psf_flux_err) > SNT => {
-                let (magpsf, sigmapsf) = flux2mag(psf_flux, psf_flux_err, magzpsci);
-                let isdiffpos = psf_flux > 0.0;
-                (
-                    Some(magpsf),
-                    Some(sigmapsf),
-                    Some(isdiffpos),
-                    Some(psf_flux / psf_flux_err),
-                )
+            Some(psf_flux) => {
+                let psf_flux_abs = psf_flux.abs();
+                if (psf_flux_abs / psf_flux_err) > SNT {
+                    let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, magzpsci);
+                    (
+                        Some(magpsf),
+                        Some(sigmapsf),
+                        Some(psf_flux > 0.0),
+                        Some(psf_flux_abs / psf_flux_err),
+                    )
+                } else {
+                    (None, None, None, None)
+                }
             }
             _ => (None, None, None, None),
         };
@@ -322,9 +326,9 @@ where
     let dia_forced_sources = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?;
     let forced_phots = dia_forced_sources
         .into_iter()
-        .map(ForcedPhot::try_from)
-        .collect::<Result<Vec<ForcedPhot>, AlertError>>()
-        .map_err(serde::de::Error::custom)?;
+        .filter_map(|fp| ForcedPhot::try_from(fp).ok())
+        .collect();
+
     Ok(Some(forced_phots))
 }
 
@@ -810,15 +814,16 @@ mod tests {
         let fp_hists = fp_hists.unwrap();
         assert_eq!(fp_hists.len(), 10);
 
-        // at the moment, negative fluxes yield non-detections
-        // this is a conscious choice, might be revisited in the future
+        // at the moment, negative fluxes should yield detections,
+        // but with isdiffpos = false
         let fp_negative_det = fp_hists.get(0).unwrap();
-        assert!(fp_negative_det.magpsf.is_none());
-        assert!(fp_negative_det.sigmapsf.is_none());
+        println!("{:?}", fp_negative_det);
+        assert!((fp_negative_det.magpsf.unwrap() - 15.949999).abs() < 1e-6);
+        assert!((fp_negative_det.sigmapsf.unwrap() - 0.002316).abs() < 1e-6);
         assert!((fp_negative_det.diffmaglim - 20.879942).abs() < 1e-6);
-        assert!(fp_negative_det.isdiffpos.is_none());
-        assert!(fp_negative_det.snr.is_none());
-        assert!((fp_negative_det.fp_hist.jd - 2460447.9202778).abs() < 1e-6);
+        assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
+        assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
+        assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
 
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
