@@ -1,9 +1,9 @@
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use redis::AsyncCommands;
 use tracing::{instrument, warn};
 
 pub struct LsstEnrichmentWorker {
@@ -11,6 +11,7 @@ pub struct LsstEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_pipeline: Vec<Document>,
 }
 
@@ -22,6 +23,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
+        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let alert_pipeline = vec![
             doc! {
@@ -92,6 +94,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
+            alert_cutout_collection,
             alert_pipeline,
         })
     }
@@ -105,41 +108,19 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn fetch_alerts(
-        &self,
-        candids: &[i64], // this is a slice of candids to process
-    ) -> Result<Vec<Document>, EnrichmentWorkerError> {
-        let mut alert_pipeline = self.alert_pipeline.clone();
-        if let Some(first_stage) = alert_pipeline.first_mut() {
-            *first_stage = doc! {
-                "$match": {
-                    "_id": {"$in": candids}
-                }
-            };
-        }
-        let mut alert_cursor = self.alert_collection.aggregate(alert_pipeline).await?;
-
-        let mut alerts: Vec<Document> = Vec::new();
-        while let Some(result) = alert_cursor.next().await {
-            match result {
-                Ok(document) => {
-                    alerts.push(document);
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        Ok(alerts)
-    }
-
-    #[instrument(skip_all, err)]
     async fn process_alerts(
         &mut self,
         candids: &[i64],
+        con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = self.fetch_alerts(&candids).await?;
+        let mut alerts = self
+            .fetch_alerts(
+                &candids,
+                &self.alert_pipeline,
+                &self.alert_collection,
+                Some(&self.alert_cutout_collection),
+            )
+            .await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -152,6 +133,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         if alerts.is_empty() {
             return Ok(vec![]);
         }
+
+        let mut stringified_alerts: Vec<String> = Vec::new();
 
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
@@ -169,7 +152,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": &properties,
                 }
             };
 
@@ -183,9 +166,28 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             updates.push(update);
             processed_alerts.push(format!("{}", candid));
+
+            // only push the stringified alert if:
+            // - properties.rock is false
+            // - ... TODO add more conditions here later
+            if !properties.get_bool("rock").unwrap_or(false) {
+                // we get a mutable reference to avoid any cloning
+                let alert_with_properties = &mut alerts[i];
+                alert_with_properties.insert("properties", properties);
+                stringified_alerts.push(serde_json::to_string(&alert_with_properties).unwrap());
+            }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // push the alerts to a redis queue called "babamul"
+        if let Some(con) = con {
+            if !stringified_alerts.is_empty() {
+                con.lpush::<&str, Vec<String>, usize>("babamul", stringified_alerts)
+                    .await
+                    .unwrap();
+            }
+        }
 
         Ok(processed_alerts)
     }

@@ -136,6 +136,9 @@ async fn test_process_lsst_alert_xmatch() {
 async fn test_enrich_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
+    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let mut con = conf::build_redis(&config).await.unwrap();
+
     // we only randomize the candid and object_id here, since the ra/dec
     // are features of the models and would change the results
     let (candid, _, _, _, bytes_content) = AlertRandomizer::new(Survey::Lsst)
@@ -147,7 +150,9 @@ async fn test_enrich_lsst_alert() {
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = enrichment_worker.process_alerts(&[candid]).await;
+    let result = enrichment_worker
+        .process_alerts(&[candid], Some(&mut con))
+        .await;
     assert!(result.is_ok());
 
     // the result should be a vec of String, for ZTF with the format

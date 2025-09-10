@@ -187,6 +187,7 @@ pub struct CatalogXmatchConfig {
     pub distance_key: Option<String>,        // name of the field to use for distance
     pub distance_max: Option<f64>,           // maximum distance in kpc
     pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
+    pub n_max: Option<i64>,                  // maximum number of objects to return
 }
 
 impl CatalogXmatchConfig {
@@ -194,11 +195,20 @@ impl CatalogXmatchConfig {
         catalog: &str,
         radius: f64,
         projection: mongodb::bson::Document,
-        use_distance: bool,
         distance_key: Option<String>,
         distance_max: Option<f64>,
         distance_max_near: Option<f64>,
+        n_max: Option<i64>,
     ) -> CatalogXmatchConfig {
+        let use_distance =
+            distance_key.is_some() && distance_max.is_some() && distance_max_near.is_some();
+
+        if distance_key.is_some() || distance_max.is_some() || distance_max_near.is_some() {
+            if !use_distance {
+                panic!("If any of distance_key, distance_max, or distance_max_near is set, all must be set (or none at all).");
+            }
+        }
+
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
             radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
@@ -207,6 +217,7 @@ impl CatalogXmatchConfig {
             distance_key,
             distance_max,
             distance_max_near,
+            n_max,
         }
     }
 
@@ -233,11 +244,6 @@ impl CatalogXmatchConfig {
             .clone()
             .into_table()?;
 
-        let use_distance = match hashmap_xmatch.get("use_distance") {
-            Some(use_distance) => use_distance.clone().into_bool()?,
-            None => false,
-        };
-
         let distance_key = match hashmap_xmatch.get("distance_key") {
             Some(distance_key) => Some(distance_key.clone().into_string()?),
             None => None,
@@ -253,6 +259,11 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
+        let n_max = match hashmap_xmatch.get("n_max") {
+            Some(n_max) => Some(n_max.clone().into_int()?),
+            None => None,
+        };
+
         // projection is a hashmap, we need to convert it to a Document
         let mut projection_doc = mongodb::bson::Document::new();
         for (key, value) in projection.iter() {
@@ -261,28 +272,14 @@ impl CatalogXmatchConfig {
             projection_doc.insert(key, value);
         }
 
-        if use_distance {
-            if distance_key.is_none() {
-                panic!("must provide a distance_key if use_distance is true");
-            }
-
-            if distance_max.is_none() {
-                panic!("must provide a distance_max if use_distance is true");
-            }
-
-            if distance_max_near.is_none() {
-                panic!("must provide a distance_max_near if use_distance is true");
-            }
-        }
-
         Ok(CatalogXmatchConfig::new(
             &catalog,
             radius,
             projection_doc,
-            use_distance,
             distance_key,
             distance_max,
             distance_max_near,
+            n_max,
         ))
     }
 }
