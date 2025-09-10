@@ -529,15 +529,14 @@ impl TryFrom<DiaForcedSource> for ForcedPhot {
         // may revisit this later
         let (magpsf, sigmapsf, isdiffpos, snr) = match dia_forced_source.psf_flux {
             Some(psf_flux) => {
-                let psf_flux = psf_flux * 1e-9;
-                if (psf_flux / psf_flux_err) > SNT {
-                    let isdiffpos = psf_flux > 0.0;
-                    let (magpsf, sigmapsf) = flux2mag(psf_flux, psf_flux_err, ZP_AB);
+                let psf_flux_abs = psf_flux.abs() * 1e-9;
+                if (psf_flux_abs / psf_flux_err) > SNT {
+                    let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, ZP_AB);
                     (
                         Some(magpsf),
                         Some(sigmapsf),
-                        Some(isdiffpos),
-                        Some(psf_flux / psf_flux_err),
+                        Some(psf_flux > 0.0),
+                        Some(psf_flux_abs / psf_flux_err),
                     )
                 } else {
                     (None, None, None, None)

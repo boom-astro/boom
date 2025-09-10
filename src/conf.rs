@@ -233,7 +233,7 @@ impl CatalogXmatchConfig {
             .into_string()?;
 
         let radius = hashmap_xmatch
-            .get("radius")
+            .get("radius_arcsec")
             .ok_or(BoomConfigError::MissingKeyError)?
             .clone()
             .into_float()?;
