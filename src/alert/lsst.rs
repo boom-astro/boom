@@ -49,11 +49,11 @@ pub struct DiaSource {
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "diaObjectId")]
-    #[serde(deserialize_with = "deserialize_objid_option")]
+    #[serde(deserialize_with = "deserialize_optional_id")]
     pub dia_object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
-    #[serde(deserialize_with = "deserialize_sso_objid_option")]
+    #[serde(deserialize_with = "deserialize_optional_id")]
     pub ss_object_id: Option<String>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
@@ -601,15 +601,7 @@ where
     Ok(objid.to_string())
 }
 
-fn deserialize_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
-    Ok(objid.map(|i| i.to_string()))
-}
-
-fn deserialize_sso_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
