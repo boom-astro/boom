@@ -208,16 +208,8 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
     };
 
     // Validate critical auth settings
-    if auth.secret_key.is_empty() {
-        panic!("SECRET_KEY must be set; cannot run with empty JWT secret");
-    }
-    if auth.admin_password.is_empty() {
-        panic!("ADMIN_PASSWORD must be set; cannot run with empty admin password");
-    }
     if auth.token_expiration <= 0 {
-        panic!(
-            "TOKEN_EXPIRATION must be greater than 0; tokens with unlimited lifetime are not allowed for security reasons"
-        );
+        panic!("Token expiration must be greater than 0 for security reasons");
     }
 
     // Load DB configuration
