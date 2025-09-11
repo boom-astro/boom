@@ -605,8 +605,7 @@ fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D:
 where
     D: Deserializer<'de>,
 {
-    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
-    match objid {
+    match <Option<i64> as Deserialize>::deserialize(deserializer)? {
         Some(0) | None => Ok(None),
         Some(i) => Ok(Some(i.to_string())),
     }
