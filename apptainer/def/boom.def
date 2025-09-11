@@ -10,7 +10,6 @@ From: rust:1.87-slim-bookworm
     src /app/src
     api /app/api
     data/models /app/data/models
-    data/alerts /app/alerts
 
 %post
     apt-get update && \
