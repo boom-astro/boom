@@ -324,9 +324,16 @@ where
     D: Deserializer<'de>,
 {
     let dia_forced_sources = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?;
+    // log a warning if any of the FpHist cannot be converted to ForcedPhot
     let forced_phots = dia_forced_sources
         .into_iter()
-        .filter_map(|fp| ForcedPhot::try_from(fp).ok())
+        .filter_map(|fp| {
+            ForcedPhot::try_from(fp)
+                .map_err(|e| {
+                    warn!("Failed to convert FpHist to ForcedPhot: {}", e);
+                })
+                .ok()
+        })
         .collect();
 
     Ok(Some(forced_phots))
@@ -817,7 +824,6 @@ mod tests {
         // at the moment, negative fluxes should yield detections,
         // but with isdiffpos = false
         let fp_negative_det = fp_hists.get(0).unwrap();
-        println!("{:?}", fp_negative_det);
         assert!((fp_negative_det.magpsf.unwrap() - 15.949999).abs() < 1e-6);
         assert!((fp_negative_det.sigmapsf.unwrap() - 0.002316).abs() < 1e-6);
         assert!((fp_negative_det.diffmaglim - 20.879942).abs() < 1e-6);
