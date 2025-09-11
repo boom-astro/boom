@@ -27,6 +27,10 @@ jobs:
       BOOM_ADMIN_EMAIL: ${{ vars.BOOM_ADMIN_EMAIL }}
       BOOM_ADMIN_PASSWORD: ${{ secrets.BOOM_ADMIN_PASSWORD }}
       BOOM_JWT_SECRET: ${{ secrets.BOOM_JWT_SECRET }}
+      STACK_NAME: boom
+      PROMETHEUS_USER: ${{ vars.PROMETHEUS_USER }}
+      PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
+      DOMAIN: ${{ vars.DOMAIN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5

@@ -190,5 +190,9 @@ The current Github Actions workflow in `deploy.yaml` expect these to be set:
 - `BOOM_ADMIN_EMAIL`
 - `BOOM_ADMIN_PASSWORD`
 - `BOOM_JWT_SECRET`
+- `STACK_NAME`
+- `DOMAIN`
+- `PROMETHEUS_USER`
+- `PROMETHEUS_HASHED_PASSWORD`
 
 That's it. Now BOOM will deploy to production on each GitHub release.
