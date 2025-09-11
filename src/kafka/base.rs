@@ -38,6 +38,7 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 const MAX_RETRIES_PRODUCER: usize = 6;
+const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug)]
 struct Metadata(HashMap<String, Vec<i32>>);
@@ -56,8 +57,9 @@ impl Metadata {
 // MetadataPartition values, neither of which implement Clone. We use a custom
 // Metadata type to capture the topic and partition information from the rdkafka
 // types, which can then can be returned to the caller.
+#[instrument(skip_all, err)]
 fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
-    let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(5))?;
+    let cluster_metadata = client.fetch_metadata(None, KAFKA_TIMEOUT_SECS)?;
     let inner = cluster_metadata
         .topics()
         .iter()
@@ -75,13 +77,34 @@ fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
 }
 
 // check that the topic exists and return the number of partitions
+#[instrument(skip_all, err)]
 pub fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
+    group_id: &str,
+    username: Option<String>,
+    password: Option<String>,
 ) -> Result<Option<usize>, KafkaError> {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let mut client_config = ClientConfig::new();
+    client_config
+        // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+        // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", bootstrap_servers)
-        .create()?;
+        .set("group.id", group_id);
+
+    if let (Some(username), Some(password)) = (username, password) {
+        client_config
+            .set("security.protocol", "SASL_PLAINTEXT")
+            .set("sasl.mechanisms", "SCRAM-SHA-512")
+            .set("sasl.username", username)
+            .set("sasl.password", password);
+    } else {
+        client_config.set("security.protocol", "PLAINTEXT");
+    }
+
+    let consumer: BaseConsumer = client_config
+        .create()
+        .inspect_err(as_error!("failed to create consumer"))?;
     let metadata = get_metadata(&consumer)?;
     debug!(
         "Existing topics: {}",
@@ -90,15 +113,25 @@ pub fn check_kafka_topic_partitions(
     Ok(metadata.partition_ids(topic_name).map(|ids| ids.len()))
 }
 
+#[instrument(skip_all, err)]
 pub fn assign_partitions_to_consumers(
     topic_name: &str,
     nb_consumers: usize,
     kafka_config: &SurveyKafkaConfig,
+    group_id: &str,
+    username: Option<String>,
+    password: Option<String>,
 ) -> Result<Vec<Vec<i32>>, ConsumerError> {
     // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
     let nb_partitions = loop {
-        if let Some(nb_partitions) =
-            check_kafka_topic_partitions(&kafka_config.consumer, &topic_name)?
+        if let Some(nb_partitions) = check_kafka_topic_partitions(
+            &kafka_config.consumer,
+            &topic_name,
+            group_id,
+            username.clone(),
+            password.clone(),
+        )
+        .inspect_err(as_error!("failed to check existing topic partitions"))?
         {
             break nb_partitions;
         }
@@ -116,6 +149,7 @@ pub fn assign_partitions_to_consumers(
     Ok(partitions)
 }
 
+#[instrument(skip_all, err)]
 pub async fn initialize_topic(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -125,7 +159,13 @@ pub async fn initialize_topic(
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let nb_partitions = match check_kafka_topic_partitions(bootstrap_servers, topic_name)? {
+    let nb_partitions = match check_kafka_topic_partitions(
+        bootstrap_servers,
+        topic_name,
+        "producer-topic-check",
+        None,
+        None,
+    )? {
         Some(nb_partitions) => {
             if nb_partitions != expected_nb_partitions {
                 warn!(
@@ -136,8 +176,7 @@ pub async fn initialize_topic(
             nb_partitions
         }
         None => {
-            let opts =
-                AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+            let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
             info!(
                 "Creating topic {} with {} partitions...",
                 topic_name, expected_nb_partitions
@@ -162,16 +201,18 @@ pub async fn initialize_topic(
     Ok(nb_partitions)
 }
 
+#[instrument(skip_all, err)]
 pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), KafkaError> {
     let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let opts = AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+    let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
     Ok(())
 }
 
+#[instrument(skip_all, err)]
 pub fn count_messages(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -187,11 +228,7 @@ pub fn count_messages(
                 .iter()
                 .try_fold(0u32, |total_messages, &partition_id| {
                     consumer
-                        .fetch_watermarks(
-                            topic_name,
-                            partition_id,
-                            std::time::Duration::from_secs(5),
-                        )
+                        .fetch_watermarks(topic_name, partition_id, KAFKA_TIMEOUT_SECS)
                         .map(|(low, high)| {
                             let count = high - low;
                             debug!(
@@ -350,9 +387,7 @@ pub trait AlertProducer {
                 let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
                     .payload(&payload)
                     .timestamp(chrono::Utc::now().timestamp_millis());
-                let status = producer
-                    .send(record, std::time::Duration::from_secs(5))
-                    .await;
+                let status = producer.send(record, KAFKA_TIMEOUT_SECS).await;
                 match status {
                     Ok(_) => {
                         break;
@@ -386,7 +421,7 @@ pub trait AlertProducer {
         );
 
         // close producer
-        producer.flush(std::time::Duration::from_secs(1)).unwrap();
+        producer.flush(KAFKA_TIMEOUT_SECS)?;
 
         Ok(Some(total_pushed as i64))
     }
@@ -438,8 +473,18 @@ pub trait AlertConsumer: Sized {
             )
         });
 
+        let username = self.username();
+        let password = self.password();
+
         let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
-        let partitions = assign_partitions_to_consumers(&topic, n_threads, &kafka_config)?;
+        let partitions = assign_partitions_to_consumers(
+            &topic,
+            n_threads,
+            &kafka_config,
+            &group_id,
+            username,
+            password,
+        )?;
 
         let mut handles = vec![];
         for i in 0..n_threads {
@@ -518,11 +563,11 @@ pub async fn consume_partitions(
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", &survey_config.consumer)
-        .set("security.protocol", "SASL_PLAINTEXT")
         .set("group.id", group_id);
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
+            .set("security.protocol", "SASL_PLAINTEXT")
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
@@ -543,7 +588,7 @@ pub async fn consume_partitions(
             .inspect_err(as_error!("failed to add partition"))?
     }
     let tpl = consumer
-        .offsets_for_times(timestamps, std::time::Duration::from_secs(5))
+        .offsets_for_times(timestamps, KAFKA_TIMEOUT_SECS)
         .inspect_err(as_error!("failed to fetch offsets"))?;
 
     consumer
