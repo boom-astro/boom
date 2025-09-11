@@ -15,8 +15,6 @@ services:
     hostname: mongo
     expose:
       - "27017"
-    ports:
-      - "27017:27017"
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${BOOM_DB_USERNAME:-mongoadmin}
       - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DB_PASSWORD:?BOOM_DB_PASSWORD must be set and non-empty}
@@ -35,8 +33,6 @@ services:
       # ALLOW_EMPTY_PASSWORD is recommended only for development.
       - ALLOW_EMPTY_PASSWORD=yes
       - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
-    ports:
-      - "6379:6379"
     volumes:
       - valkey:/data
     restart: always
@@ -50,8 +46,6 @@ services:
   broker:
     image: apache/kafka:latest
     hostname: broker
-    ports:
-      - 9092:9092
     networks:
       - boom
       - traefik-public
@@ -79,8 +73,6 @@ services:
   api:
     image: boom/boom-api:latest
     hostname: api
-    ports:
-      - "4000:4000"
     build:
       context: .
       dockerfile: Dockerfile
@@ -146,10 +138,6 @@ services:
     image: otel/opentelemetry-collector:0.131.1
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
-    ports:
-      - 4317:4317 # OTLP gRPC receiver (from Rust OTLP exporter)
-      - 55679:55679 # zpages extension
-      - 13133:13133 # health_check extension
     networks:
       - boom
   prometheus:
@@ -159,8 +147,8 @@ services:
       - --config.file=/etc/prometheus/prometheus.yaml
     volumes:
       - ./config/prometheus.yaml:/etc/prometheus/prometheus.yaml
-    ports:
-      - 9090:9090
+    expose:
+      - "9090"
     networks:
       - boom
       - traefik-public # TODO: Setup auth
