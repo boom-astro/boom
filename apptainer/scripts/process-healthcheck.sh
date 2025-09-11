@@ -5,7 +5,7 @@
 # $2 = name to print (optional, defaults to process name)
 
 current_datetime() {
-    date "+%Y-%m-%d %H:%M:%S"
+    TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
 
 GREEN="\e[32m"

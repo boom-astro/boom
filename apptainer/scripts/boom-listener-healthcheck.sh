@@ -5,7 +5,7 @@
 # $2 = URL to check (optional, default: http://localhost:5555/health)
 
 current_datetime() {
-    date "+%Y-%m-%d %H:%M:%S"
+    TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
 
 GREEN="\e[32m"

@@ -4,7 +4,7 @@
 # $1 = NB_RETRIES max retries (empty = unlimited)
 
 current_datetime() {
-    date "+%Y-%m-%d %H:%M:%S"
+    TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
 
 GREEN="\e[32m"
