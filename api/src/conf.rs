@@ -186,7 +186,7 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
 
     let admin_password = auth_conf
         .get("admin_password")
-        .expect("admin_password must be set in config")
+        .expect("admin_password must be set in config (set via BOOM_ADMIN_PASSWORD environment variable)")
         .clone()
         .into_string()
         .unwrap_or_else(|e| panic!("Invalid admin_password: {}", e));
