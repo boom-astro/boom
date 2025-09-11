@@ -251,7 +251,7 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
 
     let password = db_conf
         .get("password")
-        .expect("database password must be set in config")
+        .expect("database password must be set in config (set with BOOM_DB_PASSWORD environment variable)")
         .clone()
         .into_string()
         .unwrap_or_else(|e| panic!("Invalid database password: {}", e));
@@ -266,7 +266,7 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
 
     // Validate critical database settings
     if database.password.is_empty() {
-        panic!("DATABASE_PASSWORD must be set - cannot run with empty database password");
+        panic!("Database password must be set; cannot run with empty database password");
     }
 
     AppConfig { auth, database }
