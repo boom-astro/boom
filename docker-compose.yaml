@@ -151,7 +151,24 @@ services:
       - "9090"
     networks:
       - boom
-      - traefik-public # TODO: Setup auth
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      - traefik.http.services.${STACK_NAME?Variable not set}-prometheus.loadbalancer.server.port=9090
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-http.rule=Host(`prometheus.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-http.entrypoints=http
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.rule=Host(`prometheus.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.entrypoints=https
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.tls=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.tls.certresolver=le
+      # HTTPS redirect middleware
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-http.middlewares=https-redirect
+      # Basic auth middleware
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-prometheus-auth.basicauth.users=${PROMETHEUS_USER:?PROMETHEUS_USER must be set}:${PROMETHEUS_HASHED_PASSWORD:?PROMETHEUS_HASHED_PASSWORD must be set}
+      - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.middlewares=${STACK_NAME?Variable not set}-prometheus-auth
+    restart: always
 
 # [^1]:
 #   * https://opentelemetry.io/docs/collector/quick-start/
