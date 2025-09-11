@@ -47,6 +47,8 @@ services:
     env_file:
       - .env
   mongo:
+    env_file:
+      - .env
     ports:
       - "27017:27017"
   valkey:
@@ -56,6 +58,8 @@ services:
     ports:
       - "9092:9092"
   api:
+    env_file:
+      - .env
     ports:
       - "4000:4000"
   otel-collector:
