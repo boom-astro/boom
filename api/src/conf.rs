@@ -159,6 +159,8 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
         .and_then(|auth| auth.clone().into_table().ok())
         .expect("an auth table should exist in the config file");
 
+    let secret_key = auth_conf
+        .get("secret_key")
         .expect("secret_key must be set in config (set via BOOM_JWT_SECRET environment variable)")
         .clone()
         .into_string()
