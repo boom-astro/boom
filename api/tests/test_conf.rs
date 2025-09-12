@@ -43,7 +43,7 @@ api:
                 .or_else(|| panic_info.downcast_ref::<&str>().copied())
                 .unwrap_or("");
 
-            assert!(panic_message.contains("TOKEN_EXPIRATION must be greater than 0"));
+            assert!(panic_message.contains("Token expiration must be greater than 0"));
         }
     }
 
