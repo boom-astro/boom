@@ -71,12 +71,13 @@ services:
       test: /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:9092
       interval: 10s
   api:
-    image: boom/boom-api:latest
+    image: boom-astro/boom:latest
     hostname: api
     build:
       context: .
       dockerfile: Dockerfile
-      target: api
+    command:
+      - /app/boom-api
     networks:
       - boom
       - traefik-public
@@ -103,12 +104,11 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect
   scheduler-ztf:
-    image: boom/boom-scheduler:latest
+    image: boom-astro/boom:latest
     hostname: scheduler
     build:
       context: .
       dockerfile: Dockerfile
-      target: scheduler
     networks:
       - boom
     profiles:
@@ -119,12 +119,11 @@ services:
       - /app/scheduler
       - ztf
   scheduler-lsst:
-    image: boom/boom-scheduler:latest
+    image: boom-astro/boom:latest
     hostname: scheduler
     build:
       context: .
       dockerfile: Dockerfile
-      target: scheduler
     networks:
       - boom
     profiles:
