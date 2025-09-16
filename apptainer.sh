@@ -1,18 +1,19 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | health | stop
+# $1 = action: build | start | stop | health | filters
 
 SCRIPTS_DIR="$HOME/boom/apptainer/scripts"
 
-if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "health" ] && [ "$1" != "stop" ]; then
-  echo "Usage: $0 {build|compose|start|health|stop}"
+BLUE="\e[0;34m"
+END="\e[0m"
+
+if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "health" ] && [ "$1" != "filters" ]; then
+  echo "Usage: $0 {build|start|stop|health|filters}"
   exit 1
 fi
 
 kill_process() {
-  local BLUE="\033[0;34m"
-  local END="\033[0m"
   local process="$1"
   local name="$2"
   if pgrep -f "$process" > /dev/null; then
@@ -119,4 +120,13 @@ if [ "$1" == "health" ]; then
   "$SCRIPTS_DIR/process-healthcheck.sh" "/otelcol" otel-collector
   "$SCRIPTS_DIR/boom-listener-healthcheck.sh" 0
   "$SCRIPTS_DIR/kuma-healthcheck.sh" 0
+fi
+
+# -----------------------------
+# 4. Add filters
+# -----------------------------
+# Arguments for 'filters':
+# $2 = path to the file with the filters to add
+if [ "$1" == "filters" ]; then
+  "$SCRIPTS_DIR/add_filters.sh" "$2"
 fi
