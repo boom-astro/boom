@@ -103,9 +103,40 @@ services:
       # Enable www redirection for HTTP and HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect
+  consumer-ztf:
+    image: boom-astro/boom:latest
+    hostname: consumer-ztf
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml
+    command:
+      - /app/kafka_consumer
+      - ztf
+      - --auto-switch-date
+  consumer-lsst:
+    image: boom-astro/boom:latest
+    hostname: consumer-lsst
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml
+    command:
+      - /app/kafka_consumer
+      - lsst
   scheduler-ztf:
     image: boom-astro/boom:latest
-    hostname: scheduler
+    hostname: scheduler-ztf
     build:
       context: .
       dockerfile: Dockerfile
@@ -120,7 +151,7 @@ services:
       - ztf
   scheduler-lsst:
     image: boom-astro/boom:latest
-    hostname: scheduler
+    hostname: scheduler-lsst
     build:
       context: .
       dockerfile: Dockerfile
