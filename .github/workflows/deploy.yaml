@@ -36,5 +36,9 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.version || github.ref }}
-      - run: docker compose --profile prod -f docker-compose.yml build
-      - run: docker compose --profile prod -f docker-compose.yml up -d
+      - run: >
+          docker compose --profile prod --profile babamul
+          -f docker-compose.yml build
+      - run: >
+          docker compose --profile prod --profile babamul
+          -f docker-compose.yml up -d

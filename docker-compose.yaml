@@ -164,6 +164,20 @@ services:
     command:
       - /app/scheduler
       - lsst
+  babamul-worker:
+    image: boom-astro/boom:latest
+    hostname: babamul-worker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - boom
+    profiles:
+      - babamul
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml
+    command:
+      - /app/babamul-worker
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     volumes:
