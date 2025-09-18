@@ -72,7 +72,7 @@ api:
 
         // This should not panic
         let config = load_config(Some(temp_file.path().to_str().unwrap()));
-        assert_eq!(config.auth.token_expiration, 3600);
+        assert_eq!(config.api.auth.token_expiration, 3600);
     }
 
     #[test]
@@ -99,7 +99,7 @@ api:
 
         // This should use the default value (7 days = 604800 seconds)
         let config = load_config(Some(temp_file.path().to_str().unwrap()));
-        assert_eq!(config.auth.token_expiration, 604800); // 7 days in seconds
+        assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
     }
 
     #[test]
@@ -110,11 +110,11 @@ api:
         let config = load_config(Some("../config.yaml"));
 
         // Verify the token_expiration is set to our new default
-        assert_eq!(config.auth.token_expiration, 604800); // 7 days in seconds
+        assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
 
         // Verify other expected values
-        assert!(!config.auth.secret_key.is_empty());
-        assert!(!config.auth.admin_password.is_empty());
+        assert!(!config.api.auth.secret_key.is_empty());
+        assert!(!config.api.auth.admin_password.is_empty());
         assert!(!config.database.password.is_empty());
     }
 }

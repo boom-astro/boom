@@ -12,7 +12,7 @@ use mongodb::{Client, Database};
 pub const PROTECTED_COLLECTION_NAMES: [&str; 2] = ["users", "filters"];
 
 async fn init_api_admin_user(
-    auth_config: AuthConfig,
+    auth_config: &AuthConfig,
     database: &mongodb::Database,
 ) -> Result<(), std::io::Error> {
     let admin_username = auth_config.admin_username.clone();
@@ -142,7 +142,7 @@ async fn db_from_config(config: AppConfig) -> Database {
         .expect("failed to create username index on users collection");
 
     // Initialize the API admin user if it does not exist
-    if let Err(e) = init_api_admin_user(config.auth, &db).await {
+    if let Err(e) = init_api_admin_user(&config.api.auth, &db).await {
         eprintln!("Failed to initialize API admin user: {}", e);
     }
 

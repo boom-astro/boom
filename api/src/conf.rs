@@ -1,18 +1,7 @@
 use config::{Config, File};
 use dotenvy;
-use regex::Regex;
-use std::collections::HashMap;
-use std::env;
+use serde::Deserialize;
 use tracing::{debug, info, warn};
-
-#[derive(thiserror::Error, Debug)]
-pub enum ExpandError {
-    #[error("Missing environment variable '{var_name}' for placeholder '{placeholder}'")]
-    MissingVariable {
-        var_name: String,
-        placeholder: String,
-    },
-}
 
 /// Loads environment variables from a .env file if it exists.
 /// This function should be called early in the application startup,
@@ -45,57 +34,7 @@ pub fn load_dotenv() {
     debug!("No .env file found, using system environment variables only");
 }
 
-/// Expands environment variable placeholders in a string.
-/// Supports both ${VAR_NAME} and ${VAR_NAME:-default_value} syntax.
-///
-/// Examples:
-/// - "${BOOM_DB_PASSWORD}" -> reads from BOOM_DB_PASSWORD env var
-/// - "${BOOM_DB_PASSWORD:-defaultpass}" -> reads from BOOM_DB_PASSWORD, falls back to "defaultpass"
-fn expand_env_vars(input: &str) -> Result<String, ExpandError> {
-    let re = Regex::new(r"\$\{([^}:]+)(?::-(.*?))?\}").unwrap();
-    let mut result = input.to_string();
-    let mut replacements: HashMap<String, String> = HashMap::new();
-
-    for capture in re.captures_iter(input) {
-        let full_match = capture.get(0).unwrap().as_str();
-        let var_name = capture.get(1).unwrap().as_str();
-        let default_value = capture.get(2).map(|m| m.as_str());
-
-        // Check if we already processed this variable
-        if let Some(replacement) = replacements.get(full_match) {
-            result = result.replace(full_match, replacement);
-            continue;
-        }
-
-        // Get the environment variable value
-        let env_value = match env::var(var_name) {
-            Ok(value) => {
-                debug!("Expanded environment variable: {} = [REDACTED]", var_name);
-                value
-            }
-            Err(_) => {
-                if let Some(default) = default_value {
-                    warn!(
-                        "Environment variable {} not found, using default value",
-                        var_name
-                    );
-                    default.to_string()
-                } else {
-                    return Err(ExpandError::MissingVariable {
-                        var_name: var_name.to_string(),
-                        placeholder: full_match.to_string(),
-                    });
-                }
-            }
-        };
-
-        replacements.insert(full_match.to_string(), env_value.clone());
-        result = result.replace(full_match, &env_value);
-    }
-
-    Ok(result)
-}
-
+#[derive(Deserialize, Debug)]
 pub struct AuthConfig {
     pub secret_key: String,
     pub token_expiration: usize, // in seconds
@@ -104,16 +43,26 @@ pub struct AuthConfig {
     pub admin_email: String,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct ApiConfig {
+    pub auth: AuthConfig,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct DatabaseConfig {
     pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: String,
+    pub max_pool_size: u32,
+    pub replica_set: Option<String>,
+    pub srv: bool,
 }
 
+#[derive(Deserialize, Debug)]
 pub struct AppConfig {
-    pub auth: AuthConfig,
+    pub api: ApiConfig,
     pub database: DatabaseConfig,
 }
 
@@ -125,149 +74,65 @@ impl AppConfig {
     pub fn from_path(config_path: &str) -> Self {
         load_config(Some(config_path))
     }
+
+    /// Validate that all required secrets are present
+    fn validate_secrets(&self) -> Result<(), String> {
+        if self.database.password.is_empty() {
+            return Err(
+                "Database password must be set via BOOM_DATABASE__PASSWORD environment variable"
+                    .to_string(),
+            );
+        }
+
+        if self.api.auth.secret_key.is_empty() {
+            return Err(
+                "API secret key must be set via BOOM_API__AUTH__SECRET_KEY environment variable"
+                    .to_string(),
+            );
+        }
+
+        if self.api.auth.admin_password.is_empty() {
+            return Err("Admin password must be set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable".to_string());
+        }
+
+        // Validate token expiration
+        if self.api.auth.token_expiration <= 0 {
+            return Err("Token expiration must be greater than 0 for security reasons".to_string());
+        }
+
+        Ok(())
+    }
 }
 
 pub fn load_config(config_path: Option<&str>) -> AppConfig {
-    let config_fpath = config_path.unwrap_or("config.yaml");
+    load_dotenv();
 
-    // Read and expand environment variables in the config file
-    let file_content = std::fs::read_to_string(config_fpath)
-        .unwrap_or_else(|_| panic!("config file {} should exist", config_fpath));
-
-    let expanded_content = expand_env_vars(&file_content)
-        .unwrap_or_else(|e| panic!("Failed to expand environment variables: {}", e));
-
-    // Write to a temporary file and load
-    let temp_file =
-        tempfile::NamedTempFile::with_suffix(".yaml").expect("Failed to create temporary file");
-
-    std::fs::write(temp_file.path(), expanded_content).expect("Failed to write to temporary file");
+    let config_file = config_path.unwrap_or("config.yaml");
 
     let config = Config::builder()
-        .add_source(File::from(temp_file.path()))
+        .add_source(File::with_name(config_file))
+        // Add environment variable overrides with BOOM prefix and __ separator for nesting
+        .add_source(config::Environment::with_prefix("BOOM").separator("__"))
         .build()
-        .expect("a config.yaml file should exist");
+        .expect("Failed to build configuration");
 
-    // Load API configuration
-    let api_conf = config
-        .get_table("api")
-        .expect("an api table should exist in the config file");
+    let app_config: AppConfig = config
+        .try_deserialize()
+        .expect("Failed to deserialize configuration");
 
-    // Load Auth configuration - all values required
-    let auth_conf = api_conf
-        .get("auth")
-        .and_then(|auth| auth.clone().into_table().ok())
-        .expect("an auth table should exist in the config file");
-
-    let secret_key = auth_conf
-        .get("secret_key")
-        .expect("secret_key must be set in config (set via BOOM_JWT_SECRET environment variable)")
-        .clone()
-        .into_string()
-        .unwrap_or_else(|e| panic!("Invalid secret_key: {}", e));
-
-    let token_expiration = auth_conf
-        .get("token_expiration")
-        .map(|te| {
-            te.clone()
-                .into_int()
-                .unwrap_or_else(|e| panic!("Invalid token_expiration: {}", e)) as usize
-        })
-        .unwrap_or(604800); // Default to 7 days (604800 seconds) if not specified
-
-    let admin_username = auth_conf
-        .get("admin_username")
-        .map(|au| {
-            au.clone()
-                .into_string()
-                .unwrap_or_else(|e| panic!("Invalid admin_username: {}", e))
-        })
-        .unwrap_or_else(|| "admin".to_string()); // Username can have a reasonable default
-
-    let admin_password = auth_conf
-        .get("admin_password")
-        .expect("admin_password must be set in config (set via BOOM_ADMIN_PASSWORD environment variable)")
-        .clone()
-        .into_string()
-        .unwrap_or_else(|e| panic!("Invalid admin_password: {}", e));
-
-    let admin_email = auth_conf
-        .get("admin_email")
-        .map(|ae| {
-            ae.clone()
-                .into_string()
-                .unwrap_or_else(|e| panic!("Invalid admin_email: {}", e))
-        })
-        .unwrap_or_else(|| "admin@example.com".to_string()); // Email can have a reasonable default
-    let auth = AuthConfig {
-        secret_key,
-        token_expiration,
-        admin_username,
-        admin_password,
-        admin_email,
-    };
-
-    // Validate critical auth settings
-    if auth.token_expiration <= 0 {
-        panic!("Token expiration must be greater than 0 for security reasons");
+    // Validate that required secrets are present
+    if let Err(e) = app_config.validate_secrets() {
+        panic!("{}", e);
     }
 
-    // Load DB configuration
-    let db_conf = config
-        .get_table("database")
-        .expect("a database table should exist in the config file");
+    info!("Configuration loaded successfully");
+    debug!("Database host: {}", app_config.database.host);
+    debug!("Database name: {}", app_config.database.name);
+    debug!("Admin username: {}", app_config.api.auth.admin_username);
+    debug!(
+        "Token expiration: {} seconds",
+        app_config.api.auth.token_expiration
+    );
 
-    let host = db_conf
-        .get("host")
-        .map(|h| {
-            h.clone()
-                .into_string()
-                .unwrap_or_else(|e| panic!("Invalid host: {}", e))
-        })
-        .unwrap_or_else(|| "localhost".to_string()); // Host can have a reasonable default
-
-    let port = db_conf
-        .get("port")
-        .map(|p| {
-            p.clone()
-                .into_int()
-                .unwrap_or_else(|e| panic!("Invalid port: {}", e)) as u16
-        })
-        .unwrap_or(27017); // Port can have a reasonable default
-
-    let name = db_conf
-        .get("name")
-        .map(|n| {
-            n.clone()
-                .into_string()
-                .unwrap_or_else(|e| panic!("Invalid name: {}", e))
-        })
-        .unwrap_or_else(|| "boom".to_string()); // Database name can have a reasonable default
-
-    let username = db_conf
-        .get("username")
-        .and_then(|username| username.clone().into_string().ok())
-        .unwrap_or_else(|| "mongoadmin".to_string()); // Username can have a reasonable default
-
-    let password = db_conf
-        .get("password")
-        .expect("database password must be set in config (set with BOOM_DB_PASSWORD environment variable)")
-        .clone()
-        .into_string()
-        .unwrap_or_else(|e| panic!("Invalid database password: {}", e));
-
-    let database = DatabaseConfig {
-        name,
-        host,
-        port,
-        username,
-        password,
-    };
-
-    // Validate critical database settings
-    if database.password.is_empty() {
-        panic!("Database password must be set; cannot run with empty database password");
-    }
-
-    AppConfig { auth, database }
+    app_config
 }

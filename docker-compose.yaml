@@ -16,8 +16,8 @@ services:
     expose:
       - "27017"
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=${BOOM_DB_USERNAME:-mongoadmin}
-      - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DB_PASSWORD:?BOOM_DB_PASSWORD must be set and non-empty}
+      - MONGO_INITDB_ROOT_USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin}
+      - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set and non-empty}
     volumes:
       - mongodb:/data/db
     restart: always
@@ -78,6 +78,14 @@ services:
       dockerfile: Dockerfile
     command:
       - /app/boom-api
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      # Optional overrides (these have defaults in config.yaml)
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
     networks:
       - boom
       - traefik-public
@@ -109,6 +117,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
     networks:
       - boom
     profiles:
@@ -125,6 +139,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
     networks:
       - boom
     profiles:
@@ -140,6 +160,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
     networks:
       - boom
     profiles:
@@ -155,6 +181,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
     networks:
       - boom
     profiles:
@@ -170,6 +202,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
     networks:
       - boom
     profiles:

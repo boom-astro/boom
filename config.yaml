@@ -1,19 +1,19 @@
 database:
   host: localhost
   port: 27017
-  name: ${BOOM_DB_NAME:-boom}
+  name: boom
   max_pool_size: 200
   replica_set: null
-  username: ${BOOM_DB_USERNAME:-mongoadmin}
-  password: ${BOOM_DB_PASSWORD}
+  username: mongoadmin
+  password: "" # Set via BOOM_DATABASE__PASSWORD environment variable
   srv: false
 api:
   auth:
-    secret_key: ${BOOM_JWT_SECRET} # Required - no default, must be set in environment
+    secret_key: "" # Required - Set via BOOM_API__AUTH__SECRET_KEY environment variable
     token_expiration: 604800 # JWT token expiration in seconds (7 days) -- must be > 0
-    admin_username: ${BOOM_ADMIN_USERNAME:-admin}
-    admin_password: ${BOOM_ADMIN_PASSWORD}
-    admin_email: ${BOOM_ADMIN_EMAIL:-admin@example.com}
+    admin_username: admin
+    admin_password: "" # Required - Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
+    admin_email: admin@example.com
 redis:
   host: localhost
   port: 6379

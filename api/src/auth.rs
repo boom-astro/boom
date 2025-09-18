@@ -24,7 +24,7 @@ pub struct AuthProvider {
 }
 
 impl AuthProvider {
-    pub async fn new(config: AuthConfig, db: &mongodb::Database) -> Result<Self, std::io::Error> {
+    pub async fn new(config: &AuthConfig, db: &mongodb::Database) -> Result<Self, std::io::Error> {
         let encoding_key = EncodingKey::from_secret(config.secret_key.as_bytes());
         let decoding_key = DecodingKey::from_secret(config.secret_key.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
@@ -145,18 +145,18 @@ impl AuthProvider {
 }
 
 pub async fn get_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_default_path().auth;
-    AuthProvider::new(config, db).await
+    let config = AppConfig::from_default_path();
+    AuthProvider::new(&config.api.auth, db).await
 }
 
 pub async fn get_default_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_default_path().auth;
-    AuthProvider::new(config, db).await
+    let config = AppConfig::from_default_path();
+    AuthProvider::new(&config.api.auth, db).await
 }
 
 pub async fn get_test_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_path("../tests/config.test.yaml").auth;
-    AuthProvider::new(config, db).await
+    let config = AppConfig::from_path("../tests/config.test.yaml");
+    AuthProvider::new(&config.api.auth, db).await
 }
 
 pub async fn auth_middleware(

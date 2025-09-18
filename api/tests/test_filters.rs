@@ -15,7 +15,7 @@ mod tests {
     async fn create_admin_token(database: &Database) -> String {
         load_dotenv();
         let auth_app_data = get_test_auth(database).await.unwrap();
-        let auth_config = AppConfig::from_path("../tests/config.test.yaml").auth;
+        let auth_config = AppConfig::from_path("../tests/config.test.yaml").api.auth;
         let (token, _) = auth_app_data
             .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
             .await
