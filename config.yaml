@@ -9,10 +9,10 @@ database:
   srv: false
 api:
   auth:
-    secret_key: "" # Required - Set via BOOM_API__AUTH__SECRET_KEY environment variable
+    secret_key: "" # Set via BOOM_API__AUTH__SECRET_KEY environment variable
     token_expiration: 604800 # JWT token expiration in seconds (7 days) -- must be > 0
     admin_username: admin
-    admin_password: "" # Required - Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
+    admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
 redis:
   host: localhost
