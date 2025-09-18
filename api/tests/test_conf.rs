@@ -15,8 +15,11 @@ database:
   host: localhost
   port: 27017
   name: test_db
+  max_pool_size: 200
+  replica_set: null
   username: test
   password: test123
+  srv: false
 api:
   auth:
     secret_key: "test_secret"
@@ -57,8 +60,11 @@ database:
   host: localhost
   port: 27017
   name: test_db
+  max_pool_size: 200
+  replica_set: null
   username: test
   password: test123
+  srv: false
 api:
   auth:
     secret_key: "test_secret"
@@ -85,8 +91,11 @@ database:
   host: localhost
   port: 27017
   name: test_db
+  max_pool_size: 200
+  replica_set: null
   username: test
   password: test123
+  srv: false
 api:
   auth:
     secret_key: "test_secret"
@@ -106,8 +115,8 @@ api:
     fn test_load_config_from_default_path() {
         load_dotenv();
 
-        // Test loading the actual config.yaml file
-        let config = load_config(Some("../config.yaml"));
+        // Test loading the test config file which has actual values for secrets
+        let config = load_config(Some("../tests/config.test.yaml"));
 
         // Verify the token_expiration is set to our new default
         assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
