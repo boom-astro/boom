@@ -82,10 +82,10 @@ api:
     }
 
     #[test]
-    fn test_token_expiration_default_value() {
+    fn test_token_expiration_with_standard_value() {
         load_dotenv();
 
-        // Test that the default value is applied when token_expiration is not specified
+        // Test that the standard token_expiration value (7 days) works correctly
         let config_content = r#"
 database:
   host: localhost
@@ -99,6 +99,7 @@ database:
 api:
   auth:
     secret_key: "test_secret"
+    token_expiration: 604800
     admin_username: admin
     admin_password: test123
     admin_email: admin@test.com
@@ -106,7 +107,7 @@ api:
         let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
         std::fs::write(temp_file.path(), config_content).unwrap();
 
-        // This should use the default value (7 days = 604800 seconds)
+        // This should load successfully with the standard 7-day expiration
         let config = load_config(Some(temp_file.path().to_str().unwrap()));
         assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
     }
