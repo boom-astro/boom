@@ -117,8 +117,7 @@ fi
 # 4. Health checks
 # -----------------------------
 if [ "$1" == "health" ]; then
-  apptainer instance list
-  echo
+  apptainer instance list && echo
   "$SCRIPTS_DIR/mongodb-healthcheck.sh" 0
   "$SCRIPTS_DIR/valkey-healthcheck.sh" 0
   "$SCRIPTS_DIR/kafka-healthcheck.sh" 0
