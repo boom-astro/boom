@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | health | filters
+# $1 = action: build | start | stop | restart | health | filters
 
 SCRIPTS_DIR="$HOME/boom/apptainer/scripts"
 
 BLUE="\e[0;34m"
 END="\e[0m"
 
-if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "health" ] && [ "$1" != "filters" ]; then
+if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] && [ "$1" != "health" ] && [ "$1" != "filters" ]; then
   echo "Usage: $0 {build|start|stop|health|filters}"
   exit 1
 fi
@@ -103,6 +103,14 @@ if [ "$1" == "stop" ]; then
   if stop_service "mongo" "$target"; then
     apptainer instance stop mongo
   fi
+fi
+
+# -----------------------------
+# 4. Restart services
+# -----------------------------
+if [ "$1" == "restart" ]; then
+  "$0" stop "$2"
+  "$0" start "$2" "$3" "$4" "$5" "$6"
 fi
 
 # -----------------------------
