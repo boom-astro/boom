@@ -29,6 +29,7 @@ CONFIG_FILE="$BOOM_DIR/config.yaml"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
 mkdir -p "$LOGS_DIR"
+mkdir -p "$PERSISTENT_DIR"
 
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
