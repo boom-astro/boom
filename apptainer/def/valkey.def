@@ -5,3 +5,6 @@ From: valkey/valkey:7.2.6
     # ALLOW_EMPTY_PASSWORD is recommended only for development.
     export ALLOW_EMPTY_PASSWORD=yes
     export VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
+
+%runscript
+    exec valkey-server --logfile /log/valkey.log --dir /data

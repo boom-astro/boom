@@ -61,7 +61,10 @@ if start_service "valkey" "$1"; then
   echo && echo "$(current_datetime) - Starting Valkey"
   mkdir -p "$PERSISTENT_DIR/valkey"
   mkdir -p "$LOGS_DIR/valkey"
-  apptainer instance run "$SIF_DIR/valkey.sif" valkey
+  apptainer instance run \
+    --bind "$PERSISTENT_DIR/valkey:/data" \
+    --bind "$LOGS_DIR/valkey:/log" \
+    "$SIF_DIR/valkey.sif" valkey
   "$SCRIPTS_DIR/valkey-healthcheck.sh"
 fi
 
