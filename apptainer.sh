@@ -9,7 +9,7 @@ BLUE="\e[0;34m"
 END="\e[0m"
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] && [ "$1" != "health" ] && [ "$1" != "filters" ]; then
-  echo "Usage: $0 {build|start|stop|health|filters}"
+  echo "Usage: $0 {build|start|stop|restart|health|filters}"
   exit 1
 fi
 
