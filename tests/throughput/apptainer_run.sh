@@ -1,47 +1,39 @@
 #!/usr/bin/env bash
 
 BOOM_DIR="$HOME/boom"
-
-LOGS_DIR=${1:-$BOOM_DIR/logs/boom}
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
 DATA_DIR="$BOOM_DIR/data"
 TESTS_DIR="$BOOM_DIR/tests"
+SIF_DIR="$BOOM_DIR/apptainer/sif"
 
-SIF_DIR="$TESTS_DIR/apptainer/sif"
+LOGS_DIR=${1:-$TESTS_DIR/apptainer/logs/boom}
 PERSISTENT_DIR="$TESTS_DIR/apptainer/persistent"
 CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
 
-mkdir -p "$PERSISTENT_DIR/mongodb"
-mkdir -p "$PERSISTENT_DIR/valkey"
-mkdir -p "$PERSISTENT_DIR/alerts"
-mkdir -p "$PERSISTENT_DIR/kafka"
+GREEN="\e[32m"
+RED="\e[31m"
+END="\e[0m"
 
-# Clear log files or create them if they don't exist
-: > "$LOGS_DIR/producer.log"
-: > "$LOGS_DIR/consumer.log"
-: > "$LOGS_DIR/scheduler.log"
-mkdir -p "$LOGS_DIR/kafka"
-mkdir -p "$LOGS_DIR/valkey"
+mkdir -p "$LOGS_DIR"
+mkdir -p "$PERSISTENT_DIR"
 
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
 
-echo "$(current_datetime) - Starting BOOM services with Apptainer"
-
 # -----------------------------
 # 1. MongoDB
 # -----------------------------
-echo "$(current_datetime) - Starting MongoDB"
-apptainer instance start --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
+echo && echo "$(current_datetime) - Starting MongoDB"
+mkdir -p "$PERSISTENT_DIR/mongodb"
+apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
 sleep 5
-$SCRIPTS_DIR/mongodb-healthcheck.sh # Wait for MongoDB to be ready
+"$SCRIPTS_DIR/mongodb-healthcheck.sh"
 
-## Mongo-init
-echo "$(current_datetime) - Running mongo-init"
+echo "$(current_datetime) - Initializing MongoDB with test data"
 apptainer exec \
     --bind "$DATA_DIR/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
     --bind "$TESTS_DIR/throughput/apptainer_mongo-init.sh:/mongo-init.sh" \
@@ -54,66 +46,84 @@ apptainer exec \
 # -----------------------------
 # 2. Valkey
 # -----------------------------
-echo "$(current_datetime) - Starting Valkey"
-apptainer instance start \
+echo && echo "$(current_datetime) - Starting Valkey"
+mkdir -p "$PERSISTENT_DIR/valkey"
+mkdir -p "$LOGS_DIR/valkey"
+apptainer instance run \
   --bind "$PERSISTENT_DIR/valkey:/data" \
-  --bind "$LOGS_DIR/valkey:/valkey/logs" \
+  --bind "$LOGS_DIR/valkey:/log" \
   "$SIF_DIR/valkey.sif" valkey
-$SCRIPTS_DIR/valkey-healthcheck.sh # Wait for Valkey to be ready
+"$SCRIPTS_DIR/valkey-healthcheck.sh"
 
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
-echo "$(current_datetime) - Starting Kafka broker"
-if [ ! -f "/tmp/kraft-combined-logs/meta.properties" ]; then # Generate meta.properties if it doesn't exist
-  echo "$(current_datetime) - Generating Kafka meta.properties file"
-  apptainer exec "$SIF_DIR/kafka.sif" \
-  /opt/kafka/bin/kafka-storage.sh format \
-    --config /opt/kafka/config/server.properties \
-    --cluster-id "$(uuidgen)" \
-    --ignore-formatted \
-    --standalone
-fi
-apptainer instance start \
+echo && echo "$(current_datetime) - Starting Kafka broker"
+mkdir -p "$PERSISTENT_DIR/kafka_data"
+mkdir -p "$LOGS_DIR/kafka"
+apptainer instance run \
+    --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
+    --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
     --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
-    --bind "$PERSISTENT_DIR/kafka:/var/lib/kafka/data" \
     "$SIF_DIR/kafka.sif" broker
-$SCRIPTS_DIR/kafka-healthcheck.sh # Wait for Kafka to be ready
+"$SCRIPTS_DIR/kafka-healthcheck.sh"
 
 # -----------------------------
-# 4. Producer
+# 4. Boom
 # -----------------------------
-echo "$(current_datetime) - Starting Producer"
-apptainer run --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
-  "$SIF_DIR/boom-benchmarking.sif" \
-  /app/kafka_producer ztf 20250311 public \
-  > "$LOGS_DIR/producer.log" 2>&1
-echo "$(current_datetime) - Producer finished sending alerts"
+echo && echo "$(current_datetime) - Starting BOOM instance"
+mkdir -p "$PERSISTENT_DIR/alerts"
+apptainer instance start \
+  --bind "$CONFIG_FILE:/app/config.yaml" \
+  --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
+  "$SIF_DIR/boom.sif" boom
 
-sleep 5
+sleep 3
 
 # -----------------------------
-# 5. Consumer
+# 5. Producer
 # -----------------------------
-echo "$(current_datetime) - Starting Consumer"
-apptainer run "$SIF_DIR/boom-benchmarking.sif" \
-    /bin/sh -c "/app/kafka_consumer ztf 20250311 public" \
+echo && echo "$(current_datetime) - Starting Producer"
+if pgrep -f "/app/kafka_producer" > /dev/null; then
+  echo -e "${RED}Boom producer already running.${END}"
+else
+  apptainer exec \
+    --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
+    instance://boom /app/kafka_producer "ztf 20250311 public" \
+    > "$LOGS_DIR/producer.log" 2>&1
+  echo "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
+fi
+
+# -----------------------------
+# 6. Consumer
+# -----------------------------
+echo && echo "$(current_datetime) - Starting Consumer"
+if pgrep -f "/app/kafka_consumer" > /dev/null; then
+  echo -e "${RED}Boom consumer already running.${END}"
+else
+  apptainer exec \
+    instance://boom /app/kafka_consumer "ztf 20250311 public" \
     > "$LOGS_DIR/consumer.log" 2>&1 &
-CONSUMER_PID=$! # Save the PID to kill it later
+  echo -e "${GREEN}Boom consumer started for survey ztf${END}"
+fi
 
 # -----------------------------
-# 6. Scheduler
+# 7. Scheduler
 # -----------------------------
-echo "$(current_datetime) - Starting Scheduler"
-apptainer run --bind "$DATA_DIR/models:/app/data/models" \
-    "apptainer/sif/boom-benchmarking.sif" \
-    /app/scheduler ztf > "$LOGS_DIR/scheduler.log" 2>&1 &
-SCHEDULER_PID=$! # Save the PID to kill it later
+echo && echo "$(current_datetime) - Starting Scheduler"
+if pgrep -f "/app/scheduler" > /dev/null; then
+  echo -e "${RED}Boom scheduler already running.${END}"
+else
+  apptainer exec \
+    instance://boom /app/scheduler "ztf" \
+    > "$LOGS_DIR/scheduler.log" 2>&1 &
+  echo -e "${GREEN}Boom scheduler started for survey ztf${END}"
+fi
 
 # -----------------------------
-# 7. Wait for alerts ingestion
+# 8. Wait for alerts ingestion
 # -----------------------------
-echo "$(current_datetime) - Waiting for all alerts to be ingested"
+echo && echo "$(current_datetime) - Waiting for all alerts to be ingested"
 while [ $(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
     sleep 1
 done
@@ -126,19 +136,19 @@ done
 echo "$(current_datetime) - Waiting for filters to run on all alerts"
 PASSED_ALERTS=0
 while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
-    PASSED_ALERTS=$(apptainer exec "$SIF_DIR/boom-benchmarking.sif" cat "$LOGS_DIR/scheduler.log" | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
+    PASSED_ALERTS=$(cat "$LOGS_DIR/scheduler.log" | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
     PASSED_ALERTS=${PASSED_ALERTS:-0}
     PASSED_ALERTS=$((PASSED_ALERTS / N_FILTERS))
     sleep 1
 done
-kill $CONSUMER_PID $SCHEDULER_PID # Kill consumer and scheduler processes
 
 # -----------------------------
 # 8. Stop all instances
 # -----------------------------
 echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
-apptainer instance stop mongo
-apptainer instance stop valkey
+apptainer instance stop boom
 apptainer instance stop broker
+apptainer instance stop valkey
+apptainer instance stop mongo
 
 exit 0

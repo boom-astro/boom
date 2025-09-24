@@ -28,6 +28,10 @@ SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
 CONFIG_FILE="$BOOM_DIR/config.yaml"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
+GREEN="\e[32m"
+RED="\e[31m"
+END="\e[0m"
+
 mkdir -p "$LOGS_DIR"
 mkdir -p "$PERSISTENT_DIR"
 

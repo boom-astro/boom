@@ -241,21 +241,19 @@ RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- 
 ## Running Benchmark
 
 This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
-This benchmark uses Docker to build the image and run the benchmark, but it can also be run with Apptainer using the same Docker image.
+This benchmark uses Docker to build the image and run the benchmark, but it can also be run with Apptainer.
 The step to run the benchmark are as follows:
 
-### Build Docker Image
+### Build Image
+For Docker (docker Image):
 ```bash
   docker buildx create --use
   docker buildx inspect --bootstrap
   docker buildx bake -f tests/throughput/compose.yaml --load
 ```
-
-### Create SIF files (For Apptainer only)
-To build the boom-benchmark SIF files, you will need to have the docker image built first (see previous step).
-If you don't have docker on the system where you want to run the benchmark, you can build the SIF files on another system and transfer them over.
+For Apptainer (SIF file):
 ```bash
-  ./tests/apptainer/def/build-tests-sif.sh
+  ./apptainer/def/build-sif.sh test
 ```
 
 ### Download Data
@@ -264,8 +262,7 @@ If you don't have docker on the system where you want to run the benchmark, you 
   gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
 ```
 
-### Run Benchmark
-
+### Start Benchmark
 Using Docker:
 ```bash
   uv run tests/throughput/run.py
@@ -273,7 +270,7 @@ Using Docker:
 
 Using Apptainer:
 ```bash
-  python apptainer/run.py
+  python tests/throughput/apptainer_run.py
 ```
 
 ## Contributing
