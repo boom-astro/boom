@@ -8,6 +8,7 @@ mod tests {
     use boom_api::conf::AppConfig;
     use boom_api::db::get_default_db;
     use boom_api::routes;
+    use boom_api::test_utils::read_json_response;
     use mongodb::bson::{Document, doc};
     use mongodb::{Collection, Database};
 
@@ -57,12 +58,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-
-        // Get the filter out of the response body data so we know the ID
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp = read_json_response(resp).await;
         assert!(!resp["data"].as_object().unwrap().contains_key("_id"));
         let filter_id = resp["data"]["id"].as_str().unwrap().to_string();
 
@@ -89,10 +85,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let get_body = test::read_body(resp).await;
-        let get_body_str = String::from_utf8_lossy(&get_body);
-        let get_resp: serde_json::Value =
-            serde_json::from_str(&get_body_str).expect("failed to parse JSON");
+        let get_resp = read_json_response(resp).await;
         // Assert we have no _id field in the response
         assert!(!get_resp["data"].as_object().unwrap().contains_key("_id"));
         assert_eq!(get_resp["data"]["id"], filter_id);
@@ -122,10 +115,7 @@ mod tests {
             .to_request();
         let post_resp = test::call_service(&app, post_req).await;
         assert_eq!(post_resp.status(), StatusCode::OK);
-        let post_body = test::read_body(post_resp).await;
-        let post_body_str = String::from_utf8_lossy(&post_body);
-        let post_resp: serde_json::Value =
-            serde_json::from_str(&post_body_str).expect("failed to parse JSON");
+        let post_resp = read_json_response(post_resp).await;
         let version_id = post_resp["data"]["fid"].as_str().unwrap().to_string();
         assert!(!version_id.is_empty());
         version_id
@@ -182,15 +172,8 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
-
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-
-        // Parse response body JSON
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp = read_json_response(resp).await;
 
         assert!(resp["data"].is_array());
     }
@@ -290,10 +273,8 @@ mod tests {
             .to_request();
         let patch_resp = test::call_service(&app, patch_req).await;
         assert_eq!(patch_resp.status(), StatusCode::OK);
-        let patch_body = test::read_body(patch_resp).await;
-        let patch_body_str = String::from_utf8_lossy(&patch_body);
-        let patch_resp: serde_json::Value =
-            serde_json::from_str(&patch_body_str).expect("failed to parse JSON");
+        let patch_resp = read_json_response(patch_resp).await;
+
         assert_eq!(
             patch_resp["message"],
             format!("successfully updated filter id: {}", filter_id)

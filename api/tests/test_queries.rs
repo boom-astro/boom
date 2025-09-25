@@ -5,33 +5,8 @@ mod tests {
     use actix_web::{App, test, web};
     use boom_api::db::get_default_db;
     use boom_api::routes;
-    use mongodb::{Database, bson};
-
-    // let's make a function that creates a new catalog for testing
-    // the catalog should have a randomized name to avoid conflicts
-    // and a function to delete the catalog after the test is done
-    async fn create_test_catalog(db: &Database) -> String {
-        let name = format!("test_catalog_{}", uuid::Uuid::new_v4());
-        let collection = db.collection(&name);
-        // add an index to the collection
-        collection
-            .create_index(
-                mongodb::IndexModel::builder()
-                    .keys(mongodb::bson::doc! { "coordinates.radec_geojson": "2dsphere" })
-                    .options(None)
-                    .build(),
-            )
-            .await
-            .unwrap();
-        // insert a dummy document
-        let doc = bson::doc! { "test_field": "test_value", "test_other_field": 42, "coordinates": { "radec_geojson": { "type": "Point", "coordinates": [-170.0, 20.0] } } };
-        collection.insert_one(doc).await.unwrap();
-        name
-    }
-
-    async fn delete_test_catalog(db: &Database, name: &str) {
-        db.collection::<bson::Document>(name).drop().await.unwrap();
-    }
+    use boom_api::test_utils::{create_test_catalog, delete_test_catalog, read_json_response};
+    use mongodb::Database;
 
     /// Test GET /catalogs
     #[actix_rt::test]
@@ -55,12 +30,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-
-        // Parse response body JSON
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert_eq!(resp["data"], 1);
         // clean up
         delete_test_catalog(&database, &catalog_name).await;
@@ -86,10 +56,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].as_u64().unwrap() >= 1);
         // clean up
         delete_test_catalog(&database, &catalog_name).await;
@@ -116,11 +83,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_array());
         assert_eq!(resp["data"].as_array().unwrap().len(), 1);
 
@@ -133,11 +96,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_array());
         assert_eq!(resp["data"].as_array().unwrap().len(), 0);
 
@@ -151,11 +110,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_array());
         assert_eq!(resp["data"].as_array().unwrap().len(), 1);
 
@@ -171,10 +126,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_array());
         assert_eq!(resp["data"].as_array().unwrap().len(), 1);
         let first_doc = &resp["data"].as_array().unwrap()[0];
@@ -210,12 +162,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        println!("Response body: {}", body_str);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_object());
         assert!(resp["data"]["test"].is_array());
         assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 1);
@@ -233,11 +180,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_object());
         assert!(resp["data"]["test"].is_array());
         assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 0);
@@ -268,11 +211,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_array());
         assert_eq!(resp["data"].as_array().unwrap().len(), 1);
         let first_doc = &resp["data"].as_array().unwrap()[0];
@@ -294,11 +233,7 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Parse response body JSON
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp: serde_json::Value = read_json_response(resp).await;
         assert!(resp["data"].is_array());
         assert_eq!(resp["data"].as_array().unwrap().len(), 0);
         // clean up
