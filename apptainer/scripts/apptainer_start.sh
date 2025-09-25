@@ -51,7 +51,7 @@ start_service() {
 # -----------------------------
 # 1. MongoDB
 # -----------------------------
-if start_service "mongo" "$1"; then
+if start_service "mongo" "$2"; then
   echo && echo "$(current_datetime) - Starting MongoDB"
   mkdir -p "$PERSISTENT_DIR/mongodb"
   apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
@@ -62,7 +62,7 @@ fi
 # -----------------------------
 # 2. Valkey
 # -----------------------------
-if start_service "valkey" "$1"; then
+if start_service "valkey" "$2"; then
   echo && echo "$(current_datetime) - Starting Valkey"
   mkdir -p "$PERSISTENT_DIR/valkey"
   mkdir -p "$LOGS_DIR/valkey"
@@ -76,7 +76,7 @@ fi
 # -----------------------------
 # 3. Kafka broker
 # -----------------------------
-if start_service "broker" "$1"; then
+if start_service "broker" "$2"; then
   echo && echo "$(current_datetime) - Starting Kafka broker"
   mkdir -p "$PERSISTENT_DIR/kafka_data"
   mkdir -p "$LOGS_DIR/kafka"
@@ -91,7 +91,7 @@ fi
 # -----------------------------
 # 5. Prometheus
 # -----------------------------
-if start_service "prometheus" "$1"; then
+if start_service "prometheus" "$2"; then
   echo && echo "$(current_datetime) - Starting Prometheus instance"
   mkdir -p "$LOGS_DIR/prometheus"
   apptainer instance start \
@@ -104,7 +104,7 @@ fi
 # -----------------------------
 # 6. OpenTelemetry Collector
 # -----------------------------
-if start_service "otel" "$1"; then
+if start_service "otel" "$2"; then
   echo && echo "$(current_datetime) - Starting Otel Collector"
   if pgrep -f "otelcol" > /dev/null; then
     echo "$(current_datetime) - Otel Collector already running"
@@ -122,7 +122,7 @@ fi
 # -----------------------------
 # 7. Healthcheck listener
 # -----------------------------
-if start_service "listener" "$1"; then
+if start_service "listener" "$2"; then
   echo && echo "$(current_datetime) - Starting Boom healthcheck listener"
   if pgrep -f "boom-healthcheck-listener.py" > /dev/null; then
     echo "$(current_datetime) - Boom healthcheck listener already running"
@@ -136,7 +136,7 @@ fi
 # -----------------------------
 # 4. Boom
 # -----------------------------
-if start_service "boom" "$1" || start_service "consumer" "$1" || start_service "scheduler" "$1"; then
+if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   echo && echo "$(current_datetime) - Starting BOOM instance"
   mkdir -p "$PERSISTENT_DIR/alerts"
   apptainer instance start \
@@ -145,32 +145,31 @@ if start_service "boom" "$1" || start_service "consumer" "$1" || start_service "
     "$SIF_DIR/boom.sif" boom
 
   sleep 3
-  survey=$2
-  logs_folder=${3:-"$BOOM_DIR/logs/boom"}
+  survey=$3
   if [ -z "$survey" ]; then
     echo -e "${RED}Missing required argument: survey name${END}"
     exit 1
   fi
 
-  if start_service "boom" "$1" || start_service "consumer" "$1"; then
+  if start_service "boom" "$2" || start_service "consumer" "$2"; then
     if pgrep -f "/app/kafka_consumer" > /dev/null; then
       echo -e "${RED}Boom consumer already running.${END}"
     else
       ARGS=("$survey")
       [ -n "$4" ] && ARGS+=("$4") # $4=date
       [ -n "$5" ] && ARGS+=("$5") # $5=program ID
-      apptainer exec --env-file env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$logs_folder/consumer.log" 2>&1 &
+      apptainer exec --env-file env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
   fi
 
-  if start_service "boom" "$1" || start_service "scheduler" "$1"; then
+  if start_service "boom" "$2" || start_service "scheduler" "$2"; then
     if pgrep -f "/app/scheduler" > /dev/null; then
       echo -e "${RED}Boom scheduler already running.${END}"
     else
       ARGS=("$survey")
       [ -n "$6" ] && ARGS+=("$6") # $6=config path
-      apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$logs_folder/scheduler.log" 2>&1 &
+      apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_DIR/scheduler.log" 2>&1 &
       echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
     fi
   fi
@@ -179,7 +178,7 @@ fi
 # -----------------------------
 # 8. Uptime Kuma
 # -----------------------------
-if start_service "kuma" "$1"; then
+if start_service "kuma" "$2"; then
   echo && echo "$(current_datetime) - Starting Uptime Kuma"
   mkdir -p "$PERSISTENT_DIR/kuma"
   mkdir -p "$LOGS_DIR/kuma"
