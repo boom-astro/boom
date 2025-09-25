@@ -1,4 +1,4 @@
-use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError, fetch_alerts};
+use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use mongodb::bson::{doc, Document};
@@ -110,7 +110,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
+        let alerts =
+            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
 
         if alerts.len() != candids.len() {
             warn!(
