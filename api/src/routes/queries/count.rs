@@ -60,7 +60,7 @@ struct EstimatedCountQuery {
 /// Run an estimated count query
 #[utoipa::path(
     post,
-    path = "/queries/estimated-count",
+    path = "/queries/estimated_count",
     request_body = EstimatedCountQuery,
     responses(
         (status = 200, description = "Approximately count documents in the catalog", body = serde_json::Value),
@@ -69,7 +69,7 @@ struct EstimatedCountQuery {
     ),
     tags=["Queries"]
 )]
-#[post("/queries/estimated-count")]
+#[post("/queries/estimated_count")]
 pub async fn post_estimated_count_query(
     db: web::Data<Database>,
     web::Json(query): web::Json<EstimatedCountQuery>,

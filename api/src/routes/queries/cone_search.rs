@@ -97,7 +97,7 @@ impl ConeSearchQuery {
 /// Run a cone search query on a catalog
 #[utoipa::path(
     post,
-    path = "/queries/cone-search",
+    path = "/queries/cone_search",
     request_body = ConeSearchQuery,
     responses(
         (status = 200, description = "Cone search results", body = serde_json::Value),
@@ -106,7 +106,7 @@ impl ConeSearchQuery {
     ),
     tags=["Queries"]
 )]
-#[post("/queries/cone-search")]
+#[post("/queries/cone_search")]
 pub async fn post_cone_search_query(
     db: web::Data<Database>,
     body: web::Json<ConeSearchQuery>,
