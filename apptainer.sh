@@ -1,15 +1,17 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | restart | health | filters
+# $1 = action: build | start | stop | restart | health | benchmark | filters
 
-SCRIPTS_DIR="$HOME/boom/apptainer/scripts"
+BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
+SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
 
 BLUE="\e[0;34m"
 END="\e[0m"
 
-if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] && [ "$1" != "health" ] && [ "$1" != "filters" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|filters}"
+if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
+  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters}"
   exit 1
 fi
 
@@ -43,13 +45,12 @@ fi
 # 2. Start services
 # -----------------------------
 if [ "$1" == "start" ]; then
-  ARGS=()
+  ARGS=("$BOOM_DIR")
   [ -n "$2" ] && ARGS+=("$2") # $2=service to start
   [ -n "$3" ] && ARGS+=("$3") # $3=survey name
-  [ -n "$4" ] && ARGS+=("$4") # $4=logs folder
-  [ -n "$5" ] && ARGS+=("$5") # $5=date
-  [ -n "$6" ] && ARGS+=("$6") # $6=program ID
-  [ -n "$7" ] && ARGS+=("$7") # $7=scheduler config path
+  [ -n "$5" ] && ARGS+=("$4") # $4=date
+  [ -n "$6" ] && ARGS+=("$5") # $5=program ID
+  [ -n "$7" ] && ARGS+=("$6") # $6=scheduler config path
   # See apptainer_start.sh for the full explanation of each argument
   "$SCRIPTS_DIR/apptainer_start.sh" "${ARGS[@]}"
 fi
@@ -130,7 +131,14 @@ if [ "$1" == "health" ]; then
 fi
 
 # -----------------------------
-# 4. Add filters
+# 5. Run benchmark
+# -----------------------------
+if [ "$1" == "benchmark" ]; then
+  python3 "$BOOM_DIR/tests/throughput/apptainer_run.py"
+fi
+
+# -----------------------------
+# 6. Add filters
 # -----------------------------
 # Arguments for 'filters':
 # $2 = path to the file with the filters to add

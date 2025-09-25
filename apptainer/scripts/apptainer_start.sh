@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # Script to start BOOM services using Apptainer containers. Arguments:
-# $1 = service to start:
+# $1 = boom directory
+# $2 = service to start:
 #      - boom        : starts both consumer and scheduler
 #      - consumer    : starts the consumer process
 #      - scheduler   : starts the scheduler process
@@ -15,14 +16,13 @@
 #      If not specified or 'all', all services will be started.
 #
 # Additional arguments for 'boom', 'consumer', or 'scheduler':
-# $2 = survey name (required for consumer/scheduler)
-# $3 = logs dir (optional, default: $HOME/boom/logs/boom)
+# $3 = survey name (required for consumer/scheduler)
 # $4 = date (optional, used by consumer)
 # $5 = program ID (optional, used by consumer)
 # $6 = scheduler config path (optional, used by scheduler)
 
-BOOM_DIR="$HOME/boom"
-LOGS_DIR=${3:-$BOOM_DIR/logs/boom}
+BOOM_DIR="$1"
+LOGS_DIR="$BOOM_DIR/logs/boom"
 PERSISTENT_DIR="$BOOM_DIR/apptainer/persistent"
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
 CONFIG_FILE="$BOOM_DIR/config.yaml"
@@ -146,7 +146,7 @@ if start_service "boom" "$1" || start_service "consumer" "$1" || start_service "
 
   sleep 3
   survey=$2
-  logs_folder=${3:-"$HOME/boom/logs/boom"}
+  logs_folder=${3:-"$BOOM_DIR/logs/boom"}
   if [ -z "$survey" ]; then
     echo -e "${RED}Missing required argument: survey name${END}"
     exit 1

@@ -58,6 +58,9 @@ for_insert = {
 with open("tests/throughput/cats150.filter.json", "w") as f:
     json.dump(for_insert, f)
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+boom_dir = os.path.abspath(os.path.join(script_dir, "../../"))
+
 logs_dir = os.path.join(
     "logs",
     "boom-"
@@ -69,7 +72,7 @@ logs_dir = os.path.join(
 )
 
 # Now run the benchmark
-subprocess.run(["bash", "tests/throughput/apptainer_run.sh", logs_dir], check=True)
+subprocess.run(["bash", "tests/throughput/apptainer_run.sh", boom_dir, logs_dir], check=True)
 
 # Now analyze the logs and raise an error if we're too slow
 boom_config = (

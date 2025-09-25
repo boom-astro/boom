@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-SCRIPTS_DIR="$HOME/boom/apptainer/scripts"
-
 RED="\e[31m"
 GREEN="\e[0;32m"
 END="\e[0m"
@@ -22,11 +20,6 @@ fi
 
 if [ ! -f "$file" ]; then
   echo -e "${RED}File not found: $file${END}"
-  exit 1
-fi
-
-if ! "$SCRIPTS_DIR/mongodb-healthcheck.sh"; then
-  echo -e "${RED}MongoDB is not running.${END}"
   exit 1
 fi
 

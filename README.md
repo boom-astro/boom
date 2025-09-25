@@ -270,7 +270,7 @@ Using Docker:
 
 Using Apptainer:
 ```bash
-  python tests/throughput/apptainer_run.py
+  ./apptainer.sh benchmark
 ```
 
 ## Contributing

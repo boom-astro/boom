@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 
-BOOM_DIR="$HOME/boom"
+# Script to benchmark BOOM throughput using Apptainer containers.
+# $1 = boom directory
+# $2 = log directory name (e.g., benchmark_20240401)
+
+BOOM_DIR="$1"
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
 DATA_DIR="$BOOM_DIR/data"
 TESTS_DIR="$BOOM_DIR/tests"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
-LOGS_DIR=${1:-$TESTS_DIR/apptainer/logs/boom}
+LOGS_DIR="$TESTS_DIR/apptainer/${2:-logs/boom}"
 PERSISTENT_DIR="$TESTS_DIR/apptainer/persistent"
 CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
 
