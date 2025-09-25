@@ -5,6 +5,69 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
+pub fn lsst_alert_pipeline() -> Vec<Document> {
+    vec![
+        doc! {
+            "$match": {
+                "_id": {"$in": []}
+            }
+        },
+        doc! {
+            "$project": {
+                "objectId": 1,
+                "candidate": 1,
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_aux",
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "prv_candidates": fetch_timeseries_op(
+                    "aux.prv_candidates",
+                    "candidate.jd",
+                    365,
+                    None
+                ),
+                "fp_hists": fetch_timeseries_op(
+                    "aux.fp_hists",
+                    "candidate.jd",
+                    365,
+                    Some(vec![doc! {
+                        "$gte": [
+                            "$$x.snr",
+                            3.0
+                        ]
+                    }]),
+                ),
+                "aliases": get_array_element("aux.aliases"),
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "prv_candidates.jd": 1,
+                "prv_candidates.magpsf": 1,
+                "prv_candidates.sigmapsf": 1,
+                "prv_candidates.band": 1,
+                "fp_hists.jd": 1,
+                "fp_hists.magpsf": 1,
+                "fp_hists.sigmapsf": 1,
+                "fp_hists.band": 1,
+                "fp_hists.snr": 1,
+            }
+        },
+    ]
+}
+
 pub struct LsstEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -22,67 +85,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
 
-        let alert_pipeline = vec![
-            doc! {
-                "$match": {
-                    "_id": {"$in": []}
-                }
-            },
-            doc! {
-                "$project": {
-                    "objectId": 1,
-                    "candidate": 1,
-                }
-            },
-            doc! {
-                "$lookup": {
-                    "from": "LSST_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "prv_candidates": fetch_timeseries_op(
-                        "aux.prv_candidates",
-                        "candidate.jd",
-                        365,
-                        None
-                    ),
-                    "fp_hists": fetch_timeseries_op(
-                        "aux.fp_hists",
-                        "candidate.jd",
-                        365,
-                        Some(vec![doc! {
-                            "$gte": [
-                                "$$x.snr",
-                                3.0
-                            ]
-                        }]),
-                    ),
-                    "aliases": get_array_element("aux.aliases"),
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "prv_candidates.jd": 1,
-                    "prv_candidates.magpsf": 1,
-                    "prv_candidates.sigmapsf": 1,
-                    "prv_candidates.band": 1,
-                    "fp_hists.jd": 1,
-                    "fp_hists.magpsf": 1,
-                    "fp_hists.sigmapsf": 1,
-                    "fp_hists.band": 1,
-                    "fp_hists.snr": 1,
-                }
-            },
-        ];
-
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
@@ -91,7 +93,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_pipeline,
+            alert_pipeline: lsst_alert_pipeline(),
         })
     }
 

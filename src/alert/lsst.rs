@@ -451,19 +451,20 @@ pub struct DiaObject {
     pub ndethist: i32,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct DiaNondetectionLimit {
-    #[serde(rename = "ccdVisitId")]
-    pub ccd_visit_id: i64,
-    #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jd: f64,
-    pub band: String,
-    #[serde(rename = "diaNoise")]
-    pub dia_noise: f32,
-}
+// to uncomment once we have nondetections in the alerts again
+// #[serde_as]
+// #[skip_serializing_none]
+// #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+// pub struct DiaNondetectionLimit {
+//     #[serde(rename = "ccdVisitId")]
+//     pub ccd_visit_id: i64,
+//     #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
+//     #[serde(deserialize_with = "deserialize_mjd")]
+//     pub jd: f64,
+//     pub band: String,
+//     #[serde(rename = "diaNoise")]
+//     pub dia_noise: f32,
+// }
 
 #[serde_as]
 #[skip_serializing_none]

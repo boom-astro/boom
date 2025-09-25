@@ -5,6 +5,52 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
+pub fn decam_alert_pipeline() -> Vec<Document> {
+    vec![
+        doc! {
+            "$match": {
+                "_id": {"$in": []}
+            }
+        },
+        doc! {
+            "$project": {
+                "objectId": 1,
+                "candidate": 1,
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "DECAM_alerts_aux",
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "fp_hists": fetch_timeseries_op(
+                    "aux.fp_hists",
+                    "candidate.jd",
+                    365,
+                    None
+                )
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "fp_hists.jd": 1,
+                "fp_hists.magap": 1,
+                "fp_hists.sigmagap": 1,
+                "fp_hists.band": 1,
+            }
+        },
+    ]
+}
+
 pub struct DecamEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -25,56 +71,12 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let input_queue = "DECAM_alerts_enrichment_queue".to_string();
         let output_queue = "DECAM_alerts_filter_queue".to_string();
 
-        let alert_pipeline = vec![
-            doc! {
-                "$match": {
-                    "_id": {"$in": []}
-                }
-            },
-            doc! {
-                "$project": {
-                    "objectId": 1,
-                    "candidate": 1,
-                }
-            },
-            doc! {
-                "$lookup": {
-                    "from": "DECAM_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "fp_hists": fetch_timeseries_op(
-                        "aux.fp_hists",
-                        "candidate.jd",
-                        365,
-                        None
-                    )
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "fp_hists.jd": 1,
-                    "fp_hists.magap": 1,
-                    "fp_hists.sigmagap": 1,
-                    "fp_hists.band": 1,
-                }
-            },
-        ];
-
         Ok(DecamEnrichmentWorker {
             input_queue,
             output_queue,
             client,
             alert_collection,
-            alert_pipeline,
+            alert_pipeline: decam_alert_pipeline(),
         })
     }
 
