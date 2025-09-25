@@ -1,5 +1,4 @@
-use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
-use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
+use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError, fetch_alerts, models::{AcaiModel, BtsBotModel, Model}};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use mongodb::bson::{doc, Document};
@@ -134,14 +133,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = self
-            .fetch_alerts(
-                &candids,
-                &self.alert_pipeline,
-                &self.alert_collection,
-                Some(&self.alert_cutout_collection),
-            )
-            .await?;
+        let alerts = fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, Some(&self.alert_cutout_collection)).await?;
 
         if alerts.len() != candids.len() {
             warn!(
