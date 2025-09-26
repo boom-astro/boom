@@ -167,8 +167,8 @@ apptainer shell --pwd /app instance://boom
 ```
 Then you can run the binaries with:
 ```bash
-./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
-./scheduler <SURVEY> [CONFIG_PATH]
+/app/kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+/app/scheduler <SURVEY> [CONFIG_PATH]
 ```
 Or you can run them directly with:
 ```bash
