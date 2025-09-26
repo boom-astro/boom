@@ -158,7 +158,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       ARGS=("$survey")
       [ -n "$4" ] && ARGS+=("$4") # $4=date
       [ -n "$5" ] && ARGS+=("$5") # $5=program ID
-      apptainer exec --env-file env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/consumer.log" 2>&1 &
+      apptainer exec --env-file .env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
   fi
