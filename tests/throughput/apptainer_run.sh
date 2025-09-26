@@ -95,7 +95,7 @@ else
     --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
     instance://boom /app/kafka_producer "ztf 20250311 public" \
     > "$LOGS_DIR/producer.log" 2>&1
-  echo "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
+  echo -e "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
 fi
 
 # -----------------------------
