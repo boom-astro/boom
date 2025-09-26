@@ -93,7 +93,7 @@ if pgrep -f "/app/kafka_producer" > /dev/null; then
 else
   apptainer exec \
     --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
-    instance://boom /app/kafka_producer "ztf 20250311 public" \
+    instance://boom /app/kafka_producer ztf 20250311 public \
     > "$LOGS_DIR/producer.log" 2>&1
   echo -e "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
 fi
@@ -106,7 +106,7 @@ if pgrep -f "/app/kafka_consumer" > /dev/null; then
   echo -e "${RED}Boom consumer already running.${END}"
 else
   apptainer exec \
-    instance://boom /app/kafka_consumer "ztf 20250311 public" \
+    instance://boom /app/kafka_consumer ztf 20250311 public \
     > "$LOGS_DIR/consumer.log" 2>&1 &
   echo -e "${GREEN}Boom consumer started for survey ztf${END}"
 fi
@@ -119,7 +119,7 @@ if pgrep -f "/app/scheduler" > /dev/null; then
   echo -e "${RED}Boom scheduler already running.${END}"
 else
   apptainer exec \
-    instance://boom /app/scheduler "ztf" \
+    instance://boom /app/scheduler ztf \
     > "$LOGS_DIR/scheduler.log" 2>&1 &
   echo -e "${GREEN}Boom scheduler started for survey ztf${END}"
 fi
