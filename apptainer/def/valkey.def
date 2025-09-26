@@ -6,5 +6,9 @@ From: valkey/valkey:7.2.6
     export ALLOW_EMPTY_PASSWORD=yes
     export VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
 
+    # Fix "failed to configure LOCALE for invalid locale name." issue
+    export LANG=C.utf8
+    export LC_ALL=C.utf8
 %runscript
+    : > /log/valkey.log
     exec valkey-server --logfile /log/valkey.log --dir /data
