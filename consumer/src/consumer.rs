@@ -255,7 +255,6 @@ impl Consumer {
 
         let queue_soft_limit = self.config.queue_soft_limit;
         let delay = Duration::from_secs(self.config.queue_check_delay);
-        let mut x = std::collections::HashMap::new(); // DELETEME
         loop {
             match self.recv().await {
                 Ok(Some(message)) => {
@@ -278,8 +277,6 @@ impl Consumer {
                     trace!(queue.size = %queue_size, "message enqueued");
                     ALERT_PROCESSED.add(1, &ok_attrs);
                     self.counter.fetch_add(1, Ordering::Relaxed);
-                    let count = x.entry(message.partition()).or_insert(0); // DELETEME
-                    *count += 1; // DELETEME
                     self.base_consumer
                         .commit_message(&message, CommitMode::Sync)?;
 
