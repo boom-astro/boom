@@ -181,6 +181,7 @@ pub struct DiaSource {
     /// Filter band this source was observed with.
     pub band: Option<String>,
     /// Source well fit by a dipole.
+    #[serde(rename = "isDipole")]
     pub is_dipole: Option<bool>,
     /// General pixel flags failure; set if anything went wrong when setting pixels flags from this footprint's mask. This implies that some pixelFlags for this source may be incorrectly set to False.
     #[serde(rename = "pixelFlags")]
@@ -451,19 +452,19 @@ pub struct DiaObject {
     pub ndethist: i32,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct DiaNondetectionLimit {
-    #[serde(rename = "ccdVisitId")]
-    pub ccd_visit_id: i64,
-    #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jd: f64,
-    pub band: String,
-    #[serde(rename = "diaNoise")]
-    pub dia_noise: f32,
-}
+// #[serde_as]
+// #[skip_serializing_none]
+// #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+// pub struct DiaNondetectionLimit {
+//     #[serde(rename = "ccdVisitId")]
+//     pub ccd_visit_id: i64,
+//     #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
+//     #[serde(deserialize_with = "deserialize_mjd")]
+//     pub jd: f64,
+//     pub band: String,
+//     #[serde(rename = "diaNoise")]
+//     pub dia_noise: f32,
+// }
 
 #[serde_as]
 #[skip_serializing_none]
