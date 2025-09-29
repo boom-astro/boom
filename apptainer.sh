@@ -37,7 +37,8 @@ stop_service() {
 # 1. Build SIF files
 # -----------------------------
 if [ "$1" = "build" ]; then
-  ./apptainer/def/build-sif.sh
+  # See build-sif.sh for the full explanation of the argument
+  ./apptainer/def/build-sif.sh "$2"
   exit 0
 fi
 
@@ -53,6 +54,7 @@ if [ "$1" == "start" ]; then
   [ -n "$7" ] && ARGS+=("$6") # $6=scheduler config path
   # See apptainer_start.sh for the full explanation of each argument
   "$SCRIPTS_DIR/apptainer_start.sh" "${ARGS[@]}"
+  exit 0
 fi
 
 # -----------------------------
@@ -104,6 +106,7 @@ if [ "$1" == "stop" ]; then
   if stop_service "mongo" "$target"; then
     apptainer instance stop mongo
   fi
+  exit 0
 fi
 
 # -----------------------------
@@ -112,6 +115,7 @@ fi
 if [ "$1" == "restart" ]; then
   "$0" stop "$2"
   "$0" start "$2" "$3" "$4" "$5" "$6"
+  exit 0
 fi
 
 # -----------------------------
@@ -128,6 +132,7 @@ if [ "$1" == "health" ]; then
   "$SCRIPTS_DIR/process-healthcheck.sh" "/otelcol" otel-collector
   "$SCRIPTS_DIR/boom-listener-healthcheck.sh" 0
   "$SCRIPTS_DIR/kuma-healthcheck.sh" 0
+  exit 0
 fi
 
 # -----------------------------
@@ -136,6 +141,7 @@ fi
 if [ "$1" == "benchmark" ]; then
   pip install pandas pyyaml
   python3 "$BOOM_DIR/tests/throughput/apptainer_run.py"
+  exit 0
 fi
 
 # -----------------------------
@@ -145,4 +151,5 @@ fi
 # $2 = path to the file with the filters to add
 if [ "$1" == "filters" ]; then
   "$SCRIPTS_DIR/add_filters.sh" "$2"
+  exit 0
 fi
