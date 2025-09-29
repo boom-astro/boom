@@ -45,7 +45,7 @@ consumer:
     progress_report_interval: 5
 
   task:
-    # Timeout period (s) for feching metadata from Kafka.
+    # Timeout period (s) for fetching metadata from Kafka.
     fetch_metadata_timeout: 30
 
     # Timeout period (s) for looking up the partition offsets in Kafka by
