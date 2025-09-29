@@ -1,9 +1,12 @@
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
+use color_eyre::eyre::{OptionExt, Report};
 use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
 use config::File;
+use redis::aio::MultiplexedConnection;
+use serde::Deserialize;
 use std::path::Path;
 use tracing::{error, instrument};
 
@@ -150,9 +153,7 @@ pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigErro
 }
 
 #[instrument(skip_all, err)]
-pub async fn build_redis(
-    conf: &Config,
-) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+pub async fn build_redis(conf: &Config) -> Result<MultiplexedConnection, BoomConfigError> {
     let redis_conf = conf.get_table("redis")?;
 
     let host = match redis_conf.get("host") {
@@ -165,8 +166,7 @@ pub async fn build_redis(
         None => 6379,
     };
 
-    let uri = format!("redis://{}:{}/", host, port);
-
+    let uri = redis_uri(&host, port);
     let client_redis =
         redis::Client::open(uri).inspect_err(as_error!("failed to connect to redis"))?;
 
@@ -176,6 +176,10 @@ pub async fn build_redis(
         .inspect_err(as_error!("failed to get multiplexed connection"))?;
 
     Ok(con)
+}
+
+fn redis_uri(host: &str, port: u16) -> String {
+    format!("redis://{}:{}/", host, port)
 }
 
 #[derive(Debug)]
@@ -363,4 +367,29 @@ pub fn build_kafka_config(
     survey: &Survey,
 ) -> Result<SurveyKafkaConfig, BoomConfigError> {
     SurveyKafkaConfig::from_config(conf, survey)
+}
+
+// Boom config available to all crates.
+#[derive(Debug, Deserialize)]
+pub struct BoomConfig {
+    pub redis: RedisConfig,
+    // etc. for other common config fields
+}
+
+impl BoomConfig {
+    pub fn load(path: &Path) -> Result<Self, Report> {
+        let path_str = path.to_str().ok_or_eyre("invalid unicode")?;
+        let boom_config = load_config(path_str)?.try_deserialize()?;
+        Ok(boom_config)
+    }
+
+    pub fn redis_uri(&self) -> String {
+        redis_uri(&self.redis.host, self.redis.port)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RedisConfig {
+    pub host: String,
+    pub port: u16,
 }
