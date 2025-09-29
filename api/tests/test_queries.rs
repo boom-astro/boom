@@ -1,4 +1,4 @@
-// Tests for catalogs endpoints
+/// Tests for queries endpoints
 #[cfg(test)]
 mod tests {
     use actix_web::http::StatusCode;
