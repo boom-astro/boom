@@ -64,7 +64,7 @@ This is especially useful for running BOOM on HPC systems where Docker is not av
 3. Launch `Valkey`, `MongoDB`, `Kafka`, `Otel Collector`, `Prometheus` and `boom` using Apptainer:
     First, build the SIF files. You can do this by running:
     ```bash
-    ./apptainer/def/build-sif.sh
+    ./apptainer/scripts/build-sif.sh
     ```
     Then you can launch the services with:
     ```bash
@@ -253,7 +253,7 @@ For Docker (docker Image):
 ```
 For Apptainer (SIF file):
 ```bash
-  ./apptainer/def/build-sif.sh test
+  ./apptainer/scripts/build-sif.sh test
 ```
 
 ### Download Data

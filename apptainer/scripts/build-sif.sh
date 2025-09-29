@@ -40,19 +40,16 @@ if start_service "boom" "$1"; then
   apptainer build apptainer/sif/boom.sif apptainer/def/boom.def
 fi
 
-# Skip building monitoring services if "test" is provided
-if start_service "test" "$1"; then
-  exit 0
-fi
+if ["test" != "$1"]; then
+  if start_service "prometheus" "$1"; then
+    apptainer build apptainer/sif/prometheus.sif apptainer/def/prometheus.def
+  fi
 
-if start_service "prometheus" "$1"; then
-  apptainer build apptainer/sif/prometheus.sif apptainer/def/prometheus.def
-fi
+  if start_service "otel" "$1"; then
+    apptainer build apptainer/sif/otel-collector.sif docker://otel/opentelemetry-collector:0.131.1
+  fi
 
-if start_service "otel" "$1"; then
-  apptainer build apptainer/sif/otel-collector.sif docker://otel/opentelemetry-collector:0.131.1
-fi
-
-if start_service "kuma" "$1"; then
-  apptainer build apptainer/sif/uptime-kuma.sif apptainer/def/uptime-kuma.def
+  if start_service "kuma" "$1"; then
+    apptainer build apptainer/sif/uptime-kuma.sif apptainer/def/uptime-kuma.def
+  fi
 fi
