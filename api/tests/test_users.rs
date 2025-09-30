@@ -7,6 +7,7 @@ mod tests {
     use boom_api::conf::AppConfig;
     use boom_api::db::get_default_db;
     use boom_api::routes;
+    use boom_api::test_utils::read_json_response;
     use mongodb::Database;
 
     /// Test GET /users
@@ -23,15 +24,8 @@ mod tests {
 
         let req = test::TestRequest::get().uri("/users").to_request();
         let resp = test::call_service(&app, req).await;
-
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-
-        // Parse response body JSON
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp = read_json_response(resp).await;
 
         assert!(resp["data"].is_array());
     }
@@ -74,11 +68,8 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // Get the user out of the response body data so we know the ID
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
+        let resp = read_json_response(resp).await;
+
         let user_id = resp["data"]["id"].as_str().unwrap();
 
         // Test that we can't post the same user again

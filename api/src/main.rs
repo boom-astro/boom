@@ -47,7 +47,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::queries::post_find_query)
                     .service(routes::queries::post_cone_search_query)
                     .service(routes::queries::post_count_query)
-                    .service(routes::queries::post_estimated_count_query),
+                    .service(routes::queries::post_estimated_count_query)
+                    .service(routes::queries::post_pipeline_query),
             )
             .wrap(Logger::default())
     })
