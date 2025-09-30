@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use boom_api::conf::{load_config, load_dotenv};
+    use boom_api::conf::{AppConfig, load_config, load_dotenv};
     use std::panic;
 
     #[test]
@@ -117,7 +117,7 @@ api:
         load_dotenv();
 
         // Test loading the test config file which has actual values for secrets
-        let config = load_config(Some("../tests/config.test.yaml"));
+        let config = AppConfig::from_test_config();
 
         // Verify the token_expiration is set to our new default
         assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds

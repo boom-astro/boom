@@ -37,7 +37,7 @@ mod tests {
         load_dotenv();
         let database: Database = get_test_db().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
-        let auth_config = AppConfig::from_path("../tests/config.test.yaml").api.auth;
+        let auth_config = AppConfig::from_test_config().api.auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

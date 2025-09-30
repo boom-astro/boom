@@ -155,7 +155,7 @@ pub async fn get_default_auth(db: &mongodb::Database) -> Result<AuthProvider, st
 }
 
 pub async fn get_test_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_path("../tests/config.test.yaml");
+    let config = AppConfig::from_test_config();
     AuthProvider::new(&config.api.auth, db).await
 }
 

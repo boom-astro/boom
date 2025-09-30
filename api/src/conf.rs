@@ -75,6 +75,29 @@ impl AppConfig {
         load_config(Some(config_path))
     }
 
+    pub fn from_test_config() -> Self {
+        // Find the workspace root by looking for Cargo.toml with tests/ directory
+        let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
+        let test_config_path = loop {
+            let tests_dir = current_dir.join("tests");
+            let test_config = tests_dir.join("config.test.yaml");
+
+            // Check if we found the workspace root (has tests dir with config file)
+            if test_config.exists() {
+                break test_config;
+            }
+
+            // Move up to parent directory
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent.to_path_buf();
+            } else {
+                panic!("Could not find workspace root with tests/config.test.yaml");
+            }
+        };
+
+        load_config(Some(test_config_path.to_str().expect("Invalid path")))
+    }
+
     /// Validate that all required secrets are present
     fn validate_secrets(&self) -> Result<(), String> {
         if self.database.password.is_empty() {

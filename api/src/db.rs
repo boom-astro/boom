@@ -161,6 +161,6 @@ pub async fn get_default_db() -> Database {
 }
 
 pub async fn get_test_db() -> Database {
-    let config = AppConfig::from_path("../tests/config.test.yaml");
+    let config = AppConfig::from_test_config();
     db_from_config(config).await
 }
