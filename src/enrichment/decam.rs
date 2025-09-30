@@ -5,7 +5,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-pub fn decam_alert_pipeline() -> Vec<Document> {
+pub fn create_decam_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {
@@ -76,7 +76,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_pipeline: decam_alert_pipeline(),
+            alert_pipeline: create_decam_alert_pipeline(),
         })
     }
 

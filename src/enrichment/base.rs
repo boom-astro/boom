@@ -82,6 +82,18 @@ pub trait EnrichmentWorker {
     ) -> Result<Vec<String>, EnrichmentWorkerError>;
 }
 
+/// Fetch alerts from the database given a list of candids and an aggregation pipeline.
+/// If an alert_cutout_collection is provided, fetch cutouts from that collection as well.
+/// Return a vector of alerts as bson Documents.
+///
+/// # Arguments
+/// * `candids` - A slice of candids to fetch alerts for.
+/// * `alert_pipeline` - A reference to a vector of bson Documents representing the aggregation pipeline.
+/// * `alert_collection` - A reference to the mongodb collection containing the alerts.
+/// * `alert_cutout_collection` - An optional reference to the mongodb collection containing the cutouts.
+///
+/// # Returns
+/// A Result containing a vector of bson Documents representing the fetched alerts, or an EnrichmentWorkerError.
 #[instrument(skip_all, err)]
 pub async fn fetch_alerts(
     candids: &[i64], // this is a slice of candids to process

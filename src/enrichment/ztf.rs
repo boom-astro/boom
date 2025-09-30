@@ -9,7 +9,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-pub fn ztf_alert_pipeline() -> Vec<Document> {
+pub fn create_ztf_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {
@@ -116,7 +116,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             client,
             alert_collection,
             alert_cutout_collection,
-            alert_pipeline: ztf_alert_pipeline(),
+            alert_pipeline: create_ztf_alert_pipeline(),
             acai_h_model,
             acai_n_model,
             acai_v_model,

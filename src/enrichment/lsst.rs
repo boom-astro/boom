@@ -5,7 +5,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-pub fn lsst_alert_pipeline() -> Vec<Document> {
+pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {
@@ -93,7 +93,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_pipeline: lsst_alert_pipeline(),
+            alert_pipeline: create_lsst_alert_pipeline(),
         })
     }
 
