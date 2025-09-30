@@ -3,7 +3,11 @@ use std::{fs::File, io::BufWriter, iter::successors};
 
 use tracing::Subscriber;
 use tracing_flame::{FlameLayer, FlushGuard};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+use tracing_subscriber::{
+    fmt::{format::FmtSpan, TestWriter},
+    layer::SubscriberExt,
+    EnvFilter, Layer,
+};
 
 /// Iterate over the `Display` representations of the sources of the given error
 /// by recursively calling `std::error::Error::source()`.
@@ -230,7 +234,7 @@ fn parse_span_events(env_var: &str) -> FmtSpan {
 /// guard).
 ///
 /// The inclusion of a flame graph layer depends on the environment variable
-/// BOOM_SPAN_EVENTS. If set, a flame graph layer is added to the subscriber and
+/// BOOM_FLAME_FILE. If set, a flame graph layer is added to the subscriber and
 /// the value is used as the path where the raw flame graph data are to be
 /// written. If unset, then the returned subscriber will not include a flame
 /// graph layer.
@@ -247,7 +251,8 @@ pub fn build_subscriber() -> Result<
         .with_target(false)
         .with_file(true)
         .with_line_number(true)
-        .with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
+        .with_span_events(parse_span_events("BOOM_SPAN_EVENTS"))
+        .with_writer(TestWriter::with_stderr);
 
     let env_filter =
         EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info,ort=error"))?;

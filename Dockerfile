@@ -12,6 +12,7 @@ RUN apt-get update && \
 # Copy the source code
 COPY src ./src
 COPY api ./api
+COPY consumer ./consumer
 
 # Build the application (all of the binaries)
 RUN cargo build --release --workspace

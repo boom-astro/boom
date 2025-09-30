@@ -32,10 +32,11 @@ pub enum ProgramId {
 
 impl std::fmt::Display for ProgramId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProgramId::Public => write!(f, "1"),
-            ProgramId::Partnership => write!(f, "2"),
-            ProgramId::Caltech => write!(f, "3"),
-        }
+        let s = match self {
+            ProgramId::Public => "1",
+            ProgramId::Partnership => "2",
+            ProgramId::Caltech => "3",
+        };
+        write!(f, "{s}")
     }
 }
