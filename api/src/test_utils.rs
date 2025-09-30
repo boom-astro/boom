@@ -14,7 +14,11 @@ pub async fn create_test_catalog(db: &Database) -> String {
         .await
         .unwrap();
     // insert a dummy document
-    let doc = bson::doc! { "test_field": "test_value", "test_other_field": 42, "coordinates": { "radec_geojson": { "type": "Point", "coordinates": [-170.0, 20.0] } } };
+    let doc = bson::doc! {
+        "test_field": "test_value",
+        "test_other_field": 42,
+        "coordinates": { "radec_geojson": { "type": "Point", "coordinates": [-170.0, 20.0] } }
+    };
     collection.insert_one(doc).await.unwrap();
     name
 }
