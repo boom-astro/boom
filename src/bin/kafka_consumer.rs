@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long, value_name = "MAX", default_value_t = 15000)]
     max_in_queue: usize,
 
+    /// Simulated mode (for testing purposes, LSST only)
+    #[arg(long, default_value_t = false)]
+    simulated: bool,
+
     /// UUID associated with this instance of the consumer, generated
     /// automatically if not provided
     #[arg(long, env = "BOOM_CONSUMER_INSTANCE_ID")]
@@ -74,12 +78,6 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     .and_utc()
     .timestamp();
 
-    // TODO: let the user specify if they want to consume real or simulated LSST data
-    let simulated = match args.survey {
-        Survey::Lsst => true,
-        _ => false,
-    };
-
     match args.survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
@@ -103,7 +101,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             };
         }
         Survey::Lsst => {
-            let consumer = LsstAlertConsumer::new(None, simulated);
+            let consumer = LsstAlertConsumer::new(None, args.simulated);
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config);
             }
