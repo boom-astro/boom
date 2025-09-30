@@ -67,6 +67,7 @@ const ALERT_SCHEMA: &str = r#"
         {"name": "jd", "type": "double"},
         {"name": "ra", "type": "double"},
         {"name": "dec", "type": "double"},
+        {"name":"survey","type":{"type":"enum","name":"Survey","symbols":["ZTF","LSST","DECAM"]}},
         {"name": "filters", "type": {
             "type": "array",
             "items": {
@@ -101,9 +102,9 @@ const ALERT_SCHEMA: &str = r#"
                     {"name": "flux_err",  "type":"double"},
                     {"name":"band","type":"string"},
                     {"name":"zero_point","type":"double"},
-                    {"name":"origin","type": "string"},
+                    {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
                     {"name":"programid","type":"int"},
-                    {"name":"survey","type":"string"},
+                    {"name":"survey","type": "Survey"},
                     {"name":"ra","type":["null","double"]},
                     {"name":"dec","type":["null","double"]}
                 ]
@@ -111,8 +112,7 @@ const ALERT_SCHEMA: &str = r#"
         }},
         {"name":"cutoutScience","type":{"type":"bytes"}},
         {"name":"cutoutTemplate","type":{"type":"bytes"}},
-        {"name":"cutoutDifference","type":{"type":"bytes"}},
-        {"name":"survey","type":"string"}
+        {"name":"cutoutDifference","type":{"type":"bytes"}}
     ]
 }
 "#;
@@ -196,6 +196,7 @@ pub struct Alert {
     pub jd: f64,
     pub ra: f64,
     pub dec: f64,
+    pub survey: Survey,
     pub filters: Vec<FilterResults>,
     pub classifications: Vec<Classification>,
     pub photometry: Vec<Photometry>,
@@ -205,7 +206,6 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
-    pub survey: Survey,
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
@@ -224,7 +224,7 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::new(schema, Vec::new());
+    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
@@ -274,7 +274,7 @@ pub async fn send_alert_to_kafka(
     let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
 
     producer
-        .send(record, std::time::Duration::from_secs(0))
+        .send(record, std::time::Duration::from_secs(30))
         .await
         .map_err(|(e, _)| {
             warn!("Failed to send filter result to Kafka: {}", e);

@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-apache-avro = "0.17.0"
+apache-avro = { version = "0.20.0", features = ["snappy"] }
 async-trait = "0.1.87"
 chrono = "0.4.39"
 clap = { version = "4", features = ["derive", "env"] }
