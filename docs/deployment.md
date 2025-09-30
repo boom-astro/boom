@@ -39,6 +39,8 @@ This way, there will be a single public Traefik proxy that handles the
 communication (HTTP and HTTPS) with the outside world, and then behind that,
 there can be one or more stacks with different domains,
 even if they are on the same single server.
+This could enable, for example,
+a production and staging instance on the same machine.
 
 To create a Docker public network named `traefik-public` run the following
 command in your remote server:
