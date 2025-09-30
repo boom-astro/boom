@@ -182,16 +182,7 @@ configure secrets for the environment variables you need,
 the same ones described above, including `SECRET_KEY`, etc.
 Follow the [official GitHub guide for setting repository secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository).
 
-The current Github Actions workflow in `deploy.yaml` expect these to be set:
-
-- `BOOM_DB_PASSWORD`
-- `BOOM_ADMIN_USERNAME`
-- `BOOM_ADMIN_EMAIL`
-- `BOOM_ADMIN_PASSWORD`
-- `BOOM_JWT_SECRET`
-- `STACK_NAME`
-- `DOMAIN`
-- `PROMETHEUS_USER`
-- `PROMETHEUS_HASHED_PASSWORD`
+See [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml)
+for the secrets that should be set.
 
 That's it. Now BOOM will deploy to production on each GitHub release.
