@@ -451,7 +451,7 @@ pub struct DiaObject {
     pub ndethist: i32,
 }
 
-// to uncomment once we have nondetections in the alerts again
+// TODO: uncomment once we have nondetections in the alerts again
 // #[serde_as]
 // #[skip_serializing_none]
 // #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
