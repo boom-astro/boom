@@ -17,8 +17,7 @@
 ### Create a public Traefik reverse proxy
 
 We need a Traefik proxy to handle incoming connections and HTTPS certificates.
-
-You need to do these next steps only once.
+Note this will only need to be done once per server.
 
 Create a remote directory to store your Traefik Docker Compose file:
 
@@ -26,7 +25,8 @@ Create a remote directory to store your Traefik Docker Compose file:
 mkdir -p /root/code/traefik-public/
 ```
 
-Copy the Traefik Docker Compose file to your server. You could do it by running the command `scp` or `rsync` in your local terminal:
+Copy the Traefik Docker Compose file to your server.
+This can be done by running the command `scp` or `rsync` in your local terminal:
 
 ```bash
 rsync -a config/docker-compose.traefik.yml root@your-server.example.com:/root/code/traefik-public/
@@ -37,7 +37,7 @@ This Traefik instance will expect a Docker "public network" named
 
 This way, there will be a single public Traefik proxy that handles the
 communication (HTTP and HTTPS) with the outside world, and then behind that,
-you could have one or more stacks with different domains,
+there can be one or more stacks with different domains,
 even if they are on the same single server.
 
 To create a Docker public network named `traefik-public` run the following
@@ -63,7 +63,7 @@ Create an environment variable with the password for HTTP basic auth, e.g.:
 export PASSWORD=changethis
 ```
 
-Use openssl to generate the hashed version of the password for HTTP basic auth
+Use OpenSSL to generate the hashed version of the password for HTTP basic auth
 and store it in an environment variable:
 
 ```bash
@@ -97,7 +97,8 @@ cd /root/code/traefik-public/
 
 Now with the environment variables set and the `docker-compose.traefik.yml` in
 place,
-you can start the Traefik Docker Compose running the following command:
+you can start the Traefik Docker Compose project
+by running the following command:
 
 ```bash
 docker compose -f docker-compose.traefik.yml up -d
@@ -105,8 +106,8 @@ docker compose -f docker-compose.traefik.yml up -d
 
 ### Configure a GitHub Actions self-hosted runner for continuous deployment (CD)
 
-On your remote server, if you are running as the `root` user,
-create a user for your GitHub Actions:
+On the remote server, while running as the `root` user,
+create a user for GitHub Actions:
 
 ```bash
 adduser github
@@ -130,18 +131,16 @@ Go to the `github` user's home directory:
 cd
 ```
 
-- [Install a GitHub Action self-hosted runner following the official guide](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners#adding-a-self-hosted-runner-to-a-repository).
+Next,
+[Install a GitHub Action self-hosted runner following the official guide](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners#adding-a-self-hosted-runner-to-a-repository).
 
 When asked about labels, add a label for the environment, e.g. `production`.
 You can also add labels later.
 
-After installing, the guide would tell you to run a command to start the
+After installing, the guide will tell you to run a command to start the
 runner.
-However, this would stop once you terminate that process or if your local
-connection to your server is lost.
-
-To make sure it runs on startup and continues running,
-you can install it as a service.
+However, to make sure it runs on startup and continues running,
+we can install it as a service.
 To do that, exit the `github` user and go back to the `root` user:
 
 ```bash
