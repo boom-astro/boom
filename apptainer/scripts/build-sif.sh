@@ -40,7 +40,7 @@ if start_service "boom" "$1"; then
   apptainer build apptainer/sif/boom.sif apptainer/def/boom.def
 fi
 
-if ["test" != "$1"]; then
+if [ "test" != "$1" ]; then
   if start_service "prometheus" "$1"; then
     apptainer build apptainer/sif/prometheus.sif apptainer/def/prometheus.def
   fi
