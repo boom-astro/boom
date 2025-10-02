@@ -6,6 +6,8 @@ services:
       - 80:80
       # Listen on port 443, default for HTTPS
       - 443:443
+      # For kafka external listeners
+      - 9093:9093
     restart: always
     labels:
       # Enable Traefik for this service, to make it available in the public network
