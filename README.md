@@ -44,12 +44,31 @@ BOOM runs on macOS and Linux. You'll need:
 
 ## Setup
 
-1. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
+### Environment configuration
+
+BOOM uses environment variables for sensitive configuration like passwords
+and API keys.
+For local development, you can use the defaults in `.env.example`
+by copying it to `.env`:
+
+```sh
+cp .env.example .env
+```
+
+**Note:** Do not commit `.env` to Git or use the example values
+in production.
+
+### Start services for local development
+
+1. Launch `Valkey`, `MongoDB`, and `Kafka` using Docker, with the provided `docker-compose.yaml` file:
     ```bash
     docker compose up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
+
+    **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+
 2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
@@ -177,5 +196,5 @@ RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- 
 
 ## Contributing
 
-We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information. 
+We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information.
 We rely on [GitHub issues](https://github.com/boom-astro/boom/issues) to track bugs and feature requests.
