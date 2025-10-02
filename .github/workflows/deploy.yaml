@@ -22,6 +22,7 @@ jobs:
       - production
     env:
       ENVIRONMENT: production
+      DOMAIN: ${{ vars.DOMAIN }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_USERNAME: ${{ vars.BOOM_API__AUTH__ADMIN_USERNAME }}
@@ -30,7 +31,8 @@ jobs:
       STACK_NAME: boom
       PROMETHEUS_USER: ${{ vars.PROMETHEUS_USER }}
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
-      DOMAIN: ${{ vars.DOMAIN }}
+      KAFKA_ADMIN_PASSWORD: ${{ secrets.KAFKA_ADMIN_PASSWORD }}
+      KAFKA_READONLY_PASSWORD: ${{ secrets.KAFKA_READONLY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
