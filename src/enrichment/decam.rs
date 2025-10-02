@@ -1,7 +1,6 @@
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::fetch_timeseries_op;
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -88,41 +87,14 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn fetch_alerts(
-        &self,
-        candids: &[i64], // this is a slice of candids to process
-    ) -> Result<Vec<Document>, EnrichmentWorkerError> {
-        let mut alert_pipeline = self.alert_pipeline.clone();
-        if let Some(first_stage) = alert_pipeline.first_mut() {
-            *first_stage = doc! {
-                "$match": {
-                    "_id": {"$in": candids}
-                }
-            };
-        }
-        let mut alert_cursor = self.alert_collection.aggregate(alert_pipeline).await?;
-
-        let mut alerts: Vec<Document> = Vec::new();
-        while let Some(result) = alert_cursor.next().await {
-            match result {
-                Ok(document) => {
-                    alerts.push(document);
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        Ok(alerts)
-    }
-
-    #[instrument(skip_all, err)]
     async fn process_alerts(
         &mut self,
         candids: &[i64],
+        _con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = self.fetch_alerts(&candids).await?;
+        let alerts = self
+            .fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None)
+            .await?;
 
         if alerts.len() != candids.len() {
             warn!(

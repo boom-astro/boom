@@ -2,7 +2,6 @@ use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -131,74 +130,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn fetch_alerts(
-        &self,
-        candids: &[i64], // this is a slice of candids to process
-    ) -> Result<Vec<Document>, EnrichmentWorkerError> {
-        let mut alert_pipeline = self.alert_pipeline.clone();
-        if let Some(first_stage) = alert_pipeline.first_mut() {
-            *first_stage = doc! {
-                "$match": {
-                    "_id": {"$in": candids}
-                }
-            };
-        }
-        let mut alert_cursor = self.alert_collection.aggregate(alert_pipeline).await?;
-
-        let mut alerts: Vec<Document> = Vec::new();
-        let mut candid_to_idx = std::collections::HashMap::new();
-        let mut count = 0;
-        while let Some(result) = alert_cursor.next().await {
-            match result {
-                Ok(document) => {
-                    alerts.push(document);
-                    let candid = alerts[count].get_i64("_id")?;
-                    candid_to_idx.insert(candid, count);
-                    count += 1;
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        // next we fetch cutouts from the cutout collection
-        let mut cutout_cursor = self
-            .alert_cutout_collection
-            .find(doc! {
-                "_id": {"$in": candids}
-            })
-            .await?;
-        while let Some(result) = cutout_cursor.next().await {
-            match result {
-                Ok(cutout_doc) => {
-                    let candid = cutout_doc.get_i64("_id")?;
-                    if let Some(idx) = candid_to_idx.get(&candid) {
-                        alerts[*idx]
-                            .insert("cutoutScience", cutout_doc.get("cutoutScience").unwrap());
-                        alerts[*idx]
-                            .insert("cutoutTemplate", cutout_doc.get("cutoutTemplate").unwrap());
-                        alerts[*idx].insert(
-                            "cutoutDifference",
-                            cutout_doc.get("cutoutDifference").unwrap(),
-                        );
-                    }
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        Ok(alerts)
-    }
-
-    #[instrument(skip_all, err)]
     async fn process_alerts(
         &mut self,
         candids: &[i64],
+        _con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = self.fetch_alerts(&candids).await?;
+        let alerts = self
+            .fetch_alerts(
+                &candids,
+                &self.alert_pipeline,
+                &self.alert_collection,
+                Some(&self.alert_cutout_collection),
+            )
+            .await?;
 
         if alerts.len() != candids.len() {
             warn!(

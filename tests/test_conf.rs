@@ -80,6 +80,7 @@ fn test_catalogxmatchconfig() {
         distance_max: None,
         distance_max_near: None,
         projection: ps1_projection.clone(),
+        n_max: None,
     };
 
     assert_eq!(xmatch_config.catalog, "PS1_DR1");
@@ -91,6 +92,7 @@ fn test_catalogxmatchconfig() {
     assert_eq!(xmatch_config.distance_key, None);
     assert_eq!(xmatch_config.distance_max, None);
     assert_eq!(xmatch_config.distance_max_near, None);
+    assert_eq!(xmatch_config.n_max, None);
 
     let projection = xmatch_config.projection;
     assert_eq!(projection, ps1_projection);
