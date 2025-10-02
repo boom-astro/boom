@@ -7,50 +7,10 @@ use rdkafka::metadata::Metadata;
 use std::thread::sleep;
 use std::time::Duration;
 
-fn bootstrap() -> String {
-    std::env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "localhost:9093".to_string())
-}
-
-fn bootstrap_host_port() -> (String, u16) {
-    let b = bootstrap();
-    // naive split host:port
-    let mut parts = b.split(':');
-    let host = parts.next().unwrap_or("localhost").to_string();
-    let port = parts
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(9093);
-    (host, port)
-}
-
-fn broker_reachable(timeout: Duration) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    let (host, port) = bootstrap_host_port();
-    let addr_iter = format!("{}:{}", host, port).to_socket_addrs();
-    if let Ok(mut iter) = addr_iter {
-        if let Some(sock) = iter.next() {
-            let deadline = std::time::Instant::now() + timeout;
-            while std::time::Instant::now() < deadline {
-                match TcpStream::connect_timeout(&sock, Duration::from_millis(250)) {
-                    Ok(_) => return true,
-                    Err(_) => sleep(Duration::from_millis(100)),
-                }
-            }
-        }
-    }
-    false
-}
-
-fn username() -> String {
-    std::env::var("KAFKA_USERNAME").unwrap_or_else(|_| "readonly".to_string())
-}
-
-fn password() -> String {
+fn get_password() -> String {
     // Load .env lazily (searches for a .env file up the directory tree); ignore errors.
     let _ = dotenvy::dotenv();
-    std::env::var("KAFKA_READONLY_PASSWORD")
-        .or_else(|_| std::env::var("KAFKA_PASSWORD"))
-        .expect("KAFKA_READONLY_PASSWORD (or legacy KAFKA_PASSWORD) must be set; define it in your environment or .env file")
+    std::env::var("KAFKA_READONLY_PASSWORD").expect("KAFKA_READONLY_PASSWORD must be set")
 }
 
 fn fetch_metadata(cfg: &ClientConfig) -> Result<Metadata, KafkaError> {
@@ -78,30 +38,20 @@ fn fetch_metadata_with_retries(
     Err(last_err.unwrap_or_else(|| KafkaError::ClientCreation("Unknown error".into())))
 }
 
-fn base_cfg() -> ClientConfig {
+fn make_base_cfg() -> ClientConfig {
     let mut c = ClientConfig::new();
-    c.set("bootstrap.servers", &bootstrap());
+    c.set("bootstrap.servers", "localhost:9093".to_string());
     c.set("enable.partition.eof", "false");
     c
 }
 
 #[test]
-fn kafka_auth_enforcement() {
-    // Fast skip (treated as a pass) if broker not reachable; keeps unit test runs from failing
-    // when integration environment (Kafka container) is not up.
-    if !broker_reachable(Duration::from_secs(2)) {
-        eprintln!(
-            "Skipping kafka_auth_enforcement: Kafka bootstrap not reachable at {}",
-            bootstrap()
-        );
-        return;
-    }
-
-    let user = username();
-    let pass = password();
+fn test_kafka_auth_enforcement() {
+    let user = "readonly".to_string();
+    let pass = get_password();
 
     // 1. No auth should fail
-    let cfg_no_auth = base_cfg();
+    let cfg_no_auth = make_base_cfg();
     let no_auth_result = fetch_metadata(&cfg_no_auth);
     assert!(
         no_auth_result.is_err(),
@@ -109,7 +59,7 @@ fn kafka_auth_enforcement() {
     );
 
     // 2. Wrong password should fail
-    let mut cfg_bad = base_cfg();
+    let mut cfg_bad = make_base_cfg();
     cfg_bad
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("sasl.mechanism", "SCRAM-SHA-512")
@@ -122,7 +72,7 @@ fn kafka_auth_enforcement() {
     );
 
     // 3. Correct password should succeed
-    let mut cfg_good = base_cfg();
+    let mut cfg_good = make_base_cfg();
     cfg_good
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("sasl.mechanism", "SCRAM-SHA-512")
