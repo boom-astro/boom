@@ -152,24 +152,26 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
   fi
 
   if start_service "boom" "$2" || start_service "consumer" "$2"; then
-    if pgrep -f "/app/kafka_consumer" > /dev/null; then
+    ARGS=("$survey")
+    [ -n "$4" ] && ARGS+=("$4") # $4=date
+    [ -n "$5" ] && ARGS+=("$5") # $5=program ID
+    if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
       echo -e "${RED}Boom consumer already running.${END}"
     else
-      ARGS=("$survey")
-      [ -n "$4" ] && ARGS+=("$4") # $4=date
-      [ -n "$5" ] && ARGS+=("$5") # $5=program ID
-      apptainer exec --env-file .env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/consumer.log" 2>&1 &
+      mkdir -p "$LOGS_DIR/$survey"
+      apptainer exec --env-file .env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/$survey/consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
   fi
 
   if start_service "boom" "$2" || start_service "scheduler" "$2"; then
-    if pgrep -f "/app/scheduler" > /dev/null; then
+    ARGS=("$survey")
+    [ -n "$6" ] && ARGS+=("$6") # $6=config path
+    if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
       echo -e "${RED}Boom scheduler already running.${END}"
     else
-      ARGS=("$survey")
-      [ -n "$6" ] && ARGS+=("$6") # $6=config path
-      apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_DIR/scheduler.log" 2>&1 &
+      mkdir -p "$LOGS_DIR/$survey"
+      apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_DIR/$survey/scheduler.log" 2>&1 &
       echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
     fi
   fi
