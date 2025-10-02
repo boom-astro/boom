@@ -1,5 +1,7 @@
 //! Integration test for Kafka external listener authentication.
 
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaError;
@@ -19,6 +21,27 @@ fn fetch_metadata(cfg: &ClientConfig) -> Result<Metadata, KafkaError> {
     consumer.fetch_metadata(None, Duration::from_secs(1))
 }
 
+async fn create_topic(cfg: &ClientConfig, topic: &str) -> Result<(), KafkaError> {
+    // Create an AdminClient from the provided config
+    let admin: AdminClient<DefaultClientContext> = cfg
+        .create()
+        .map_err(|e| KafkaError::ClientCreation(e.to_string()))?;
+
+    let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+    let results = admin
+        .create_topics(&[new_topic], &AdminOptions::new())
+        .await?;
+
+    for result in results {
+        match result {
+            Ok(_) => return Ok(()),
+            Err((_topic_name, code)) => return Err(KafkaError::AdminOp(code)),
+        }
+    }
+    // If the vector was empty (shouldn't happen), treat as success.
+    Ok(())
+}
+
 fn make_base_cfg() -> ClientConfig {
     let mut c = ClientConfig::new();
     c.set("group.id", "test-group");
@@ -27,8 +50,8 @@ fn make_base_cfg() -> ClientConfig {
     c
 }
 
-#[test]
-fn test_kafka_auth_enforcement() {
+#[tokio::test]
+async fn test_kafka_auth_enforcement() {
     let user = "readonly".to_string();
     let pass = get_password();
 
@@ -78,5 +101,12 @@ fn test_kafka_auth_enforcement() {
     assert!(
         good_result.topics().len() > 0,
         "Expected at least one topic in metadata"
+    );
+
+    // Make sure the read-only user can't create topics (by checking for the error code)
+    let create_topic_result = create_topic(&cfg_good, "some-test-topic").await;
+    assert!(
+        create_topic_result.is_err(),
+        "Expected topic creation to fail for read-only user, but succeeded"
     );
 }
