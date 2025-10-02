@@ -129,6 +129,7 @@ c = Consumer({
 * The script is idempotent; re-runs update passwords & reapply ACLs.
 * If you change a password, restart the broker container to re-run script (or run commands manually).
 * To restrict topic access, replace the `--topic '*'` ACL entry with specific topics or a prefixed pattern via `--topic 'astronomy-*'`.
+* ACL/user initialization now happens via a one-shot compose service `kafka-acl-init` (depends on broker health). Re-run with `docker compose run --rm kafka-acl-init` if you need to refresh credentials without recreating broker.
 
 ## Future: TLS / mTLS
 

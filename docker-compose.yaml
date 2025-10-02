@@ -75,7 +75,6 @@ services:
       KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
     volumes:
       - kafka_data:/var/lib/kafka/data
-      - ./scripts/init_kafka_acls.sh:/docker-entrypoint-init.d/init_kafka_acls.sh:ro
       - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-cluster.sh", "cluster-id", "--bootstrap-server", "broker:9092"]
@@ -88,6 +87,21 @@ services:
       - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.rule=HostSNI(`*`)
       - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.entrypoints=kafka
       # - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.tls.passthrough=true
+  kafka-acl-init:
+    image: apache/kafka:latest
+    hostname: kafka-acl-init
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks:
+      - boom
+    environment:
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?Set KAFKA_ADMIN_PASSWORD}
+      KAFKA_READONLY_PASSWORD: ${KAFKA_READONLY_PASSWORD:?Set KAFKA_READONLY_PASSWORD}
+    volumes:
+      - ./scripts/init_kafka_acls.sh:/init_kafka_acls.sh:ro
+    entrypoint: ["bash","/init_kafka_acls.sh"]
+    restart: "no"
   api:
     image: boom-astro/boom:latest
     hostname: api

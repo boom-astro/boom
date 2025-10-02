@@ -14,7 +14,7 @@ set -euo pipefail
 #
 # NOTE: Broker requires no explicit JAAS file for SCRAM; credentials are stored in metadata log.
 
-BROKER="broker:9092"  # Use internal PLAINTEXT for administrative operations
+BROKER="broker:29092"  # Use internal PLAINTEXT inter-broker listener for administrative operations
 ADMIN_USER="admin"
 ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
@@ -26,12 +26,15 @@ kafka_log() { echo "[init-kafka] $*"; }
 
 wait_for_kafka() {
   local -r start=$(date +%s)
+  kafka_log "Waiting for broker API on $BROKER"
   until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "$BROKER" >/dev/null 2>&1; do
-    if (( $(date +%s) - start > 60 )); then
-      k kafka_log "Kafka did not become ready in time"; exit 1
+    if (( $(date +%s) - start > 120 )); then
+      kafka_log "Broker did not become ready in time"; exit 1
     fi
-    sleep 2
+    sleep 3
   done
+  # Additional small delay to allow controller metadata log operations (esp first boot)
+  sleep 5
 }
 
 wait_for_kafka
@@ -45,17 +48,24 @@ user_exists() {
 create_or_update_user() {
   local user=$1
   local pwd=$2
-  if user_exists "$user"; then
-    kafka_log "User $user exists; ensuring SCRAM credentials updated"
-    /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" \
-      --alter --entity-type users --entity-name "$user" \
-      --add-config "SCRAM-SHA-512=[password=$pwd]" >/dev/null
-  else
-    kafka_log "Creating user $user"
-    /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" \
-      --alter --entity-type users --entity-name "$user" \
-      --add-config "SCRAM-SHA-512=[password=$pwd]" >/dev/null
-  fi
+  local attempt=0
+  local max_attempts=5
+  while (( attempt < max_attempts )); do
+    if user_exists "$user"; then
+      kafka_log "User $user exists; updating SCRAM credentials (attempt $((attempt+1)))"
+    else
+      kafka_log "Creating user $user (attempt $((attempt+1)))"
+    fi
+    if /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" \
+        --alter --entity-type users --entity-name "$user" \
+        --add-config "SCRAM-SHA-512=[password=$pwd]" >/dev/null 2>&1; then
+        return 0
+    fi
+    attempt=$((attempt+1))
+    sleep 4
+  done
+  kafka_log "Failed to create/update user $user after $max_attempts attempts" >&2
+  exit 1
 }
 
 create_or_update_user "$ADMIN_USER" "$ADMIN_PWD"
