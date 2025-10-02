@@ -50,6 +50,8 @@ Mechanism: `SASL_PLAINTEXT` with mechanism `SCRAM-SHA-512`.
 
 Users created by init script `scripts/init_kafka_acls.sh`:
 
+No broker-side JAAS configuration file is required for SCRAM: credentials are stored in the metadata log. The init script directly manages users via Kafka CLI.
+
 * `admin` – password from env `KAFKA_ADMIN_PASSWORD`; declared in `KAFKA_SUPER_USERS` giving full access.
 * `readonly` – password from env `KAFKA_READONLY_PASSWORD`; ACL-limited to describing cluster and reading topics / committing offsets.
 

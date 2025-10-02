@@ -12,7 +12,7 @@ set -euo pipefail
 #   KAFKA_READONLY_PASSWORD
 # Uses 'admin' and 'readonly' usernames.
 #
-# NOTE: This uses the Kafka CLI tools which require JAAS config for user creation. We inject a temporary JAAS file.
+# NOTE: Broker requires no explicit JAAS file for SCRAM; credentials are stored in metadata log.
 
 BROKER="broker:9092"  # Use internal PLAINTEXT for administrative operations
 ADMIN_USER="admin"
@@ -20,18 +20,7 @@ ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
 READ_PWD="${KAFKA_READONLY_PASSWORD}"
 
-JAAS_FILE="/tmp/kafka_admin_jaas.conf"
-
-# Create JAAS config enabling user management via SCRAM
-cat > "$JAAS_FILE" <<EOF
-KafkaServer {
- org.apache.kafka.common.security.scram.ScramLoginModule required
- username=\"$ADMIN_USER\"
- password=\"$ADMIN_PWD\";
-};
-EOF
-
-export KAFKA_OPTS="-Djava.security.auth.login.config=$JAAS_FILE"
+# KAFKA_OPTS with JAAS is set at container level (docker-compose).
 
 kafka_log() { echo "[init-kafka] $*"; }
 
