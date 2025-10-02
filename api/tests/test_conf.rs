@@ -1,16 +1,14 @@
 #[cfg(test)]
 mod tests {
     use boom_api::conf::{AppConfig, load_config, load_dotenv};
-    use std::panic;
 
     #[test]
+    #[should_panic(expected = "Token expiration must be greater than 0")]
     fn test_token_expiration_validation_fails_with_zero() {
         load_dotenv();
 
-        // This should panic because token_expiration is 0
-        let result = panic::catch_unwind(|| {
-            // Create a temporary config file with token_expiration: 0
-            let config_content = r#"
+        // Create a temporary config file with token_expiration: 0
+        let config_content = r#"
 database:
   host: localhost
   port: 27017
@@ -28,26 +26,11 @@ api:
     admin_password: test123
     admin_email: admin@test.com
 "#;
-            let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
-            std::fs::write(temp_file.path(), config_content).unwrap();
+        let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+        std::fs::write(temp_file.path(), config_content).unwrap();
 
-            // Try to load the config - this should panic due to validation
-            load_config(Some(temp_file.path().to_str().unwrap()));
-        });
-
-        // The function should have panicked
-        assert!(result.is_err());
-
-        // Check that the panic message contains our validation error
-        if let Err(panic_info) = result {
-            let panic_message = panic_info
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| panic_info.downcast_ref::<&str>().copied())
-                .unwrap_or("");
-
-            assert!(panic_message.contains("Token expiration must be greater than 0"));
-        }
+        // Trigger the panic (the #[should_panic] attribute will assert on message substring)
+        load_config(Some(temp_file.path().to_str().unwrap()));
     }
 
     #[test]
