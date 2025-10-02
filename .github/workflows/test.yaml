@@ -33,6 +33,39 @@ jobs:
       run: cp .env.example .env
     - name: Start services
       run: docker compose up --build -d
+    - name: Wait for Kafka ACL initialization
+      run: |
+        echo "Waiting for kafka-acl-init container to finish..."
+        # Wait until container exists
+        for i in {1..30}; do
+          if docker compose ps kafka-acl-init --format json 2>/dev/null | grep -q '"Name"'; then
+            break
+          fi
+          sleep 2
+        done
+        # Now poll for it to reach exited status (script completes) while broker stays healthy
+        ATTEMPTS=0
+        while true; do
+          STATE=$(docker compose ps --format json kafka-acl-init | jq -r '.[0].State' 2>/dev/null || echo unknown)
+          EXIT_CODE=$(docker compose ps --format json kafka-acl-init | jq -r '.[0].ExitCode' 2>/dev/null || echo '')
+          if [ "$STATE" = "exited" ]; then
+            echo "kafka-acl-init exited with code ${EXIT_CODE}"
+            if [ "$EXIT_CODE" != "0" ]; then
+              echo "kafka-acl-init failed" >&2
+              docker compose logs kafka-acl-init || true
+              exit 1
+            fi
+            break
+          fi
+          if [ $ATTEMPTS -gt 60 ]; then
+            echo "Timed out waiting for kafka-acl-init to exit" >&2
+            docker compose logs kafka-acl-init || true
+            exit 1
+          fi
+            ATTEMPTS=$((ATTEMPTS+1))
+            sleep 2
+        done
+        echo "kafka-acl-init completed successfully."
     - name: Test BOOM
       run: cargo test --release
     - name: Test BOOM API
