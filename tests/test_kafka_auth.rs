@@ -4,7 +4,6 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaError;
 use rdkafka::metadata::Metadata;
-use std::thread::sleep;
 use std::time::Duration;
 
 fn get_password() -> String {
@@ -17,30 +16,13 @@ fn fetch_metadata(cfg: &ClientConfig) -> Result<Metadata, KafkaError> {
     let consumer: BaseConsumer = cfg
         .create()
         .map_err(|e| KafkaError::ClientCreation(e.to_string()))?;
-    consumer.fetch_metadata(None, Duration::from_secs(5))
-}
-
-fn fetch_metadata_with_retries(
-    cfg: &ClientConfig,
-    attempts: u32,
-    delay: Duration,
-) -> Result<Metadata, KafkaError> {
-    let mut last_err: Option<KafkaError> = None;
-    for _ in 0..attempts {
-        match fetch_metadata(cfg) {
-            Ok(m) => return Ok(m),
-            Err(e) => {
-                last_err = Some(e);
-                sleep(delay);
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| KafkaError::ClientCreation("Unknown error".into())))
+    consumer.fetch_metadata(None, Duration::from_secs(1))
 }
 
 fn make_base_cfg() -> ClientConfig {
     let mut c = ClientConfig::new();
-    c.set("bootstrap.servers", "localhost:9093".to_string());
+    c.set("group.id", "test-group");
+    c.set("bootstrap.servers", "localhost:9093");
     c.set("enable.partition.eof", "false");
     c
 }
@@ -49,6 +31,18 @@ fn make_base_cfg() -> ClientConfig {
 fn test_kafka_auth_enforcement() {
     let user = "readonly".to_string();
     let pass = get_password();
+
+    println!("Using Kafka user '{user}' with password '{pass}'");
+
+    // Ensure we can connect with no auth on localhost:9092 to ensure the
+    // broker is up before testing auth on 9093
+    let mut cfg = make_base_cfg();
+    cfg.set("bootstrap.servers", "localhost:9092");
+    let meta = fetch_metadata(&cfg).expect("Expected metadata fetch on PLAINTEXT to succeed");
+    assert!(
+        meta.topics().len() > 0,
+        "Expected at least one topic in metadata"
+    );
 
     // 1. No auth should fail
     let cfg_no_auth = make_base_cfg();
@@ -78,8 +72,7 @@ fn test_kafka_auth_enforcement() {
         .set("sasl.mechanism", "SCRAM-SHA-512")
         .set("sasl.username", &user)
         .set("sasl.password", &pass);
-    let good_result = fetch_metadata_with_retries(&cfg_good, 5, Duration::from_millis(500))
-        .expect("Expected successful metadata fetch with correct credentials");
+    let good_result = fetch_metadata(&cfg_good).unwrap();
 
     // Basic sanity: there should be at least one topic (internal topics count)
     assert!(
