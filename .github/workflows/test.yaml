@@ -35,36 +35,25 @@ jobs:
       run: docker compose up --build -d
     - name: Wait for Kafka ACL initialization
       run: |
-        echo "Waiting for kafka-acl-init container to finish..."
-        # Wait until container exists
-        for i in {1..30}; do
-          if docker compose ps kafka-acl-init --format json 2>/dev/null | grep -q '"Name"'; then
+        echo "Waiting for kafka-acl-init container to start..."
+        for i in {1..60}; do
+          if docker compose ps --status running kafka-acl-init >/dev/null 2>&1 || docker compose ps kafka-acl-init 2>&1 | grep -q kafka-acl-init; then
             break
           fi
           sleep 2
         done
-        # Now poll for it to reach exited status (script completes) while broker stays healthy
-        ATTEMPTS=0
-        while true; do
-          STATE=$(docker compose ps --format json kafka-acl-init | jq -r '.[0].State' 2>/dev/null || echo unknown)
-          EXIT_CODE=$(docker compose ps --format json kafka-acl-init | jq -r '.[0].ExitCode' 2>/dev/null || echo '')
-          if [ "$STATE" = "exited" ]; then
-            echo "kafka-acl-init exited with code ${EXIT_CODE}"
-            if [ "$EXIT_CODE" != "0" ]; then
-              echo "kafka-acl-init failed" >&2
-              docker compose logs kafka-acl-init || true
-              exit 1
-            fi
-            break
-          fi
-          if [ $ATTEMPTS -gt 60 ]; then
-            echo "Timed out waiting for kafka-acl-init to exit" >&2
-            docker compose logs kafka-acl-init || true
-            exit 1
-          fi
-            ATTEMPTS=$((ATTEMPTS+1))
-            sleep 2
-        done
+        CID=$(docker compose ps -q kafka-acl-init)
+        if [ -z "$CID" ]; then
+          echo "kafka-acl-init container not found" >&2
+          exit 1
+        fi
+        echo "Container ID: $CID. Waiting for it to exit..."
+        EXIT_CODE=$(docker wait "$CID")
+        echo "kafka-acl-init exited with code $EXIT_CODE"
+        if [ "$EXIT_CODE" != "0" ]; then
+          docker compose logs kafka-acl-init || true
+          exit 1
+        fi
         echo "kafka-acl-init completed successfully."
     - name: Test BOOM
       run: cargo test --release
