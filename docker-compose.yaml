@@ -69,7 +69,11 @@ services:
       KAFKA_LISTENER_NAME_EXTERNAL_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
       KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
       KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: 'true'
-      KAFKA_SUPER_USERS: User:admin
+      # Include ANONYMOUS because inter-broker + controller channels use PLAINTEXT (no SASL),
+      # so the principal resolves to User:ANONYMOUS. Without granting it super-user rights,
+      # controller metadata or internal admin ops can be unauthorized and cause the process to exit.
+      # (Alternative: secure internal listener with SASL and drop ANONYMOUS.)
+      KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?Set KAFKA_ADMIN_PASSWORD}
       KAFKA_READONLY_PASSWORD: ${KAFKA_READONLY_PASSWORD:?Set KAFKA_READONLY_PASSWORD}
       KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
