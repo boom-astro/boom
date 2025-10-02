@@ -57,6 +57,7 @@ services:
   broker:
     ports:
       - "9092:9092"
+      - "9093:9093"
   api:
     env_file:
       - .env

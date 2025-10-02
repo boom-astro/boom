@@ -51,8 +51,8 @@ services:
       - traefik-public
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -60,16 +60,51 @@ services:
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_NODE_ID: 1
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
-      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 15
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_EXTERNAL_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: 'true'
+      # Include ANONYMOUS because inter-broker + controller channels use PLAINTEXT (no SASL),
+      # so the principal resolves to User:ANONYMOUS. Without granting it super-user rights,
+      # controller metadata or internal admin ops can be unauthorized and cause the process to exit.
+      # (Alternative: secure internal listener with SASL and drop ANONYMOUS.)
+      KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
     volumes:
       - kafka_data:/var/lib/kafka/data
+      - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
     healthcheck:
-      test: /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:9092
+      test: ["CMD", "/opt/kafka/bin/kafka-cluster.sh", "cluster-id", "--bootstrap-server", "broker:29092"]
       interval: 10s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      - traefik.tcp.services.${STACK_NAME?Variable not set}-kafka.loadbalancer.server.port=9093
+      - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.rule=HostSNI(`*`)
+      - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.entrypoints=kafka
+      # Uncomment to enable TLS passthrough (requires EXTERNAL listener to use SSL)
+      # - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.tls.passthrough=true
+  kafka-acl-init:
+    image: apache/kafka:latest
+    hostname: kafka-acl-init
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks:
+      - boom
+    environment:
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?Set KAFKA_ADMIN_PASSWORD}
+      KAFKA_READONLY_PASSWORD: ${KAFKA_READONLY_PASSWORD:?Set KAFKA_READONLY_PASSWORD}
+    volumes:
+      - ./scripts/init_kafka_acls.sh:/init_kafka_acls.sh:ro
+    entrypoint: ["bash","/init_kafka_acls.sh"]
+    restart: "no"
   api:
     image: boom-astro/boom:latest
     hostname: api
