@@ -7,6 +7,7 @@ mod tests {
     use boom_api::conf::AppConfig;
     use boom_api::db::get_default_db;
     use boom_api::routes;
+    use boom_api::test_utils::read_json_response;
     use mongodb::{Database, bson::doc};
 
     /// Test POST /auth
@@ -40,19 +41,14 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8_lossy(&body);
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
-
-        let token = resp["access_token"]
-            .as_str()
-            .expect("token should be a string");
+        let resp = read_json_response(resp).await;
 
         // there should also be an access_type field
         assert!(resp.get("token_type").is_some());
         assert_eq!(resp["token_type"], "Bearer");
+        let token = resp["access_token"]
+            .as_str()
+            .expect("token should be a string");
 
         if auth_app_data.token_expiration > 0 {
             assert!(resp.get("expires_in").is_some());

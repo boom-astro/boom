@@ -38,6 +38,7 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 const MAX_RETRIES_PRODUCER: usize = 6;
+const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug)]
 struct Metadata(HashMap<String, Vec<i32>>);
@@ -58,7 +59,7 @@ impl Metadata {
 // types, which can then can be returned to the caller.
 #[instrument(skip_all, err)]
 fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
-    let cluster_metadata = client.fetch_metadata(None, std::time::Duration::from_secs(10))?;
+    let cluster_metadata = client.fetch_metadata(None, KAFKA_TIMEOUT_SECS)?;
     let inner = cluster_metadata
         .topics()
         .iter()
@@ -158,41 +159,45 @@ pub async fn initialize_topic(
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let nb_partitions =
-        match check_kafka_topic_partitions(bootstrap_servers, topic_name, "test", None, None)? {
-            Some(nb_partitions) => {
-                if nb_partitions != expected_nb_partitions {
-                    warn!(
-                        "Topic {} exists but has {} partitions instead of expected {}",
-                        topic_name, nb_partitions, expected_nb_partitions
-                    );
-                }
-                nb_partitions
-            }
-            None => {
-                let opts =
-                    AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
-                info!(
-                    "Creating topic {} with {} partitions...",
-                    topic_name, expected_nb_partitions
+    let nb_partitions = match check_kafka_topic_partitions(
+        bootstrap_servers,
+        topic_name,
+        "producer-topic-check",
+        None,
+        None,
+    )? {
+        Some(nb_partitions) => {
+            if nb_partitions != expected_nb_partitions {
+                warn!(
+                    "Topic {} exists but has {} partitions instead of expected {}",
+                    topic_name, nb_partitions, expected_nb_partitions
                 );
-                admin_client
-                    .create_topics(
-                        &[NewTopic::new(
-                            topic_name,
-                            expected_nb_partitions as i32,
-                            TopicReplication::Fixed(1),
-                        )],
-                        &opts,
-                    )
-                    .await?;
-                info!(
-                    "Topic {} created successfully with {} partitions",
-                    topic_name, expected_nb_partitions
-                );
-                expected_nb_partitions
             }
-        };
+            nb_partitions
+        }
+        None => {
+            let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
+            info!(
+                "Creating topic {} with {} partitions...",
+                topic_name, expected_nb_partitions
+            );
+            admin_client
+                .create_topics(
+                    &[NewTopic::new(
+                        topic_name,
+                        expected_nb_partitions as i32,
+                        TopicReplication::Fixed(1),
+                    )],
+                    &opts,
+                )
+                .await?;
+            info!(
+                "Topic {} created successfully with {} partitions",
+                topic_name, expected_nb_partitions
+            );
+            expected_nb_partitions
+        }
+    };
     Ok(nb_partitions)
 }
 
@@ -202,7 +207,7 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let opts = AdminOptions::new().operation_timeout(Some(std::time::Duration::from_secs(5)));
+    let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
     Ok(())
 }
@@ -223,11 +228,7 @@ pub fn count_messages(
                 .iter()
                 .try_fold(0u32, |total_messages, &partition_id| {
                     consumer
-                        .fetch_watermarks(
-                            topic_name,
-                            partition_id,
-                            std::time::Duration::from_secs(10),
-                        )
+                        .fetch_watermarks(topic_name, partition_id, KAFKA_TIMEOUT_SECS)
                         .map(|(low, high)| {
                             let count = high - low;
                             debug!(
@@ -386,9 +387,7 @@ pub trait AlertProducer {
                 let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic_name)
                     .payload(&payload)
                     .timestamp(chrono::Utc::now().timestamp_millis());
-                let status = producer
-                    .send(record, std::time::Duration::from_secs(5))
-                    .await;
+                let status = producer.send(record, KAFKA_TIMEOUT_SECS).await;
                 match status {
                     Ok(_) => {
                         break;
@@ -422,7 +421,7 @@ pub trait AlertProducer {
         );
 
         // close producer
-        producer.flush(std::time::Duration::from_secs(1)).unwrap();
+        producer.flush(KAFKA_TIMEOUT_SECS)?;
 
         Ok(Some(total_pushed as i64))
     }
@@ -589,7 +588,7 @@ pub async fn consume_partitions(
             .inspect_err(as_error!("failed to add partition"))?
     }
     let tpl = consumer
-        .offsets_for_times(timestamps, std::time::Duration::from_secs(5))
+        .offsets_for_times(timestamps, KAFKA_TIMEOUT_SECS)
         .inspect_err(as_error!("failed to fetch offsets"))?;
 
     consumer
