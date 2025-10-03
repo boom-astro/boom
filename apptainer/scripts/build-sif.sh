@@ -3,7 +3,7 @@
 # Script to build SIF files using Apptainer.
 # $1 = service to build (optional):
 #     - "all" (default): builds all services
-#     - "test"         : builds all services except monitoring services
+#     - "benchmark"    : builds all services except monitoring services
 #     - "mongo"        : builds MongoDB service
 #     - "valkey"       : builds Valkey service
 #     - "kafka"        : builds Kafka service
@@ -17,8 +17,8 @@ mkdir -p apptainer/sif
 start_service() {
     local service="$1"
     local target="$2"
-    # Start a service if target is empty, "all", or matches the service name
-    if [[ -z "$target" || "$target" = "all" || "$target" = "$service" ]]; then
+    # Start a service if target is empty, "all", "benchmark" or matches the service name
+    if [[ -z "$target" || "$target" = "all" || "$target" = "benchmark" || "$target" = "$service" ]]; then
         return 0
     fi
     return 1
@@ -40,7 +40,7 @@ if start_service "boom" "$1"; then
   apptainer build apptainer/sif/boom.sif apptainer/def/boom.def
 fi
 
-if [ "test" != "$1" ]; then
+if [ "$1" != "benchmark" ]; then
   if start_service "prometheus" "$1"; then
     apptainer build apptainer/sif/prometheus.sif apptainer/def/prometheus.def
   fi
