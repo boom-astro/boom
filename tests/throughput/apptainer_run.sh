@@ -2,7 +2,7 @@
 
 # Script to benchmark BOOM throughput using Apptainer containers.
 # $1 = boom directory
-# $2 = log directory name
+# $2 = log directory (optional; default: tests/apptainer/logs/boom)
 
 BOOM_DIR="$1"
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
@@ -10,7 +10,7 @@ DATA_DIR="$BOOM_DIR/data"
 TESTS_DIR="$BOOM_DIR/tests"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
-LOGS_DIR="$TESTS_DIR/apptainer/${2:-logs/boom}"
+LOGS_DIR="$BOOM_DIR/${2:-tests/apptainer/logs/boom}"
 PERSISTENT_DIR="$TESTS_DIR/apptainer/persistent"
 CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
 

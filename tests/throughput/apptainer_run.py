@@ -66,6 +66,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 boom_dir = os.path.abspath(os.path.join(script_dir, "../../"))
 
 logs_dir = os.path.join(
+    "tests",
+    "apptainer",
     "logs",
     "boom-"
     + (
@@ -79,21 +81,15 @@ logs_dir = os.path.join(
 subprocess.run(["bash", "tests/throughput/apptainer_run.sh", boom_dir, logs_dir], check=True)
 
 # Now analyze the logs and raise an error if we're too slow
-boom_config = (
-    f"na={args.n_alert_workers}-"
-    f"ne={args.n_enrichment_workers}-"
-    f"nf={args.n_filter_workers}"
-)
-boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
-boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
+
 # To calculate BOOM wall time, take the first timestamp from the consumer log
 # as the start and the last timestamp of the scheduler as the end
-with open(boom_consumer_log_fpath) as f:
+with open(f"{logs_dir}/consumer.log") as f:
     line = f.readline()
     t1_b = pd.to_datetime(
         line.split()[0].replace("\x1b[2m", "").replace("\x1b[0m", "")
     )
-with open(boom_scheduler_log_fpath) as f:
+with open(f"{logs_dir}/scheduler.log") as f:
     lines = f.readlines()
     line = lines[-3]
     t2_b = pd.to_datetime(
