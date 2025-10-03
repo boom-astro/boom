@@ -64,11 +64,11 @@ This is especially useful for running BOOM on HPC systems where Docker is not av
 3. Launch `Valkey`, `MongoDB`, `Kafka`, `Otel Collector`, `Prometheus` and `boom` using Apptainer:
     First, build the SIF files. You can do this by running:
     ```bash
-    ./apptainer/scripts/build-sif.sh
+    ./apptainer.sh build
     ```
     Then you can launch the services with:
     ```bash
-    ./apptainer.sh compose
+    ./apptainer.sh start
     ```
     *To check if the instances are running and healthy, run `./apptainer.sh health`.*
 4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
@@ -253,7 +253,7 @@ For Docker (docker Image):
 ```
 For Apptainer (SIF file):
 ```bash
-  ./apptainer/scripts/build-sif.sh test
+  ./apptainer.sh build benchmark
 ```
 
 ### Download Data
