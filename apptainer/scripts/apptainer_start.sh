@@ -158,8 +158,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
       echo -e "${RED}Boom consumer already running.${END}"
     else
-      mkdir -p "$LOGS_DIR/$survey"
-      apptainer exec --env-file .env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/$survey/consumer.log" 2>&1 &
+      apptainer exec --env-file .env instance://boom /app/kafka_consumer "${ARGS[@]}" > "$LOGS_DIR/${survey}_consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
   fi
@@ -170,8 +169,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
       echo -e "${RED}Boom scheduler already running.${END}"
     else
-      mkdir -p "$LOGS_DIR/$survey"
-      apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_DIR/$survey/scheduler.log" 2>&1 &
+      apptainer exec instance://boom /app/scheduler "${ARGS[@]}" > "$LOGS_DIR/${survey}_scheduler.log" 2>&1 &
       echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
     fi
   fi
