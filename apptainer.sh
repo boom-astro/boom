@@ -7,6 +7,9 @@ BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom di
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
 
 BLUE="\e[0;34m"
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
 END="\e[0m"
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
@@ -46,12 +49,29 @@ fi
 # 2. Start services
 # -----------------------------
 if [ "$1" == "start" ]; then
+  if [ -z "$2" ] || { { [ "$2" == "all" ] || [ "$2" == "boom" ] || [ "$2" == "consumer" ] || [ "$2" == "scheduler" ]; } && [ -z "$3" ]; }; then
+    echo -e "${RED}Error: Missing required arguments.${END}"
+    echo -e "Usage: ${BLUE}$0 start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
+    echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | broker | valkey | prometheus | otel | listener | kuma | all${END}"
+    echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
+    echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
+    echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
+    echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
+    exit 1
+  fi
+
   ARGS=("$BOOM_DIR")
-  [ -n "$2" ] && ARGS+=("$2") # $2=service to start
-  [ -n "$3" ] && ARGS+=("$3") # $3=survey name
-  [ -n "$5" ] && ARGS+=("$4") # $4=date
-  [ -n "$6" ] && ARGS+=("$5") # $5=program ID
-  [ -n "$7" ] && ARGS+=("$6") # $6=scheduler config path
+  # Check if $2 is a survey name
+  if [[ "$2" == "lsst" || "$2" == "ztf" || "$2" == "decam" ]]; then
+    ARGS+=("all") # service to start
+  else
+    [ -n "$2" ] && ARGS+=("$2") # service to start
+    shift
+  fi
+  [ -n "$2" ] && ARGS+=("$2") # survey name
+  [ -n "$3" ] && ARGS+=("$3") # date
+  [ -n "$4" ] && ARGS+=("$4") # program ID
+  [ -n "$5" ] && ARGS+=("$5") # scheduler config path
   # See apptainer_start.sh for the full explanation of each argument
   "$SCRIPTS_DIR/apptainer_start.sh" "${ARGS[@]}"
   exit 0
@@ -60,21 +80,16 @@ fi
 # -----------------------------
 # 3. Stop services
 # -----------------------------
-# Arguments for 'stop':
-# $2 = service to stop:
-#      - boom        : stop the Boom instance
-#      - consumer    : stop the consumer process
-#      - scheduler   : stop the scheduler process
-#      - mongo       : stop the MongoDB instance
-#      - broker      : stop the kafka broker instance
-#      - valkey      : stop the Valkey instance
-#      - prometheus  : stop the Prometheus instance
-#      - otel        : stop the OpenTelemetry Collector process
-#      - listener    : stop the Boom healthcheck listener process
-#      - kuma        : stop the Kuma service instance
-#      If not specified or 'all', all services will be stopped.
 if [ "$1" == "stop" ]; then
-  target="$2" # $2=service to stop (all if empty or "all")
+  target="$2"
+  if [ -n "$target" ] && [ "$target" != "all" ] && [ "$target" != "boom" ] && [ "$target" != "consumer" ] && [ "$target" != "scheduler" ] \
+    && [ "$target" != "mongo" ] && [ "$target" != "broker" ] && [ "$target" != "valkey" ] && [ "$target" != "prometheus" ] \
+    && [ "$target" != "otel" ] && [ "$target" != "listener" ] && [ "$target" != "kuma" ]; then
+    echo -e "${RED}Error: Invalid service name '$target'.${END}"
+    echo -e "Usage: ${BLUE}$0 stop [service|all|'empty']${END} ${YELLOW}('empty' will default to all)${END}"
+    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom | consumer | scheduler | mongo | broker | valkey | prometheus | otel | listener | kuma ${END}"
+    exit 1
+  fi
 
   if stop_service "kuma" "$target"; then
     apptainer instance stop kuma
