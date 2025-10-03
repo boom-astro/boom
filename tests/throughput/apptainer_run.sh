@@ -2,7 +2,7 @@
 
 # Script to benchmark BOOM throughput using Apptainer containers.
 # $1 = boom directory
-# $2 = log directory name (e.g., benchmark_20240401)
+# $2 = log directory name
 
 BOOM_DIR="$1"
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
@@ -91,7 +91,7 @@ echo && echo "$(current_datetime) - Starting Producer"
 if pgrep -f "/app/kafka_producer" > /dev/null; then
   echo -e "${RED}Boom producer already running.${END}"
 else
-  apptainer exec \
+  apptainer exec --pwd /app \
     --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
     instance://boom /app/kafka_producer ztf 20250311 public \
     > "$LOGS_DIR/producer.log" 2>&1
@@ -105,7 +105,7 @@ echo && echo "$(current_datetime) - Starting Consumer"
 if pgrep -f "/app/kafka_consumer" > /dev/null; then
   echo -e "${RED}Boom consumer already running.${END}"
 else
-  apptainer exec \
+  apptainer exec --pwd /app \
     instance://boom /app/kafka_consumer ztf 20250311 public \
     > "$LOGS_DIR/consumer.log" 2>&1 &
   echo -e "${GREEN}Boom consumer started for survey ztf${END}"
@@ -118,7 +118,7 @@ echo && echo "$(current_datetime) - Starting Scheduler"
 if pgrep -f "/app/scheduler" > /dev/null; then
   echo -e "${RED}Boom scheduler already running.${END}"
 else
-  apptainer exec \
+  apptainer exec --pwd /app \
     instance://boom /app/scheduler ztf \
     > "$LOGS_DIR/scheduler.log" 2>&1 &
   echo -e "${GREEN}Boom scheduler started for survey ztf${END}"
