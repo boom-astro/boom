@@ -35,10 +35,10 @@ config["workers"]["ZTF"]["alert"]["n_workers"] = args.n_alert_workers
 config["workers"]["ZTF"]["enrichment"]["n_workers"] = args.n_enrichment_workers
 config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
-config["database"]["host"] = "mongo"
-config["kafka"]["consumer"]["ZTF"] = "broker:29092"
-config["kafka"]["producer"] = "broker:29092"
-config["redis"]["host"] = "valkey"
+config["database"]["host"] = "localhost"
+config["kafka"]["consumer"]["ZTF"] = "localhost:29092"
+config["kafka"]["producer"] = "localhost:29092"
+config["redis"]["host"] = "localhost"
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
