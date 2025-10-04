@@ -95,32 +95,32 @@ impl CiderImagesModel {
             let age = (firstjd - lastjd) as f32;
 
             let nnondet = ncovhist - ndethist; 
-
+            // Normalized values based on images and metadata training model
             let alert_features = [
-                sgscore1,
-                sgscore2,
-                distpsnr1,
-                distpsnr2,
-                nmtchps,
-                sharpnr,
-                scorr,
+                (sgscore1-0.236)/0.266,
+                (sgscore2-0.401)/0.328,
+                (distpsnr1-3.151)/3.757,
+                (distpsnr2-9.269)/6.323,
+                (nmtchps-9.231)/8.089,
+                (sharpnr-0.253)/0.256,
+                (scorr-22.089)/16.757,
                 ra,
                 dec,
-                diffmaglim,
-                sky,
-                ndethist,
-                ncovhist,
-                sigmapsf,
-                chinr,
-                magpsf as f32,
-                nnondet,
-                classtar,
-                filter_id as f32,
-                days_since_peak,
-                days_to_peak,
-                age,
-                peakmag_so_far as f32,
-                maxmag_so_far as f32
+                (diffmaglim-20.17)/0.535,
+                (sky-0.0901)/2.58,
+                (ndethist-18.7)/27.83,
+                (ncovhist-1144.9)/1141.27,
+                (sigmapsf-0.996)/0.0448,
+                (chinr-3.257)/21.5,
+                (magpsf as f32 - 18.64)/0.936,
+                (nnondet-1126.0)/1140.0,
+                (classtar-0.95)/0.08,
+                (filter_id as f32 -1.62)/0.57,
+                (days_since_peak-359.59)/627.91,
+                (days_to_peak-90.93)/327.51,
+                (age-450.5)/734.29,
+                (peakmag_so_far as f32 -17.945)/0.896,
+                (maxmag_so_far as f32 -20.37)/0.6325
             ];
 
             features_batch.extend(alert_features);
