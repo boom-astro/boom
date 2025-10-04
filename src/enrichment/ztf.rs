@@ -1,4 +1,4 @@
-use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
+use crate::enrichment::models::{AcaiModel, BtsBotModel, CiderImagesModel, Model};
 use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
@@ -19,6 +19,7 @@ pub struct ZtfEnrichmentWorker {
     acai_o_model: AcaiModel,
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
+    ciderimage_model: CiderImagesModel
 }
 
 #[async_trait::async_trait]
@@ -104,6 +105,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // we load the btsbot model (different architecture, and input/output then ACAI)
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
+        let ciderimage_model = CiderImagesModel::new("data/models/cider_img_meta.onnx")?;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -118,6 +120,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_o_model,
             acai_b_model,
             btsbot_model,
+            ciderimage_model
         })
     }
 
@@ -167,6 +170,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let (properties, all_bands_properties, programid) =
                 self.get_alert_properties(&alerts[i]).await?;
 
+            // Copy the all band properties since it will be referenced twice
+
+            let copy_of_properties = all_bands_properties.clone();
             // Now, prepare inputs for ML models and run inference
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
             let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1])?;
@@ -180,7 +186,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let metadata_btsbot = self
                 .btsbot_model
                 .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
+
+            let metadata_cider = self
+                .ciderimage_model
+                .get_cider_metadata(&alerts[i..i + 1], &[copy_of_properties])?;
+            let triplet_cider = self.ciderimage_model.get_triplet_for_cider(&alerts[i..i + 1])?; 
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
+            let cider_img_scores = self.ciderimage_model.predict(&metadata_cider, &triplet_cider)?;
 
             let find_document = doc! {
                 "_id": candid
@@ -195,6 +207,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "classifications.acai_o": acai_o_scores[0],
                     "classifications.acai_b": acai_b_scores[0],
                     "classifications.btsbot": btsbot_scores[0],
+                    "classifications.cider_img": cider_img_scores,
                     // properties
                     "properties": properties,
                 }

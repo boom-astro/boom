@@ -16,6 +16,8 @@ pub enum ModelError {
     PrepareCutoutError(#[from] CutoutError),
     #[error("error converting predictions to vec")]
     ModelOutputToVecError,
+    #[error("error converting array to tensor")]
+    TensorConversionError,
 }
 
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
@@ -52,6 +54,23 @@ pub trait Model {
             {
                 let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j as usize]);
                 let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
+                slice.assign(&cutout_array);
+            }
+        }
+        Ok(triplets)
+    }
+
+    fn get_triplet_for_cider(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
+        let mut triplets = Array::zeros((alerts.len(), 3, 49, 49));
+        for i in 0..alerts.len() {
+            let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
+            for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
+                .iter()
+                .enumerate()
+            {
+                let mut slice = triplets.slice_mut(ndarray::s![i, j, .., ..]);
+                let full_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
+                let cutout_array = full_array.slice(ndarray::s![7..56, 7..56]).to_owned();
                 slice.assign(&cutout_array);
             }
         }
