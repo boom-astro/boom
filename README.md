@@ -258,8 +258,8 @@ For Apptainer (SIF file):
 
 ### Download Data
 ```bash
-  mkdir -p ./data/alerts/ztf/public/20250311
-  gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+  mkdir -p ./tests/data/alerts/ztf/public/20250311
+  gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./tests/data/alerts/kowalski.NED.json.gz
 ```
 
 ### Start Benchmark

@@ -6,7 +6,6 @@
 
 BOOM_DIR="$1"
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
-DATA_DIR="$BOOM_DIR/data"
 TESTS_DIR="$BOOM_DIR/tests"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
@@ -39,7 +38,7 @@ sleep 5
 
 echo "$(current_datetime) - Initializing MongoDB with test data"
 apptainer exec \
-    --bind "$DATA_DIR/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
+    --bind "$TESTS_DIR/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
     --bind "$TESTS_DIR/throughput/apptainer_mongo-init.sh:/mongo-init.sh" \
     --bind "$TESTS_DIR/throughput/cats150.filter.json:/cats150.filter.json" \
     --env DB_NAME=boom-benchmarking \
@@ -92,7 +91,6 @@ if pgrep -f "/app/kafka_producer" > /dev/null; then
   echo -e "${RED}Boom producer already running.${END}"
 else
   apptainer exec --pwd /app \
-    --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
     instance://boom /app/kafka_producer ztf 20250311 public \
     > "$LOGS_DIR/producer.log" 2>&1
   echo -e "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
