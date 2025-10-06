@@ -18,3 +18,4 @@ logs
 
 **/apptainer/sif
 **/apptainer/persistent
+*.gz
