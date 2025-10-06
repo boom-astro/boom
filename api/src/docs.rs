@@ -47,10 +47,11 @@ impl Modify for SecurityAddon {
         routes::filters::get_filters,
         routes::filters::get_filter,
         routes::filters::post_filter_version,
-        routes::queries::post_count_query,
-        routes::queries::post_estimated_count_query,
-        routes::queries::post_find_query,
-        routes::queries::post_cone_search_query,
+        routes::queries::count::post_count_query,
+        routes::queries::count::post_estimated_count_query,
+        routes::queries::find::post_find_query,
+        routes::queries::cone_search::post_cone_search_query,
+        routes::queries::pipeline::post_pipeline_query
     ),
     security(
         ("api_jwt_token" = [])
