@@ -9,7 +9,7 @@ volumes:
 
 services:
   mongo:
-    image: mongo:6.0
+    image: mongo:5.0
     hostname: mongo
     expose:
       - "27017"
@@ -26,7 +26,7 @@ services:
     volumes:
       - mongodb:/data/db
   mongo-init:
-    image: mongo:6.0
+    image: mongo:5.0
     depends_on:
       mongo:
         condition: service_healthy
