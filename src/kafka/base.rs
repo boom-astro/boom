@@ -38,7 +38,7 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 const MAX_RETRIES_PRODUCER: usize = 6;
-const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(15);
+const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug)]
 struct Metadata(HashMap<String, Vec<i32>>);
@@ -59,7 +59,10 @@ impl Metadata {
 // types, which can then can be returned to the caller.
 #[instrument(skip_all, err)]
 fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
+    println!("Fetching metadata from Kafka cluster...");
+    println!("This may take a few seconds...");
     let cluster_metadata = client.fetch_metadata(None, KAFKA_TIMEOUT_SECS)?;
+    println!("Fetched metadata from Kafka cluster.");
     let inner = cluster_metadata
         .topics()
         .iter()
@@ -92,12 +95,19 @@ pub fn check_kafka_topic_partitions(
         .set("bootstrap.servers", bootstrap_servers)
         .set("group.id", group_id);
 
+    println!("username: {:?}, password: {:?}", username, password);
+    println!(
+        "bootstrap_servers: {}, group_id: {}",
+        bootstrap_servers, group_id
+    );
+
     if let (Some(username), Some(password)) = (username, password) {
         client_config
             .set("security.protocol", "SASL_PLAINTEXT")
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
+        println!("set sasl config");
     } else {
         client_config.set("security.protocol", "PLAINTEXT");
     }
@@ -123,21 +133,22 @@ pub fn assign_partitions_to_consumers(
     password: Option<String>,
 ) -> Result<Vec<Vec<i32>>, ConsumerError> {
     // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
-    let nb_partitions = loop {
-        if let Some(nb_partitions) = check_kafka_topic_partitions(
-            &kafka_config.consumer,
-            &topic_name,
-            group_id,
-            username.clone(),
-            password.clone(),
-        )
-        .inspect_err(as_error!("failed to check existing topic partitions"))?
-        {
-            break nb_partitions;
-        }
-        info!("Topic {} does not exist yet, retrying...", &topic_name);
-        std::thread::sleep(core::time::Duration::from_secs(5));
-    };
+    // let nb_partitions = loop {
+    //     if let Some(nb_partitions) = check_kafka_topic_partitions(
+    //         &kafka_config.consumer,
+    //         &topic_name,
+    //         group_id,
+    //         username.clone(),
+    //         password.clone(),
+    //     )
+    //     .inspect_err(as_error!("failed to check existing topic partitions"))?
+    //     {
+    //         break nb_partitions;
+    //     }
+    //     info!("Topic {} does not exist yet, retrying...", &topic_name);
+    //     std::thread::sleep(core::time::Duration::from_secs(5));
+    // };
+    let nb_partitions = 45;
 
     let nb_consumers = nb_consumers.clone().min(nb_partitions);
 
@@ -571,6 +582,7 @@ pub async fn consume_partitions(
             .set("sasl.mechanisms", "SCRAM-SHA-512")
             .set("sasl.username", username)
             .set("sasl.password", password);
+        println!("set sasl config");
     } else {
         client_config.set("security.protocol", "PLAINTEXT");
     }
@@ -587,9 +599,17 @@ pub async fn consume_partitions(
             .set_offset(offset)
             .inspect_err(as_error!("failed to add partition"))?
     }
+    println!(
+        "Consumer {} assigned to topic {} partitions {:?} starting from timestamp {}",
+        id, topic, partitions, timestamp
+    );
     let tpl = consumer
         .offsets_for_times(timestamps, KAFKA_TIMEOUT_SECS)
         .inspect_err(as_error!("failed to fetch offsets"))?;
+    println!(
+        "Fetched offsets for topic {} partitions {:?}",
+        topic, partitions
+    );
 
     consumer
         .assign(&tpl)
