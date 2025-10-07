@@ -66,8 +66,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 boom_dir = os.path.abspath(os.path.join(script_dir, "../../"))
 
 logs_dir = os.path.join(
-    f"{boom_dir}/tests/apptainer",
-    "logs",
+    f"{boom_dir}/tests/apptainer/logs",
     "boom-"
     + (
         f"na={args.n_alert_workers}-"
