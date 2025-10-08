@@ -60,7 +60,10 @@ pub trait Model {
         Ok(triplets)
     }
 
-    fn get_triplet_for_cider(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
+    fn get_triplet_for_cider(
+        &self,
+        alerts: &[Document],
+    ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alerts.len(), 3, 49, 49));
         for i in 0..alerts.len() {
             let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
