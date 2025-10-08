@@ -213,7 +213,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "classifications.acai_o": acai_o_scores[0],
                     "classifications.acai_b": acai_b_scores[0],
                     "classifications.btsbot": btsbot_scores[0],
-                    "classifications.cider_img": cider_img_scores,
+                    "classifications.cider_img_nuclear": cider_img_scores[0],
+                    "classifications.cider_img_snI": cider_img_scores[1],
+                    "classifications.cider_img_snII": cider_img_scores[2],
+                    "classifications.cider_img_cataclysmic": cider_img_scores[3],
                     // properties
                     "properties": properties,
                 }
