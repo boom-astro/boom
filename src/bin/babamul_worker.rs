@@ -35,6 +35,7 @@ fn main() {
     let config = conf::load_config(config_path)?;
     let mut valkey_con = conf::build_redis(&config).await?;
 
+    // Some general parameters/constants
     let input_queue = "babamul";
     let batch_size = NonZero::new(1000).unwrap();
 
