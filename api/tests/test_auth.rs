@@ -3,18 +3,39 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_default_auth};
-    use boom_api::conf::AppConfig;
-    use boom_api::db::get_default_db;
+    use boom_api::auth::{auth_middleware, get_test_auth};
+    use boom_api::conf::{AppConfig, load_dotenv};
+    use boom_api::db::get_test_db;
     use boom_api::routes;
-    use boom_api::test_utils::read_json_response;
     use mongodb::{Database, bson::doc};
 
     /// Test POST /auth
     #[actix_rt::test]
     async fn test_post_auth() {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        load_dotenv();
+
+        // Clear users collection for clean test BEFORE setting up the database
+        let config = AppConfig::from_test_config();
+        let db_config = config.database;
+        let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
+            format!(
+                "mongodb://{}:{}@{}:{}",
+                db_config.username, db_config.password, db_config.host, db_config.port
+            )
+        });
+        let client = mongodb::Client::with_uri_str(uri)
+            .await
+            .expect("failed to connect");
+        let temp_db = client.database(&db_config.name);
+        temp_db
+            .collection::<mongodb::bson::Document>("users")
+            .drop()
+            .await
+            .ok(); // Ignore errors if collection doesn't exist
+
+        // Now set up the database, which will create the admin user
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -26,9 +47,9 @@ mod tests {
         // On initialization of the db connection, an admin user for the API
         // should be created if it does not exist yet, and updated if it does
         // but the password and/or email have changed.
-        let auth_config = AppConfig::default().auth;
-        let admin_username = auth_config.admin_username;
-        let admin_password = auth_config.admin_password;
+        let auth_config = AppConfig::from_test_config().api.auth;
+        let admin_username = auth_config.admin_username.clone();
+        let admin_password = auth_config.admin_password.clone();
 
         // Now try to authenticate with the admin user, to retrieve a JWT token
         let req = test::TestRequest::post()
@@ -40,8 +61,17 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let resp = read_json_response(resp).await;
+        let response_status = resp.status();
+        assert_eq!(response_status, StatusCode::OK);
+
+        let body = test::read_body(resp).await;
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        let resp: serde_json::Value =
+            serde_json::from_str(&body_str).expect("failed to parse JSON");
+
+        let _ = resp["access_token"]
+            .as_str()
+            .expect("token should be a string");
 
         // there should also be an access_type field
         assert!(resp.get("token_type").is_some());
@@ -93,9 +123,31 @@ mod tests {
     /// Test POST /auth
     #[actix_rt::test]
     async fn test_auth_middleware() {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
-        let auth_config = AppConfig::default().auth;
+        load_dotenv();
+
+        // Clear users collection for clean test BEFORE setting up the database
+        let config = AppConfig::from_test_config();
+        let db_config = config.database;
+        let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
+            format!(
+                "mongodb://{}:{}@{}:{}",
+                db_config.username, db_config.password, db_config.host, db_config.port
+            )
+        });
+        let client = mongodb::Client::with_uri_str(uri)
+            .await
+            .expect("failed to connect");
+        let temp_db = client.database(&db_config.name);
+        temp_db
+            .collection::<mongodb::bson::Document>("users")
+            .drop()
+            .await
+            .ok(); // Ignore errors if collection doesn't exist
+
+        // Now set up the database, which will create the admin user
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let auth_config = AppConfig::from_test_config().api.auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

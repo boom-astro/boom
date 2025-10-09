@@ -8,6 +8,13 @@ database:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+api:
+  auth:
+    secret_key: "1234"
+    token_expiration: 604800
+    admin_username: admin
+    admin_password: adminsecret
+    admin_email: admin@example.com
 redis:
   host: localhost
   port: 6379
@@ -93,7 +100,7 @@ crossmatch:
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      projection: 
+      projection:
         _id: 0
         ra: 1
         dec: 1
