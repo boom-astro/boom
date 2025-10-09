@@ -95,10 +95,10 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop kuma
   fi
   if stop_service "listener" "$target"; then
-    kill_process "boom-healthcheck-listener.py" boom healthcheck listener
+    kill_process "boom-healthcheck-listener.py" "boom healthcheck listener"
   fi
   if stop_service "otel" "$target"; then
-    kill_process "otel-collector" Otel collector
+    kill_process "/otelcol" "Otel collector"
   fi
   if stop_service "prometheus" "$target"; then
     apptainer instance stop prometheus

@@ -27,7 +27,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             status = check_process("/app/scheduler")
             self.respond(200 if status else 503,
                          f"scheduler {'is healthy' if status else 'unhealthy'}\n")
-        elif self.path == "/otel_collector_health":
+        elif self.path == "/otel_health":
             status = check_process("/otelcol")
             self.respond(200 if status else 503,
                          f"Otel collector {'is healthy' if status else 'unhealthy'}\n")

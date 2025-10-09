@@ -109,13 +109,14 @@ if start_service "otel" "$2"; then
   if pgrep -f "otelcol" > /dev/null; then
     echo "$(current_datetime) - Otel Collector already running"
   else
-    mkdir -p "$LOGS_DIR/otel-collector"
+    mkdir -p "$LOGS_DIR/otel"
     apptainer exec \
       --bind "$BOOM_DIR/config/apptainer-otel-collector-config.yaml:/etc/otelcol/config.yaml" \
-      --bind "$LOGS_DIR/otel-collector:/var/log/otel-collector" \
-      "$SIF_DIR/otel-collector.sif" /otelcol --config /etc/otelcol/config.yaml \
-      > "$LOGS_DIR/otel-collector/otel-collector.log" 2>&1 &
+      --bind "$LOGS_DIR/otel:/var/log/otel" \
+      "$SIF_DIR/otel.sif" /otelcol --config /etc/otelcol/config.yaml \
+      > "$LOGS_DIR/otel/otel.log" 2>&1 &
   fi
+  sleep 1
   "$SCRIPTS_DIR/process-healthcheck.sh" "otelcol" otel-collector
 fi
 
@@ -188,6 +189,6 @@ if start_service "kuma" "$2"; then
   apptainer instance start \
     --bind "$PERSISTENT_DIR/kuma:/app/data" \
     --bind "$LOGS_DIR/kuma:/app/logs" \
-    "$SIF_DIR/uptime-kuma.sif" kuma
+    "$SIF_DIR/kuma.sif" kuma
   "$SCRIPTS_DIR/kuma-healthcheck.sh"
 fi

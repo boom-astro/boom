@@ -17,39 +17,28 @@ mkdir -p apptainer/sif
 start_service() {
     local service="$1"
     local target="$2"
-    # Start a service if target is empty, "all", "benchmark" or matches the service name
-    if [[ -z "$target" || "$target" = "all" || "$target" = "benchmark" || "$target" = "$service" ]]; then
-        return 0
-    fi
-    return 1
+    # Return 0 if target is empty, "all", "benchmark" or matches the service name
+    [[ -z "$target" || "$target" = "all" || "$target" = "benchmark" || "$target" = "$service" ]]
 }
 
-if start_service "mongo" "$1"; then
-  apptainer build apptainer/sif/mongo.sif apptainer/def/mongo.def
-fi
+build() {
+    apptainer build --force apptainer/sif/"$1".sif "${2:-apptainer/def/$1.def}"
+}
 
-if start_service "valkey" "$1"; then
-  apptainer build apptainer/sif/valkey.sif apptainer/def/valkey.def
-fi
+declare -a services=("mongo" "valkey" "kafka" "boom")
+for service in "${services[@]}"; do
+  if start_service "$service" "$1"; then
+    build "$service"
+  fi
+done
 
-if start_service "kafka" "$1"; then
-  apptainer build apptainer/sif/kafka.sif apptainer/def/kafka.def
-fi
 
-if start_service "boom" "$1"; then
-  apptainer build apptainer/sif/boom.sif apptainer/def/boom.def
-fi
-
+declare -a monitoring_services=("prometheus" "otel docker://otel/opentelemetry-collector:0.131.1" "kuma")
 if [ "$1" != "benchmark" ]; then
-  if start_service "prometheus" "$1"; then
-    apptainer build apptainer/sif/prometheus.sif apptainer/def/prometheus.def
-  fi
-
-  if start_service "otel" "$1"; then
-    apptainer build apptainer/sif/otel-collector.sif docker://otel/opentelemetry-collector:0.131.1
-  fi
-
-  if start_service "kuma" "$1"; then
-    apptainer build apptainer/sif/uptime-kuma.sif apptainer/def/uptime-kuma.def
-  fi
+  for service in "${monitoring_services[@]}"; do
+    read -r name def <<< "$service" # split service if a def is provided
+    if start_service "$name" "$1"; then
+      build "$name" "$def"
+    fi
+  done
 fi
