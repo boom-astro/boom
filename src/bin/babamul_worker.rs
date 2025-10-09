@@ -2,6 +2,8 @@
 //! and if any alerts passed they are sent to Babamul-specific Kafka output
 //! streams
 
+use crate::conf;
+
 // Add instrumentation
 // UpDownCounter for the number of alert batches currently being processed by the enrichment workers.
 static ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
@@ -32,6 +34,7 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 fn main() {
     // Connect to Valkey
+    let config_path = "config.yaml";
     let config = conf::load_config(config_path)?;
     let mut valkey_con = conf::build_redis(&config).await?;
 
