@@ -251,6 +251,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         ACTIVE.add(-1, &active_attrs);
         BATCH_PROCESSED.add(1, attributes);
         ALERT_PROCESSED.add(candids.len() as u64, attributes);
+
+        // TODO: If Babamul is enabled, push enriched alerts to Babamul queue
     }
 
     Ok(())
