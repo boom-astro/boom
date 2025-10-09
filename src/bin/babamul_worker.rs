@@ -68,6 +68,7 @@ fn main() {
         }
 
         // Next, filter the alerts based on the criteria
+        // TODO: Move into enrichment worker
         let filtered_alerts: Vec<Alert> = alerts
             .into_iter()
             .filter(|alert| {
