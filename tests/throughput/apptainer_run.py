@@ -19,7 +19,7 @@ parser.add_argument(
 parser.add_argument(
     "--n-enrichment-workers",
     type=int,
-    default=6,
+    default=9,
     help="Number of machine learning workers to use for benchmarking.",
 )
 parser.add_argument(
