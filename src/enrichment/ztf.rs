@@ -85,7 +85,7 @@ pub struct ZtfEnrichmentWorker {
     acai_o_model: AcaiModel,
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
-    ciderimage_model: CiderImagesModel,
+    ciderimages_model: CiderImagesModel,
 }
 
 #[async_trait::async_trait]
@@ -110,7 +110,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // we load the btsbot model (different architecture, and input/output then ACAI)
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
-        let ciderimage_model = CiderImagesModel::new("data/models/cider_img_meta.onnx")?;
+        let ciderimages_model = CiderImagesModel::new("data/models/cider_img_meta.onnx")?;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -125,7 +125,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_o_model,
             acai_b_model,
             btsbot_model,
-            ciderimage_model,
+            ciderimages_model,
         })
     }
 
@@ -190,14 +190,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
 
             let metadata_cider = self
-                .ciderimage_model
-                .get_cider_metadata(&alerts[i..i + 1], &[copy_of_properties])?;
-            let triplet_cider = self
-                .ciderimage_model
-                .get_triplet_for_cider(&alerts[i..i + 1])?;
+                .ciderimages_model
+                .get_metadata(&alerts[i..i + 1], &[copy_of_properties])?;
+            let triplet_cider = self.ciderimages_model.get_triplet(&alerts[i..i + 1])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
             let cider_img_scores = self
-                .ciderimage_model
+                .ciderimages_model
                 .predict(&metadata_cider, &triplet_cider)?;
 
             let find_document = doc! {

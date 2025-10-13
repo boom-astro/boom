@@ -1,4 +1,5 @@
 use crate::enrichment::models::{load_model, Model, ModelError};
+use crate::utils::fits::{prepare_triplet, CutoutError};
 use mongodb::bson::Document;
 use ndarray::{Array, Array2, Axis, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
@@ -44,7 +45,7 @@ impl Model for CiderImagesModel {
 
 impl CiderImagesModel {
     #[instrument(skip_all, err)]
-    pub fn get_cider_metadata(
+    pub fn get_metadata(
         &self,
         alerts: &[Document],
         alert_properties: &[Document],
@@ -128,11 +129,9 @@ impl CiderImagesModel {
         let features_array = Array::from_shape_vec((alerts.len(), 24), features_batch)?;
         Ok(features_array)
     }
-}
 
-impl CiderImagesModel {
     #[instrument(skip_all)]
-    fn softmax(input: Array2<f32>) -> Array2<f32> {
+    pub fn softmax(input: Array2<f32>) -> Array2<f32> {
         let mut output = Array2::zeros(input.raw_dim());
 
         for (i, row) in input.axis_iter(Axis(0)).enumerate() {
@@ -147,5 +146,26 @@ impl CiderImagesModel {
             }
         }
         output
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn get_triplet(
+        &self,
+        alerts: &[Document],
+    ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
+        let mut triplets = Array::zeros((alerts.len(), 3, 49, 49));
+        for i in 0..alerts.len() {
+            let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
+            for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
+                .iter()
+                .enumerate()
+            {
+                let mut slice = triplets.slice_mut(ndarray::s![i, j, .., ..]);
+                let full_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
+                let cutout_array = full_array.slice(ndarray::s![7..56, 7..56]).to_owned();
+                slice.assign(&cutout_array);
+            }
+        }
+        Ok(triplets)
     }
 }
