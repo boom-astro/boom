@@ -216,6 +216,7 @@ pub struct Candidate {
     pub sharpnr: Option<f32>,
     pub sky: Option<f32>,
     pub fwhm: Option<f32>,
+    pub classtar: Option<f32>,
     pub mindtoedge: Option<f32>,
     pub seeratio: Option<f32>,
     pub aimage: Option<f32>,

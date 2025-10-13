@@ -49,11 +49,11 @@ pub struct DiaSource {
     pub detector: i32,
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "diaObjectId")]
-    #[serde(deserialize_with = "deserialize_objid_option")]
+    #[serde(deserialize_with = "deserialize_optional_id")]
     pub dia_object_id: Option<String>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
-    #[serde(deserialize_with = "deserialize_sso_objid_option")]
+    #[serde(deserialize_with = "deserialize_optional_id")]
     pub ss_object_id: Option<String>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
@@ -181,6 +181,7 @@ pub struct DiaSource {
     /// Filter band this source was observed with.
     pub band: Option<String>,
     /// Source well fit by a dipole.
+    #[serde(rename = "isDipole")]
     pub is_dipole: Option<bool>,
     /// General pixel flags failure; set if anything went wrong when setting pixels flags from this footprint's mask. This implies that some pixelFlags for this source may be incorrectly set to False.
     #[serde(rename = "pixelFlags")]
@@ -451,19 +452,20 @@ pub struct DiaObject {
     pub ndethist: i32,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct DiaNondetectionLimit {
-    #[serde(rename = "ccdVisitId")]
-    pub ccd_visit_id: i64,
-    #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jd: f64,
-    pub band: String,
-    #[serde(rename = "diaNoise")]
-    pub dia_noise: f32,
-}
+// TODO: uncomment once we have nondetections in the alerts again
+// #[serde_as]
+// #[skip_serializing_none]
+// #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+// pub struct DiaNondetectionLimit {
+//     #[serde(rename = "ccdVisitId")]
+//     pub ccd_visit_id: i64,
+//     #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
+//     #[serde(deserialize_with = "deserialize_mjd")]
+//     pub jd: f64,
+//     pub band: String,
+//     #[serde(rename = "diaNoise")]
+//     pub dia_noise: f32,
+// }
 
 #[serde_as]
 #[skip_serializing_none]
@@ -600,20 +602,11 @@ where
     Ok(objid.to_string())
 }
 
-fn deserialize_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
-    Ok(objid.map(|i| i.to_string()))
-}
-
-fn deserialize_sso_objid_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let objid: Option<i64> = <Option<i64> as Deserialize>::deserialize(deserializer)?;
-    match objid {
+    match <Option<i64> as Deserialize>::deserialize(deserializer)? {
         Some(0) | None => Ok(None),
         Some(i) => Ok(Some(i.to_string())),
     }
