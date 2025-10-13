@@ -10,6 +10,7 @@ edition = "2021"
 [dependencies]
 apache-avro = "0.17.0"
 async-trait = "0.1.87"
+cdshealpix = "0.7.3"
 chrono = "0.4.39"
 clap = { version = "4", features = ["derive", "env"] }
 config = "0.15.6"
@@ -18,6 +19,7 @@ flare = "0.2.0"
 flate2 = "1.1.0"
 futures = "0.3.31"
 indicatif = "0.17.11"
+moc = "0.19.1"
 mongodb = "3.2.0"
 ndarray = "0.16.1"
 openssl = { version = "0.10.72", features = ["vendored"] }
