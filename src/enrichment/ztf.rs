@@ -173,8 +173,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let (properties, all_bands_properties, programid) =
                 self.get_alert_properties(&alerts[i]).await?;
 
-            // Copy the all band properties since it will be referenced twice
-            let copy_of_properties = all_bands_properties.clone();
             // Now, prepare inputs for ML models and run inference
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
             let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1])?;
@@ -187,11 +185,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             let metadata_btsbot = self
                 .btsbot_model
-                .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
+                .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
 
             let metadata_cider = self
                 .ciderimages_model
-                .get_metadata(&alerts[i..i + 1], &[copy_of_properties])?;
+                .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
             let triplet_cider = self.ciderimages_model.get_triplet(&alerts[i..i + 1])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
             let cider_img_scores = self

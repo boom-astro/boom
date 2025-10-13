@@ -1,7 +1,7 @@
 use crate::enrichment::models::{load_model, Model, ModelError};
-use crate::utils::fits::{prepare_triplet, CutoutError};
+use crate::utils::fits::prepare_triplet;
 use mongodb::bson::Document;
-use ndarray::{Array, Array2, Axis, Dim};
+use ndarray::{Array, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
 
@@ -48,7 +48,7 @@ impl CiderImagesModel {
     pub fn get_metadata(
         &self,
         alerts: &[Document],
-        alert_properties: &[Document],
+        alert_properties: &[&Document],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
@@ -128,24 +128,6 @@ impl CiderImagesModel {
 
         let features_array = Array::from_shape_vec((alerts.len(), 24), features_batch)?;
         Ok(features_array)
-    }
-
-    #[instrument(skip_all)]
-    pub fn softmax(input: Array2<f32>) -> Array2<f32> {
-        let mut output = Array2::zeros(input.raw_dim());
-
-        for (i, row) in input.axis_iter(Axis(0)).enumerate() {
-            let max_val = row.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-
-            let exp_values: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
-
-            let sum_exp: f32 = exp_values.iter().sum();
-
-            for (j, &exp_val) in exp_values.iter().enumerate() {
-                output[[i, j]] = exp_val / sum_exp;
-            }
-        }
-        output
     }
 
     #[instrument(skip_all, err)]
