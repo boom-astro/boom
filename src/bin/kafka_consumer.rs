@@ -3,7 +3,7 @@ use boom::{
     utils::{
         enums::{ProgramId, Survey},
         o11y::{
-            logging::{build_subscriber, log_error, WARN},
+            logging::{WARN, build_subscriber, log_error},
             metrics::init_metrics,
         },
     },

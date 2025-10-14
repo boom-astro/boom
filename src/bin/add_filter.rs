@@ -1,6 +1,6 @@
 use clap::Parser;
 use mongodb::bson::doc;
-use tracing::{error, Level};
+use tracing::{Level, error};
 use tracing_subscriber::FmtSubscriber;
 
 use boom::conf;

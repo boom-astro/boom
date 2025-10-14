@@ -1,11 +1,11 @@
 //! Common metrics utilities.
 use std::sync::LazyLock;
 
-use opentelemetry::{metrics::Meter, KeyValue};
+use opentelemetry::{KeyValue, metrics::Meter};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
-    metrics::{SdkMeterProvider, Temporality},
     Resource,
+    metrics::{SdkMeterProvider, Temporality},
 };
 
 // From the `opentelemetry` docs for the `MeterProvider` trait,

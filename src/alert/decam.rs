@@ -1,7 +1,7 @@
 use crate::{
     alert::base::{
-        deserialize_mjd, Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
-        SchemaCache,
+        Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache,
+        deserialize_mjd,
     },
     conf,
     utils::{
@@ -12,7 +12,7 @@ use crate::{
 };
 use constcat::concat;
 use flare::Time;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
@@ -342,7 +342,7 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{decam_alert_worker, AlertRandomizer},
+        testing::{AlertRandomizer, decam_alert_worker},
     };
 
     #[tokio::test]

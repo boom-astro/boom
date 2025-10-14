@@ -4,19 +4,19 @@ use crate::{
         db::get_array_element,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
-        worker::{should_terminate, WorkerCmd},
+        worker::{WorkerCmd, should_terminate},
     },
 };
 
 use std::{num::NonZero, sync::LazyLock};
 
 use apache_avro::Schema;
-use apache_avro::{serde_avro_bytes, Writer};
+use apache_avro::{Writer, serde_avro_bytes};
 use futures::stream::StreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use opentelemetry::{
-    metrics::{Counter, UpDownCounter},
     KeyValue,
+    metrics::{Counter, UpDownCounter},
 };
 use rdkafka::producer::FutureProducer;
 use rdkafka::{config::ClientConfig, producer::FutureRecord};
@@ -682,8 +682,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 })?;
             trace!(
                 "Sent alert with candid {} to Kafka topic {}",
-                &alert.candid,
-                &output_topic
+                &alert.candid, &output_topic
             );
             // Incrementing by alerts_output.len() outside this loop may be more
             // efficient, but incrementing by 1 here is more accurate.

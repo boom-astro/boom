@@ -1,7 +1,7 @@
 use boom::{
     kafka::{
-        count_messages, delete_topic, AlertConsumer, AlertProducer, ZtfAlertConsumer,
-        ZtfAlertProducer,
+        AlertConsumer, AlertProducer, ZtfAlertConsumer, ZtfAlertProducer, count_messages,
+        delete_topic,
     },
     utils::{data::count_files_in_dir, enums::ProgramId, testing::TEST_CONFIG_FILE},
 };

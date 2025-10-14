@@ -1,11 +1,11 @@
 use boom::{
     conf,
-    scheduler::{get_num_workers, ThreadPool},
+    scheduler::{ThreadPool, get_num_workers},
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
         o11y::{
-            logging::{build_subscriber, log_error, WARN},
+            logging::{WARN, build_subscriber, log_error},
             metrics::init_metrics,
         },
         worker::WorkerType,
@@ -17,7 +17,7 @@ use std::time::Duration;
 use clap::Parser;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::sync::oneshot;
-use tracing::{info, info_span, instrument, warn, Instrument};
+use tracing::{Instrument, info, info_span, instrument, warn};
 use uuid::Uuid;
 
 #[derive(Parser)]

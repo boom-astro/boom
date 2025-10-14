@@ -3,7 +3,7 @@ use std::{fs::File, io::BufWriter, iter::successors};
 
 use tracing::Subscriber;
 use tracing_flame::{FlameLayer, FlushGuard};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt::format::FmtSpan, layer::SubscriberExt};
 
 /// Iterate over the `Display` representations of the sources of the given error
 /// by recursively calling `std::error::Error::source()`.

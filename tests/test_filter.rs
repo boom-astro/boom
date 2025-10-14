@@ -1,10 +1,10 @@
 use boom::{
     conf,
-    filter::{uses_field_in_filter, validate_filter_pipeline, Filter, ZtfFilter},
+    filter::{Filter, ZtfFilter, uses_field_in_filter, validate_filter_pipeline},
     utils::enums::Survey,
-    utils::testing::{insert_test_filter, remove_test_filter, TEST_CONFIG_FILE},
+    utils::testing::{TEST_CONFIG_FILE, insert_test_filter, remove_test_filter},
 };
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 
 fn pipeline_to_json(pipeline: &[Document]) -> Vec<serde_json::Value> {
     pipeline

@@ -3,7 +3,7 @@ use boom::{
     conf,
     utils::enums::Survey,
     utils::testing::{
-        decam_alert_worker, drop_alert_from_collections, AlertRandomizer, TEST_CONFIG_FILE,
+        AlertRandomizer, TEST_CONFIG_FILE, decam_alert_worker, drop_alert_from_collections,
     },
 };
 use mongodb::bson::doc;

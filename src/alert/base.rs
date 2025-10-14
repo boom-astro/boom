@@ -4,7 +4,7 @@ use crate::{
     utils::{
         db::{cutout2bsonbinary, get_coordinates},
         o11y::{
-            logging::{as_error, log_error, WARN},
+            logging::{WARN, as_error, log_error},
             metrics::SCHEDULER_METER,
         },
         spatial::XmatchError,
@@ -14,17 +14,17 @@ use crate::{
 
 use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
 
-use apache_avro::{from_avro_datum, from_value, Reader, Schema};
+use apache_avro::{Reader, Schema, from_avro_datum, from_value};
 use mongodb::{
-    bson::{doc, Document},
     Collection,
+    bson::{Document, doc},
 };
 use opentelemetry::{
-    metrics::{Counter, UpDownCounter},
     KeyValue,
+    metrics::{Counter, UpDownCounter},
 };
 use redis::AsyncCommands;
-use serde::{de::Deserializer, Deserialize};
+use serde::{Deserialize, de::Deserializer};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;

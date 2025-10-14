@@ -1,8 +1,8 @@
 use flare::spatial::radec2lb;
 use mongodb::{
-    bson::{doc, to_document, Document},
-    options::IndexOptions,
     Collection, Database, IndexModel,
+    bson::{Document, doc, to_document},
+    options::IndexOptions,
 };
 use serde::Serialize;
 use tracing::instrument;

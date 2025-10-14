@@ -12,7 +12,7 @@ use crate::{
 use std::{collections::HashMap, sync::LazyLock};
 
 use indicatif::ProgressBar;
-use opentelemetry::{metrics::Counter, KeyValue};
+use opentelemetry::{KeyValue, metrics::Counter};
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
@@ -294,9 +294,7 @@ pub trait AlertProducer {
                 } else {
                     warn!(
                         "Topic {} already exists with {} messages, but {} Avro files found in data directory",
-                        topic_name,
-                        total_messages,
-                        avro_count
+                        topic_name, total_messages, avro_count
                     );
                 }
             } else {

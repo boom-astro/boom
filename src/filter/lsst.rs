@@ -1,12 +1,12 @@
 use futures::stream::StreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
 use crate::filter::{
-    get_filter_object, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin,
-    Photometry,
+    Alert, Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    Origin, Photometry, get_filter_object, run_filter, uses_field_in_filter,
+    validate_filter_pipeline,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;

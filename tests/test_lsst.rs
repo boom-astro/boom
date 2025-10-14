@@ -1,13 +1,13 @@
 use boom::{
-    alert::{AlertWorker, ProcessAlertStatus, LSST_ZTF_XMATCH_RADIUS, ZTF_DEC_RANGE},
+    alert::{AlertWorker, LSST_ZTF_XMATCH_RADIUS, ProcessAlertStatus, ZTF_DEC_RANGE},
     conf,
     enrichment::{EnrichmentWorker, LsstEnrichmentWorker},
-    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
+    filter::{FilterWorker, LsstFilterWorker, alert_to_avro_bytes, load_alert_schema},
     utils::{
         enums::Survey,
         testing::{
-            drop_alert_from_collections, insert_test_filter, lsst_alert_worker, remove_test_filter,
-            ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+            AlertRandomizer, TEST_CONFIG_FILE, drop_alert_from_collections, insert_test_filter,
+            lsst_alert_worker, remove_test_filter, ztf_alert_worker,
         },
     },
 };

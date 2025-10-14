@@ -6,14 +6,14 @@ use crate::{
     conf,
     utils::{
         db::{mongify, update_timeseries_op},
-        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT},
+        lightcurves::{SNT, flux2mag, fluxerr2diffmaglim},
         o11y::logging::as_error,
         spatial::xmatch,
     },
 };
 use constcat::concat;
 use flare::Time;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::fmt::Debug;
@@ -764,7 +764,7 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{ztf_alert_worker, AlertRandomizer},
+        testing::{AlertRandomizer, ztf_alert_worker},
     };
 
     #[tokio::test]

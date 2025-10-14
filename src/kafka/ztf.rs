@@ -76,7 +76,9 @@ impl ZtfAlertProducer {
         if program_id == ProgramId::Partnership
             && (partnership_archive_username.is_none() || partnership_archive_password.is_none())
         {
-            panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for partnership program ID");
+            panic!(
+                "ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for partnership program ID"
+            );
         }
 
         ZtfAlertProducer {

@@ -1,15 +1,14 @@
 use crate::{
     alert::{
-        AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_URL,
+        AlertWorker, DecamAlertWorker, LSST_SCHEMA_REGISTRY_URL, LsstAlertWorker, SchemaRegistry,
+        ZtfAlertWorker,
     },
     conf,
     utils::{db::initialize_survey_indexes, enums::Survey},
 };
 use apache_avro::{
-    from_avro_datum,
+    Reader, Schema, Writer, from_avro_datum,
     types::{Record, Value},
-    Reader, Schema, Writer,
 };
 use mongodb::bson::doc;
 use rand::Rng;
@@ -376,7 +375,7 @@ impl AlertRandomizer {
                     }
                 }
                 "diaObjectId" => {
-                    if let Some(ref id) = object_id {
+                    if let &mut Some(ref id) = object_id {
                         let id_i64 = id.parse::<i64>().unwrap();
                         *value = Value::Union(1_u32, Box::new(Value::Long(id_i64)));
                     } else {

@@ -1,11 +1,10 @@
 use crate::enrichment::{
-    fetch_alerts,
+    EnrichmentWorker, EnrichmentWorkerError, fetch_alerts,
     models::{AcaiModel, BtsBotModel, Model},
-    EnrichmentWorker, EnrichmentWorkerError,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 

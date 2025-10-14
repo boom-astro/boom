@@ -1,7 +1,7 @@
-use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
+use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError, fetch_alerts};
 use crate::utils::db::fetch_timeseries_op;
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 

@@ -9,7 +9,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
-        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
+        lightcurves::{SNT, ZP_AB, flux2mag, fluxerr2diffmaglim},
         o11y::logging::as_error,
         spatial::xmatch,
     },
@@ -17,7 +17,7 @@ use crate::{
 
 use constcat::concat;
 use flare::Time;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use tracing::{instrument, warn};
@@ -236,7 +236,7 @@ impl TryFrom<DiaSource> for Candidate {
             (None, Some(ss_id)) => (format!("sso{}", ss_id), true),
             (None, None) => return Err(AlertError::MissingObjectId),
             (Some(dia_id), Some(ss_id)) => {
-                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
+                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id));
             }
         };
 
@@ -1038,7 +1038,7 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{lsst_alert_worker, AlertRandomizer},
+        testing::{AlertRandomizer, lsst_alert_worker},
     };
 
     #[tokio::test]

@@ -1,10 +1,10 @@
 use crate::{
-    alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
-    enrichment::{run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker},
-    filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
+    alert::{DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker, run_alert_worker},
+    enrichment::{LsstEnrichmentWorker, ZtfEnrichmentWorker, run_enrichment_worker},
+    filter::{LsstFilterWorker, ZtfFilterWorker, run_filter_worker},
     utils::{
         enums::Survey,
-        o11y::logging::{as_error, INFO},
+        o11y::logging::{INFO, as_error},
         worker::{WorkerCmd, WorkerType},
     },
 };

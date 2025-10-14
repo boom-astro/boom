@@ -4,17 +4,17 @@ use crate::{
     utils::{
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
-        worker::{should_terminate, WorkerCmd},
+        worker::{WorkerCmd, should_terminate},
     },
 };
 
 use std::{num::NonZero, sync::LazyLock};
 
 use futures::StreamExt;
-use mongodb::bson::{doc, document::ValueAccessError, Document};
+use mongodb::bson::{Document, doc, document::ValueAccessError};
 use opentelemetry::{
-    metrics::{Counter, UpDownCounter},
     KeyValue,
+    metrics::{Counter, UpDownCounter},
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;

@@ -1,7 +1,7 @@
-use crate::utils::fits::{prepare_triplet, CutoutError};
+use crate::utils::fits::{CutoutError, prepare_triplet};
 use mongodb::bson::Document;
 use ndarray::{Array, Dim};
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{Session, builder::GraphOptimizationLevel};
 use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]

@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc::{error::TryRecvError, Receiver};
+use tokio::sync::mpsc::{Receiver, error::TryRecvError};
 use tracing::{info, instrument, warn};
 
 // checks if a flag is set to true and, if so, exits the program

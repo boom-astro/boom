@@ -1,16 +1,16 @@
 use boom::{
     alert::{
-        AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
+        AlertWorker, DECAM_DEC_RANGE, LSST_DEC_RANGE, ProcessAlertStatus, ZTF_DECAM_XMATCH_RADIUS,
         ZTF_LSST_XMATCH_RADIUS,
     },
     conf,
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
-    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
+    filter::{FilterWorker, ZtfFilterWorker, alert_to_avro_bytes, load_alert_schema},
     utils::{
         enums::Survey,
         testing::{
-            decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
-            remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+            AlertRandomizer, TEST_CONFIG_FILE, decam_alert_worker, drop_alert_from_collections,
+            insert_test_filter, lsst_alert_worker, remove_test_filter, ztf_alert_worker,
         },
     },
 };
