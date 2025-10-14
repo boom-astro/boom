@@ -15,7 +15,6 @@ clap = { version = "4", features = ["derive", "env"] }
 config = "0.15.18"
 constcat = "0.6.1"
 flare = "0.2.0"
-flate2 = "1.1.4"
 futures = "0.3.31"
 indicatif = "0.18.0"
 mongodb = "3.3.0"
@@ -50,6 +49,3 @@ ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
 # otherwise, install ort with the cuda feature
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
-
-[dev-dependencies]
-criterion = "0.7"
