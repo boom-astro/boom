@@ -24,6 +24,8 @@ kill_process() {
   if pgrep -f "$process" > /dev/null; then
     pkill -f "$process"
     echo -e "${BLUE}INFO${END}:    Stopping $name process"
+  else
+    echo -e "${YELLOW}WARNING${END}: $name process is not running"
   fi
 }
 
@@ -107,10 +109,14 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop boom
   fi
   if stop_service "consumer" "$target"; then
-    kill_process "/app/kafka_consumer" consumer
+    ARGS=()
+    [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
+    [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all survey consumers are killed
+    kill_process "/app/kafka_consumer ${ARGS[*]}" consumer
   fi
   if stop_service "scheduler" "$target"; then
-    kill_process "/app/scheduler" scheduler
+    survey=$3 # if no survey is provided, all schedulers are killed
+    kill_process "/app/scheduler $survey" scheduler
   fi
   if stop_service "valkey" "$target"; then
     apptainer instance stop valkey
