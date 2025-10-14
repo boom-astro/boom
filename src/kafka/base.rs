@@ -38,7 +38,7 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 const MAX_RETRIES_PRODUCER: usize = 6;
-const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(15);
+const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug)]
 struct Metadata(HashMap<String, Vec<i32>>);
@@ -580,7 +580,7 @@ pub async fn consume_partitions(
         .inspect_err(as_error!("failed to create consumer"))?;
 
     let mut timestamps = rdkafka::TopicPartitionList::new();
-    let offset = rdkafka::Offset::Offset(timestamp);
+    let offset = rdkafka::Offset::Offset(timestamp * 1000); // convert to milliseconds
     for i in &partitions {
         timestamps
             .add_partition(topic, *i)
