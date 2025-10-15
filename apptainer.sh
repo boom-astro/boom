@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | restart | health | benchmark | filters
+# $1 = action: build | start | stop | restart | health | benchmark | filters | backup
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
@@ -13,8 +13,8 @@ YELLOW="\e[33m"
 END="\e[0m"
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
-  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters}"
+  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] && [ "$1" != "backup" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup}"
   exit 1
 fi
 
@@ -173,4 +173,14 @@ fi
 if [ "$1" == "filters" ]; then
   "$SCRIPTS_DIR/add_filters.sh" "$2"
   exit 0
+fi
+
+# -----------------------------
+# 7. Backup MongoDB
+# -----------------------------
+if [ "$1" == "backup" ]; then
+  apptainer exec instance://mongo mongodump \
+  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
+  --archive=/tmp/mongo_backups/mongo_$(date +%Y-%m-%d).gz \
+  --gzip
 fi
