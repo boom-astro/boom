@@ -3,7 +3,7 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::{App, test, web};
-    use boom_api::db::get_default_db;
+    use boom_api::db::get_test_db;
     use boom_api::routes;
     use boom_api::test_utils::{create_test_catalog, delete_test_catalog, read_json_response};
     use mongodb::Database;
@@ -11,7 +11,7 @@ mod tests {
     /// Test GET /catalogs
     #[actix_rt::test]
     async fn test_post_count_query() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
 
         let app = test::init_service(
             App::new()
@@ -39,7 +39,7 @@ mod tests {
     /// Test POST /queries/estimated_count
     #[actix_rt::test]
     async fn test_post_estimated_count_query() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
 
         let app = test::init_service(
             App::new()
@@ -65,7 +65,7 @@ mod tests {
     // next, let's test the /queries/find endpoint
     #[actix_rt::test]
     async fn test_post_find_query() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
         let test_catalog_name = create_test_catalog(&database).await;
         let app = test::init_service(
             App::new()
@@ -141,7 +141,7 @@ mod tests {
     // next we test the /queries/cone-search endpoint
     #[actix_rt::test]
     async fn test_post_cone_search_query() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
         let test_catalog_name = create_test_catalog(&database).await;
         let app = test::init_service(
             App::new()
@@ -191,7 +191,7 @@ mod tests {
     // last but not least, we test the /queries/pipeline endpoint
     #[actix_rt::test]
     async fn test_post_pipeline_query() {
-        let database: Database = get_default_db().await;
+        let database: Database = get_test_db().await;
         let test_catalog_name = create_test_catalog(&database).await;
         let app = test::init_service(
             App::new()

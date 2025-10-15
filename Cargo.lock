@@ -481,6 +481,7 @@ dependencies = [
  "clap",
  "config",
  "constcat",
+ "dotenvy",
  "flare",
  "futures",
  "indicatif",
@@ -517,6 +518,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt",
  "config",
+ "dotenvy",
  "env_logger",
  "flare",
  "futures",
@@ -525,6 +527,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tracing",
  "utoipa",
  "utoipa-scalar",
  "uuid",
@@ -985,6 +990,12 @@ checksum = "442039f5147480ba31067cb00ada1adae6892028e40e45fc5de7b7df6dcc1b5f"
 dependencies = [
  "const-random",
 ]
+
+[[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "duct"

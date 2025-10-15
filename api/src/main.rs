@@ -1,6 +1,7 @@
 use actix_web::middleware::from_fn;
 use actix_web::{App, HttpServer, middleware::Logger, web};
 use boom_api::auth::{auth_middleware, get_auth};
+use boom_api::conf::load_dotenv;
 use boom_api::db::get_db;
 use boom_api::docs::ApiDoc;
 use boom_api::routes;
@@ -9,6 +10,9 @@ use utoipa_scalar::{Scalar, Servable};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Load environment variables from .env file before anything else
+    load_dotenv();
+
     let database = get_db().await;
     let auth = get_auth(&database).await.unwrap();
 
