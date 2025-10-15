@@ -19,7 +19,7 @@ flare = "0.2.0"
 flate2 = "1.1.0"
 futures = "0.3.31"
 indicatif = "0.17.11"
-mongodb = "3.2.0"
+mongodb = "3.2.5"
 ndarray = "0.16.1"
 openssl = { version = "0.10.72", features = ["vendored"] }
 opentelemetry = "0.30.0"
