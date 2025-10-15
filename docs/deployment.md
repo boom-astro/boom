@@ -13,6 +13,7 @@
    like `traefik.boom.caltech.edu`, `api.boom.caltech.edu`, etc.
 1. Install and configure [Docker](https://docs.docker.com/engine/install/) on
    the remote server (Docker Engine, not Docker Desktop).
+1. Install [Git LFS](https://git-lfs.com/).
 
 ### Create a public Traefik reverse proxy
 
