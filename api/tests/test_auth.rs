@@ -14,26 +14,7 @@ mod tests {
     async fn test_post_auth() {
         load_dotenv();
 
-        // Clear users collection for clean test BEFORE setting up the database
-        let config = AppConfig::from_test_config();
-        let db_config = config.database;
-        let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
-            format!(
-                "mongodb://{}:{}@{}:{}",
-                db_config.username, db_config.password, db_config.host, db_config.port
-            )
-        });
-        let client = mongodb::Client::with_uri_str(uri)
-            .await
-            .expect("failed to connect");
-        let temp_db = client.database(&db_config.name);
-        temp_db
-            .collection::<mongodb::bson::Document>("users")
-            .drop()
-            .await
-            .ok(); // Ignore errors if collection doesn't exist
-
-        // Now set up the database, which will create the admin user
+        // Set up the database, which will create the admin user
         let database: Database = get_test_db().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
@@ -124,25 +105,6 @@ mod tests {
     #[actix_rt::test]
     async fn test_auth_middleware() {
         load_dotenv();
-
-        // Clear users collection for clean test BEFORE setting up the database
-        let config = AppConfig::from_test_config();
-        let db_config = config.database;
-        let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
-            format!(
-                "mongodb://{}:{}@{}:{}",
-                db_config.username, db_config.password, db_config.host, db_config.port
-            )
-        });
-        let client = mongodb::Client::with_uri_str(uri)
-            .await
-            .expect("failed to connect");
-        let temp_db = client.database(&db_config.name);
-        temp_db
-            .collection::<mongodb::bson::Document>("users")
-            .drop()
-            .await
-            .ok(); // Ignore errors if collection doesn't exist
 
         // Now set up the database, which will create the admin user
         let database: Database = get_test_db().await;
