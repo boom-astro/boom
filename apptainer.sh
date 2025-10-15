@@ -181,6 +181,6 @@ fi
 if [ "$1" == "backup" ]; then
   apptainer exec instance://mongo mongodump \
   --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
-  --archive=/tmp/mongo_backups/mongo_$(date +%Y-%m-%d).gz \
+  --archive=/tmp/mongo_backups/mongo_"$(date +%Y-%m-%d)".gz \
   --gzip
 fi
