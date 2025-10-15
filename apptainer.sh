@@ -168,10 +168,9 @@ fi
 # -----------------------------
 # 6. Add filters
 # -----------------------------
-# Arguments for 'filters':
-# $2 = path to the file with the filters to add
 if [ "$1" == "filters" ]; then
-  "$SCRIPTS_DIR/add_filters.sh" "$2"
+  path_to_file="$2"
+  "$SCRIPTS_DIR/add_filters.sh" "$path_to_file"
   exit 0
 fi
 
@@ -179,8 +178,10 @@ fi
 # 7. Backup MongoDB
 # -----------------------------
 if [ "$1" == "backup" ]; then
+  path_to_folder=${2:-/tmp/mongo_backups}
+  mkdir -p "$path_to_folder"
   apptainer exec instance://mongo mongodump \
   --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
-  --archive=/tmp/mongo_backups/mongo_"$(date +%Y-%m-%d)".gz \
+  --archive="$path_to_folder/mongo_$(date +%Y-%m-%d).gz" \
   --gzip
 fi
