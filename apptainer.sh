@@ -182,10 +182,9 @@ if [ "$1" == "backup" ]; then
   path_to_folder=${2:-/tmp/mongo_backups} # Folder to save the backup to
   mkdir -p "$path_to_folder"
   apptainer exec instance://mongo mongodump \
-  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
+  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
   --archive="$path_to_folder/mongo_$(date +%Y-%m-%d).gz" \
-  --gzip \
-  --oplog
+  --gzip
   exit 0
 fi
 
@@ -200,10 +199,9 @@ if [ "$1" == "restore" ]; then
     exit 1
   fi
   apptainer exec instance://mongo mongorestore \
-  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
+  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
   --archive="$path_to_file" \
   --gzip \
-  --drop \
-  --oplogReplay
+  --drop
   exit 0
 fi
