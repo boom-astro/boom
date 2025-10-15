@@ -7,6 +7,7 @@ mod tests {
     use boom_api::conf::{AppConfig, load_dotenv};
     use boom_api::db::get_test_db;
     use boom_api::routes;
+    use boom_api::test_utils::read_json_response;
     use mongodb::{Database, bson::doc};
 
     /// Test POST /auth
@@ -45,11 +46,7 @@ mod tests {
         let response_status = resp.status();
         assert_eq!(response_status, StatusCode::OK);
 
-        let body = test::read_body(resp).await;
-        let body_str = String::from_utf8(body.to_vec()).unwrap();
-        let resp: serde_json::Value =
-            serde_json::from_str(&body_str).expect("failed to parse JSON");
-
+        let resp: serde_json::Value = read_json_response(resp).await;
         let _ = resp["access_token"]
             .as_str()
             .expect("token should be a string");
