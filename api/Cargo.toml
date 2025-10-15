@@ -15,7 +15,6 @@ flare = "0.2.0"
 futures = "0.3.31"
 jsonwebtoken = "9.3.1" # 10.0.0 shows a performance hit, due to its new "backends" feature
 mongodb = "3.3.0"
-regex = "1.12.2"
 serde = "1.0.228"
 serde_json = "1.0.145"
 serde_with = "3.15.0"
