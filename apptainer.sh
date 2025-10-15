@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | restart | health | benchmark | filters | backup
+# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
@@ -13,8 +13,9 @@ YELLOW="\e[33m"
 END="\e[0m"
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
-  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] && [ "$1" != "backup" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup}"
+  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] \
+  && [ "$1" != "backup" ] && [ "$1" != "restore" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore} [args...]"
   exit 1
 fi
 
@@ -178,10 +179,31 @@ fi
 # 7. Backup MongoDB
 # -----------------------------
 if [ "$1" == "backup" ]; then
-  path_to_folder=${2:-/tmp/mongo_backups}
+  path_to_folder=${2:-/tmp/mongo_backups} # Folder to save the backup to
   mkdir -p "$path_to_folder"
   apptainer exec instance://mongo mongodump \
   --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
   --archive="$path_to_folder/mongo_$(date +%Y-%m-%d).gz" \
-  --gzip
+  --gzip \
+  --oplog
+  exit 0
+fi
+
+# -----------------------------
+# 8. Restore MongoDB
+# -----------------------------
+if [ "$1" == "restore" ]; then
+  path_to_file="$2" # Path to the backup file
+  if [ -z "$path_to_file" ]; then
+    echo -e "${RED}Error: Missing path to the backup file.${END}"
+    echo -e "Usage: ${BLUE}$0 restore <path_to_backup_file>${END}"
+    exit 1
+  fi
+  apptainer exec instance://mongo mongorestore \
+  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/?authSource=admin" \
+  --archive="$path_to_file" \
+  --gzip \
+  --drop \
+  --oplogReplay
+  exit 0
 fi
