@@ -182,6 +182,10 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
     let config = conf::load_config(config_path)?;
     let mut con = conf::build_redis(&config).await?;
+    // Detect if Babamul is enabled from the config
+    // TODO: We should be parsing the config as a struct so we don't have to
+    // carry around this low-level object outside the conf module?
+    let babamul_enabled = conf::babamul_enabled(&config);
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
