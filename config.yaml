@@ -14,6 +14,8 @@ api:
     admin_username: admin # Admin username for the API
     admin_password: adminsecret # Admin password for the API
     admin_email: admin@example.com # Admin email for the API
+babamul:
+  enabled: false
 redis:
   host: localhost
   port: 6379
@@ -99,7 +101,7 @@ crossmatch:
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      projection: 
+      projection:
         _id: 0
         ra: 1
         dec: 1
