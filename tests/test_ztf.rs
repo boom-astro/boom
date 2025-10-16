@@ -314,7 +314,7 @@ async fn test_enrich_ztf_alert() {
 
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
-    let alerts_output = result.unwrap();
+    let (alerts_output, _alerts) = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert, &format!("1,{}", candid));
@@ -393,7 +393,7 @@ async fn test_filter_ztf_alert() {
     assert!(result.is_ok());
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
-    let enrichment_output = result.unwrap();
+    let (enrichment_output, _alerts) = result.unwrap();
     assert_eq!(enrichment_output.len(), 1);
     let candid_programid_str = &enrichment_output[0];
     assert_eq!(candid_programid_str, &format!("1,{}", candid));

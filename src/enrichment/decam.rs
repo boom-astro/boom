@@ -92,7 +92,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
     async fn process_alerts(
         &mut self,
         candids: &[i64],
-    ) -> Result<Vec<String>, EnrichmentWorkerError> {
+    ) -> Result<(Vec<String>, Vec<Document>), EnrichmentWorkerError> {
         let alerts =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
 
@@ -105,13 +105,13 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         }
 
         if alerts.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], alerts));
         }
 
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
-        let mut processed_alerts = Vec::new();
+        let mut processed_alert_ids = Vec::new();
         for i in 0..alerts.len() {
             let candid = alerts[i].get_i64("_id")?;
 
@@ -136,12 +136,12 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             );
 
             updates.push(update);
-            processed_alerts.push(format!("{}", candid));
+            processed_alert_ids.push(format!("{}", candid));
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
-        Ok(processed_alerts)
+        Ok((processed_alert_ids, alerts))
     }
 }
 

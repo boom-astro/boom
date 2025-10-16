@@ -152,7 +152,7 @@ async fn test_enrich_lsst_alert() {
 
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
-    let alerts_output = result.unwrap();
+    let (alerts_output, _alerts) = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert, &format!("{}", candid));

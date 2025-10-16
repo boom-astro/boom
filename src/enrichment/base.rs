@@ -79,7 +79,7 @@ pub trait EnrichmentWorker {
     async fn process_alerts(
         &mut self,
         alerts: &[i64],
-    ) -> Result<Vec<String>, EnrichmentWorkerError>;
+    ) -> Result<(Vec<String>, Vec<Document>), EnrichmentWorkerError>;
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.
@@ -235,16 +235,17 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             continue;
         }
 
-        let processed_alerts: Vec<String> = enrichment_worker
-            .process_alerts(&candids)
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, &processing_error_attrs);
-            })?;
+        let (processed_alert_ids, _processed_alerts): (Vec<String>, Vec<Document>) =
+            enrichment_worker
+                .process_alerts(&candids)
+                .await
+                .inspect_err(|_| {
+                    ACTIVE.add(-1, &active_attrs);
+                    BATCH_PROCESSED.add(1, &processing_error_attrs);
+                })?;
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
-        con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
+        con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alert_ids)
             .await
             .inspect_err(|_| {
                 ACTIVE.add(-1, &active_attrs);
