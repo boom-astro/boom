@@ -41,12 +41,6 @@ fn main() {
     // Some general parameters/constants
     let input_queue = "babamul";
     let batch_size = NonZero::new(1000).unwrap();
-
-    // Filter criteria
-    // TODO: Get these from config?
-    let min_reliability = 0.5;
-    let pixel_flags = vec![1, 2, 3];
-    let sso = false;
     let sg_star_thresh = 0.5;
 
     loop {
@@ -67,20 +61,9 @@ fn main() {
             continue;
         }
 
-        // Next, filter the alerts based on the criteria
-        // TODO: Move into enrichment worker
-        let filtered_alerts: Vec<Alert> = alerts
-            .into_iter()
-            .filter(|alert| {
-                alert.reliability >= min_reliability
-                    && !pixel_flags.contains(&alert.pixel_flag)
-                    && alert.sso == sso
-            })
-            .collect();
-
         // Now, split into categories for ZTF match: star, galaxy, or none
         let (star_alerts, galaxy_alerts, none_alerts): (Vec<Alert>, Vec<Alert>, Vec<Alert>) =
-            filtered_alerts.into_iter().partition_map(|alert| {
+            alerts.into_iter().partition_map(|alert| {
                 if alert.sg_score > sg_star_thresh {
                     Either::Left(alert)
                 } else if alert.sg_score <= (1.0 - sg_star_thresh) {
@@ -91,14 +74,15 @@ fn main() {
             });
 
         // Finally, send to the appropriate Babamul Kafka topics
+        // TODO: This should be 8 different topics
         if !star_alerts.is_empty() {
-            send_to_kafka("babamul_stars", star_alerts);
+            send_to_kafka("babamul.stars", star_alerts);
         }
         if !galaxy_alerts.is_empty() {
-            send_to_kafka("babamul_galaxies", galaxy_alerts);
+            send_to_kafka("babamul.galaxies", galaxy_alerts);
         }
         if !none_alerts.is_empty() {
-            send_to_kafka("babamul_none", none_alerts);
+            send_to_kafka("babamul.none", none_alerts);
         }
 
         let attributes = &ok_attrs;
