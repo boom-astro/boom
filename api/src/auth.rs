@@ -45,7 +45,7 @@ impl AuthProvider {
         &self,
         user: &User,
     ) -> Result<(String, Option<usize>), jsonwebtoken::errors::Error> {
-        let iat = chrono::Utc::now().timestamp() as usize;
+        let iat = flare::Time::now().to_utc().timestamp() as usize;
         let exp = iat + self.token_expiration;
         let claims = Claims {
             sub: user.id.clone(),
