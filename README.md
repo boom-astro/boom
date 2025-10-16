@@ -113,7 +113,7 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 ```
 *or for Apptainer:*
 ```bash
-apptainer exec instance://broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic ztf_YYYYMMDD_programid1
+apptainer exec instance://kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
 
 ### Alert Consumption
