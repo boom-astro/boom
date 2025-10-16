@@ -1,8 +1,10 @@
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, Bson, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use redis::AsyncCommands;
+use serde_json;
 use tracing::{instrument, warn};
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
@@ -68,12 +70,17 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+pub struct Babamul {
+    valkey_con: redis::aio::MultiplexedConnection,
+}
+
 pub struct LsstEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_pipeline: Vec<Document>,
+    babamul: Option<Babamul>,
 }
 
 #[async_trait::async_trait]
@@ -88,12 +95,22 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
+        // Detect if Babamul is enabled from the config
+        let babamul_enabled = crate::conf::babamul_enabled(&config_file);
+        let babamul: Option<Babamul> = if babamul_enabled {
+            let valkey_con = crate::conf::build_redis(&config_file).await?;
+            Some(Babamul { valkey_con })
+        } else {
+            None
+        };
+
         Ok(LsstEnrichmentWorker {
             input_queue,
             output_queue,
             client,
             alert_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
+            babamul,
         })
     }
 
@@ -129,6 +146,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
+        let mut babamul_alerts = Vec::new();
         for i in 0..alerts.len() {
             let candid = alerts[i].get_i64("_id")?;
 
@@ -141,7 +159,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": properties.clone(),
                 }
             };
 
@@ -155,9 +173,52 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             updates.push(update);
             processed_alerts.push(format!("{}", candid));
+
+            // If Babamul is enabled, merge the alert and properties and append a
+            // JSON payload to the in-memory `babamul_alerts` vector. We'll flush
+            // the vector to Redis once after we've written updates to MongoDB.
+            if self.babamul.is_some() {
+                // Merge properties into the alert document
+                let mut merged = alerts[i].clone();
+                merged.insert("properties", Bson::Document(properties.clone()));
+
+                // Determine if this alert is worth sending to Babamul
+                let min_reliability = 0.5;
+                let pixel_flags = vec![1, 2, 3];
+                let sso = false;
+
+                if (merged.get_f64("candidate.reliability").unwrap_or(0.0) < min_reliability)
+                    || (merged
+                        .get_document("candidate")
+                        .unwrap()
+                        .get_i32("pixel_flags")
+                        .map(|pf| pixel_flags.contains(&pf))
+                        .unwrap_or(false))
+                    || (merged
+                        .get_document("properties")
+                        .unwrap()
+                        .get_bool("rock")
+                        .unwrap_or(false)
+                        == sso)
+                {
+                    // Skip this alert, it doesn't meet the criteria
+                    continue;
+                }
+
+                // Serialize BSON Document directly to JSON string
+                let payload = serde_json::to_string(&Bson::Document(merged))?;
+                babamul_alerts.push(payload);
+            }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // If we have Babamul payloads buffered, push them in one command to Redis.
+        if !babamul_alerts.is_empty() {
+            if let Some(b) = &mut self.babamul {
+                let _: () = b.valkey_con.lpush("babamul", babamul_alerts).await?;
+            }
+        }
 
         Ok(processed_alerts)
     }

@@ -67,6 +67,8 @@ pub enum EnrichmentWorkerError {
     RunModelError(#[from] ModelError),
     #[error("could not access cutout images")]
     CutoutAccessError(#[from] CutoutError),
+    #[error("json serialization error")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 #[async_trait::async_trait]
@@ -182,10 +184,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
     let config = conf::load_config(config_path)?;
     let mut con = conf::build_redis(&config).await?;
-    // Detect if Babamul is enabled from the config
-    // TODO: We should be parsing the config as a struct so we don't have to
-    // carry around this low-level object outside the conf module?
-    let babamul_enabled = conf::babamul_enabled(&config);
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
@@ -255,8 +253,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         ACTIVE.add(-1, &active_attrs);
         BATCH_PROCESSED.add(1, attributes);
         ALERT_PROCESSED.add(candids.len() as u64, attributes);
-
-        // TODO: If Babamul is enabled, push enriched alerts to Babamul queue
     }
 
     Ok(())
