@@ -30,7 +30,7 @@ get_mongo_count(){
 }
 
 get_kafka_count(){
-  apptainer exec instance://broker kafka-consumer-groups.sh \
+  apptainer exec instance://kafka kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 \
   --group "$KAFKA_GROUP" \
   --describe 2>/dev/null \

@@ -55,7 +55,7 @@ if [ "$1" == "start" ]; then
   if [ -z "$2" ] || { { [ "$2" == "all" ] || [ "$2" == "boom" ] || [ "$2" == "consumer" ] || [ "$2" == "scheduler" ]; } && [ -z "$3" ]; }; then
     echo -e "${RED}Error: Missing required arguments.${END}"
     echo -e "Usage: ${BLUE}$0 start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
-    echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | broker | valkey | prometheus | otel | listener | kuma | all${END}"
+    echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
     echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
     echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
     echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
@@ -86,11 +86,11 @@ fi
 if [ "$1" == "stop" ]; then
   target="$2"
   if [ -n "$target" ] && [ "$target" != "all" ] && [ "$target" != "boom" ] && [ "$target" != "consumer" ] && [ "$target" != "scheduler" ] \
-    && [ "$target" != "mongo" ] && [ "$target" != "broker" ] && [ "$target" != "valkey" ] && [ "$target" != "prometheus" ] \
+    && [ "$target" != "mongo" ] && [ "$target" != "kafka" ] && [ "$target" != "valkey" ] && [ "$target" != "prometheus" ] \
     && [ "$target" != "otel" ] && [ "$target" != "listener" ] && [ "$target" != "kuma" ]; then
     echo -e "${RED}Error: Invalid service name '$target'.${END}"
     echo -e "Usage: ${BLUE}$0 stop [service|all|'empty']${END} ${YELLOW}('empty' will default to all)${END}"
-    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom | consumer | scheduler | mongo | broker | valkey | prometheus | otel | listener | kuma ${END}"
+    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma ${END}"
     exit 1
   fi
 
@@ -122,8 +122,8 @@ if [ "$1" == "stop" ]; then
   if stop_service "valkey" "$target"; then
     apptainer instance stop valkey
   fi
-  if stop_service "broker" "$target"; then
-    apptainer instance stop broker
+  if stop_service "kafka" "$target"; then
+    apptainer instance stop kafka
   fi
   if stop_service "mongo" "$target"; then
     apptainer instance stop mongo

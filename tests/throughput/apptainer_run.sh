@@ -59,16 +59,16 @@ apptainer instance run \
 "$SCRIPTS_DIR/valkey-healthcheck.sh"
 
 # -----------------------------
-# 3. Kafka broker
+# 3. Kafka
 # -----------------------------
-echo && echo "$(current_datetime) - Starting Kafka broker"
+echo && echo "$(current_datetime) - Starting Kafka"
 mkdir -p "$PERSISTENT_DIR/kafka_data"
 mkdir -p "$LOGS_DIR/kafka"
 apptainer instance run \
     --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
     --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
     --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
-    "$SIF_DIR/kafka.sif" broker
+    "$SIF_DIR/kafka.sif" kafka
 "$SCRIPTS_DIR/kafka-healthcheck.sh"
 
 # -----------------------------
@@ -126,12 +126,12 @@ fi
 # 8. Wait for alerts ingestion
 # -----------------------------
 echo && echo "$(current_datetime) - Waiting for all alerts to be ingested"
-while [ $(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
+while [ "$(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()")" -lt $EXPECTED_ALERTS ]; do
     sleep 1
 done
 
 echo "$(current_datetime) - Waiting for all alerts to be classified"
-while [ $(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval 'db.getSiblingDB("boom-benchmarking").ZTF_alerts.countDocuments({ classifications: { $exists: true } })') -lt $EXPECTED_ALERTS ]; do
+while [ "$(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })")" -lt $EXPECTED_ALERTS ]; do
     sleep 1
 done
 
@@ -149,7 +149,7 @@ done
 # -----------------------------
 echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
 apptainer instance stop boom
-apptainer instance stop broker
+apptainer instance stop kafka
 apptainer instance stop valkey
 apptainer instance stop mongo
 

@@ -7,7 +7,7 @@
 #      - consumer    : starts the consumer process
 #      - scheduler   : starts the scheduler process
 #      - mongo       : starts the MongoDB instance
-#      - broker      : starts the kafka broker instance
+#      - kafka      : starts the kafka kafka instance
 #      - valkey      : starts the Valkey instance
 #      - prometheus  : starts the Prometheus instance
 #      - otel        : starts OpenTelemetry Collector process
@@ -74,17 +74,17 @@ if start_service "valkey" "$2"; then
 fi
 
 # -----------------------------
-# 3. Kafka broker
+# 3. Kafka kafka
 # -----------------------------
-if start_service "broker" "$2"; then
-  echo && echo "$(current_datetime) - Starting Kafka broker"
+if start_service "kafka" "$2"; then
+  echo && echo "$(current_datetime) - Starting Kafka"
   mkdir -p "$PERSISTENT_DIR/kafka_data"
   mkdir -p "$LOGS_DIR/kafka"
   apptainer instance run \
       --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
       --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
       --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
-      "$SIF_DIR/kafka.sif" broker
+      "$SIF_DIR/kafka.sif" kafka
   "$SCRIPTS_DIR/kafka-healthcheck.sh"
 fi
 
