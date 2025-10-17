@@ -24,7 +24,7 @@ while true; do
     echo -e "${YELLOW}$(current_datetime) - Valkey is loading the dataset${END}"
     sleep 5
   else
-    echo -e "${RED}$(current_datetime) - Valkey unhealthy: $output${END}"
+    echo -e "${RED}$(current_datetime) - Valkey unhealthy${END}"
     sleep 1
   fi
 
