@@ -127,6 +127,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
+        // TODO: Can we define a struct for what comes out here?
         let alerts =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
 
@@ -175,8 +176,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             processed_alerts.push(format!("{}", candid));
 
             // If Babamul is enabled, merge the alert and properties and append a
-            // JSON payload to the in-memory `babamul_alerts` vector. We'll flush
-            // the vector to Redis once after we've written updates to MongoDB.
+            // JSON payload to the in-memory `babamul_alerts` vector
             if self.babamul.is_some() {
                 // Merge properties into the alert document
                 let mut merged = alerts[i].clone();
