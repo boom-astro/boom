@@ -15,7 +15,7 @@ NB_RETRIES=${1:-}
 
 cpt=0
 until timeout 3 curl -sSf http://localhost:3001 > /dev/null 2>&1; do
-    echo -e "${RED}$(current_datetime) - Uptime Kuma unhealthy${END}"
+    echo -e "${RED}$(current_datetime) - uptime kuma unhealthy${END}"
     if [ -n "$NB_RETRIES" ] && [ $cpt -ge $NB_RETRIES ]; then
         exit 1
     fi
@@ -24,5 +24,5 @@ until timeout 3 curl -sSf http://localhost:3001 > /dev/null 2>&1; do
     sleep 3
 done
 
-echo -e "${GREEN}$(current_datetime) - Uptime Kuma is healthy${END}"
+echo -e "${GREEN}$(current_datetime) - uptime kuma is healthy${END}"
 exit 0

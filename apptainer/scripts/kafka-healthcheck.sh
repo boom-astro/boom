@@ -15,7 +15,7 @@ NB_RETRIES=${1:-}
 
 cpt=0
 until apptainer exec instance://kafka /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server localhost:9092 > /dev/null 2>&1; do
-    echo -e "${RED}$(current_datetime) - Kafka unhealthy${END}"
+    echo -e "${RED}$(current_datetime) - kafka unhealthy${END}"
     if [ -n "$NB_RETRIES" ] && [ $cpt -ge $NB_RETRIES ]; then
       exit 1
     fi
@@ -24,5 +24,5 @@ until apptainer exec instance://kafka /opt/kafka/bin/kafka-cluster.sh cluster-id
     sleep 2
 done
 
-echo -e "${GREEN}$(current_datetime) - Kafka is healthy${END}"
+echo -e "${GREEN}$(current_datetime) - kafka is healthy${END}"
 exit 0

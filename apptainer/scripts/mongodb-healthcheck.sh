@@ -17,7 +17,7 @@ cpt=0
 until echo 'db.runCommand("ping").ok' | \
     apptainer exec instance://mongo mongosh localhost:27017/test --quiet 2>/dev/null | \
     grep -q 1; do
-    echo -e "${RED}$(current_datetime) - MongoDB unhealthy${END}"
+    echo -e "${RED}$(current_datetime) - mongodb unhealthy${END}"
     if [ -n "$NB_RETRIES" ] && [ "$cpt" -ge "$NB_RETRIES" ]; then
         exit 1
     fi
@@ -25,5 +25,5 @@ until echo 'db.runCommand("ping").ok' | \
     sleep 5
 done
 
-echo -e "${GREEN}$(current_datetime) - MongoDB is healthy${END}"
+echo -e "${GREEN}$(current_datetime) - mongodb is healthy${END}"
 exit 0

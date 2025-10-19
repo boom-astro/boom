@@ -18,13 +18,13 @@ cpt=0
 while true; do
   output=$(timeout 3 bash -c "apptainer exec instance://valkey redis-cli ping" 2>&1)
   if echo "$output" | grep -q "PONG"; then
-    echo -e "${GREEN}$(current_datetime) - Valkey is healthy${END}"
+    echo -e "${GREEN}$(current_datetime) - valkey is healthy${END}"
     exit 0
   elif echo "$output" | grep -q "LOADING"; then
-    echo -e "${YELLOW}$(current_datetime) - Valkey is loading the dataset${END}"
+    echo -e "${YELLOW}$(current_datetime) - valkey is loading the dataset${END}"
     sleep 5
   else
-    echo -e "${RED}$(current_datetime) - Valkey unhealthy${END}"
+    echo -e "${RED}$(current_datetime) - valkey unhealthy${END}"
     sleep 1
   fi
 
