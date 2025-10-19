@@ -3,6 +3,7 @@
 # Script to start BOOM services using Apptainer containers. Arguments:
 # $1 = boom directory
 # $2 = service to start:
+#      - all         : starts all services
 #      - boom        : starts both consumer and scheduler
 #      - consumer    : starts the consumer process
 #      - scheduler   : starts the scheduler process
@@ -13,7 +14,6 @@
 #      - otel        : starts OpenTelemetry Collector process
 #      - listener    : starts Boom healthcheck listener process
 #      - kuma        : starts the Kuma instance
-#      If not specified or 'all', all services will be started.
 #
 # Additional arguments for 'boom', 'consumer', or 'scheduler':
 # $3 = survey name (required for consumer/scheduler)
@@ -29,6 +29,7 @@ CONFIG_FILE="$BOOM_DIR/config.yaml"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
 GREEN="\e[32m"
+BLUE="\e[34m"
 RED="\e[31m"
 END="\e[0m"
 
@@ -47,6 +48,14 @@ start_service() {
     fi
     return 1
 }
+
+if [ "$2" != "all" ] && [ "$2" != "boom" ] && [ "$2" != "consumer" ] && [ "$2" != "scheduler" ] \
+  && [ "$2" != "mongo" ] && [ "$2" != "kafka" ] && [ "$2" != "valkey" ] && [ "$2" != "prometheus" ] \
+  && [ "$2" != "otel" ] && [ "$2" != "listener" ] && [ "$2" != "kuma" ]; then
+  echo -e "${RED}Error: Invalid service name '$2'.${END}"
+  echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
+  exit 1
+fi
 
 # -----------------------------
 # 1. MongoDB
