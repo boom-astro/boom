@@ -4,8 +4,22 @@
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
-COUNT_FILE="$BOOM_DIR/apptainer/persistent/count.txt"
-KAFKA_GROUP="temp_group"
+KAFKA_TEMP_GROUP="temp_group"
+
+get_kafka_temp_group(){
+  local survey=$1
+  echo "${KAFKA_TEMP_GROUP}_${survey}"
+}
+
+# --- Consume one message from each survey to create the temp group ---
+for survey in LSST ZTF; do
+  apptainer exec instance://kafka kafka-console-consumer.sh \
+    --bootstrap-server localhost:9092 \
+    --topic "${survey}_alerts_results" \
+    --group "$(get_kafka_temp_group "$survey")" \
+    --from-beginning \
+    --max-messages 1 > /dev/null 2>&1
+done
 
 if [[ -f "$BOOM_DIR/.env" ]]; then
   set -a
@@ -20,6 +34,15 @@ current_datetime() {
   TZ=utc date "+%Y-%m-%d"
 }
 
+get_count_file(){
+  local survey=$1
+  if [[ "$survey" == "LSST" ]]; then
+    echo "$BOOM_DIR/apptainer/persistent/lsst_count.txt"
+  else
+    echo "$BOOM_DIR/apptainer/persistent/ztf_count.txt"
+  fi
+}
+
 # --- Function to get count from MongoDB ---
 get_mongo_count(){
   local collection=$1
@@ -30,9 +53,10 @@ get_mongo_count(){
 }
 
 get_kafka_count(){
+  local survey=$1
   apptainer exec instance://kafka kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 \
-  --group "$KAFKA_GROUP" \
+  --group "$(get_kafka_temp_group "$survey")" \
   --describe 2>/dev/null \
   | awk 'NR>1 {sum += $5} END {print sum}'
 }
@@ -47,65 +71,95 @@ prepare_message(){
   local -n db=$1
   local old_alerts_count=$2
   local filtered_msg=$3
-  message_to_send="$(current_datetime) - LSST:
+  local survey=$4
+  echo "$(current_datetime) - $survey:
 
-New alerts : $(format "$((db["LSST_alerts"] - old_alerts_count))")
+New alerts : $(format "$((db["${survey}_alerts"] - old_alerts_count))")
 Filtered       : $filtered_msg
 
- -      -      MongoDB      -      -
-Alerts    :   $(format "${db["LSST_alerts"]}")
-Aux        :   $(format "${db["LSST_alerts_aux"]}")
-Cutouts :   $(format "${db["LSST_alerts_cutouts"]}")"
+-      -      MongoDB      -      -
+Alerts    :   $(format "${db["${survey}_alerts"]}")
+Aux        :   $(format "${db["${survey}_alerts_aux"]}")
+Cutouts :   $(format "${db["${survey}_alerts_cutouts"]}")"
 }
 
-collections=("LSST_alerts" "LSST_alerts_aux" "LSST_alerts_cutouts")
-message_to_send=""
+collections=("" "_aux" "_cutouts")
+
+separator="
+------------------------
+"
+
 if [[ "$1" == "test" ]]; then
   chat_id=$BOOM_TESTING_CHAT_ID
 else
   chat_id=$BOOM_CHAT_ID
 fi
 
-old_alerts_count=0
-old_filtered_alerts_count=0
+declare -A old_alerts_count=(
+  [LSST]=0
+  [LSST_filtered]=0
+  [ZTF]=0
+  [ZTF_filtered]=0
+)
+
 # --- Read old LSST_alerts count if file exists (formatted as: all_alerts:filtered_alerts) ---
-if [[ -f "$COUNT_FILE" ]]; then
-    read -r old_alerts_count old_filtered_alerts_count < <(tr ':' ' ' < "$COUNT_FILE")
+if [[ -f "$(get_count_file LSST)" ]]; then
+    read -r alerts filtered_alerts < <(tr ':' ' ' < "$(get_count_file LSST)")
+    old_alerts_count[LSST]=$alerts
+    old_alerts_count[LSST_filtered]=$filtered_alerts
 fi
 
+# --- Read old ZTF_alerts count if file exists (formatted as: all_alerts:filtered_alerts) ---
+if [[ -f "$(get_count_file ZTF)" ]]; then
+    read -r alerts filtered_alerts < <(tr ':' ' ' < "$(get_count_file ZTF)")
+    old_alerts_count[ZTF]=$alerts
+    old_alerts_count[ZTF_filtered]=$filtered_alerts
+fi
+
+declare -A current_db
 while true; do
-  # --- Get new counts from Kafka ---
-  filtered_alerts=0
-  if "$SCRIPTS_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
-    filtered_alerts=$(get_kafka_count)
-    filtered_msg=$(format "$((filtered_alerts - old_filtered_alerts_count))")
-  else
-    filtered_alerts=old_filtered_alerts_count
-    filtered_msg="Kafka is down!"
-  fi
+  message_to_send=""
 
-  # --- Get new counts from MongoDB ---
-  declare -A current_db
-  if "$SCRIPTS_DIR/mongodb-healthcheck.sh" > /dev/null 2>&1; then
-    for col in "${collections[@]}"; do
-        current_db["$col"]=$(get_mongo_count "$col")
-    done
-    # --- Prepare message ---
-    prepare_message current_db "$old_alerts_count" "$filtered_msg"
-    old_alerts_count=${current_db["LSST_alerts"]}
-  else
-    current_db["LSST_alerts"]=$old_alerts_count
-    message_to_send="$(current_datetime) MongoDB is down!"
-  fi
+  # Process each survey
+  for survey in LSST ZTF; do
+    # --- Get new counts from Kafka ---
+    filtered_alerts=0
+    if "$SCRIPTS_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
+      filtered_alerts=$(get_kafka_count "$survey")
+      filtered_msg=$(format "$((filtered_alerts - old_alerts_count["${survey}_filtered"]))")
+    else
+      filtered_alerts=old_alerts_count["${survey}_filtered"]
+      filtered_msg="Kafka is down!"
+    fi
 
-  # --- Save new filtered alerts count to file ---
-  echo "${current_db["LSST_alerts"]}:$filtered_alerts" > "$COUNT_FILE"
+    # --- Get new counts from MongoDB ---
+    if "$SCRIPTS_DIR/mongodb-healthcheck.sh" > /dev/null 2>&1; then
+      for col in "${collections[@]}"; do
+          current_db["${survey}_alerts${col}"]=$(get_mongo_count "${survey}_alerts${col}")
+      done
+      # --- Prepare message ---
+      message="$(prepare_message current_db "${old_alerts_count["${survey}"]}" "$filtered_msg" "$survey")"
+      if [[ "$message_to_send" == "" ]]; then
+        message_to_send+="$message"
+      else # Add a separator between survey messages
+        message_to_send+="$separator$message"
+      fi
+      old_alerts_count["${survey}"]=${current_db["${survey}_alerts"]}
+    else
+      current_db["${survey}_alerts"]=${old_alerts_count["${survey}"]}
+      message_to_send="$(current_datetime) MongoDB is down!"
+    fi
+
+    # --- Save new filtered alerts count to file ---
+    echo "${current_db["${survey}_alerts"]}:$filtered_alerts" > "$(get_count_file "$survey")"
+
+  done
 
   # --- Send message to Telegram ---
   curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
        --data-urlencode "chat_id=$chat_id" \
        --data-urlencode "text=$message_to_send" > /dev/null
 
-  # --- Wait until next 09:00:00 AM America/Santiago time (LSST time zone) ---
-  sleep $((($(TZ="America/Santiago" date -d "09:00:00" +%s) - $(TZ="America/Santiago" date +%s) + 86400) % 86400 ))
+  # --- Wait until next 08:00:00 AM America/Los_Angeles time (ZTF Time Zone) ---
+  sleep $((($(TZ="America/Los_Angeles" date -d "08:00:00" +%s) - $(TZ="America/Los_Angeles" date +%s) + 86400) % 86400 ))
 done
