@@ -29,11 +29,6 @@ EXPECTED_ALERTS=29142
 N_FILTERS=25
 TIMEOUT_SECS=60*5 # 5 minutes
 
-graceful_shutdown() {
-    docker compose -f $COMPOSE_CONFIG down
-    exit 1
-}
-
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
@@ -42,7 +37,8 @@ while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoa
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for alerts to be ingested"
-        graceful_shutdown()
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
     fi
     sleep 1
 done
@@ -55,7 +51,8 @@ while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoa
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for alerts to be classified"
-        graceful_shutdown()
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
     fi
     sleep 1
 done
@@ -72,7 +69,8 @@ while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for filters to run on all alerts"
-        graceful_shutdown()
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
     fi
     sleep 1
 done
