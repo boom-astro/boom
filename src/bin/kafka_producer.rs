@@ -1,4 +1,5 @@
 use boom::{
+    conf::load_dotenv,
     kafka::{AlertProducer, DecamAlertProducer, ZtfAlertProducer},
     utils::{
         enums::{ProgramId, Survey},
@@ -34,6 +35,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load environment variables from .env file before anything else
+    load_dotenv();
+
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
