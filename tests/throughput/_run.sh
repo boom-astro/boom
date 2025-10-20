@@ -27,7 +27,7 @@ docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/sche
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
-TIMEOUT_SECS=60*5 # 5 minutes
+TIMEOUT_SECS=300 # 5 minutes
 
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
