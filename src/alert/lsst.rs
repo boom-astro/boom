@@ -36,6 +36,8 @@ pub const LSST_DECAM_XMATCH_RADIUS: f64 =
 
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
+const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
+
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
@@ -193,7 +195,7 @@ pub struct DiaSource {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct Candidate {
+pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
     #[serde(rename(serialize = "objectId"))]
@@ -208,22 +210,24 @@ pub struct Candidate {
     pub is_sso: bool,
 }
 
-impl TryFrom<DiaSource> for Candidate {
+impl TryFrom<DiaSource> for LsstCandidate {
     type Error = AlertError;
     fn try_from(dia_source: DiaSource) -> Result<Self, Self::Error> {
-        let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)? * 1e-9;
-        let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)? * 1e-9;
+        let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
+        let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
 
-        let ap_flux = dia_source.ap_flux.ok_or(AlertError::MissingFluxAperture)? * 1e-9;
+        let ap_flux = dia_source.ap_flux.ok_or(AlertError::MissingFluxAperture)?;
         let ap_flux_err = dia_source
             .ap_flux_err
-            .ok_or(AlertError::MissingFluxAperture)?
-            * 1e-9;
+            .ok_or(AlertError::MissingFluxAperture)?;
 
-        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, ZP_AB);
-        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, ZP_AB);
+        // instead of converting all the nJy values to Jy, we just add 2.5 * log10(1e9) = 22.5
+        // to the zeropoint
 
-        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, ZP_AB);
+        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, LSST_ZP_AB_NJY);
+        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
+
+        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, is_sso is false
         // if ss_object_id is defined, is_sso is true
@@ -240,7 +244,7 @@ impl TryFrom<DiaSource> for Candidate {
             }
         };
 
-        Ok(Candidate {
+        Ok(LsstCandidate {
             dia_source,
             object_id,
             magpsf,
@@ -509,7 +513,7 @@ pub struct DiaForcedSource {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct ForcedPhot {
+pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
     pub magpsf: Option<f32>,
@@ -519,21 +523,20 @@ pub struct ForcedPhot {
     pub snr: Option<f32>,
 }
 
-impl TryFrom<DiaForcedSource> for ForcedPhot {
+impl TryFrom<DiaForcedSource> for LsstForcedPhot {
     type Error = AlertError;
     fn try_from(dia_forced_source: DiaForcedSource) -> Result<Self, Self::Error> {
         let psf_flux_err = dia_forced_source
             .psf_flux_err
-            .ok_or(AlertError::MissingFluxPSF)?
-            * 1e-9;
+            .ok_or(AlertError::MissingFluxPSF)?;
 
         // for now, we only consider positive detections (flux positive) as detections
         // may revisit this later
         let (magpsf, sigmapsf, isdiffpos, snr) = match dia_forced_source.psf_flux {
             Some(psf_flux) => {
-                let psf_flux_abs = psf_flux.abs() * 1e-9;
+                let psf_flux_abs = psf_flux.abs();
                 if (psf_flux_abs / psf_flux_err) > SNT {
-                    let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, ZP_AB);
+                    let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
                     (
                         Some(magpsf),
                         Some(sigmapsf),
@@ -547,9 +550,9 @@ impl TryFrom<DiaForcedSource> for ForcedPhot {
             _ => (None, None, None, None),
         };
 
-        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, ZP_AB);
+        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
-        Ok(ForcedPhot {
+        Ok(LsstForcedPhot {
             dia_forced_source,
             magpsf,
             sigmapsf,
@@ -567,13 +570,13 @@ pub struct LsstAlert {
     pub candid: i64,
     #[serde(rename(deserialize = "diaSource"))]
     #[serde(deserialize_with = "deserialize_candidate")]
-    pub candidate: Candidate,
+    pub candidate: LsstCandidate,
     #[serde(rename = "prvDiaSources")]
     #[serde(deserialize_with = "deserialize_prv_candidates")]
-    pub prv_candidates: Option<Vec<Candidate>>,
+    pub prv_candidates: Option<Vec<LsstCandidate>>,
     #[serde(rename = "prvDiaForcedSources")]
     #[serde(deserialize_with = "deserialize_prv_forced_sources")]
-    pub fp_hists: Option<Vec<ForcedPhot>>,
+    pub fp_hists: Option<Vec<LsstForcedPhot>>,
     // NOTE: the prv_nondetections is missing in version 9 of the schema,
     // and will be reintroduced in a future version
     // #[serde(rename = "prvDiaNondetectionLimits")]
@@ -624,38 +627,40 @@ where
     }
 }
 
-fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
+fn deserialize_candidate<'de, D>(deserializer: D) -> Result<LsstCandidate, D::Error>
 where
     D: Deserializer<'de>,
 {
     let dia_source = <DiaSource as Deserialize>::deserialize(deserializer)?;
-    Candidate::try_from(dia_source).map_err(serde::de::Error::custom)
+    LsstCandidate::try_from(dia_source).map_err(serde::de::Error::custom)
 }
 
-fn deserialize_prv_candidates<'de, D>(deserializer: D) -> Result<Option<Vec<Candidate>>, D::Error>
+fn deserialize_prv_candidates<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<LsstCandidate>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
-        .map(Candidate::try_from)
-        .collect::<Result<Vec<Candidate>, AlertError>>()
+        .map(LsstCandidate::try_from)
+        .collect::<Result<Vec<LsstCandidate>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
     Ok(Some(candidates))
 }
 
 fn deserialize_prv_forced_sources<'de, D>(
     deserializer: D,
-) -> Result<Option<Vec<ForcedPhot>>, D::Error>
+) -> Result<Option<Vec<LsstForcedPhot>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let dia_forced_sources = <Vec<DiaForcedSource> as Deserialize>::deserialize(deserializer)?;
     let forced_phots = dia_forced_sources
         .into_iter()
-        .map(ForcedPhot::try_from)
-        .collect::<Result<Vec<ForcedPhot>, AlertError>>()
+        .map(LsstForcedPhot::try_from)
+        .collect::<Result<Vec<LsstForcedPhot>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
     Ok(Some(forced_phots))
 }
@@ -777,9 +782,9 @@ impl LsstAlertWorker {
     #[instrument(skip_all)]
     fn format_prv_candidates_and_fp_hist(
         &self,
-        prv_candidates: Option<Vec<Candidate>>,
+        prv_candidates: Option<Vec<LsstCandidate>>,
         candidate_doc: Document,
-        fp_hist: Option<Vec<ForcedPhot>>,
+        fp_hist: Option<Vec<LsstForcedPhot>>,
     ) -> (Vec<Document>, Vec<Document>) {
         let mut prv_candidates_doc = prv_candidates
             .unwrap_or(vec![])

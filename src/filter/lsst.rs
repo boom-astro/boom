@@ -91,8 +91,8 @@ pub async fn build_lsst_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")? * 1e-9; // from nJy to Jy
-            let flux_err = doc.get_f64("psfFluxErr")? * 1e-9; // from nJy to Jy
+            let flux = doc.get_f64("psfFlux")?; // in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
