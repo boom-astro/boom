@@ -18,8 +18,8 @@ pub enum BoomConfigError {
     ConnectRedisError(#[from] redis::RedisError),
     #[error("could not find config file")]
     ConfigFileNotFound,
-    #[error("missing key in config")]
-    MissingKeyError,
+    #[error("missing key in config: {0}")]
+    MissingKeyError(String),
 }
 /// Loads environment variables from a .env file if it exists.
 /// This function should be called early in the application startup,
@@ -252,19 +252,19 @@ impl CatalogXmatchConfig {
 
         let catalog = hashmap_xmatch
             .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
             .clone()
             .into_string()?;
 
         let radius = hashmap_xmatch
             .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
             .clone()
             .into_float()?;
 
         let projection = hashmap_xmatch
             .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
             .clone()
             .into_table()?;
 
@@ -380,12 +380,12 @@ impl SurveyKafkaConfig {
             .unwrap_or_default()
             .into_table()?;
 
-        // server defaults to localhost:9092
         let consumer_server = consumer_config
             .get("server")
             .and_then(|c| c.clone().into_string().ok())
-            .unwrap_or_else(|| "localhost:9092".to_string());
+            .ok_or(BoomConfigError::MissingKeyError("server".to_string()))?;
 
+        // the schema registry is optional
         let consumer_schema_registry = consumer_config
             .get("schema_registry")
             .and_then(|c| c.clone().into_string().ok());
@@ -401,16 +401,8 @@ impl SurveyKafkaConfig {
         // group_id defaults to boom-<survey>-consumer-group
         let consumer_group_id = consumer_config
             .get("group_id")
-            .and_then(|c| c.clone().into_string().ok());
-
-        let consumer_group_id = consumer_group_id.unwrap_or_else(|| match &consumer_username {
-            Some(username) => format!(
-                "{}-{}-boom-consumer_group",
-                username,
-                survey.to_string().to_lowercase()
-            ),
-            None => format!("{}-boom-consumer_group", survey.to_string().to_lowercase()),
-        });
+            .and_then(|c| c.clone().into_string().ok())
+            .ok_or(BoomConfigError::MissingKeyError("group_id".to_string()))?;
 
         let consumer = KafkaConsumerConfig {
             server: consumer_server,
