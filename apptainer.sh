@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore
+# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore | log
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
+LOGS_DIR="$BOOM_DIR/logs/boom"
 
 BLUE="\e[0;34m"
 RED="\e[31m"
@@ -14,8 +15,8 @@ END="\e[0m"
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
   && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] \
-  && [ "$1" != "backup" ] && [ "$1" != "restore" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore} [args...]"
+  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|log} [args...]"
   exit 1
 fi
 
@@ -204,4 +205,36 @@ if [ "$1" == "restore" ]; then
   --gzip \
   --drop
   exit 0
+fi
+
+# -----------------------------
+# 8. Display log
+# -----------------------------
+if [ "$1" == "log" ]; then
+  survey="${2:-lsst}"
+  service="${3:-scheduler}"
+  if { [ "$survey" != "lsst" ] && [ "$survey" != "ztf" ] && [ "$survey" != "decam" ]; } \
+  || { [ "$service" != "scheduler" ] && [ "$service" != "s" ] && [ "$service" != "consumer" ] \
+  && [ "$service" != "cons" ] && [ "$service" != "c" ]; }; then
+    echo -e "${RED}Error: Invalid survey name '$survey'.${END}"
+    echo -e "  ${BLUE}<survey>:${END} ${GREEN}lsst | ztf | decam${END} ${YELLOW}(optional, defaults to lsst)${END}"
+    echo -e "  ${BLUE}<service>:${END} ${GREEN}scheduler | s | consumer | cons | c${END} ${YELLOW}(optional, defaults to scheduler)${END}"
+    echo -e "  ${BLUE}<date>:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional, defaults to latest)${END}"
+    exit 1
+  fi
+
+  if [ "$service" = "scheduler" ] || [ "$service" = "s" ]; then
+    echo -e "${BLUE}Displaying $survey scheduler log...${END}"
+    tail -f "$LOGS_DIR/${survey}_scheduler.log"
+  else
+    date="$4"
+    if [ -n "$date" ]; then
+      echo -e "${BLUE}Displaying $survey consumer log for date $date...${END}"
+      tail -f "$LOGS_DIR/${survey}_${date}_consumer.log"
+    else # no date provided, display the latest consumer log
+      latest_log="$(ls -t "$LOGS_DIR/${survey}_"*"_consumer.log" 2>/dev/null | head -n 1)"
+      echo -e "${BLUE}Displaying latest $survey consumer log ($(basename  "$latest_log"))...${END}"
+      tail -f "$latest_log"
+    fi
+  fi
 fi
