@@ -497,7 +497,7 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp: i64) -> KafkaResult<()>
                 KAFKA_TIMEOUT_SECS,
             )?;
         } else {
-            println!(
+            warn!(
                 "No offset found for partition {} at timestamp {}",
                 elem.partition(),
                 timestamp
@@ -530,9 +530,10 @@ pub async fn consumer(
         // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", &server)
         .set("group.id", &group_id)
-        .set("enable.auto.commit", "true")
         .set("auto.offset.reset", "earliest")
-        // Important: disable auto-start so we can seek before consuming
+        // Important: disable automatic offset storage so offsets
+        // can be manually controlled during the seek operation
+        .set("enable.auto.commit", "true")
         .set("enable.auto.offset.store", "false");
 
     if let (Some(username), Some(password)) = (username, password) {
@@ -563,7 +564,7 @@ pub async fn consumer(
             Some(Ok(_msg)) => {
                 debug!("Received initial message, seeking to timestamp...");
                 // Now seek all assigned partitions to the target timestamp
-                seek_to_timestamp(&consumer, timestamp * 1000).unwrap();
+                seek_to_timestamp(&consumer, timestamp * 1000)?;
                 break;
             }
             Some(Err(e)) => {
