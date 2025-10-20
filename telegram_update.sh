@@ -127,6 +127,7 @@ while true; do
     if "$SCRIPTS_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
       filtered_alerts=$(get_kafka_count "$survey")
       filtered_msg=$(format "$((filtered_alerts - old_alerts_count["${survey}_filtered"]))")
+      old_alerts_count["${survey}_filtered"]=$filtered_alerts
     else
       filtered_alerts=old_alerts_count["${survey}_filtered"]
       filtered_msg="Kafka is down!"
