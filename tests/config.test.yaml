@@ -22,16 +22,16 @@ kafka:
   consumer:
     ZTF:
       server: "localhost:9092"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
     LSST:
       server: "usdf-alert-stream-dev.lsst.cloud:9094"
       schema_registry: "https://usdf-alert-schemas-dev.slac.stanford.edu"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
       username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
       password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
     DECAM:
       server: "localhost:9092"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:

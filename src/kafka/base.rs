@@ -469,7 +469,7 @@ pub trait AlertConsumer: Sized {
     }
 }
 
-fn seek_to_timestamp(consumer: &BaseConsumer, timestamp: i64) -> KafkaResult<()> {
+fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<()> {
     // Get current assignment
     let assignment = consumer.assignment()?;
 
@@ -480,7 +480,7 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp: i64) -> KafkaResult<()>
         tpl_with_timestamps.add_partition_offset(
             elem.topic(),
             elem.partition(),
-            rdkafka::Offset::Offset(timestamp), // Use timestamp as offset for lookup
+            rdkafka::Offset::Offset(timestamp_ms), // Use timestamp as offset for lookup, in ms
         )?;
     }
 
@@ -489,6 +489,11 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp: i64) -> KafkaResult<()>
 
     // Seek to the resolved offsets
     for elem in offsets.elements() {
+        debug!(
+            "Seeking partition {} to offset for timestamp {}",
+            elem.partition(),
+            timestamp_ms
+        );
         if let rdkafka::Offset::Offset(offset) = elem.offset() {
             consumer.seek(
                 elem.topic(),
@@ -496,11 +501,17 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp: i64) -> KafkaResult<()>
                 rdkafka::Offset::Offset(offset),
                 KAFKA_TIMEOUT_SECS,
             )?;
+            debug!(
+                "Seeked partition {} to offset {} for timestamp {}",
+                elem.partition(),
+                offset,
+                timestamp_ms
+            );
         } else {
             warn!(
                 "No offset found for partition {} at timestamp {}",
                 elem.partition(),
-                timestamp
+                timestamp_ms
             );
         }
     }
@@ -619,6 +630,8 @@ pub async fn consumer(
     // start timer
     let start = std::time::Instant::now();
 
+    debug!("Starting Kafka consumer loop...");
+
     // Process the rest normally
     loop {
         if max_in_queue > 0 && total % 1000 == 0 {
@@ -666,7 +679,7 @@ pub async fn consumer(
                 continue;
             }
             None => {
-                trace!("No message available");
+                debug!("No message available");
                 if exit_on_eof {
                     info!("No more messages, exiting consumer {}", id);
                     break;
