@@ -93,13 +93,13 @@ async fn test_produce_and_consume_from_archive() {
     let timestamp = datetime.and_utc().timestamp();
     ztf_alert_consumer
         .consume(
+            None,
             timestamp,
+            None,
+            Some(1),
+            None,
+            false,
             TEST_CONFIG_FILE,
-            true,
-            None,
-            None,
-            None,
-            Some(topic),
         )
         .await
         .unwrap();

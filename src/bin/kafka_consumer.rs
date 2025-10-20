@@ -87,13 +87,13 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
+                    None,
                     timestamp,
-                    &args.config,
-                    false,
+                    None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    None,
-                    None,
+                    false,
+                    &args.config,
                 )
                 .await
             {
@@ -108,13 +108,13 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
+                    None,
                     timestamp,
-                    &args.config,
-                    false,
+                    None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    None,
-                    None,
+                    false,
+                    &args.config,
                 )
                 .await
             {
@@ -129,13 +129,13 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
+                    None,
                     timestamp,
-                    &args.config,
-                    false,
+                    None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    None,
-                    None,
+                    false,
+                    &args.config,
                 )
                 .await
             {

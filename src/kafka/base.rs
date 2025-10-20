@@ -397,12 +397,6 @@ pub enum ConsumerError {
 pub trait AlertConsumer: Sized {
     fn topic_name(&self, timestamp: i64) -> String;
     fn output_queue(&self) -> String;
-    fn username(&self) -> Option<String> {
-        None
-    }
-    fn password(&self) -> Option<String> {
-        None
-    }
     fn survey(&self) -> crate::utils::enums::Survey;
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
@@ -421,47 +415,38 @@ pub trait AlertConsumer: Sized {
     #[instrument(skip(self))]
     async fn consume(
         &self,
+        topic: Option<String>,
         timestamp: i64,
-        config_path: &str,
-        exit_on_eof: bool,
+        kafka_config: Option<SurveyKafkaConfig>,
         n_threads: Option<usize>,
         max_in_queue: Option<usize>,
-        group_id: Option<String>,
-        topic: Option<String>,
+        exit_on_eof: bool,
+        config_path: &str,
     ) -> Result<(), ConsumerError> {
         let config = conf::load_config(config_path)?;
-        let kafka_config = conf::build_kafka_config(&config, &self.survey())?;
+
+        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
+        let kafka_config = match kafka_config {
+            Some(cfg) => cfg,
+            None => conf::build_kafka_config(&config, &self.survey())?,
+        };
 
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let group_id = group_id.unwrap_or_else(|| match self.username() {
-            Some(username) => format!("{}-boom-consumer_group", username),
-            None => format!(
-                "{}-boom-consumer_group",
-                self.survey().to_string().to_lowercase()
-            ),
-        });
-        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
 
         let mut handles = vec![];
         for i in 0..n_threads {
             let topic = topic.clone();
-            let group_id = group_id.clone();
-            let username = self.username();
-            let password = self.password();
             let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
             let handle = tokio::spawn(async move {
-                let result = consume_partitions(
+                let result = consumer(
                     &i.to_string(),
                     &topic,
-                    &group_id,
                     &output_queue,
                     max_in_queue,
                     timestamp,
-                    &username,
-                    &password,
                     &config,
                     &kafka_config,
                     exit_on_eof,
@@ -523,26 +508,28 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp: i64) -> KafkaResult<()>
     Ok(())
 }
 
-#[instrument(skip(username, password, config, survey_config))]
-pub async fn consume_partitions(
+#[instrument(skip(config, survey_config))]
+pub async fn consumer(
     id: &str,
     topic: &str,
-    group_id: &str,
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
-    username: &Option<String>,
-    password: &Option<String>,
     config: &config::Config,
     survey_config: &SurveyKafkaConfig,
     exit_on_eof: bool,
 ) -> Result<(), ConsumerError> {
+    let server = survey_config.consumer.server.clone();
+    let group_id = survey_config.consumer.group_id.clone();
+    let username = survey_config.consumer.username.clone();
+    let password = survey_config.consumer.password.clone();
+
     let mut client_config = ClientConfig::new();
     client_config
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "consumer,cgrp,topic,fetch")
-        .set("bootstrap.servers", &survey_config.consumer)
-        .set("group.id", group_id)
+        .set("bootstrap.servers", &server)
+        .set("group.id", &group_id)
         .set("enable.auto.commit", "true")
         .set("auto.offset.reset", "earliest")
         // Important: disable auto-start so we can seek before consuming

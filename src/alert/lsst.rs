@@ -809,7 +809,7 @@ impl AlertWorker for LsstAlertWorker {
         let kafka_config = conf::build_kafka_config(&config_file, &Survey::Lsst)
             .inspect_err(as_error!("failed to build kafka config"))?;
 
-        let schema_registry_url = match kafka_config.schema_registry {
+        let schema_registry_url = match kafka_config.consumer.schema_registry {
             Some(ref url) => url.as_ref(),
             None => LSST_SCHEMA_REGISTRY_URL,
         };
