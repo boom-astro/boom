@@ -221,6 +221,7 @@ if [ "$1" == "log" ]; then
     echo -e "  ${BLUE}<survey>:${END} ${GREEN}lsst | ztf | decam${END} ${YELLOW}(optional, defaults to lsst)${END}"
     echo -e "  ${BLUE}<service>:${END} ${GREEN}scheduler | s | consumer | cons | c${END} ${YELLOW}(optional, defaults to scheduler)${END}"
     echo -e "  ${BLUE}<date>:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional, defaults to latest)${END}"
+    echo -e "  ${BLUE}<program_id>:${END} ${GREEN}public | partnership (part) | caltech${END} ${YELLOW}(only for ztf)${END}"
     exit 1
   fi
 
@@ -229,12 +230,30 @@ if [ "$1" == "log" ]; then
     tail -f "$LOGS_DIR/${survey}_scheduler.log"
   else
     date="$4"
+    program="$5"
+
+    if [ "$date" == "public" ] || [ "$date" == "partnership" ] || [ "$date" == "part" ] || [ "$date" == "caltech" ]; then
+      program="$date"
+      date=""
+    elif [ $survey == "ztf" ] && [ -z "$program" ]; then
+      program="public"
+    fi
+
+    if [ "$program" == "part" ]; then
+      program="partnership"
+    fi
+
     if [ -n "$date" ]; then
-      echo -e "${BLUE}Displaying $survey consumer log for date $date...${END}"
-      tail -f "$LOGS_DIR/${survey}_${date}_consumer.log"
+      echo -e "${BLUE}Displaying $survey${program:+ $program} consumer log for date $date...${END}"
+      tail -f "$LOGS_DIR/${survey}_${date}${program:+_$program}_consumer.log"
     else # no date provided, display the latest consumer log
-      latest_log="$(ls -t "$LOGS_DIR/${survey}_"*"_consumer.log" 2>/dev/null | head -n 1)"
-      echo -e "${BLUE}Displaying latest $survey consumer log ($(basename  "$latest_log"))...${END}"
+      latest_log="$(ls -t "$LOGS_DIR/${survey}_"*"${program:+_$program}_consumer.log" 2>/dev/null | head -n 1)"
+      if [ -z "$latest_log" ]; then
+        echo -e "${RED}Error: No consumer log files found for survey $survey${program:+ and program $program}.${END}"
+        exit 1
+      fi
+
+      echo -e "${BLUE}Displaying latest $survey${program:+ $program} consumer log ($(basename  "$latest_log"))...${END}"
       tail -f "$latest_log"
     fi
   fi
