@@ -1,7 +1,8 @@
 use crate::enrichment::models::{load_model, Model, ModelError};
 use crate::utils::fits::prepare_triplet;
+use crate::utils::lightcurves::PhotometryMag;
 use mongodb::bson::Document;
-use ndarray::{Array, Dim};
+use ndarray::{Array, Array2, Array3, ArrayBase, Dim, OwnedRepr};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
 
@@ -17,29 +18,6 @@ impl Model for CiderImagesModel {
         Ok(Self {
             model: load_model(&path)?,
         })
-    }
-
-    #[instrument(skip_all, err)]
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError> {
-        let model_inputs = inputs! {
-            "metadata" => TensorRef::from_array_view(metadata_features)?,
-            "images" => TensorRef::from_array_view(image_features)?,
-        };
-
-        let first_dim_size = image_features.shape()[0];
-        let outputs = self.model.run(model_inputs)?;
-        let (_, scores) = outputs["logits"]
-            .try_extract_tensor::<f32>()
-            .map_err(|_| ModelError::ModelOutputToVecError)?;
-
-        let vec_scores = scores.to_vec();
-        let temp_array = Array::from_shape_vec((first_dim_size, 4), vec_scores)?;
-        let output = Self::softmax(temp_array);
-        Ok(output.row(0).to_vec())
     }
 }
 
@@ -149,5 +127,271 @@ impl CiderImagesModel {
             }
         }
         Ok(triplets)
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn predict(
+        &mut self,
+        metadata_features: &Array<f32, Dim<[usize; 2]>>,
+        image_features: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<Vec<f32>, ModelError> {
+        let model_inputs = inputs! {
+            "metadata" => TensorRef::from_array_view(metadata_features)?,
+            "images" => TensorRef::from_array_view(image_features)?,
+        };
+
+        let first_dim_size = image_features.shape()[0];
+        let outputs = self.model.run(model_inputs)?;
+        let (_, scores) = outputs["logits"]
+            .try_extract_tensor::<f32>()
+            .map_err(|_| ModelError::ModelOutputToVecError)?;
+
+        let vec_scores = scores.to_vec();
+        let temp_array = Array::from_shape_vec((first_dim_size, 4), vec_scores)?;
+        let output = Self::softmax(temp_array);
+        Ok(output.row(0).to_vec())
+    }
+}
+
+pub struct CiderPhotometryModel {
+    model: Session,
+}
+
+impl Model for CiderPhotometryModel {
+    #[instrument(err)]
+    fn new(path: &str) -> Result<Self, ModelError> {
+        Ok(Self {
+            model: load_model(&path)?,
+        })
+    }
+}
+
+impl CiderPhotometryModel {
+    #[instrument(skip_all, err)]
+    pub fn predict(
+        &mut self,
+        data_array: &ArrayBase<OwnedRepr<f32>, Dim<[usize; 3]>>,
+        mask_array: &ArrayBase<OwnedRepr<bool>, Dim<[usize; 2]>>,
+    ) -> Result<Vec<f32>, ModelError> {
+        let model_inputs = inputs! {
+            "x" => TensorRef::from_array_view(data_array.view())?,
+            "pad_mask" => TensorRef::from_array_view(mask_array.view())?
+        };
+
+        // let first_dim_size = image_features.shape()[0];
+        let outputs = self.model.run(model_inputs)?;
+        let (_, scores) = outputs["logits"]
+            .try_extract_tensor::<f32>()
+            .map_err(|_| ModelError::ModelOutputToVecError)?;
+
+        let vec_scores = scores.to_vec();
+        let temp_array = Array::from_shape_vec((1, 5), vec_scores)?;
+        let output = Self::softmax(temp_array);
+        Ok(output.row(0).to_vec())
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn photometry_inputs(
+        &self,
+        photometry: Vec<PhotometryMag>,
+    ) -> Result<
+        (
+            ArrayBase<OwnedRepr<f32>, Dim<[usize; 3]>>,
+            ArrayBase<OwnedRepr<bool>, Dim<[usize; 2]>>,
+        ),
+        ModelError,
+    > {
+        let mut sorted_photometry = Vec::from(photometry);
+        sorted_photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+        sorted_photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
+        let mut result = Vec::new();
+
+        let mut bands: std::collections::HashMap<String, Vec<PhotometryMag>> =
+            std::collections::HashMap::new();
+        for point in sorted_photometry {
+            bands
+                .entry(point.band.clone())
+                .or_insert_with(Vec::new)
+                .push(point);
+        }
+        // Process each band separately
+        for (_band, mut points) in bands {
+            // Sort by time
+            points.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            let mut i = 0;
+            while i < points.len() {
+                let mut group = vec![&points[i]];
+                let mut j = i + 1;
+
+                // Collect all points within time_threshold of the first point in group
+                while j < points.len() && (points[j].time - points[i].time) <= 0.5 {
+                    group.push(&points[j]);
+                    j += 1;
+                }
+
+                // Combine the group
+                let combined = Self::combine_group(&group);
+                result.push(combined);
+
+                i = j;
+            }
+        }
+        // Sort final result by time
+        result.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+
+        let initial_t = result[0].time;
+        let mut dt = Vec::new();
+        let mut delta_t = Vec::new();
+        let mut temp = result[0].time;
+        let mut log_fluxes = Vec::new();
+        let mut sigma_fluxes = Vec::new();
+        let mut tail1: Vec<f32> = Vec::new();
+        let mut tail2: Vec<f32> = Vec::new();
+        let mut tail3: Vec<f32> = Vec::new();
+
+        for point in &result {
+            let diff_delta_t = point.time - initial_t;
+            let diff_dt = point.time - temp;
+            temp = point.time;
+            dt.push(diff_dt as f32);
+            delta_t.push(diff_delta_t as f32);
+            log_fluxes.push(point.mag.max(1e-6).log10() as f32);
+            sigma_fluxes.push(point.mag_err / (point.mag * 2.302585) as f32);
+            if point.band == "g" {
+                tail1.push(1.0);
+                tail2.push(0.0);
+                tail3.push(0.0);
+            } else if point.band == "r" {
+                tail1.push(0.0);
+                tail2.push(1.0);
+                tail3.push(0.0);
+            } else {
+                tail1.push(0.0);
+                tail2.push(0.0);
+                tail3.push(1.0);
+            }
+        }
+        // normalizing constants
+        let mean = [3.2246544, 0.7540643, 1.8746203, 0.05986896];
+        let std = [1.1197147, 0.7268315, 0.415058, 0.03053633];
+
+        let norm_delta_t: Vec<f32> = delta_t
+            .iter()
+            .map(|&dt| (dt - mean[0]) / (std[0] + 1e-8))
+            .collect();
+
+        let norm_dt: Vec<f32> = dt
+            .iter()
+            .map(|&t| (t - mean[1]) / (std[1] + 1e-8))
+            .collect();
+
+        let norm_log_fluxes: Vec<f32> = log_fluxes
+            .iter()
+            .map(|&lf| (lf - mean[2]) / (std[2] + 1e-8))
+            .collect();
+
+        let norm_sigma_fluxes: Vec<f32> = sigma_fluxes
+            .iter()
+            .map(|&sf| (sf - mean[3]) / (std[3] + 1e-8))
+            .collect();
+
+        let n = delta_t.len();
+        let mut no_pad_input: Vec<Vec<f32>> = Vec::new();
+
+        for i in 0..n {
+            no_pad_input.push(vec![
+                norm_delta_t[i],
+                norm_dt[i],
+                norm_log_fluxes[i],
+                norm_sigma_fluxes[i],
+                tail1[i],
+                tail2[i],
+                tail3[i],
+            ]);
+        }
+
+        let (final_input, mask) = Self::pad_or_truncate(&no_pad_input, 257);
+        let rows = final_input.len();
+        let cols = if rows > 0 { final_input[0].len() } else { 0 };
+
+        // Flatten the 2D vec into 1D
+        let flat_data: Vec<f32> = final_input.into_iter().flatten().collect();
+
+        // Create Array3 with shape [1, rows, cols]
+        let data_array: ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 3]>> =
+            Array3::from_shape_vec((1, rows, cols), flat_data)
+                .expect("Shape mismatch when creating Array3");
+
+        // // Convert Vec<bool> to Array2 with shape [1, 257]
+        // // First convert bool to f32 or i32 if needed
+        // let mask_flat: Vec<i32> = mask.iter().map(|&b| if b { 1 } else { 0 }).collect();
+        let mask_array: ndarray::ArrayBase<ndarray::OwnedRepr<bool>, ndarray::Dim<[usize; 2]>> =
+            Array2::from_shape_vec((1, mask.len()), mask).unwrap();
+
+        Ok((data_array, mask_array))
+    }
+
+    fn combine_group(group: &[&PhotometryMag]) -> PhotometryMag {
+        if group.len() == 1 {
+            return (*group[0]).clone();
+        }
+
+        let eps = 1e-8;
+        let mut weighted_time_sum = 0.0;
+        let mut weighted_mag_sum = 0.0;
+        let mut weighted_err_sum = 0.0;
+        let mut weight_sum = 0.0;
+
+        for point in group {
+            let weight = 1.0 / (point.mag_err + eps);
+
+            weighted_time_sum += point.time * weight as f64;
+            weighted_mag_sum += point.mag * weight;
+            weighted_err_sum += point.mag_err * weight;
+            weight_sum += weight;
+        }
+
+        let combined_time = weighted_time_sum / weight_sum as f64;
+        let combined_mag = weighted_mag_sum / weight_sum;
+        let combined_err = weighted_err_sum / weight_sum;
+
+        PhotometryMag {
+            time: combined_time,
+            mag: combined_mag,
+            mag_err: combined_err,
+            band: group[0].band.clone(),
+        }
+    }
+
+    fn pad_or_truncate(arr: &Vec<Vec<f32>>, max_len: usize) -> (Vec<Vec<f32>>, Vec<bool>) {
+        let n = arr.len();
+        let d = if n > 0 { arr[0].len() } else { 0 };
+
+        if n >= max_len {
+            // Truncate to max_len
+            let data: Vec<Vec<f32>> = arr[0..max_len]
+                .iter()
+                .map(|row| row.iter().map(|&x| x as f32).collect())
+                .collect();
+            let mask = vec![false; max_len];
+            (data, mask)
+        } else {
+            // Pad with zeros
+            let mut data: Vec<Vec<f32>> = arr
+                .iter()
+                .map(|row| row.iter().map(|&x| x as f32).collect())
+                .collect();
+
+            // Add padding rows
+            for _ in 0..(max_len - n) {
+                data.push(vec![0.0; d]);
+            }
+
+            // Create mask: false for real data, true for padding
+            let mut mask = vec![false; n];
+            mask.extend(vec![true; max_len - n]);
+
+            (data, mask)
+        }
     }
 }

@@ -60,21 +60,13 @@ pub trait Model {
         Ok(triplets)
     }
 
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError>;
-
     #[instrument(skip_all)]
     fn softmax(input: Array2<f32>) -> Array2<f32> {
         let mut output = Array2::zeros(input.raw_dim());
 
         for (i, row) in input.axis_iter(Axis(0)).enumerate() {
             let max_val = row.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-
             let exp_values: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
-
             let sum_exp: f32 = exp_values.iter().sum();
 
             for (j, &exp_val) in exp_values.iter().enumerate() {
