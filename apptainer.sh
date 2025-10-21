@@ -113,7 +113,8 @@ if [ "$1" == "stop" ]; then
   if stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
-    [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all survey consumers are killed
+    [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all dates are killed
+    [ -n "$5" ] && ARGS+=("$5") # program ID, if not provided, all program IDs are killed
     kill_process "/app/kafka_consumer ${ARGS[*]}" consumer
   fi
   if stop_service "scheduler" "$target"; then
