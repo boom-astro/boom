@@ -1,10 +1,10 @@
 use crate::enrichment::{
     fetch_alerts,
-    models::{AcaiModel, BtsBotModel, Model},
+    models::{AcaiModel, BtsBotModel, CiderImagesModel, CiderPhotometryModel, Model},
     EnrichmentWorker, EnrichmentWorkerError,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
+use crate::utils::lightcurves::{analyze_photometry, parse_photometry, PhotometryMag};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -85,6 +85,8 @@ pub struct ZtfEnrichmentWorker {
     acai_o_model: AcaiModel,
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
+    ciderimages_model: CiderImagesModel,
+    ciderphotometry_model: CiderPhotometryModel,
 }
 
 #[async_trait::async_trait]
@@ -109,6 +111,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // we load the btsbot model (different architecture, and input/output then ACAI)
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
+        let ciderimages_model = CiderImagesModel::new("data/models/cider_img_meta.onnx")?;
+        let ciderphotometry_model = CiderPhotometryModel::new("data/models/cider_photometry.onnx")?;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -123,6 +127,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_o_model,
             acai_b_model,
             btsbot_model,
+            ciderimages_model,
+            ciderphotometry_model,
         })
     }
 
@@ -167,7 +173,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let candid = alerts[i].get_i64("_id")?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, all_bands_properties, programid) =
+            let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alerts[i]).await?;
 
             // Now, prepare inputs for ML models and run inference
@@ -182,8 +188,23 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             let metadata_btsbot = self
                 .btsbot_model
-                .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
+                .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
+
+            let metadata_cider = self
+                .ciderimages_model
+                .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
+            let triplet_cider = self.ciderimages_model.get_triplet(&alerts[i..i + 1])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
+            let cider_img_scores = self
+                .ciderimages_model
+                .predict(&metadata_cider, &triplet_cider)?;
+
+            let (photometry_data_array, photometry_mask) =
+                self.ciderphotometry_model.photometry_inputs(lightcurve)?;
+
+            let cider_photo_scores = self
+                .ciderphotometry_model
+                .predict(&photometry_data_array, &photometry_mask)?;
 
             let find_document = doc! {
                 "_id": candid
@@ -198,6 +219,16 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "classifications.acai_o": acai_o_scores[0],
                     "classifications.acai_b": acai_b_scores[0],
                     "classifications.btsbot": btsbot_scores[0],
+                    "classifications.cider_img_nuclear": cider_img_scores[0],
+                    "classifications.cider_img_snI": cider_img_scores[1],
+                    "classifications.cider_img_snII": cider_img_scores[2],
+                    "classifications.cider_img_cataclysmic": cider_img_scores[3],
+                    "classifications.cider_photo_snI": cider_photo_scores[0],
+                    "classifications.cider_photo_snII": cider_photo_scores[1],
+                    "classifications.cider_photo_cataclysmic": cider_photo_scores[2],
+                    "classifications.cider_photo_agn": cider_photo_scores[3],
+                    "classifications.cider_photo_tde": cider_photo_scores[4],
+
                     // properties
                     "properties": properties,
                 }
@@ -225,7 +256,7 @@ impl ZtfEnrichmentWorker {
     async fn get_alert_properties(
         &self,
         alert: &Document,
-    ) -> Result<(Document, Document, i32), EnrichmentWorkerError> {
+    ) -> Result<(Document, Document, i32, Vec<PhotometryMag>), EnrichmentWorkerError> {
         let candidate = alert.get_document("candidate")?;
         let jd = candidate.get_f64("jd")?;
         let programid = candidate.get_i32("programid")?;
@@ -265,7 +296,7 @@ impl ZtfEnrichmentWorker {
             fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
         ));
 
-        let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve);
+        let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve.clone());
 
         Ok((
             doc! {
@@ -277,6 +308,7 @@ impl ZtfEnrichmentWorker {
             },
             all_bands_properties,
             programid,
+            lightcurve,
         ))
     }
 }
