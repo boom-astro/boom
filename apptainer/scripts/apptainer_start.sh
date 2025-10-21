@@ -170,7 +170,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     else
       apptainer exec --env-file .env --pwd /app \
         instance://boom /app/kafka_consumer "${ARGS[@]}" \
-        > "$LOGS_DIR/${survey}${4:+_$4}_consumer.log" 2>&1 &
+        > "$LOGS_DIR/${survey}${4:+_$4}${5:+_$5}_consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
   fi
