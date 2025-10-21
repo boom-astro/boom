@@ -109,15 +109,13 @@ if [ "$1" == "stop" ]; then
   fi
   if stop_service "boom" "$target"; then
     apptainer instance stop boom
-  fi
-  if stop_service "consumer" "$target"; then
+  elif stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
     [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all dates are killed
     [ -n "$5" ] && ARGS+=("$5") # program ID, if not provided, all program IDs are killed
     kill_process "/app/kafka_consumer ${ARGS[*]}" consumer
-  fi
-  if stop_service "scheduler" "$target"; then
+  elif stop_service "scheduler" "$target"; then
     survey=$3 # if no survey is provided, all schedulers are killed
     kill_process "/app/scheduler $survey" scheduler
   fi
