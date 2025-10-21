@@ -409,7 +409,10 @@ pub trait AlertConsumer: Sized {
             .del(&self.output_queue())
             .await
             .inspect_err(as_error!("failed to delete queue"))?;
-        info!("Cleared redis queue for Kafka consumer");
+        info!(
+            "Cleared redis queue {} for Kafka consumer",
+            self.output_queue()
+        );
         Ok(())
     }
     #[instrument(skip(self))]
@@ -508,11 +511,18 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
                 timestamp_ms
             );
         } else {
-            warn!(
-                "No offset found for partition {} at timestamp {}",
+            debug!(
+                "Seeking partition {} to end as no offset found for timestamp {}",
                 elem.partition(),
                 timestamp_ms
             );
+            // If we didn't find an offset for the timestamp, seek to the end
+            consumer.seek(
+                elem.topic(),
+                elem.partition(),
+                rdkafka::Offset::End,
+                KAFKA_TIMEOUT_SECS,
+            )?;
         }
     }
 

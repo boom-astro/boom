@@ -64,7 +64,11 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
 
     let conf = Config::builder()
         .add_source(File::from(path))
-        .add_source(config::Environment::with_prefix("BOOM").separator("__"))
+        .add_source(
+            config::Environment::with_prefix("boom")
+                .prefix_separator("_")
+                .separator("__"),
+        )
         .build()?;
 
     Ok(conf)
@@ -325,11 +329,14 @@ impl CatalogXmatchConfig {
 #[instrument(skip(conf), err)]
 pub fn build_xmatch_configs(
     conf: &Config,
-    stream_name: &str,
+    survey_name: &Survey,
 ) -> Result<Vec<CatalogXmatchConfig>, BoomConfigError> {
     let crossmatches = conf.get_table("crossmatch")?;
 
-    let crossmatches_stream = match crossmatches.get(stream_name).cloned() {
+    let crossmatches_stream = match crossmatches
+        .get(&survey_name.to_string().to_lowercase())
+        .cloned()
+    {
         Some(x) => x,
         None => {
             return Ok(Vec::new());
@@ -375,7 +382,7 @@ impl SurveyKafkaConfig {
             .cloned()
             .unwrap_or_default()
             .into_table()?
-            .get(&survey.to_string())
+            .get(&survey.to_string().to_lowercase())
             .cloned()
             .unwrap_or_default()
             .into_table()?;

@@ -814,7 +814,7 @@ impl AlertWorker for LsstAlertWorker {
             None => LSST_SCHEMA_REGISTRY_URL,
         };
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Lsst)
             .inspect_err(as_error!("failed to load xmatch config"))?;
 
         let db: mongodb::Database = conf::build_db(&config_file)

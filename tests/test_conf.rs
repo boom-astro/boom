@@ -33,7 +33,8 @@ fn test_build_xmatch_configs() {
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
     assert!(crossmatches_ztf.len() > 0);
 
-    let catalog_xmatch_configs = conf::build_xmatch_configs(&config, "ZTF").unwrap();
+    let catalog_xmatch_configs =
+        conf::build_xmatch_configs(&config, &boom::utils::enums::Survey::Ztf).unwrap();
 
     assert_eq!(catalog_xmatch_configs.len(), 4);
 

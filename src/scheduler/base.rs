@@ -31,7 +31,7 @@ pub fn get_num_workers(
 ) -> Result<i64, SchedulerError> {
     let table = conf.get_table("workers")?;
     let stream_table = table
-        .get(&format!("{}", survey_name))
+        .get(&survey_name.to_string().to_lowercase())
         .ok_or(config::ConfigError::NotFound(
             "survey_name not found in workers table".to_string(),
         ))?
@@ -75,7 +75,7 @@ impl ThreadPool {
     ///
     /// worker_type: a `WorkerType` enum to designate which type of workers this threadpool contains
     /// size: number of workers initially inside of threadpool
-    /// survey_name: source stream. e.g. 'ZTF'
+    /// survey_name: source stream. e.g. 'ztf'
     /// config_path: path to config file
     #[instrument(skip(config_path))]
     pub fn new(
