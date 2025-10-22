@@ -124,8 +124,6 @@ services:
     networks:
       - boom
       - traefik-public
-    profiles:
-      - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
     labels:

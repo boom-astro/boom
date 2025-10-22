@@ -23,14 +23,46 @@ COPY ./api/src ./api/src
 RUN cargo build --release --workspace
 
 
+## Dev target for fast rebuilds in container
+FROM builder AS dev
+
+# Install runtime deps + Kafka CLI
+ARG KAFKA_VERSION=3.7.1
+ARG SCALA_VERSION=2.13
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsasl2-2 ca-certificates openjdk-17-jre-headless curl bash tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz \
+    && tar -xzf /tmp/kafka.tgz -C /opt \
+    && ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka \
+    && rm -f /tmp/kafka.tgz
+
+ENV PATH="/opt/kafka/bin:${PATH}"
+
+RUN cargo install cargo-watch
+
+WORKDIR /app
+
+CMD ["cargo", "watch", "-x", "run --bin boom-api"]
+
+
 ## Create a minimal runtime image for binaries
 FROM debian:bookworm-slim
 
 WORKDIR /app
 
+# Install runtime deps + Kafka CLI
+ARG KAFKA_VERSION=3.7.1
+ARG SCALA_VERSION=2.13
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsasl2-2 ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    libsasl2-2 ca-certificates openjdk-17-jre-headless curl bash tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz \
+    && tar -xzf /tmp/kafka.tgz -C /opt \
+    && ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka \
+    && rm -f /tmp/kafka.tgz
+
+ENV PATH="/opt/kafka/bin:${PATH}"
 
 # Copy the built executables from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler
