@@ -29,8 +29,32 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
+    - name: Create default .env file
+      run: cp .env.example .env
     - name: Start services
       run: docker compose up --build -d
+    - name: Wait for Kafka ACL initialization
+      run: |
+        echo "Waiting for kafka-acl-init container to start..."
+        for i in {1..60}; do
+          if docker compose ps --status running kafka-acl-init >/dev/null 2>&1 || docker compose ps kafka-acl-init 2>&1 | grep -q kafka-acl-init; then
+            break
+          fi
+          sleep 2
+        done
+        CID=$(docker compose ps -q kafka-acl-init)
+        if [ -z "$CID" ]; then
+          echo "kafka-acl-init container not found" >&2
+          exit 1
+        fi
+        echo "Container ID: $CID. Waiting for it to exit..."
+        EXIT_CODE=$(docker wait "$CID")
+        echo "kafka-acl-init exited with code $EXIT_CODE"
+        if [ "$EXIT_CODE" != "0" ]; then
+          docker compose logs kafka-acl-init || true
+          exit 1
+        fi
+        echo "kafka-acl-init completed successfully."
     - name: Test BOOM
       run: cargo test --release
     - name: Test BOOM API

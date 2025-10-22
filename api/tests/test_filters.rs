@@ -4,9 +4,9 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
     use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_default_auth};
-    use boom_api::conf::AppConfig;
-    use boom_api::db::get_default_db;
+    use boom_api::auth::{auth_middleware, get_test_auth};
+    use boom_api::conf::{AppConfig, load_dotenv};
+    use boom_api::db::get_test_db;
     use boom_api::routes;
     use boom_api::test_utils::read_json_response;
     use mongodb::bson::{Document, doc};
@@ -14,8 +14,9 @@ mod tests {
 
     /// Helper function to create an auth token for the admin user
     async fn create_admin_token(database: &Database) -> String {
-        let auth_app_data = get_default_auth(database).await.unwrap();
-        let auth_config = AppConfig::default().auth;
+        load_dotenv();
+        let auth_app_data = get_test_auth(database).await.unwrap();
+        let auth_config = AppConfig::from_test_config().api.auth;
         let (token, _) = auth_app_data
             .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
             .await
@@ -34,9 +35,10 @@ mod tests {
 
     /// Helper function to create a test filter and return its ID and token
     async fn create_test_filter() -> (String, String, Database) {
-        let database: Database = get_default_db().await;
+        load_dotenv();
+        let database: Database = get_test_db().await;
         let token = create_admin_token(&database).await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_app_data = get_test_auth(&database).await.unwrap();
 
         let app = test::init_service(
             App::new()
@@ -67,8 +69,9 @@ mod tests {
 
     // let's make a helper function that takes a filter_id, GETs the filter and returns it
     async fn get_test_filter(filter_id: &str, token: &str) -> serde_json::Value {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        load_dotenv();
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -98,8 +101,9 @@ mod tests {
         token: &str,
         new_version: &serde_json::Value,
     ) -> String {
-        let database: Database = get_default_db().await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        load_dotenv();
+        let database: Database = get_test_db().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -154,9 +158,10 @@ mod tests {
     /// Test GET /filters
     #[actix_rt::test]
     async fn test_get_filters() {
-        let database: Database = get_default_db().await;
+        load_dotenv();
+        let database: Database = get_test_db().await;
         let token = create_admin_token(&database).await;
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_app_data = get_test_auth(&database).await.unwrap();
 
         let app = test::init_service(
             App::new()
@@ -237,7 +242,7 @@ mod tests {
     async fn test_patch_filter() {
         let (filter_id, token, database) = create_test_filter().await;
         // Create app for PATCH testing
-        let auth_app_data = get_default_auth(&database).await.unwrap();
+        let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

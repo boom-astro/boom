@@ -5,15 +5,15 @@ database:
   max_pool_size: 200
   replica_set: null
   username: mongoadmin
-  password: mongoadminsecret
+  password: "" # Set via BOOM_DATABASE__PASSWORD environment variable
   srv: false
 api:
   auth:
-    secret_key: "1234" # Secret key for JWT authentication, change it to a strong secret
-    token_expiration: 0 # jwt token expiration in seconds, 0 to disable. Should NOT be 0 in production
-    admin_username: admin # Admin username for the API
-    admin_password: adminsecret # Admin password for the API
-    admin_email: admin@example.com # Admin email for the API
+    secret_key: "" # Set via BOOM_API__AUTH__SECRET_KEY environment variable
+    token_expiration: 604800 # JWT token expiration in seconds (7 days) -- must be > 0
+    admin_username: admin
+    admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
+    admin_email: admin@example.com
 babamul:
   enabled: false
 redis:
