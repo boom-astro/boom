@@ -34,6 +34,7 @@ async fn main() -> std::io::Result<()> {
                     .wrap(from_fn(auth_middleware))
                     .service(routes::info::get_db_info)
                     .service(routes::kafka::get_kafka_acls)
+                    .service(routes::kafka::post_kafka_acl)
                     .service(routes::surveys::get_object)
                     .service(routes::filters::post_filter)
                     .service(routes::filters::patch_filter)

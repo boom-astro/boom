@@ -2,11 +2,12 @@
 
 use crate::models::response;
 use crate::routes::users::User;
-use actix_web::{HttpResponse, get, web};
+use actix_web::{HttpResponse, get, post, web};
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 use std::str;
+use utoipa::ToSchema;
 
 /// Get Kafka ACLs
 #[utoipa::path(
@@ -150,4 +151,101 @@ pub async fn get_kafka_acls(current_user: web::ReqData<User>) -> HttpResponse {
         }
         Err(e) => response::internal_error(&format!("Error executing {}: {}", cli_path, e)),
     }
+}
+
+#[derive(serde::Deserialize, Clone, ToSchema)]
+pub struct AclPost {
+    pub username: String,
+    pub topic: String,
+}
+
+/// Add a user ACL entry
+#[utoipa::path(
+    post,
+    path = "/kafka/acls",
+    request_body = AclPost,
+    responses(
+        (status = 200, description = "Kafka ACL entry (read-only) added successfully"),
+    ),
+    tags=["Kafka"]
+)]
+#[post("/kafka/acls")]
+pub async fn post_kafka_acl(
+    body: web::Json<AclPost>,
+    current_user: web::ReqData<User>,
+) -> HttpResponse {
+    // Only admins can access this endpoint
+    if !current_user.is_admin {
+        return response::forbidden("Access denied: Admins only");
+    }
+    // Determine broker and CLI path
+    // Prefer env override for internal admin listener; default matches docker compose network
+    let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
+    let cli_path = "/opt/kafka/bin/kafka-acls.sh";
+
+    // Topic name must not be "*" -- it must be more specific
+    if body.topic == "*" {
+        return response::bad_request("Invalid topic name: cannot be '*'");
+    }
+
+    // TODO: Check that this user exists
+
+    // Create READ operation entry
+    match Command::new(cli_path)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--allow-principal")
+        .arg(format!("User:{}", body.username))
+        .arg("--add")
+        .arg("--operation")
+        .arg("READ")
+        .arg("--topic")
+        .arg(&body.topic)
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                return response::internal_error(&format!(
+                    "Failed to add Kafka ACL via {} on {}: {}",
+                    cli_path,
+                    broker,
+                    stderr.trim()
+                ));
+            }
+        }
+        Err(e) => {
+            return response::internal_error(&format!("Error executing {}: {}", cli_path, e));
+        }
+    }
+    // Now add DESCRIBE operation as well
+    match Command::new(cli_path)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--allow-principal")
+        .arg(format!("User:{}", body.username))
+        .arg("--add")
+        .arg("--operation")
+        .arg("DESCRIBE")
+        .arg("--topic")
+        .arg(&body.topic)
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                return response::internal_error(&format!(
+                    "Failed to add Kafka ACL via {} on {}: {}",
+                    cli_path,
+                    broker,
+                    stderr.trim()
+                ));
+            }
+        }
+        Err(e) => {
+            return response::internal_error(&format!("Error executing {}: {}", cli_path, e));
+        }
+    }
+
+    response::ok("Kafka ACL added successfully", serde_json::json!({}))
 }
