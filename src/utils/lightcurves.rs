@@ -72,20 +72,23 @@ pub struct PhotometryProperties {
     pub linear_fit_after: [f32; 3],  // slope, intercept, r-squared
 }
 
+pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) -> () {
+    // sort by time
+    photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+
+    // remove duplicates (same time and band)
+    photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
+
+    ()
+}
+
 // we want a function that takes a Vec of PhotometryMag and:
 // - sort by time (ascending)
 // - divide it by band
 // - identifies the index of the peak (minimum magnitude) for each band
 // - for each band, do a linear fit of the data before the peak and after the peak independently
 // - return a vec of PhotometryProperties
-pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> (Document, Document, bool) {
-    // first sort by time
-    let mut sorted_photometry = photometry;
-    sorted_photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-
-    // deduplicate by time and band, keeping the first occurrence
-    sorted_photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
-
+pub fn analyze_photometry(sorted_photometry: &[PhotometryMag]) -> (Document, Document, bool) {
     let stationary = sorted_photometry.len() > 0
         && (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
 
@@ -101,7 +104,7 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> (Document, Document
     let last_jd = sorted_photometry.last().unwrap().time;
 
     // group by band
-    let mut bands: std::collections::HashMap<String, Vec<PhotometryMag>> =
+    let mut bands: std::collections::HashMap<String, Vec<&PhotometryMag>> =
         std::collections::HashMap::new();
     for mag in sorted_photometry {
         bands
@@ -387,13 +390,14 @@ mod tests {
     #[test]
     fn test_analyze_photometry() {
         // Test case 1: only one data point
-        let data = vec![PhotometryMag {
+        let mut data = vec![PhotometryMag {
             time: 2459000.5,
             mag: 20.0,
             mag_err: 0.1,
             band: "r".to_string(),
         }];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, false);
@@ -419,7 +423,7 @@ mod tests {
         assert_eq!(data[0].band, peak_band);
 
         // Test case 2: 2 data points in the same band, rising
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -433,7 +437,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -466,7 +471,7 @@ mod tests {
         assert_eq!(data[1].band, peak_band);
 
         // Test case 3: 2 data points in the same band, fading
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 19.0,
@@ -480,7 +485,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -512,7 +518,7 @@ mod tests {
         assert_eq!(data[0].band, peak_band);
 
         // Test case 4: 3 data points in the same band, rising then fading
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -532,7 +538,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -573,7 +580,7 @@ mod tests {
         // Test case 5: multiple bands
         // - rising and fading in r band (3 points)
         // - only rising in g band (2 points)
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -605,7 +612,8 @@ mod tests {
                 band: "g".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -666,7 +674,7 @@ mod tests {
         assert_eq!(data[1].band, peak_band);
 
         // Edge case 1: duplicated points (same time and band)
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -687,7 +695,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, _, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, _, stationary) = analyze_photometry(&data);
         // make sure that only 2 points were used (the duplicate should be removed)
         assert_eq!(stationary, true);
         assert_eq!(results.len(), 1);

@@ -1,6 +1,6 @@
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::fetch_timeseries_op;
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
+use crate::utils::lightcurves::{analyze_photometry, parse_photometry, prepare_photometry};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -156,9 +156,10 @@ impl DecamEnrichmentWorker {
         let jd = candidate.get_f64("jd")?;
 
         let fp_hists = alert.get_array("fp_hists")?;
-        let lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
+        let mut lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
 
-        let (photstats, _, stationary) = analyze_photometry(lightcurve);
+        prepare_photometry(&mut lightcurve);
+        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
         let properties = doc! {
             "stationary": stationary,

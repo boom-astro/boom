@@ -1,6 +1,6 @@
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
+use crate::utils::lightcurves::{analyze_photometry, parse_photometry, prepare_photometry};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -183,7 +183,8 @@ impl LsstEnrichmentWorker {
             fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
         ));
 
-        let (photstats, _, stationary) = analyze_photometry(lightcurve);
+        prepare_photometry(&mut lightcurve);
+        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
         let properties = doc! {
             // properties
