@@ -3,6 +3,7 @@ use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use redis::AsyncCommands;
 use tracing::{instrument, warn};
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
@@ -73,6 +74,7 @@ pub struct LsstEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_pipeline: Vec<Document>,
 }
 
@@ -84,6 +86,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
+        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
@@ -109,6 +112,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
     async fn process_alerts(
         &mut self,
         candids: &[i64],
+        con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
         let alerts =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
@@ -124,6 +128,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         if alerts.is_empty() {
             return Ok(vec![]);
         }
+
+        let mut stringified_alerts: Vec<String> = Vec::new();
 
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
@@ -141,7 +147,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": &properties,
                 }
             };
 
@@ -155,9 +161,28 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             updates.push(update);
             processed_alerts.push(format!("{}", candid));
+
+            // only push the stringified alert if:
+            // - properties.rock is false
+            // - ... TODO add more conditions here later
+            if !properties.get_bool("rock").unwrap_or(false) {
+                // we get a mutable reference to avoid any cloning
+                let alert_with_properties = &mut alerts[i];
+                alert_with_properties.insert("properties", properties);
+                stringified_alerts.push(serde_json::to_string(&alert_with_properties).unwrap());
+            }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // push the alerts to a redis queue called "babamul"
+        if let Some(con) = con {
+            if !stringified_alerts.is_empty() {
+                con.lpush::<&str, Vec<String>, usize>("babamul", stringified_alerts)
+                    .await
+                    .unwrap();
+            }
+        }
 
         Ok(processed_alerts)
     }

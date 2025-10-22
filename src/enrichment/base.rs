@@ -79,6 +79,7 @@ pub trait EnrichmentWorker {
     async fn process_alerts(
         &mut self,
         alerts: &[i64],
+        con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError>;
 }
 
@@ -232,7 +233,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         }
 
         let processed_alerts: Vec<String> = enrichment_worker
-            .process_alerts(&candids)
+            .process_alerts(&candids, Some(&mut con))
             .await
             .inspect_err(|_| {
                 ACTIVE.add(-1, &active_attrs);

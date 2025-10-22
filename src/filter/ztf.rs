@@ -160,23 +160,23 @@ pub async fn build_ztf_alerts(
                 Ok(flux) => Some(flux),
                 Err(_) => None,
             };
+            let magzpsci = doc.get_f64("magzpsci")?;
             let flux_err = match doc.get_f64("forcediffimfluxunc") {
                 Ok(flux_err) => flux_err,
                 Err(_) => {
                     let diffmaglim = doc.get_f64("diffmaglim")?;
-                    limmag_to_fluxerr(diffmaglim, 23.9, 5.0)
+                    limmag_to_fluxerr(diffmaglim, magzpsci, 5.0)
                 }
             };
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
-            let zero_point = 23.9;
 
             photometry.push(Photometry {
                 jd,
                 flux,
                 flux_err,
                 band: format!("ztf{}", band),
-                zero_point,
+                zero_point: magzpsci,
                 origin: Origin::ForcedPhot,
                 programid,
                 survey: Survey::Ztf,
@@ -324,7 +324,35 @@ impl Filter for ZtfFilter {
             uses_field_in_filter(filter_pipeline, "prv_nondetections");
         let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
         let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
-        let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
+        let mut use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
+
+        // check if other survey's data is used, in which case we do want to bring in aliases
+        let use_lsst_prv_candidates_index =
+            uses_field_in_filter(filter_pipeline, "LSST.prv_candidates");
+        let use_lsst_fp_hists_index = uses_field_in_filter(filter_pipeline, "LSST.fp_hists");
+
+        if use_lsst_prv_candidates_index.is_some() {
+            if use_aliases_index.is_none() {
+                use_aliases_index = use_lsst_prv_candidates_index;
+            } else {
+                use_aliases_index = Some(
+                    use_aliases_index
+                        .unwrap()
+                        .min(use_lsst_prv_candidates_index.unwrap()),
+                );
+            }
+        }
+        if use_lsst_fp_hists_index.is_some() {
+            if use_aliases_index.is_none() {
+                use_aliases_index = use_lsst_fp_hists_index;
+            } else {
+                use_aliases_index = Some(
+                    use_aliases_index
+                        .unwrap()
+                        .min(use_lsst_fp_hists_index.unwrap()),
+                );
+            }
+        }
 
         if use_prv_candidates_index.is_some() {
             // insert it in aux addFields stage
@@ -385,12 +413,6 @@ impl Filter for ZtfFilter {
             aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
         }
 
-        let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
-            || use_prv_nondetections_index.is_some()
-            || use_cross_matches_index.is_some()
-            || use_fp_hists_index.is_some()
-            || use_aliases_index.is_some();
-
         let mut insert_aux_index = usize::MAX;
         if let Some(index) = use_prv_candidates_index {
             insert_aux_index = insert_aux_index.min(index);
@@ -407,14 +429,33 @@ impl Filter for ZtfFilter {
         if let Some(index) = use_aliases_index {
             insert_aux_index = insert_aux_index.min(index);
         }
+        let mut insert_aux_pipeline = insert_aux_index != usize::MAX;
 
-        // some sanity checks
-        if insert_aux_index == usize::MAX && insert_aux_pipeline {
-            return Err(FilterError::InvalidFilterPipeline);
+        // same for LSST
+        let mut lsst_aux_add_fields = doc! {};
+        if use_lsst_prv_candidates_index.is_some() {
+            lsst_aux_add_fields.insert(
+                "LSST.prv_candidates".to_string(),
+                fetch_timeseries_op("lsst_aux.prv_candidates", "candidate.jd", 365, None),
+            );
+        }
+        if use_lsst_fp_hists_index.is_some() {
+            lsst_aux_add_fields.insert(
+                "LSST.fp_hists".to_string(),
+                fetch_timeseries_op("lsst_aux.fp_hists", "candidate.jd", 365, None),
+            );
         }
 
-        // now we loop over the base_pipeline and insert stages from the filter_pipeline
-        // and when i = insert_index, we insert the aux_pipeline before the stage
+        let mut lsst_insert_aux_index = usize::MAX;
+        if let Some(index) = use_lsst_prv_candidates_index {
+            lsst_insert_aux_index = lsst_insert_aux_index.min(index);
+        }
+        if let Some(index) = use_lsst_fp_hists_index {
+            lsst_insert_aux_index = lsst_insert_aux_index.min(index);
+        }
+        let mut lsst_insert_aux_pipeline = lsst_insert_aux_index != usize::MAX;
+
+        // now we loop over the base_pipeline and insert stages
         for i in 0..filter_pipeline.len() {
             let x = mongodb::bson::to_document(&filter_pipeline[i])?;
 
@@ -434,6 +475,24 @@ impl Filter for ZtfFilter {
                     "$unset": "aux"
                 });
                 insert_aux_pipeline = false; // only insert once
+            }
+
+            if lsst_insert_aux_pipeline {
+                pipeline.push(doc! {
+                    "$lookup": doc! {
+                        "from": format!("LSST_alerts_aux"),
+                        "localField": "aliases.LSST.0",
+                        "foreignField": "_id",
+                        "as": "lsst_aux"
+                    }
+                });
+                pipeline.push(doc! {
+                    "$addFields": &lsst_aux_add_fields
+                });
+                pipeline.push(doc! {
+                    "$unset": "lsst_aux"
+                });
+                lsst_insert_aux_pipeline = false; // only insert once
             }
 
             // push the current stage

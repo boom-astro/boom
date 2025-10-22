@@ -138,6 +138,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
     async fn process_alerts(
         &mut self,
         candids: &[i64],
+        _con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
         let alerts = fetch_alerts(
             &candids,
