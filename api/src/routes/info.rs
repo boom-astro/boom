@@ -42,3 +42,27 @@ pub async fn get_db_info(
         Err(e) => response::internal_error(&format!("Error getting database info: {:?}", e)),
     }
 }
+
+/// Get Kafka users
+#[utoipa::path(
+    get,
+    path = "/kafka-users",
+    responses(
+        (status = 200, description = "Kafka users retrieved successfully"),
+    ),
+    tags=["Info"]
+)]
+#[get("/kafka-users")]
+pub async fn get_kafka_users(current_user: web::ReqData<User>) -> HttpResponse {
+    // Only admins can access this endpoint
+    if !current_user.is_admin {
+        return response::forbidden("Access denied: Admins only");
+    }
+    // Placeholder implementation
+    // TODO: Integrate with Kafka to fetch actual users
+    let kafka_users = vec!["kafka_user_1", "kafka_user_2"];
+    response::ok(
+        "Kafka users retrieved successfully",
+        serde_json::to_value(kafka_users).unwrap(),
+    )
+}
