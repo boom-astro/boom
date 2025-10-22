@@ -33,7 +33,7 @@ async fn main() -> std::io::Result<()> {
                 actix_web::web::scope("")
                     .wrap(from_fn(auth_middleware))
                     .service(routes::info::get_db_info)
-                    .service(routes::info::get_kafka_acls)
+                    .service(routes::kafka::get_kafka_acls)
                     .service(routes::surveys::get_object)
                     .service(routes::filters::post_filter)
                     .service(routes::filters::patch_filter)
