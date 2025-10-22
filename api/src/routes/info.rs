@@ -43,17 +43,17 @@ pub async fn get_db_info(
     }
 }
 
-/// Get Kafka users
+/// Get Kafka ACLs
 #[utoipa::path(
     get,
-    path = "/kafka-users",
+    path = "/kafka-acls",
     responses(
-        (status = 200, description = "Kafka users retrieved successfully"),
+        (status = 200, description = "Kafka ACLs retrieved successfully"),
     ),
     tags=["Info"]
 )]
-#[get("/kafka-users")]
-pub async fn get_kafka_users(current_user: web::ReqData<User>) -> HttpResponse {
+#[get("/kafka-acls")]
+pub async fn get_kafka_acls(current_user: web::ReqData<User>) -> HttpResponse {
     // Only admins can access this endpoint
     if !current_user.is_admin {
         return response::forbidden("Access denied: Admins only");
