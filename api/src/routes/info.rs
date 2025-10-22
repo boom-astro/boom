@@ -1,6 +1,9 @@
 use crate::models::response;
 use crate::routes::users::User;
 use actix_web::{HttpResponse, get, web};
+use std::env;
+use std::process::Command;
+use std::str;
 
 /// Check the health of the API server
 #[utoipa::path(
@@ -58,11 +61,46 @@ pub async fn get_kafka_acls(current_user: web::ReqData<User>) -> HttpResponse {
     if !current_user.is_admin {
         return response::forbidden("Access denied: Admins only");
     }
-    // Placeholder implementation
-    // TODO: Integrate with Kafka to fetch actual users
-    let kafka_users = vec!["kafka_user_1", "kafka_user_2"];
-    response::ok(
-        "Kafka users retrieved successfully",
-        serde_json::to_value(kafka_users).unwrap(),
-    )
+    // Determine broker and CLI path
+    // Prefer env override for internal admin listener; default matches docker compose network
+    let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
+    let cli_path = "/opt/kafka/bin/kafka-acls.sh";
+
+    // Execute the Kafka CLI to list ACLs
+    match Command::new(cli_path)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--list")
+        .output()
+    {
+        Ok(output) => {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                // Return both raw output and parsed lines for convenience
+                let entries: Vec<String> = stdout
+                    .lines()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                let data = serde_json::json!({
+                    "broker": broker,
+                    "cli": cli_path,
+                    "entries": entries,
+                    "raw": stdout,
+                });
+                response::ok("Kafka ACLs retrieved successfully", data)
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                response::internal_error(&format!(
+                    "Failed to retrieve Kafka ACLs (exit={:?}) via {} on {}: {}",
+                    output.status.code(),
+                    cli_path,
+                    broker,
+                    stderr.trim()
+                ))
+            }
+        }
+        Err(e) => response::internal_error(&format!("Error executing {}: {}", cli_path, e)),
+    }
 }
