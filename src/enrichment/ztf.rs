@@ -1,10 +1,76 @@
-use crate::enrichment::models::{AcaiModel, BtsBotModel, Model};
-use crate::enrichment::{EnrichmentWorker, EnrichmentWorkerError};
+use crate::enrichment::{
+    fetch_alerts,
+    models::{AcaiModel, BtsBotModel, Model},
+    EnrichmentWorker, EnrichmentWorkerError,
+};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
+
+pub fn create_ztf_alert_pipeline() -> Vec<Document> {
+    vec![
+        doc! {
+            "$match": {
+                "_id": {"$in": []}
+            }
+        },
+        doc! {
+            "$project": {
+                "objectId": 1,
+                "candidate": 1,
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "prv_candidates": fetch_timeseries_op(
+                    "aux.prv_candidates",
+                    "candidate.jd",
+                    365,
+                    None
+                ),
+                "fp_hists": fetch_timeseries_op(
+                    "aux.fp_hists",
+                    "candidate.jd",
+                    365,
+                    Some(vec![doc! {
+                        "$gte": [
+                            "$$x.snr",
+                            3.0
+                        ]
+                    }]),
+                ),
+                "aliases": get_array_element("aux.aliases"),
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "prv_candidates.jd": 1,
+                "prv_candidates.magpsf": 1,
+                "prv_candidates.sigmapsf": 1,
+                "prv_candidates.band": 1,
+                "fp_hists.jd": 1,
+                "fp_hists.magpsf": 1,
+                "fp_hists.sigmapsf": 1,
+                "fp_hists.band": 1,
+                "fp_hists.snr": 1,
+            }
+        },
+    ]
+}
 
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
@@ -31,67 +97,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let alert_collection = db.collection("ZTF_alerts");
         let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
 
-        let alert_pipeline = vec![
-            doc! {
-                "$match": {
-                    "_id": {"$in": []}
-                }
-            },
-            doc! {
-                "$project": {
-                    "objectId": 1,
-                    "candidate": 1,
-                }
-            },
-            doc! {
-                "$lookup": {
-                    "from": "ZTF_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "prv_candidates": fetch_timeseries_op(
-                        "aux.prv_candidates",
-                        "candidate.jd",
-                        365,
-                        None
-                    ),
-                    "fp_hists": fetch_timeseries_op(
-                        "aux.fp_hists",
-                        "candidate.jd",
-                        365,
-                        Some(vec![doc! {
-                            "$gte": [
-                                "$$x.snr",
-                                3.0
-                            ]
-                        }]),
-                    ),
-                    "aliases": get_array_element("aux.aliases"),
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "prv_candidates.jd": 1,
-                    "prv_candidates.magpsf": 1,
-                    "prv_candidates.sigmapsf": 1,
-                    "prv_candidates.band": 1,
-                    "fp_hists.jd": 1,
-                    "fp_hists.magpsf": 1,
-                    "fp_hists.sigmapsf": 1,
-                    "fp_hists.band": 1,
-                    "fp_hists.snr": 1,
-                }
-            },
-        ];
-
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
@@ -111,7 +116,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             client,
             alert_collection,
             alert_cutout_collection,
-            alert_pipeline,
+            alert_pipeline: create_ztf_alert_pipeline(),
             acai_h_model,
             acai_n_model,
             acai_v_model,
@@ -135,14 +140,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         candids: &[i64],
         _con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = self
-            .fetch_alerts(
-                &candids,
-                &self.alert_pipeline,
-                &self.alert_collection,
-                Some(&self.alert_cutout_collection),
-            )
-            .await?;
+        let alerts = fetch_alerts(
+            &candids,
+            &self.alert_pipeline,
+            &self.alert_collection,
+            Some(&self.alert_cutout_collection),
+        )
+        .await?;
 
         if alerts.len() != candids.len() {
             warn!(

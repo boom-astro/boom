@@ -1,5 +1,40 @@
 use config::{Config, File};
+use dotenvy;
+use serde::Deserialize;
+use tracing::{debug, info, warn};
 
+/// Loads environment variables from a .env file if it exists.
+/// This function should be called early in the application startup,
+/// typically before any configuration loading.
+///
+/// The function looks for .env files in this order:
+/// 1. .env in the current working directory
+/// 2. .env in the parent directory (useful when running from subdirs)
+/// 3. If none found, continues without error (env vars may be set by system)
+pub fn load_dotenv() {
+    // Try current directory first
+    if std::path::Path::new(".env").exists() {
+        match dotenvy::dotenv() {
+            Ok(_) => info!("Loaded environment variables from .env file"),
+            Err(e) => warn!("Found .env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // Try parent directory (useful when running from subdirectories like api/)
+    if std::path::Path::new("../.env").exists() {
+        match dotenvy::from_path("../.env") {
+            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // No .env file found - this is fine, environment variables may be set by the system
+    debug!("No .env file found, using system environment variables only");
+}
+
+#[derive(Deserialize, Debug)]
 pub struct AuthConfig {
     pub secret_key: String,
     pub token_expiration: usize, // in seconds
@@ -8,40 +43,26 @@ pub struct AuthConfig {
     pub admin_email: String,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        AuthConfig {
-            secret_key: "1234".to_string(),
-            token_expiration: 0,
-            admin_username: "admin".to_string(),
-            admin_password: "adminsecret".to_string(),
-            admin_email: "admin@example.com".to_string(),
-        }
-    }
+#[derive(Deserialize, Debug)]
+pub struct ApiConfig {
+    pub auth: AuthConfig,
 }
 
+#[derive(Deserialize, Debug)]
 pub struct DatabaseConfig {
     pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: String,
+    pub max_pool_size: u32,
+    pub replica_set: Option<String>,
+    pub srv: bool,
 }
 
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        DatabaseConfig {
-            name: "boom".to_string(),
-            host: "localhost".to_string(),
-            port: 27017,
-            username: "mongoadmin".to_string(),
-            password: "mongoadminsecret".to_string(),
-        }
-    }
-}
-
+#[derive(Deserialize, Debug)]
 pub struct AppConfig {
-    pub auth: AuthConfig,
+    pub api: ApiConfig,
     pub database: DatabaseConfig,
 }
 
@@ -53,120 +74,88 @@ impl AppConfig {
     pub fn from_path(config_path: &str) -> Self {
         load_config(Some(config_path))
     }
-}
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        AppConfig {
-            auth: AuthConfig::default(),
-            database: DatabaseConfig::default(),
+    pub fn from_test_config() -> Self {
+        // Find the workspace root by looking for Cargo.toml with tests/ directory
+        let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
+        let test_config_path = loop {
+            let tests_dir = current_dir.join("tests");
+            let test_config = tests_dir.join("config.test.yaml");
+
+            // Check if we found the workspace root (has tests dir with config file)
+            if test_config.exists() {
+                break test_config;
+            }
+
+            // Move up to parent directory
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent.to_path_buf();
+            } else {
+                panic!("Could not find workspace root with tests/config.test.yaml");
+            }
+        };
+
+        load_config(Some(test_config_path.to_str().expect("Invalid path")))
+    }
+
+    /// Validate that all required secrets are present
+    fn validate_secrets(&self) -> Result<(), String> {
+        if self.database.password.is_empty() {
+            return Err(
+                "Database password must be set via BOOM_DATABASE__PASSWORD environment variable"
+                    .to_string(),
+            );
         }
+
+        if self.api.auth.secret_key.is_empty() {
+            return Err(
+                "API secret key must be set via BOOM_API__AUTH__SECRET_KEY environment variable"
+                    .to_string(),
+            );
+        }
+
+        if self.api.auth.admin_password.is_empty() {
+            return Err("Admin password must be set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable".to_string());
+        }
+
+        // Validate token expiration
+        if self.api.auth.token_expiration <= 0 {
+            return Err("Token expiration must be greater than 0 for security reasons".to_string());
+        }
+
+        Ok(())
     }
 }
 
 pub fn load_config(config_path: Option<&str>) -> AppConfig {
-    let config_fpath = config_path.unwrap_or("config.yaml");
-    let default_config = AppConfig::default();
+    load_dotenv();
+
+    let config_file = config_path.unwrap_or("config.yaml");
+
     let config = Config::builder()
-        .add_source(File::with_name(config_fpath))
+        .add_source(File::with_name(config_file))
+        // Add environment variable overrides with BOOM prefix and __ separator for nesting
+        .add_source(config::Environment::with_prefix("BOOM").separator("__"))
         .build()
-        .expect("a config.yaml file should exist");
+        .expect("Failed to build configuration");
 
-    // Load API configuration
-    let api_conf = config
-        .get_table("api")
-        .expect("an api table should exist in the config file");
+    let app_config: AppConfig = config
+        .try_deserialize()
+        .expect("Failed to deserialize configuration");
 
-    // Load Auth configuration
-    let auth_conf = api_conf
-        .get("auth")
-        .and_then(|auth| auth.clone().into_table().ok())
-        .expect("an auth table should exist in the config file");
-    let secret_key = match auth_conf.get("secret_key") {
-        Some(secret_key) => secret_key
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid secret_key: {}", e)),
-        None => default_config.auth.secret_key.clone(),
-    };
-    let token_expiration = match auth_conf.get("token_expiration") {
-        Some(token_expiration) => token_expiration
-            .clone()
-            .into_int()
-            .unwrap_or_else(|e| panic!("Invalid token_expiration: {}", e))
-            as usize,
-        None => default_config.auth.token_expiration,
-    };
-    let admin_username = match auth_conf.get("admin_username") {
-        Some(admin_username) => admin_username
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid admin_username: {}", e)),
-        None => default_config.auth.admin_username.clone(),
-    };
-    let admin_password = match auth_conf.get("admin_password") {
-        Some(admin_password) => admin_password
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid admin_password: {}", e)),
-        None => default_config.auth.admin_password.clone(),
-    };
-    let admin_email = match auth_conf.get("admin_email") {
-        Some(admin_email) => admin_email
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid admin_email: {}", e)),
-        None => default_config.auth.admin_email.clone(),
-    };
-    let auth = AuthConfig {
-        secret_key,
-        token_expiration,
-        admin_username,
-        admin_password,
-        admin_email,
-    };
+    // Validate that required secrets are present
+    if let Err(e) = app_config.validate_secrets() {
+        panic!("{}", e);
+    }
 
-    // Load DB configuration
-    let db_conf = config
-        .get_table("database")
-        .expect("a database table should exist in the config file");
-    let host = match db_conf.get("host") {
-        Some(host) => host
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid host: {}", e)),
-        None => default_config.database.host.clone(),
-    };
-    let port = match db_conf.get("port") {
-        Some(port) => port
-            .clone()
-            .into_int()
-            .unwrap_or_else(|e| panic!("Invalid port: {}", e)) as u16,
-        None => default_config.database.port,
-    };
-    let name = match db_conf.get("name") {
-        Some(name) => name
-            .clone()
-            .into_string()
-            .unwrap_or_else(|e| panic!("Invalid name: {}", e)),
-        None => default_config.database.name.clone(),
-    };
-    let username = db_conf
-        .get("username")
-        .and_then(|username| username.clone().into_string().ok())
-        .unwrap_or(default_config.database.username);
-    let password = db_conf
-        .get("password")
-        .and_then(|password| password.clone().into_string().ok())
-        .unwrap_or(default_config.database.password);
+    info!("Configuration loaded successfully");
+    debug!("Database host: {}", app_config.database.host);
+    debug!("Database name: {}", app_config.database.name);
+    debug!("Admin username: {}", app_config.api.auth.admin_username);
+    debug!(
+        "Token expiration: {} seconds",
+        app_config.api.auth.token_expiration
+    );
 
-    let database = DatabaseConfig {
-        name,
-        host,
-        port,
-        username,
-        password,
-    };
-
-    AppConfig { auth, database }
+    app_config
 }

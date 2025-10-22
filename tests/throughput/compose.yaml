@@ -94,7 +94,7 @@ services:
     image: boom/boom-benchmarking:latest
     hostname: producer
     build:
-      dockerfile: ${PWD}/Dockerfile-benchmark
+      dockerfile: ${PWD}/Dockerfile
       context: ${PWD}
       pull: false
     command:
@@ -113,13 +113,11 @@ services:
     volumes:
       - ${PWD}/data/alerts:/app/data/alerts
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-  # TODO: Add a prestart script here to load in some filters and have others
-  # depend on its "service_completed_successfully" healthcheck
   consumer:
-    image: boom/boom-benchmarking:latest
+    image: boom-astro/boom:latest
     hostname: consumer
     build:
-      dockerfile: ${PWD}/Dockerfile-benchmark
+      dockerfile: ${PWD}/Dockerfile
       context: ${PWD}
       pull: false
     networks:
@@ -138,10 +136,10 @@ services:
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
   scheduler:
-    image: boom/boom-benchmarking:latest
+    image: boom-astro/boom:latest
     hostname: scheduler
     build:
-      dockerfile: ${PWD}/Dockerfile-benchmark
+      dockerfile: ${PWD}/Dockerfile
       context: ${PWD}
       pull: false
     command:

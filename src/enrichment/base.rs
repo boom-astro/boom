@@ -11,7 +11,7 @@ use crate::{
 use std::{num::NonZero, sync::LazyLock};
 
 use futures::StreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, document::ValueAccessError, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
@@ -76,79 +76,99 @@ pub trait EnrichmentWorker {
         Self: Sized;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
-    #[instrument(skip_all, err)]
-    async fn fetch_alerts(
-        &self,
-        candids: &[i64], // this is a slice of candids to process
-        alert_pipeline: &Vec<Document>,
-        alert_collection: &mongodb::Collection<Document>,
-        alert_cutout_collection: Option<&mongodb::Collection<Document>>,
-    ) -> Result<Vec<Document>, EnrichmentWorkerError> {
-        let mut alert_pipeline = alert_pipeline.clone();
-        if let Some(first_stage) = alert_pipeline.first_mut() {
-            *first_stage = doc! {
-                "$match": {
-                    "_id": {"$in": candids}
-                }
-            };
-        }
-        let mut alert_cursor = alert_collection.aggregate(alert_pipeline).await?;
+    async fn process_alerts(
+        &mut self,
+        alerts: &[i64],
+        con: Option<&mut redis::aio::MultiplexedConnection>,
+    ) -> Result<Vec<String>, EnrichmentWorkerError>;
+}
 
-        let mut alerts: Vec<Document> = Vec::new();
-        let mut candid_to_idx = std::collections::HashMap::new();
-        let mut count = 0;
-        while let Some(result) = alert_cursor.next().await {
+/// Fetch alerts from the database given a list of candids and an aggregation pipeline.
+/// If an alert_cutout_collection is provided, fetch cutouts from that collection as well.
+/// Return a vector of alerts as bson Documents.
+///
+/// # Arguments
+/// * `candids` - A slice of candids to fetch alerts for.
+/// * `alert_pipeline` - A reference to a vector of bson Documents representing the aggregation pipeline.
+/// * `alert_collection` - A reference to the mongodb collection containing the alerts.
+/// * `alert_cutout_collection` - An optional reference to the mongodb collection containing the cutouts.
+///
+/// # Returns
+/// A Result containing a vector of bson Documents representing the fetched alerts, or an EnrichmentWorkerError.
+#[instrument(skip_all, err)]
+pub async fn fetch_alerts(
+    candids: &[i64], // this is a slice of candids to process
+    alert_pipeline: &Vec<Document>,
+    alert_collection: &mongodb::Collection<Document>,
+    alert_cutout_collection: Option<&mongodb::Collection<Document>>,
+) -> Result<Vec<Document>, EnrichmentWorkerError> {
+    let mut alert_pipeline = alert_pipeline.clone();
+    if let Some(first_stage) = alert_pipeline.first_mut() {
+        *first_stage = doc! {
+            "$match": {
+                "_id": {"$in": candids}
+            }
+        };
+    }
+    let mut alert_cursor = alert_collection.aggregate(alert_pipeline).await?;
+
+    let mut alerts: Vec<Document> = Vec::new();
+    let mut candid_to_idx = std::collections::HashMap::new();
+    let mut count = 0;
+    while let Some(result) = alert_cursor.next().await {
+        match result {
+            Ok(document) => {
+                alerts.push(document);
+                let candid = alerts[count].get_i64("_id")?;
+                candid_to_idx.insert(candid, count);
+                count += 1;
+            }
+            _ => {
+                continue;
+            }
+        }
+    }
+
+    // next we fetch cutouts from the cutout collection, if provided
+    if let Some(alert_cutout_collection) = alert_cutout_collection {
+        let mut cutout_cursor = alert_cutout_collection
+            .find(doc! {
+                "_id": {"$in": candids}
+            })
+            .await?;
+        while let Some(result) = cutout_cursor.next().await {
             match result {
-                Ok(document) => {
-                    alerts.push(document);
-                    let candid = alerts[count].get_i64("_id")?;
-                    candid_to_idx.insert(candid, count);
-                    count += 1;
+                Ok(cutout_doc) => {
+                    let candid = cutout_doc.get_i64("_id")?;
+                    if let Some(idx) = candid_to_idx.get(&candid) {
+                        alerts[*idx].insert(
+                            "cutoutScience",
+                            cutout_doc
+                                .get("cutoutScience")
+                                .ok_or(ValueAccessError::NotPresent)?,
+                        );
+                        alerts[*idx].insert(
+                            "cutoutTemplate",
+                            cutout_doc
+                                .get("cutoutTemplate")
+                                .ok_or(ValueAccessError::NotPresent)?,
+                        );
+                        alerts[*idx].insert(
+                            "cutoutDifference",
+                            cutout_doc
+                                .get("cutoutDifference")
+                                .ok_or(ValueAccessError::NotPresent)?,
+                        );
+                    }
                 }
                 _ => {
                     continue;
                 }
             }
         }
-
-        // next we fetch cutouts from the cutout collection, if provided
-        if let Some(alert_cutout_collection) = alert_cutout_collection {
-            let mut cutout_cursor = alert_cutout_collection
-                .find(doc! {
-                    "_id": {"$in": candids}
-                })
-                .await?;
-            while let Some(result) = cutout_cursor.next().await {
-                match result {
-                    Ok(cutout_doc) => {
-                        let candid = cutout_doc.get_i64("_id")?;
-                        if let Some(idx) = candid_to_idx.get(&candid) {
-                            alerts[*idx]
-                                .insert("cutoutScience", cutout_doc.get("cutoutScience").unwrap());
-                            alerts[*idx].insert(
-                                "cutoutTemplate",
-                                cutout_doc.get("cutoutTemplate").unwrap(),
-                            );
-                            alerts[*idx].insert(
-                                "cutoutDifference",
-                                cutout_doc.get("cutoutDifference").unwrap(),
-                            );
-                        }
-                    }
-                    _ => {
-                        continue;
-                    }
-                }
-            }
-        }
-
-        Ok(alerts)
     }
-    async fn process_alerts(
-        &mut self,
-        alerts: &[i64],
-        con: Option<&mut redis::aio::MultiplexedConnection>,
-    ) -> Result<Vec<String>, EnrichmentWorkerError>;
+
+    Ok(alerts)
 }
 
 #[tokio::main]
