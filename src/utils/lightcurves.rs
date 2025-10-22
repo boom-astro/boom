@@ -72,14 +72,12 @@ pub struct PhotometryProperties {
     pub linear_fit_after: [f32; 3],  // slope, intercept, r-squared
 }
 
-pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) -> () {
+pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
     // sort by time
     photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
 
     // remove duplicates (same time and band)
     photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
-
-    ()
 }
 
 // we want a function that takes a Vec of PhotometryMag and:
