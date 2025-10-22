@@ -135,7 +135,13 @@ pub fn load_config(config_path: Option<&str>) -> AppConfig {
     let config = Config::builder()
         .add_source(File::with_name(config_file))
         // Add environment variable overrides with BOOM prefix and __ separator for nesting
-        .add_source(config::Environment::with_prefix("BOOM").separator("__"))
+        .add_source(
+            config::Environment::with_prefix("BOOM")
+                .prefix_separator("_")
+                .separator("__")
+                .try_parsing(true)
+                .ignore_empty(true),
+        )
         .build()
         .expect("Failed to build configuration");
 
