@@ -3,8 +3,6 @@ use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use mongodb::bson::{doc, Bson, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use redis::AsyncCommands;
-use serde_json;
 use tracing::{instrument, warn};
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
@@ -71,7 +69,76 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
 }
 
 pub struct Babamul {
-    valkey_con: redis::aio::MultiplexedConnection,
+    kafka_producer: rdkafka::producer::FutureProducer,
+}
+
+impl Babamul {
+    fn new(config: config::Config) -> Self {
+        // Read Kafka producer config from kafka: producer in the config
+        // TODO: Do this properly
+        let kafka_producer_host = config
+            .get("kafka.producer")
+            .unwrap_or_else(|_| "broker:29092".to_string());
+
+        // Create Kafka producer
+        let kafka_producer: rdkafka::producer::FutureProducer =
+            rdkafka::config::ClientConfig::new()
+                // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+                // .set("debug", "broker,topic,msg")
+                .set("bootstrap.servers", &kafka_producer_host)
+                .set("message.timeout.ms", "5000")
+                // it's best to increase batch.size if the cluster
+                // is running on another machine. Locally, lower means less
+                // latency, since we are not limited by network speed anyways
+                .set("batch.size", "16384")
+                .set("linger.ms", "5")
+                .set("acks", "1")
+                .set("max.in.flight.requests.per.connection", "5")
+                .set("retries", "3")
+                .create()
+                .unwrap();
+        Babamul { kafka_producer }
+    }
+
+    fn process_alert(
+        &self,
+        alert: Document,
+        properties: Document,
+    ) -> Result<(), EnrichmentWorkerError> {
+        // Merge properties into the alert document
+        let mut merged = alert.clone();
+        merged.insert("properties", Bson::Document(properties.clone()));
+
+        // Determine if this alert is worth sending to Babamul
+        let min_reliability = 0.5;
+        let pixel_flags = vec![1, 2, 3];
+        let sso = false;
+
+        if (merged.get_f64("candidate.reliability").unwrap_or(0.0) < min_reliability)
+            || (merged
+                .get_document("candidate")
+                .unwrap()
+                .get_i32("pixel_flags")
+                .map(|pf| pixel_flags.contains(&pf))
+                .unwrap_or(false))
+            || (merged
+                .get_document("properties")
+                .unwrap()
+                .get_bool("rock")
+                .unwrap_or(false)
+                == sso)
+        {
+            // Skip this alert, it doesn't meet the criteria
+            return Ok(());
+        }
+
+        // Determine which topic this alert should go to
+        // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
+        // TODO: Send to topic
+        let _producer = &self.kafka_producer;
+
+        Ok(())
+    }
 }
 
 pub struct LsstEnrichmentWorker {
@@ -87,7 +154,7 @@ pub struct LsstEnrichmentWorker {
 impl EnrichmentWorker for LsstEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_config(&config_path)?;
+        let config_file: config::Config = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
@@ -98,8 +165,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // Detect if Babamul is enabled from the config
         let babamul_enabled = crate::conf::babamul_enabled(&config_file);
         let babamul: Option<Babamul> = if babamul_enabled {
-            let valkey_con = crate::conf::build_redis(&config_file).await?;
-            Some(Babamul { valkey_con })
+            Some(Babamul::new(config_file))
         } else {
             None
         };
@@ -147,7 +213,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut babamul_alerts = Vec::new();
         for i in 0..alerts.len() {
             let candid = alerts[i].get_i64("_id")?;
 
@@ -175,50 +240,16 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             updates.push(update);
             processed_alerts.push(format!("{}", candid));
 
-            // If Babamul is enabled, merge the alert and properties and append a
-            // JSON payload to the in-memory `babamul_alerts` vector
+            // If Babamul is enabled, process this alert for its streams
             if self.babamul.is_some() {
-                // Merge properties into the alert document
-                let mut merged = alerts[i].clone();
-                merged.insert("properties", Bson::Document(properties.clone()));
-
-                // Determine if this alert is worth sending to Babamul
-                let min_reliability = 0.5;
-                let pixel_flags = vec![1, 2, 3];
-                let sso = false;
-
-                if (merged.get_f64("candidate.reliability").unwrap_or(0.0) < min_reliability)
-                    || (merged
-                        .get_document("candidate")
-                        .unwrap()
-                        .get_i32("pixel_flags")
-                        .map(|pf| pixel_flags.contains(&pf))
-                        .unwrap_or(false))
-                    || (merged
-                        .get_document("properties")
-                        .unwrap()
-                        .get_bool("rock")
-                        .unwrap_or(false)
-                        == sso)
-                {
-                    // Skip this alert, it doesn't meet the criteria
-                    continue;
-                }
-
-                // Serialize BSON Document directly to JSON string
-                let payload = serde_json::to_string(&Bson::Document(merged))?;
-                babamul_alerts.push(payload);
+                self.babamul
+                    .as_ref()
+                    .unwrap()
+                    .process_alert(alerts[i].clone(), properties.clone())?;
             }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
-
-        // If we have Babamul payloads buffered, push them in one command to Redis.
-        if !babamul_alerts.is_empty() {
-            if let Some(b) = &mut self.babamul {
-                let _: () = b.valkey_con.lpush("babamul", babamul_alerts).await?;
-            }
-        }
 
         Ok(processed_alerts)
     }
