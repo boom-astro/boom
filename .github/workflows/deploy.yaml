@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to deploy (tag, branch, or commit SHA)'
+        description: "Version to deploy (tag, branch, or commit SHA)"
         required: true
-        default: 'main'
+        default: "main"
         type: string
 
 jobs:
@@ -39,8 +39,8 @@ jobs:
         with:
           ref: ${{ github.event.inputs.version || github.ref }}
       - run: >
-          docker compose --profile prod --profile babamul
+          docker compose --profile prod
           -f docker-compose.yml build
       - run: >
-          docker compose --profile prod --profile babamul
+          docker compose --profile prod
           -f docker-compose.yml up -d

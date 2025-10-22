@@ -229,26 +229,6 @@ services:
     command:
       - /app/scheduler
       - lsst
-  babamul-worker:
-    image: boom-astro/boom:latest
-    hostname: babamul-worker
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      # Required secrets - must be set in environment
-      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
-      # Optional overrides
-      BOOM_DATABASE__HOST: mongo
-      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
-    networks:
-      - boom
-    profiles:
-      - babamul
-    volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
-    command:
-      - /app/babamul-worker
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     volumes:
