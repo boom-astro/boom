@@ -621,9 +621,10 @@ mod tests {
         let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
         let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
         let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
-        assert!((data[1].time - r_peak_jd).abs() < 1e-6);
-        assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
-        assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        // the original array was sorted, so the r-band peak is now at index 2 (not 1)
+        assert!((data[2].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[2].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[2].mag_err - r_peak_mag_err).abs() < 1e-6);
         assert_eq!(r_stats.contains_key("rising"), true);
         assert_eq!(r_stats.contains_key("fading"), true);
         // check the rising stats in r band
