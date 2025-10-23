@@ -126,6 +126,9 @@ services:
       - traefik-public
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+    profiles:
+      - prod
+      - api
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
