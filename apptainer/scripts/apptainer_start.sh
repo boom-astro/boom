@@ -146,7 +146,7 @@ fi
 # -----------------------------
 # 4. Boom
 # -----------------------------
-if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
+if [ -n "$3" ] && { start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; }; then
   echo && echo "$(current_datetime) - Starting BOOM instance"
   mkdir -p "$PERSISTENT_DIR/alerts"
   apptainer instance start \

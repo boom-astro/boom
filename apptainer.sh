@@ -53,8 +53,8 @@ fi
 # 2. Start services
 # -----------------------------
 if [ "$1" == "start" ]; then
-  if [ -z "$2" ] || { { [ "$2" == "all" ] || [ "$2" == "boom" ] || [ "$2" == "consumer" ] || [ "$2" == "scheduler" ]; } && [ -z "$3" ]; }; then
-    echo -e "${RED}Error: Missing required arguments.${END}"
+  if { [ "$2" == "boom" ] || [ "$2" == "consumer" ] || [ "$2" == "scheduler" ]; } && [ -z "$3" ]; then
+    echo -e "${RED}Error: Missing survey name argument.${END}"
     echo -e "Usage: ${BLUE}$0 start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
     echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
     echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
@@ -66,7 +66,7 @@ if [ "$1" == "start" ]; then
 
   ARGS=("$BOOM_DIR")
   # Check if $2 is a survey name
-  if [[ "$2" == "lsst" || "$2" == "ztf" || "$2" == "decam" ]]; then
+  if [ -z "$2" ] || [ "$2" = "lsst" ] || [ "$2" = "ztf" ] || [ "$2" = "decam" ]; then
     ARGS+=("all") # service to start
   else
     [ -n "$2" ] && ARGS+=("$2") # service to start
