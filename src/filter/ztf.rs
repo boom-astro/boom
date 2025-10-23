@@ -4,6 +4,7 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
+use crate::filter::lsst::build_lsst_alert;
 use crate::filter::{
     get_filter_object, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
     validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
@@ -13,9 +14,13 @@ use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 #[instrument(skip_all, err)]
-pub async fn build_ztf_alerts(
+pub async fn get_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
     alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+    alert_cutout_collection: &mongodb::Collection<mongodb::bson::Document>,
+    lsst_alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+    lsst_alert_cutout_collection: &mongodb::Collection<mongodb::bson::Document>,
+    include_survey_matches: bool,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
@@ -32,6 +37,12 @@ pub async fn build_ztf_alerts(
                 "dec": "$candidate.dec",
                 "rb": "$candidate.rb",
                 "drb": "$candidate.drb",
+                "sgscore1": "$candidate.sgscore1",
+                "sgscore2": "$candidate.sgscore2",
+                "sgscore3": "$candidate.sgscore3",
+                "distpsnr1": "$candidate.distpsnr1",
+                "distpsnr2": "$candidate.distpsnr2",
+                "distpsnr3": "$candidate.distpsnr3",
                 "classifications": 1,
             }
         },
@@ -44,14 +55,6 @@ pub async fn build_ztf_alerts(
             }
         },
         doc! {
-            "$lookup": {
-                "from": "ZTF_alerts_cutouts",
-                "localField": "_id",
-                "foreignField": "_id",
-                "as": "cutouts"
-            }
-        },
-        doc! {
             "$project": {
                 "objectId": 1,
                 "jd": 1,
@@ -60,9 +63,10 @@ pub async fn build_ztf_alerts(
                 "prv_candidates": get_array_element("aux.prv_candidates"),
                 "prv_nondetections": get_array_element("aux.prv_nondetections"),
                 "fp_hists": get_array_element("aux.fp_hists"),
-                "cutoutScience": get_array_element("cutouts.cutoutScience"),
-                "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
-                "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
+                // "cutoutScience": get_array_element("cutouts.cutoutScience"),
+                // "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
+                // "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
+                "aliases": get_array_element("aux.aliases"),
                 "classifications": 1,
             }
         },
@@ -72,20 +76,16 @@ pub async fn build_ztf_alerts(
     let mut cursor = alert_collection.aggregate(pipeline).await?;
 
     let mut alerts_output = Vec::new();
+    let mut candid_to_idx = std::collections::HashMap::new();
+    let mut lsst_aliases_to_idx: HashMap<String, Vec<usize>> = HashMap::new();
     while let Some(alert_document) = cursor.next().await {
+        info!("Processing ZTF alert document");
         let alert_document = alert_document?;
         let candid = alert_document.get_i64("_id")?;
         let object_id = alert_document.get_str("objectId")?.to_string();
         let jd = alert_document.get_f64("jd")?;
         let ra = alert_document.get_f64("ra")?;
         let dec = alert_document.get_f64("dec")?;
-        let cutout_science = alert_document.get_binary_generic("cutoutScience")?.to_vec();
-        let cutout_template = alert_document
-            .get_binary_generic("cutoutTemplate")?
-            .to_vec();
-        let cutout_difference = alert_document
-            .get_binary_generic("cutoutDifference")?
-            .to_vec();
 
         // let's create the array of photometry (non forced phot only for now)
         let mut photometry = Vec::new();
@@ -198,6 +198,7 @@ pub async fn build_ztf_alerts(
                     classifications.push(Classification {
                         classifier: key.to_string(),
                         score,
+                        separation: None,
                     });
                 }
             }
@@ -208,12 +209,48 @@ pub async fn build_ztf_alerts(
             classifications.push(Classification {
                 classifier: "rb".to_string(),
                 score: rb,
+                separation: None,
             });
         }
         if let Some(drb) = alert_document.get_f64("drb").ok() {
             classifications.push(Classification {
                 classifier: "drb".to_string(),
                 score: drb,
+                separation: None,
+            });
+        }
+
+        // if we have both sgscore1 and distpsnr1, we add a classification for the nearest PS1 star
+        if let (Some(sgscore1), Some(distpsnr1)) = (
+            alert_document.get_f64("sgscore1").ok(),
+            alert_document.get_f64("distpsnr1").ok(),
+        ) {
+            classifications.push(Classification {
+                classifier: "ps1_sg".to_string(),
+                score: sgscore1,
+                separation: Some(distpsnr1), // in arcseconds
+            });
+        }
+        // if we have both sgscore2 and distpsnr2, we add a classification for the 2d nearest PS1 star
+        if let (Some(sgscore2), Some(distpsnr2)) = (
+            alert_document.get_f64("sgscore2").ok(),
+            alert_document.get_f64("distpsnr2").ok(),
+        ) {
+            classifications.push(Classification {
+                classifier: "ps1_sg".to_string(),
+                score: sgscore2,
+                separation: Some(distpsnr2), // in arcseconds
+            });
+        }
+        // if we have both sgscore3 and distpsnr3, we add a classification for the 3rd nearest PS1 star
+        if let (Some(sgscore3), Some(distpsnr3)) = (
+            alert_document.get_f64("sgscore3").ok(),
+            alert_document.get_f64("distpsnr3").ok(),
+        ) {
+            classifications.push(Classification {
+                classifier: "ps1_sg".to_string(),
+                score: sgscore3,
+                separation: Some(distpsnr3), // in arcseconds
             });
         }
 
@@ -229,21 +266,197 @@ pub async fn build_ztf_alerts(
                 .unwrap_or_else(Vec::new),
             classifications,
             photometry,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
+            cutout_science: Vec::<u8>::new(),    //cutout_science,
+            cutout_template: Vec::<u8>::new(),   //cutout_template,
+            cutout_difference: Vec::<u8>::new(), //cutout_difference,
             survey: Survey::Ztf,
+            survey_matches: None,
         };
 
+        info!(
+            "Built ZTF alert candid={} object_id={}",
+            candid, &alert.object_id
+        );
+
         alerts_output.push(alert);
+        candid_to_idx.insert(candid, alerts_output.len() - 1);
+
+        // if we have aliases for LSST, we store them for later
+        // aliases is a dict with survey names as keys and array of strings as values
+        if include_survey_matches {
+            if let Some(aliases_doc) = alert_document.get_document("aliases").ok() {
+                // we only care about the first alias for now
+                if let Some(lsst_aliases) = aliases_doc.get_array("LSST").ok() {
+                    println!(
+                        "ZTF alert candid={} has LSST aliases: {:?}",
+                        candid, lsst_aliases
+                    );
+                    for alias in lsst_aliases {
+                        if let Some(alias_str) = alias.as_str() {
+                            lsst_aliases_to_idx
+                                .entry(alias_str.to_string())
+                                .or_insert(Vec::new())
+                                .push(alerts_output.len() - 1);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if candids.len() != alerts_output.len() {
         return Err(FilterWorkerError::AlertNotFound);
     }
 
+    let mut cutout_cursor = alert_cutout_collection
+        .find(doc! {
+            "_id": {"$in": candids}
+        })
+        .await?;
+    while let Some(result) = cutout_cursor.next().await {
+        match result {
+            Ok(cutout_doc) => {
+                let candid = cutout_doc.get_i64("_id")?;
+                if let Some(idx) = candid_to_idx.get(&candid) {
+                    alerts_output[*idx].cutout_science =
+                        cutout_doc.get_binary_generic("cutoutScience")?.to_vec();
+                    alerts_output[*idx].cutout_template =
+                        cutout_doc.get_binary_generic("cutoutTemplate")?.to_vec();
+                    alerts_output[*idx].cutout_difference =
+                        cutout_doc.get_binary_generic("cutoutDifference")?.to_vec();
+                }
+            }
+            Err(e) => {
+                warn!("Error fetching cutout document: {}", e);
+                continue;
+            }
+        }
+    }
+
+    if include_survey_matches {
+        // print the lsst_aliases_to_idx map
+        println!(
+            "ZTF alerts LSST aliases to indices map: {:?}",
+            lsst_aliases_to_idx
+        );
+        let lsst_object_ids: Vec<String> = lsst_aliases_to_idx.keys().cloned().collect();
+        // we care about getting the most recent alert for each object id
+        println!(
+            "ZTF alerts querying LSST alerts with objectIDs: {:?}",
+            lsst_object_ids
+        );
+        let pipeline = vec![
+            doc! {
+                "$match": {
+                    "objectId": { "$in": &lsst_object_ids }
+                }
+            },
+            doc! {
+                "$sort": {
+                    "jd": -1
+                }
+            },
+            doc! {
+                "$group": {
+                    "_id": "$objectId",
+                    "candid": { "$first": "$_id" },
+                    "jd": { "$first": "$candidate.jd" },
+                    "ra": { "$first": "$candidate.ra" },
+                    "dec": { "$first": "$candidate.dec" },
+                    "classifications": { "$first": "$classifications" },
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "LSST_alerts_aux",
+                    "localField": "_id",
+                    "foreignField": "_id",
+                    "as": "aux"
+                }
+            },
+            doc! {
+                "$project": {
+                    "_id": "$candid",
+                    "objectId": "$_id",
+                    "jd": 1,
+                    "ra": 1,
+                    "dec": 1,
+                    "classifications": 1,
+                    "prv_candidates": get_array_element("aux.prv_candidates"),
+                    "fp_hists": get_array_element("aux.fp_hists"),
+                }
+            },
+        ];
+
+        let mut cursor = lsst_alert_collection.aggregate(pipeline).await?;
+
+        let mut lsst_alerts = Vec::new();
+        let mut lsst_candid_to_idx = HashMap::new();
+        let mut lsst_objectid_to_idx = HashMap::new();
+        while let Some(alert_document) = cursor.next().await {
+            info!("Processing LSST alert document for ZTF aliases");
+            let alert_document = alert_document?;
+            let alert =
+                build_lsst_alert(alert_document, &HashMap::<i64, Vec<FilterResults>>::new())?;
+            let candid = alert.candid;
+            let object_id = alert.object_id.clone();
+            info!(
+                "Found matching LSST alert for ZTF aliases: {:?}",
+                alert.object_id
+            );
+            lsst_alerts.push(alert);
+            let idx = lsst_alerts.len() - 1;
+            lsst_candid_to_idx.insert(candid, idx);
+            lsst_objectid_to_idx.insert(object_id, idx);
+        }
+
+        // grab the lsst cutouts and add them to the lsst alerts
+        let mut lsst_cutout_cursor = lsst_alert_cutout_collection
+            .find(doc! {
+                "_id": {"$in": lsst_candid_to_idx.keys().cloned().collect::<Vec<i64>>()}
+            })
+            .await?;
+        while let Some(result) = lsst_cutout_cursor.next().await {
+            match result {
+                Ok(cutout_doc) => {
+                    let candid = cutout_doc.get_i64("_id")?;
+                    if let Some(idx) = lsst_candid_to_idx.get(&candid) {
+                        lsst_alerts[*idx].cutout_science =
+                            cutout_doc.get_binary_generic("cutoutScience")?.to_vec();
+                        lsst_alerts[*idx].cutout_template =
+                            cutout_doc.get_binary_generic("cutoutTemplate")?.to_vec();
+                        lsst_alerts[*idx].cutout_difference =
+                            cutout_doc.get_binary_generic("cutoutDifference")?.to_vec();
+                    }
+                }
+                Err(e) => {
+                    warn!("Error fetching LSST cutout document: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        // now we can assign the lsst alerts to the ztf alerts
+        for (lsst_object_id, idxs) in lsst_aliases_to_idx.iter() {
+            if let Some(lsst_idx) = lsst_objectid_to_idx.get(lsst_object_id) {
+                let lsst_alert = lsst_alerts.get(*lsst_idx).unwrap().clone();
+                for &ztf_idx in idxs {
+                    alerts_output[ztf_idx]
+                        .survey_matches
+                        .get_or_insert(Vec::new())
+                        .push(lsst_alert.clone());
+                }
+            }
+        }
+    }
+
     Ok(alerts_output)
 }
+
+// let's make a function that takes:
+// - an array of alerts
+// -
 
 #[derive(Debug)]
 pub struct ZtfFilter {
@@ -452,10 +665,13 @@ impl Filter for ZtfFilter {
 
 pub struct ZtfFilterWorker {
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
     input_queue: String,
     output_topic: String,
     filters: Vec<ZtfFilter>,
     filters_by_permission: HashMap<i32, Vec<String>>,
+    lsst_alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    lsst_alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
 }
 
 #[async_trait::async_trait]
@@ -468,7 +684,11 @@ impl FilterWorker for ZtfFilterWorker {
         let config_file = crate::conf::load_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let alert_collection = db.collection("ZTF_alerts");
+        let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
         let filter_collection = db.collection("filters");
+
+        let lsst_alert_collection = db.collection("LSST_alerts");
+        let lsst_alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
@@ -515,10 +735,13 @@ impl FilterWorker for ZtfFilterWorker {
 
         Ok(ZtfFilterWorker {
             alert_collection,
+            alert_cutout_collection,
             input_queue,
             output_topic,
             filters,
             filters_by_permission,
+            lsst_alert_collection,
+            lsst_alert_cutout_collection,
         })
     }
 
@@ -613,7 +836,15 @@ impl FilterWorker for ZtfFilterWorker {
                 }
             }
 
-            let alerts = build_ztf_alerts(&results_map, &self.alert_collection).await?;
+            let alerts = get_ztf_alerts(
+                &results_map,
+                &self.alert_collection,
+                &self.alert_cutout_collection,
+                &self.lsst_alert_collection,
+                &self.lsst_alert_cutout_collection,
+                true,
+            )
+            .await?;
             alerts_output.extend(alerts);
         }
 

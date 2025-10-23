@@ -1,7 +1,7 @@
 use boom::{
     alert::{
         AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
-        ZTF_LSST_XMATCH_RADIUS,
+        ZTF_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS,
     },
     conf,
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
@@ -380,6 +380,13 @@ async fn test_enrich_ztf_alert() {
 
 #[tokio::test]
 async fn test_filter_ztf_alert() {
+    use tracing::Level;
+    use tracing_subscriber::FmtSubscriber;
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let mut alert_worker = ztf_alert_worker().await;
 
     let (candid, object_id, _ra, _dec, bytes_content) =
@@ -431,4 +438,79 @@ async fn test_filter_ztf_alert() {
     let schema = load_alert_schema().unwrap();
     let encoded = alert_to_avro_bytes(&alert, &schema);
     assert!(encoded.is_ok());
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert_xmatch() {
+    use tracing::Level;
+    use tracing_subscriber::FmtSubscriber;
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    // in this test, we first insert an LSST alert, then a ZTF alert that should xmatch
+    // then we filter on them, and we verify that the ZTF alert has the LSST xmatch info
+    let mut lsst_alert_worker = lsst_alert_worker().await;
+    let (lsst_candid, lsst_object_id, lsst_ra, lsst_dec, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .dec(ZTF_DEC_RANGE.0 + 10.0)
+            .get()
+            .await;
+    let status = lsst_alert_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(lsst_candid));
+    let mut ztf_alert_worker = ztf_alert_worker().await;
+    let (ztf_candid, ztf_object_id, _, _, ztf_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf)
+            .ra(lsst_ra)
+            .dec(lsst_dec)
+            .get()
+            .await;
+    let status = ztf_alert_worker
+        .process_alert(&ztf_bytes_content)
+        .await
+        .unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(ztf_candid));
+    // then run the enrichment worker to get the classifications
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let result = enrichment_worker.process_alerts(&[ztf_candid]).await;
+    assert!(result.is_ok());
+    // the result should be a vec of String, for ZTF with the format
+    // "programid,candid" which is what the filter worker expects
+    let enrichment_output = result.unwrap();
+    assert_eq!(enrichment_output.len(), 1);
+    let candid_programid_str = &enrichment_output[0];
+    assert_eq!(candid_programid_str, &format!("1,{}", ztf_candid));
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[candid_programid_str.clone()])
+        .await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    assert!(result.is_ok());
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, ztf_candid);
+    assert_eq!(alert.object_id, ztf_object_id);
+    assert!(alert.cutout_science.len() > 0);
+    assert!(alert.cutout_template.len() > 0);
+    assert!(alert.cutout_difference.len() > 0);
+
+    // verify that the alert has the LSST alias
+    let lsst_aliases = alert.survey_matches.as_ref().unwrap();
+    // assert!(lsst_aliases.iter().any(|a| a.object_id == lsst_object_id && a.survey == Survey::Lsst));
+    let lsst_xmatch = lsst_aliases
+        .iter()
+        .find(|a| a.survey == Survey::Lsst)
+        .unwrap();
+    assert_eq!(lsst_xmatch.object_id, lsst_object_id);
+    // verify that the xmatch has cutouts (i.e. that they aren't empty vecs)
+    assert!(lsst_xmatch.cutout_science.len() > 0);
+    assert!(lsst_xmatch.cutout_template.len() > 0);
+    assert!(lsst_xmatch.cutout_difference.len() > 0);
 }

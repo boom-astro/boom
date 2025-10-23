@@ -8,5 +8,5 @@ pub use base::{
     Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
 };
 use base::{get_filter_object, parse_programid_candid_tuple, Classification, Origin, Photometry};
-pub use lsst::{build_lsst_alerts, LsstFilter, LsstFilterWorker};
-pub use ztf::{build_ztf_alerts, ZtfFilter, ZtfFilterWorker};
+pub use lsst::{get_lsst_alerts, LsstFilter, LsstFilterWorker};
+pub use ztf::{get_ztf_alerts, ZtfFilter, ZtfFilterWorker};

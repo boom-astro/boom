@@ -87,7 +87,8 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "Classification",
                 "fields": [
                     {"name": "classifier", "type": "string"},
-                    {"name": "score", "type": "double"}
+                    {"name": "score", "type": "double"},
+                    {"name": "separation", "type": ["null","double"]}
                 ]
             }
         }},
@@ -112,7 +113,11 @@ const ALERT_SCHEMA: &str = r#"
         }},
         {"name":"cutoutScience","type":{"type":"bytes"}},
         {"name":"cutoutTemplate","type":{"type":"bytes"}},
-        {"name":"cutoutDifference","type":{"type":"bytes"}}
+        {"name":"cutoutDifference","type":{"type":"bytes"}},
+        {"name": "survey_matches", "type": ["null", {
+            "type": "array",
+            "items": "Alert"
+        }]}
     ]
 }
 "#;
@@ -179,6 +184,7 @@ pub struct Photometry {
 pub struct Classification {
     pub classifier: String,
     pub score: f64,
+    pub separation: Option<f64>, // in arcseconds, if the score comes from a crossmatch
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -206,6 +212,7 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
+    pub survey_matches: Option<Vec<Alert>>,
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
