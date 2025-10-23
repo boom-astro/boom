@@ -139,7 +139,6 @@ impl Babamul {
         // For now, all LSST alerts go to "babamul.none"
         let category: String = "none".to_string();
         let topic_name = format!("babamul.{}", category);
-        let _producer = &self.kafka_producer;
         let schema = crate::filter::load_alert_schema().unwrap();
         // Convert the merged document into an Alert
         let alert_obj = Alert::from_bson_document(&merged).unwrap();
