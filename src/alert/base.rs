@@ -220,6 +220,8 @@ pub enum AlertError {
     MagicBytesError,
     #[error("missing alert aux")]
     AlertAuxNotFound,
+    #[error("unexpected fid value")]
+    UnknownFid(i32),
 }
 
 #[derive(Debug, PartialEq)]

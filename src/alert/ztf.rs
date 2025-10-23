@@ -34,6 +34,15 @@ pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
 
 const ZTF_ZP: f32 = 23.9;
 
+fn fid2band(fid: i32) -> Result<String, AlertError> {
+    match fid {
+        1 => Ok("g".to_string()),
+        2 => Ok("r".to_string()),
+        3 => Ok("i".to_string()),
+        _ => Err(AlertError::UnknownFid(fid)),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct Cutout {
     #[serde(rename = "fileName")]
@@ -48,9 +57,7 @@ pub struct Cutout {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct PrvCandidate {
     pub jd: f64,
-    #[serde(rename(deserialize = "fid", serialize = "band"))]
-    #[serde(deserialize_with = "deserialize_fid")]
-    pub band: String,
+    pub fid: i32,
     pub pid: i64,
     pub diffmaglim: Option<f32>,
     pub programpi: Option<String>,
@@ -104,6 +111,7 @@ pub struct ZtfPrvCandidate {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
     pub snr: Option<f32>,
+    pub band: String,
 }
 
 impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
@@ -113,6 +121,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
         let sigmapsf = prv_candidate.sigmapsf;
         let isdiffpos = prv_candidate.isdiffpos;
         let diffmaglim = prv_candidate.diffmaglim;
+        let band = fid2band(prv_candidate.fid)?;
 
         let (psf_flux, psf_flux_err, snr) = match (magpsf, sigmapsf, isdiffpos, diffmaglim) {
             (Some(mag), Some(sigmag), Some(isdiff), _) => {
@@ -140,6 +149,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             psf_flux,
             psf_flux_err,
             snr,
+            band,
         })
     }
 }
@@ -176,9 +186,7 @@ where
 pub struct FpHist {
     pub field: Option<i32>,
     pub rcid: Option<i32>,
-    #[serde(rename(deserialize = "fid", serialize = "band"))]
-    #[serde(deserialize_with = "deserialize_fid")]
-    pub band: String,
+    pub fid: i32,
     pub pid: i64,
     pub rfid: i64,
     pub magzpsci: Option<f32>,
@@ -220,6 +228,7 @@ pub struct ZtfForcedPhot {
     pub diffmaglim: f32,
     pub isdiffpos: Option<bool>,
     pub snr: Option<f32>,
+    pub band: String,
 }
 
 impl TryFrom<FpHist> for ZtfForcedPhot {
@@ -229,6 +238,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             .forcediffimfluxunc
             .ok_or(AlertError::MissingFluxPSF)?;
 
+        let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
 
         let (magpsf, sigmapsf, isdiffpos, snr) = match fp_hist.forcediffimflux {
@@ -258,6 +268,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             diffmaglim,
             isdiffpos,
             snr,
+            band,
         })
     }
 }
@@ -268,9 +279,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct Candidate {
     pub jd: f64,
-    #[serde(rename(deserialize = "fid", serialize = "band"))]
-    #[serde(deserialize_with = "deserialize_fid")]
-    pub band: String,
+    pub fid: i32,
     pub pid: i64,
     pub diffmaglim: Option<f32>,
     pub programpi: Option<String>,
@@ -383,40 +392,16 @@ where
     deserialize_isdiffpos_option(deserializer).map(|x| x.unwrap())
 }
 
-fn deserialize_fid<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn deserialize_fp_hists<'de, D>(deserializer: D) -> Result<Option<Vec<ZtfForcedPhot>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    // the fid is a mapper: 1 = g, 2 = r, 3 = i
-    let fid: i32 = Deserialize::deserialize(deserializer)?;
-    match fid {
-        1 => Ok("g".to_string()),
-        2 => Ok("r".to_string()),
-        3 => Ok("i".to_string()),
-        _ => Err(serde::de::Error::custom(format!("Unknown fid: {}", fid))),
-    }
-}
-
-fn deserialize_prv_forced_sources<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<ZtfForcedPhot>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let dia_forced_sources = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?;
-    // log a warning if any of the FpHist cannot be converted to ZtfForcedPhot
-    let forced_phots = dia_forced_sources
+    let fp_hists = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?
         .into_iter()
-        .filter_map(|fp| {
-            ZtfForcedPhot::try_from(fp)
-                .map_err(|e| {
-                    warn!("Failed to convert FpHist to ZtfForcedPhot: {}", e);
-                })
-                .ok()
-        })
+        .filter_map(|fp| ZtfForcedPhot::try_from(fp).ok())
         .collect();
 
-    Ok(Some(forced_phots))
+    Ok(Some(fp_hists))
 }
 
 fn deserialize_ssnamenr<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -439,6 +424,7 @@ pub struct ZtfCandidate {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: f32,
     pub snr: f32,
+    pub band: String,
 }
 
 impl TryFrom<Candidate> for ZtfCandidate {
@@ -448,6 +434,7 @@ impl TryFrom<Candidate> for ZtfCandidate {
         let magpsf = candidate.magpsf;
         let sigmapsf = candidate.sigmapsf;
         let isdiffpos = candidate.isdiffpos;
+        let band = fid2band(candidate.fid)?;
 
         let (flux, flux_err) = mag2flux(magpsf, sigmapsf, ZTF_ZP);
 
@@ -460,6 +447,7 @@ impl TryFrom<Candidate> for ZtfCandidate {
             }, // convert to nJy
             psf_flux_err: flux_err * 1e9_f32, // convert to nJy
             snr: flux / flux_err,
+            band,
         })
     }
 }
@@ -483,7 +471,7 @@ pub struct ZtfAlert {
     pub candidate: ZtfCandidate,
     #[serde(deserialize_with = "deserialize_prv_candidates")]
     pub prv_candidates: Option<Vec<ZtfPrvCandidate>>,
-    #[serde(deserialize_with = "deserialize_prv_forced_sources")]
+    #[serde(deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Option<Vec<ZtfForcedPhot>>,
     #[serde(
         rename = "cutoutScience",
