@@ -19,7 +19,7 @@ ADMIN_USER="admin"
 ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
 READ_PWD="${KAFKA_READONLY_PASSWORD}"
-TIMEOUT=300
+TIMEOUT=600
 
 # KAFKA_OPTS with JAAS is set at container level (docker-compose).
 
