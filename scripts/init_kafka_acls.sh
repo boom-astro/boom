@@ -19,6 +19,7 @@ ADMIN_USER="admin"
 ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
 READ_PWD="${KAFKA_READONLY_PASSWORD}"
+TIMEOUT=300
 
 # KAFKA_OPTS with JAAS is set at container level (docker-compose).
 
@@ -28,7 +29,7 @@ wait_for_kafka() {
   local -r start=$(date +%s)
   kafka_log "Waiting for broker API on $BROKER"
   until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "$BROKER" >/dev/null 2>&1; do
-    if (( $(date +%s) - start > 120 )); then
+    if (( $(date +%s) - start > $TIMEOUT )); then
       kafka_log "Broker did not become ready in time"; exit 1
     fi
     sleep 3
