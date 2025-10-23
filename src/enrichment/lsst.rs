@@ -1,4 +1,5 @@
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
+use crate::filter::Alert;
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
 use mongodb::bson::{doc, Bson, Document};
@@ -100,7 +101,7 @@ impl Babamul {
         Babamul { kafka_producer }
     }
 
-    fn process_alert(
+    async fn process_alert(
         &self,
         alert: Document,
         properties: Document,
@@ -134,8 +135,22 @@ impl Babamul {
 
         // Determine which topic this alert should go to
         // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
-        // TODO: Send to topic
+        // TODO: Get this implemented
+        // For now, all LSST alerts go to "babamul.none"
+        let category: String = "none".to_string();
+        let topic_name = format!("babamul.{}", category);
         let _producer = &self.kafka_producer;
+        let schema = crate::filter::load_alert_schema().unwrap();
+        // Convert the merged document into an Alert
+        let alert_obj = Alert::from_bson_document(&merged).unwrap();
+        let _ = crate::filter::send_alert_to_kafka(
+            &alert_obj,
+            &schema,
+            &self.kafka_producer,
+            &topic_name,
+        )
+        .await
+        .unwrap();
 
         Ok(())
     }
@@ -242,10 +257,12 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             // If Babamul is enabled, process this alert for its streams
             if self.babamul.is_some() {
-                self.babamul
+                let _ = self
+                    .babamul
                     .as_ref()
                     .unwrap()
-                    .process_alert(alerts[i].clone(), properties.clone())?;
+                    .process_alert(alerts[i].clone(), properties.clone())
+                    .await;
             }
         }
 

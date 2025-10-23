@@ -13,7 +13,7 @@ use std::{num::NonZero, sync::LazyLock};
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{self, doc, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
@@ -206,6 +206,13 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
+}
+
+impl Alert {
+    pub fn from_bson_document(doc: &Document) -> Result<Self, bson::de::Error> {
+        // from_document consumes, so clone if you only have &Document
+        bson::from_document(doc.clone())
+    }
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
