@@ -77,7 +77,7 @@ impl Babamul {
         // Read Kafka producer config from kafka: producer in the config
         // TODO: Do this properly
         let kafka_producer_host = config
-            .get("kafka.producer")
+            .get_string("kafka.producer")
             .unwrap_or_else(|_| "broker:29092".to_string());
 
         // Create Kafka producer
