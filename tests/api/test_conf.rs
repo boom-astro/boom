@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use boom_api::conf::{AppConfig, load_config, load_dotenv};
+    use boom::conf::{load_config, load_dotenv, AppConfig};
 
     #[test]
     #[should_panic(expected = "Token expiration must be greater than 0")]

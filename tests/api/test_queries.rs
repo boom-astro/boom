@@ -2,10 +2,10 @@
 #[cfg(test)]
 mod tests {
     use actix_web::http::StatusCode;
-    use actix_web::{App, test, web};
-    use boom_api::db::get_test_db;
-    use boom_api::routes;
-    use boom_api::test_utils::{create_test_catalog, delete_test_catalog, read_json_response};
+    use actix_web::{test, web, App};
+    use boom::api::db::get_test_db;
+    use boom::api::routes;
+    use boom::api::test_utils::{create_test_catalog, delete_test_catalog, read_json_response};
     use mongodb::Database;
 
     /// Test GET /catalogs

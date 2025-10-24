@@ -401,7 +401,7 @@ pub trait AlertConsumer: Sized {
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
         let config =
-            conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?;
+            conf::load_raw_config(config_path).inspect_err(as_error!("failed to load config"))?;
         let mut con = conf::build_redis(&config)
             .await
             .inspect_err(as_error!("failed to connect to redis"))?;
@@ -426,7 +426,7 @@ pub trait AlertConsumer: Sized {
         exit_on_eof: bool,
         config_path: &str,
     ) -> Result<(), ConsumerError> {
-        let config = conf::load_config(config_path)?;
+        let config = conf::load_raw_config(config_path)?;
 
         let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
         let kafka_config = match kafka_config {

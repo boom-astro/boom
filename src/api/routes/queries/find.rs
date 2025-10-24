@@ -1,11 +1,11 @@
 /// Endpoints for executing analytical queries.
-use crate::catalogs::catalog_exists;
-use crate::filters::parse_filter;
-use crate::models::response;
+use crate::api::catalogs::catalog_exists;
+use crate::api::filters::parse_filter;
+use crate::api::models::response;
 
-use actix_web::{HttpResponse, post, web};
+use actix_web::{post, web, HttpResponse};
 use futures::StreamExt;
-use mongodb::{Database, bson::doc};
+use mongodb::{bson::doc, Database};
 use utoipa::ToSchema;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]

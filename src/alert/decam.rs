@@ -156,7 +156,7 @@ impl DecamAlertWorker {
 #[async_trait::async_trait]
 impl AlertWorker for DecamAlertWorker {
     async fn new(config_path: &str) -> Result<DecamAlertWorker, AlertWorkerError> {
-        let config_file = conf::load_config(&config_path)?;
+        let config_file = conf::load_raw_config(&config_path)?;
 
         let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Decam)?;
 

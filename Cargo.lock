@@ -475,16 +475,22 @@ dependencies = [
 name = "boom"
 version = "0.1.0"
 dependencies = [
+ "actix-rt",
+ "actix-web",
  "apache-avro",
  "async-trait",
+ "base64 0.22.1",
+ "bcrypt",
  "chrono",
  "clap",
  "config",
  "constcat",
  "dotenvy",
+ "env_logger",
  "flare",
  "futures",
  "indicatif",
+ "jsonwebtoken",
  "mongodb",
  "ndarray",
  "openssl",
@@ -505,34 +511,10 @@ dependencies = [
  "tracing",
  "tracing-flame",
  "tracing-subscriber",
- "uuid",
- "zune-inflate",
-]
-
-[[package]]
-name = "boom-api"
-version = "0.1.0"
-dependencies = [
- "actix-rt",
- "actix-web",
- "base64 0.22.1",
- "bcrypt",
- "config",
- "dotenvy",
- "env_logger",
- "flare",
- "futures",
- "jsonwebtoken",
- "mongodb",
- "serde",
- "serde_json",
- "serde_with",
- "tempfile",
- "thiserror 2.0.17",
- "tracing",
  "utoipa",
  "utoipa-scalar",
  "uuid",
+ "zune-inflate",
 ]
 
 [[package]]

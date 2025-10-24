@@ -57,5 +57,3 @@ jobs:
         echo "kafka-acl-init completed successfully."
     - name: Test BOOM
       run: cargo test --release
-    - name: Test BOOM API
-      run: cargo test --release --package boom-api

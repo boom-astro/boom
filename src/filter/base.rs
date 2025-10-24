@@ -582,7 +582,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
 
-    let config = conf::load_config(config_path)?;
+    let config = conf::load_raw_config(config_path)?;
     let kafka_config = conf::build_kafka_config(&config, &T::survey())
         .inspect_err(|e| error!("Failed to build Kafka config: {}", e))?;
 
