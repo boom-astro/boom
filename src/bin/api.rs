@@ -1,10 +1,10 @@
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom::api::auth::{auth_middleware, get_auth};
-use boom::api::conf::load_dotenv;
 use boom::api::db::get_db;
 use boom::api::docs::ApiDoc;
 use boom::api::routes;
+use boom::conf::load_dotenv;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 

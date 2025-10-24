@@ -91,7 +91,7 @@ pub struct ZtfEnrichmentWorker {
 impl EnrichmentWorker for ZtfEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_config(&config_path)?;
+        let config_file = crate::conf::load_raw_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");

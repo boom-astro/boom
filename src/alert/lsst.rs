@@ -784,7 +784,7 @@ impl AlertWorker for LsstAlertWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
         let config_file =
-            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
+            conf::load_raw_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
         let kafka_config = conf::build_kafka_config(&config_file, &Survey::Lsst)
             .inspect_err(as_error!("failed to build kafka config"))?;

@@ -3,7 +3,7 @@ use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
 fn test_load_config() {
-    let config = conf::load_config(TEST_CONFIG_FILE);
+    let config = conf::load_raw_config(TEST_CONFIG_FILE);
     assert!(config.is_ok());
 
     let config = config.unwrap();
@@ -26,7 +26,7 @@ fn test_load_config() {
 
 #[test]
 fn test_build_xmatch_configs() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
 
     let crossmatches = config.get_table("crossmatch").unwrap();
     let crossmatches_ztf = crossmatches.get("ztf").cloned().unwrap();
@@ -59,7 +59,7 @@ fn test_build_xmatch_configs() {
 
 #[tokio::test]
 async fn test_build_db() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
 
     // try a simple query to just validate that the connection works
@@ -97,7 +97,7 @@ fn test_catalogxmatchconfig() {
     assert_eq!(projection, ps1_projection);
 
     // validate the from_config method
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let crossmatches = config.get_table("crossmatch").unwrap();
     let crossmatches_ztf = crossmatches.get("ztf").cloned().unwrap();
     let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();

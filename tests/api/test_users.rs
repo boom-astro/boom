@@ -4,10 +4,10 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
     use boom::api::auth::{auth_middleware, get_test_auth};
-    use boom::api::conf::{load_dotenv, AppConfig};
     use boom::api::db::get_test_db;
     use boom::api::routes;
     use boom::api::test_utils::read_json_response;
+    use boom::conf::{load_dotenv, AppConfig};
     use mongodb::Database;
 
     /// Test GET /users

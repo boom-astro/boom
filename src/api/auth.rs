@@ -1,5 +1,5 @@
-use crate::api::conf::{AppConfig, AuthConfig};
 use crate::api::routes::users::User;
+use crate::conf::{AppConfig, AuthConfig};
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
