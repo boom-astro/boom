@@ -4,7 +4,9 @@ use crate::enrichment::{
     EnrichmentWorker, EnrichmentWorkerError,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
+use crate::utils::lightcurves::{
+    analyze_photometry, parse_photometry, prepare_photometry, PhotometryMag,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -167,7 +169,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let candid = alerts[i].get_i64("_id")?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, all_bands_properties, programid) =
+            let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alerts[i]).await?;
 
             // Now, prepare inputs for ML models and run inference
@@ -225,7 +227,7 @@ impl ZtfEnrichmentWorker {
     async fn get_alert_properties(
         &self,
         alert: &Document,
-    ) -> Result<(Document, Document, i32), EnrichmentWorkerError> {
+    ) -> Result<(Document, Document, i32, Vec<PhotometryMag>), EnrichmentWorkerError> {
         let candidate = alert.get_document("candidate")?;
         let jd = candidate.get_f64("jd")?;
         let programid = candidate.get_i32("programid")?;
@@ -265,7 +267,8 @@ impl ZtfEnrichmentWorker {
             fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
         ));
 
-        let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve);
+        prepare_photometry(&mut lightcurve);
+        let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
         Ok((
             doc! {
@@ -277,6 +280,7 @@ impl ZtfEnrichmentWorker {
             },
             all_bands_properties,
             programid,
+            lightcurve,
         ))
     }
 }
