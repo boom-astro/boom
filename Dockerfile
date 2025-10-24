@@ -8,11 +8,10 @@ RUN apt-get update && \
 
 # First we build an empty rust project to cache dependencies
 # this way we skip dependencies build when only the source code changes
-RUN cargo init app && cd app && cargo init api
+RUN cargo init app
 COPY Cargo.toml Cargo.lock /app/
-COPY api/Cargo.toml /app/api/
-RUN cd app && cargo build --release --workspace && \
-    rm -rf app/src && rm -rf app/api/src
+RUN cd app && cargo build --release && \
+    rm -rf app/src
 
 # Now we copy the source code and build the actual application
 WORKDIR /app
