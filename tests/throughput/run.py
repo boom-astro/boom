@@ -39,13 +39,14 @@ parser.add_argument(
 args = parser.parse_args()
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
-config["workers"]["ZTF"]["alert"]["n_workers"] = args.n_alert_workers
-config["workers"]["ZTF"]["enrichment"]["n_workers"] = args.n_enrichment_workers
-config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
+config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
+config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
+config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["host"] = "mongo"
 config["database"]["password"] = "mongoadminsecret"
-config["kafka"]["consumer"]["ZTF"] = "broker:29092"
+config["kafka"]["consumer"]["ztf"]["server"] = "broker:29092"
+config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
 config["kafka"]["producer"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"

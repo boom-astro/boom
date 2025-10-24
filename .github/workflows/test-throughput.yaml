@@ -66,6 +66,7 @@ jobs:
         run: |
           uv run tests/throughput/run.py
       - name: Upload logs (including wall time) as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: throughput-logs
@@ -114,8 +115,6 @@ jobs:
             | New wall time | Baseline wall time | Difference |
             | -------------- | ------------------ | ---------- |
             | ${{ steps.compare-with-baseline.outputs.current }} | ${{ steps.compare-with-baseline.outputs.baseline }} | ${{ steps.compare-with-baseline.outputs.percentage_diff }}% |
-          comment-type: edit
-          reuse-existing-comment: true
           edit-mode: replace
       - name: Fail if wall time increased too much (PR only)
         if: github.event_name == 'pull_request'

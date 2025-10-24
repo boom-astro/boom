@@ -27,26 +27,51 @@ docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/sche
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
+TIMEOUT_SECS=300 # 5 minutes
 
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
+START_TIME=$(date +%s)
 while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
+    CURRENT_TIME=$(date +%s)
+    ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+    if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+        echo "$(current_datetime) - Timeout reached while waiting for alerts to be ingested"
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
+    fi
     sleep 1
 done
 
 # Wait until we see all alerts with classifications
 echo "$(current_datetime) - Waiting for all alerts to be classified"
+START_TIME=$(date +%s)
 while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })") -lt $EXPECTED_ALERTS ]; do
+    CURRENT_TIME=$(date +%s)
+    ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+    if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+        echo "$(current_datetime) - Timeout reached while waiting for alerts to be classified"
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
+    fi
     sleep 1
 done
 
 # Wait until we've filtered all alerts
 echo "$(current_datetime) - Waiting for filters to run on all alerts"
+START_TIME=$(date +%s)
 PASSED_ALERTS=0
 while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
     PASSED_ALERTS=$(docker compose -f $COMPOSE_CONFIG logs scheduler | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
     PASSED_ALERTS=${PASSED_ALERTS:-0}
     PASSED_ALERTS=$((PASSED_ALERTS / N_FILTERS))
+    CURRENT_TIME=$(date +%s)
+    ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+    if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+        echo "$(current_datetime) - Timeout reached while waiting for filters to run on all alerts"
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
+    fi
     sleep 1
 done
 

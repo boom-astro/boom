@@ -83,17 +83,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
             if args.clear {
-                let _ = consumer.clear_output_queue(&args.config);
+                let _ = consumer.clear_output_queue(&args.config).await;
             }
             match consumer
                 .consume(
+                    None,
                     timestamp,
-                    &args.config,
-                    false,
+                    None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    None,
-                    None,
+                    false,
+                    &args.config,
                 )
                 .await
             {
@@ -104,17 +104,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         Survey::Lsst => {
             let consumer = LsstAlertConsumer::new(None, args.simulated);
             if args.clear {
-                let _ = consumer.clear_output_queue(&args.config);
+                let _ = consumer.clear_output_queue(&args.config).await;
             }
             match consumer
                 .consume(
+                    None,
                     timestamp,
-                    &args.config,
-                    false,
+                    None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    None,
-                    None,
+                    false,
+                    &args.config,
                 )
                 .await
             {
@@ -125,17 +125,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         Survey::Decam => {
             let consumer = DecamAlertConsumer::new(None);
             if args.clear {
-                let _ = consumer.clear_output_queue(&args.config);
+                let _ = consumer.clear_output_queue(&args.config).await;
             }
             match consumer
                 .consume(
+                    None,
                     timestamp,
-                    &args.config,
-                    false,
+                    None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    None,
-                    None,
+                    false,
+                    &args.config,
                 )
                 .await
             {
