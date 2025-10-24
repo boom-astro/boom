@@ -104,6 +104,8 @@ services:
       - public
       - --server-url
       - broker:29092
+    environment:
+      RUST_LOG: debug,ort=error
     networks:
       - boom
     depends_on:
@@ -124,6 +126,8 @@ services:
       - boom
     # have it sleep 5 seconds to allow kafka to finish producing
     command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 public"]
+    environment:
+      RUST_LOG: debug,ort=error
     depends_on:
       producer:
         condition: service_completed_successfully
