@@ -651,7 +651,7 @@ impl AlertWorker for ZtfAlertWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
         let config_file =
-            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
+            conf::load_raw_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
         let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Ztf)
             .inspect_err(as_error!("failed to load xmatch config"))?;

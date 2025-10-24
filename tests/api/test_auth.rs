@@ -2,13 +2,13 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
-    use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_test_auth};
-    use boom_api::conf::{AppConfig, load_dotenv};
-    use boom_api::db::get_test_db;
-    use boom_api::routes;
-    use boom_api::test_utils::read_json_response;
-    use mongodb::{Database, bson::doc};
+    use actix_web::{test, web, App};
+    use boom::api::auth::{auth_middleware, get_test_auth};
+    use boom::api::db::get_test_db;
+    use boom::api::routes;
+    use boom::api::test_utils::read_json_response;
+    use boom::conf::{load_dotenv, AppConfig};
+    use mongodb::{bson::doc, Database};
 
     /// Test POST /auth
     #[actix_rt::test]
@@ -71,7 +71,7 @@ mod tests {
 
         // assert that the token is a valid JWT
         // (i.e. that we can decode it)
-        let claims: Result<boom_api::auth::Claims, jsonwebtoken::errors::Error> =
+        let claims: Result<boom::api::auth::Claims, jsonwebtoken::errors::Error> =
             auth_app_data.decode_token(token).await;
         assert!(
             claims.is_ok(),
@@ -81,7 +81,7 @@ mod tests {
         let user_id = claims.unwrap().sub;
         // query the user from the database to check that it exists
         let user = database
-            .collection::<boom_api::routes::users::User>("users")
+            .collection::<boom::api::routes::users::User>("users")
             .find_one(doc! { "_id": user_id })
             .await
             .unwrap();

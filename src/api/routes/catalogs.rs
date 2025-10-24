@@ -1,9 +1,9 @@
 /// Routes for data catalogs.
-use crate::{catalogs::catalog_exists, db::PROTECTED_COLLECTION_NAMES, models::response};
+use crate::api::{catalogs::catalog_exists, db::PROTECTED_COLLECTION_NAMES, models::response};
 
-use actix_web::{HttpResponse, get, web};
+use actix_web::{get, web, HttpResponse};
 use futures::StreamExt;
-use mongodb::{Database, bson::doc};
+use mongodb::{bson::doc, Database};
 
 #[derive(serde::Deserialize)]
 struct CatalogsQueryParams {

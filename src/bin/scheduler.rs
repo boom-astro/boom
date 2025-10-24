@@ -47,7 +47,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         warn!("no config file provided, using {}", default_config_path);
         default_config_path
     });
-    let config = conf::load_config(&config_path).expect("could not load config file");
+    let config = conf::load_raw_config(&config_path).expect("could not load config file");
 
     // get num workers from config file
     let n_alert = get_num_workers(&config, &args.survey, "alert")

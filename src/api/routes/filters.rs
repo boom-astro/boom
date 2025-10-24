@@ -1,11 +1,11 @@
-use crate::{models::response, routes::users::User};
+use crate::api::{models::response, routes::users::User};
 
-use actix_web::{HttpResponse, get, patch, post, web};
+use actix_web::{get, patch, post, web, HttpResponse};
 use flare::Time;
 use futures::stream::StreamExt;
 use mongodb::{
+    bson::{doc, Document},
     Collection, Database,
-    bson::{Document, doc},
 };
 use std::vec;
 use utoipa::ToSchema;

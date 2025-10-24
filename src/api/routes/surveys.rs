@@ -1,10 +1,10 @@
-use crate::models::response;
-use actix_web::{HttpResponse, get, web};
+use crate::api::models::response;
+use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{
+    bson::{doc, document::ValueAccessResult, Document},
     Collection, Database,
-    bson::{Document, doc, document::ValueAccessResult},
 };
 use utoipa::ToSchema;
 
@@ -196,12 +196,10 @@ pub async fn get_object(
         prv_candidates,
         prv_nondetections,
         fp_hists,
-        classifications: serde_json::json!(
-            newest_alert
-                .get_document("classifications")
-                .unwrap()
-                .clone()
-        ),
+        classifications: serde_json::json!(newest_alert
+            .get_document("classifications")
+            .unwrap()
+            .clone()),
         cross_matches: serde_json::json!(aux_entry.get_document("cross_matches").unwrap().clone()),
         aliases: serde_json::json!(aux_entry.get_document("aliases").unwrap().clone()),
     };

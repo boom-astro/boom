@@ -1,5 +1,5 @@
-use crate::auth::AuthProvider;
-use actix_web::{HttpResponse, post, web};
+use crate::api::auth::AuthProvider;
+use actix_web::{post, web, HttpResponse};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};

@@ -1,15 +1,15 @@
 /// Endpoints for executing analytical queries.
-use crate::catalogs::catalog_exists;
-use crate::filters::parse_optional_filter;
-use crate::models::response;
+use crate::api::catalogs::catalog_exists;
+use crate::api::filters::parse_optional_filter;
+use crate::api::models::response;
 
-use actix_web::{HttpResponse, post, web};
+use actix_web::{post, web, HttpResponse};
 use futures::TryStreamExt;
-use mongodb::{Database, bson::doc};
+use mongodb::{bson::doc, Database};
 use std::collections::HashMap;
 use std::fmt;
-use utoipa::openapi::RefOr;
 use utoipa::openapi::schema::{ObjectBuilder, Schema};
+use utoipa::openapi::RefOr;
 use utoipa::{PartialSchema, ToSchema};
 
 #[derive(serde::Deserialize, Clone)]
