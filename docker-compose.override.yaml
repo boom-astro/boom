@@ -66,9 +66,8 @@ services:
       dockerfile: Dockerfile
       target: dev
     working_dir: /app
-    command: ["cargo", "watch", "--watch", "api", "-x", "run --package boom-api"]
+    command: ["cargo", "watch", "-x", "run --bin api"]
     volumes:
-      - ./api:/app/api
       - ./src:/app/src
       - ./Cargo.toml:/app/Cargo.toml
       - ./Cargo.lock:/app/Cargo.lock

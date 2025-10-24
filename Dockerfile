@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV PATH="/opt/kafka/bin:${PATH}"
 
-RUN cargo install cargo-watch
+RUN cargo install --locked cargo-watch
 
 WORKDIR /app
 
