@@ -67,6 +67,8 @@ pub enum EnrichmentWorkerError {
     RunModelError(#[from] ModelError),
     #[error("could not access cutout images")]
     CutoutAccessError(#[from] CutoutError),
+    #[error("json serialization error")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 #[async_trait::async_trait]

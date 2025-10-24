@@ -60,9 +60,10 @@ in production.
 
 ### Start services for local development
 
-1. Launch `Valkey`, `MongoDB`, and `Kafka` using Docker, with the provided `docker-compose.yaml` file:
+1. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode
+   using Docker, with the provided `docker-compose.yaml` file:
     ```bash
-    docker compose up -d
+    docker compose --profile api up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
@@ -73,16 +74,6 @@ in production.
     ```bash
     cargo build --release
     ```
-
-### API
-
-To run the API server in development mode,
-first ensure `cargo-watch` is installed (`cargo install cargo-watch`),
-then call:
-
-```sh
-make api-dev
-```
 
 ## Running BOOM:
 

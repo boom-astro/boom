@@ -1,7 +1,8 @@
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
+use crate::filter::Alert;
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, Bson, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
@@ -68,12 +69,99 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+pub struct Babamul {
+    kafka_producer: rdkafka::producer::FutureProducer,
+}
+
+impl Babamul {
+    fn new(config: config::Config) -> Self {
+        // Read Kafka producer config from kafka: producer in the config
+        // TODO: Do this properly
+        let kafka_producer_host = config
+            .get_string("kafka.producer")
+            .unwrap_or_else(|_| "broker:29092".to_string());
+
+        // Create Kafka producer
+        let kafka_producer: rdkafka::producer::FutureProducer =
+            rdkafka::config::ClientConfig::new()
+                // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+                // .set("debug", "broker,topic,msg")
+                .set("bootstrap.servers", &kafka_producer_host)
+                .set("message.timeout.ms", "5000")
+                // it's best to increase batch.size if the cluster
+                // is running on another machine. Locally, lower means less
+                // latency, since we are not limited by network speed anyways
+                .set("batch.size", "16384")
+                .set("linger.ms", "5")
+                .set("acks", "1")
+                .set("max.in.flight.requests.per.connection", "5")
+                .set("retries", "3")
+                .create()
+                .unwrap();
+        Babamul { kafka_producer }
+    }
+
+    async fn process_alert(
+        &self,
+        alert: Document,
+        properties: Document,
+    ) -> Result<(), EnrichmentWorkerError> {
+        // Merge properties into the alert document
+        let mut merged = alert.clone();
+        merged.insert("properties", Bson::Document(properties.clone()));
+
+        // Determine if this alert is worth sending to Babamul
+        let min_reliability = 0.5;
+        let pixel_flags = vec![1, 2, 3];
+        let sso = false;
+
+        if (merged.get_f64("candidate.reliability").unwrap_or(0.0) < min_reliability)
+            || (merged
+                .get_document("candidate")
+                .unwrap()
+                .get_i32("pixel_flags")
+                .map(|pf| pixel_flags.contains(&pf))
+                .unwrap_or(false))
+            || (merged
+                .get_document("properties")
+                .unwrap()
+                .get_bool("rock")
+                .unwrap_or(false)
+                == sso)
+        {
+            // Skip this alert, it doesn't meet the criteria
+            return Ok(());
+        }
+
+        // Determine which topic this alert should go to
+        // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
+        // TODO: Get this implemented
+        // For now, all LSST alerts go to "babamul.none"
+        let category: String = "none".to_string();
+        let topic_name = format!("babamul.{}", category);
+        let schema = crate::filter::load_alert_schema().unwrap();
+        // Convert the merged document into an Alert
+        let alert_obj = Alert::from_bson_document(&merged).unwrap();
+        let _ = crate::filter::send_alert_to_kafka(
+            &alert_obj,
+            &schema,
+            &self.kafka_producer,
+            &topic_name,
+        )
+        .await
+        .unwrap();
+
+        Ok(())
+    }
+}
+
 pub struct LsstEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_pipeline: Vec<Document>,
+    babamul: Option<Babamul>,
 }
 
 #[async_trait::async_trait]
@@ -88,12 +176,21 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
+        // Detect if Babamul is enabled from the config
+        let babamul_enabled = crate::conf::babamul_enabled(&config_file);
+        let babamul: Option<Babamul> = if babamul_enabled {
+            Some(Babamul::new(config_file))
+        } else {
+            None
+        };
+
         Ok(LsstEnrichmentWorker {
             input_queue,
             output_queue,
             client,
             alert_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
+            babamul,
         })
     }
 
@@ -110,6 +207,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
+        // TODO: Can we define a struct for what comes out here?
         let alerts =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
 
@@ -141,7 +239,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": properties.clone(),
                 }
             };
 
@@ -155,6 +253,16 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             updates.push(update);
             processed_alerts.push(format!("{}", candid));
+
+            // If Babamul is enabled, process this alert for its streams
+            if self.babamul.is_some() {
+                let _ = self
+                    .babamul
+                    .as_ref()
+                    .unwrap()
+                    .process_alert(alerts[i].clone(), properties.clone())
+                    .await;
+            }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
