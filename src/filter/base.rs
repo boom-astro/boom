@@ -98,8 +98,8 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "Photometry",
                 "fields": [
                     {"name": "jd", "type": "double"},
-                    {"name": "flux",  "type": ["null", "double"]},
-                    {"name": "flux_err",  "type":"double"},
+                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy"},
+                    {"name": "flux_err",  "type":"double", "doc": "in nJy"},
                     {"name":"band","type":"string"},
                     {"name":"zero_point","type":"double"},
                     {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
@@ -164,8 +164,8 @@ pub enum Origin {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
-    pub flux: Option<f64>,
-    pub flux_err: f64,
+    pub flux: Option<f64>, // in nJy
+    pub flux_err: f64,     // in nJy
     pub band: String,
     pub zero_point: f64,
     pub origin: Origin,
