@@ -1,5 +1,5 @@
 /// Functionality for working with analytical data catalogs.
-use crate::db::PROTECTED_COLLECTION_NAMES;
+use crate::api::db::PROTECTED_COLLECTION_NAMES;
 
 use mongodb::Database;
 

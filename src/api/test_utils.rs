@@ -1,4 +1,4 @@
-use mongodb::{Database, bson};
+use mongodb::{bson, Database};
 
 pub async fn create_test_catalog(db: &Database) -> String {
     let name = format!("test_catalog_{}", uuid::Uuid::new_v4());

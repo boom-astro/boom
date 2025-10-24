@@ -220,6 +220,8 @@ pub enum AlertError {
     MagicBytesError,
     #[error("missing alert aux")]
     AlertAuxNotFound,
+    #[error("unexpected fid value")]
+    UnknownFid(i32),
 }
 
 #[derive(Debug, PartialEq)]
@@ -636,7 +638,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
     worker_id: Uuid,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
-    let config = conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
+    let config =
+        conf::load_raw_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
 
     let mut alert_processor = T::new(config_path).await?;
     let stream_name = alert_processor.stream_name();

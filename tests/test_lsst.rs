@@ -27,7 +27,7 @@ async fn test_process_lsst_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "LSST_alerts";
     let filter = doc! {"_id": candid};
@@ -88,7 +88,7 @@ async fn test_process_lsst_alert() {
 
 #[tokio::test]
 async fn test_process_lsst_alert_xmatch() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
 
     let mut alert_worker = lsst_alert_worker().await;
@@ -158,7 +158,7 @@ async fn test_enrich_lsst_alert() {
     assert_eq!(alert, &format!("{}", candid));
 
     // check that the alert was inserted in the DB, and ML scores added later
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "LSST_alerts";
     let filter = doc! {"_id": candid};

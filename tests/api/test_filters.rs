@@ -3,13 +3,13 @@
 mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
-    use actix_web::{App, test, web};
-    use boom_api::auth::{auth_middleware, get_test_auth};
-    use boom_api::conf::{AppConfig, load_dotenv};
-    use boom_api::db::get_test_db;
-    use boom_api::routes;
-    use boom_api::test_utils::read_json_response;
-    use mongodb::bson::{Document, doc};
+    use actix_web::{test, web, App};
+    use boom::api::auth::{auth_middleware, get_test_auth};
+    use boom::api::db::get_test_db;
+    use boom::api::routes;
+    use boom::api::test_utils::read_json_response;
+    use boom::conf::{load_dotenv, AppConfig};
+    use mongodb::bson::{doc, Document};
     use mongodb::{Collection, Database};
 
     /// Helper function to create an auth token for the admin user
@@ -206,11 +206,9 @@ mod tests {
         let active_fid = filter["active_fid"].as_str().unwrap();
         assert_eq!(active_fid, active_fid_after);
         let versions = filter["fv"].as_array().unwrap();
-        assert!(
-            versions
-                .iter()
-                .any(|v| v["fid"].as_str().unwrap() == active_fid_after)
-        );
+        assert!(versions
+            .iter()
+            .any(|v| v["fid"].as_str().unwrap() == active_fid_after));
 
         // Post another version, but don't set it as active
         let new_version = serde_json::json!({
@@ -227,11 +225,9 @@ mod tests {
         let active_fid = filter["active_fid"].as_str().unwrap();
         assert_eq!(active_fid, active_fid_after); // should still be the same
         let versions = filter["fv"].as_array().unwrap();
-        assert!(
-            versions
-                .iter()
-                .any(|v| v["fid"].as_str().unwrap() == active_fid_after2)
-        );
+        assert!(versions
+            .iter()
+            .any(|v| v["fid"].as_str().unwrap() == active_fid_after2));
 
         // Clean up the filter
         cleanup_test_filter(&database, &filter_id).await;

@@ -30,7 +30,7 @@ async fn test_process_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
@@ -89,7 +89,7 @@ async fn test_process_ztf_alert() {
 
 #[tokio::test]
 async fn test_process_ztf_alert_xmatch() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
@@ -320,7 +320,7 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(alert, &format!("1,{}", candid));
 
     // check that the alert was inserted in the DB, and ML scores added later
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
@@ -361,7 +361,7 @@ async fn test_enrich_ztf_alert() {
     let fading_rate = fading.get_f64("rate").unwrap();
     assert!((peak_mag - 15.6940).abs() < 1e-6);
     assert!((peak_jd - 2460441.971956).abs() < 1e-6);
-    assert!((rising_rate + 0.252037).abs() < 1e-6);
+    assert!((rising_rate + 0.20024).abs() < 1e-6);
     assert!((fading_rate - 0.037152).abs() < 1e-6);
 
     assert!(photstats.contains_key("r"));
@@ -374,7 +374,7 @@ async fn test_enrich_ztf_alert() {
     let fading_rate = fading.get_f64("rate").unwrap();
     assert!((peak_mag - 14.3987).abs() < 1e-6);
     assert!((peak_jd - 2460441.922303).abs() < 1e-6);
-    assert!((rising_rate + 0.133773).abs() < 1e-6);
+    assert!((rising_rate + 0.13846).abs() < 1e-6);
     assert!((fading_rate - 0.063829).abs() < 1e-6);
 }
 

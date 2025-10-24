@@ -58,7 +58,7 @@ async fn main() {
     };
 
     // insert the filter into the database
-    let config_file = match conf::load_config("config.yaml") {
+    let config_file = match conf::load_raw_config("config.yaml") {
         Ok(config) => config,
         Err(e) => {
             error!("error loading config file: {}", e);

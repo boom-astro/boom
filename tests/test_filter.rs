@@ -120,7 +120,7 @@ async fn test_validate_filter_pipeline() {
 
 #[tokio::test]
 async fn test_build_filter() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_collection = db.collection("filters");
 
@@ -160,7 +160,7 @@ async fn test_build_filter() {
 
 #[tokio::test]
 async fn test_filter_found() {
-    let config = conf::load_config("tests/config.test.yaml").unwrap();
+    let config = conf::load_raw_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
     let filter_collection = db.collection("filters");
@@ -171,7 +171,7 @@ async fn test_filter_found() {
 
 #[tokio::test]
 async fn test_no_filter_found() {
-    let config = conf::load_config("tests/config.test.yaml").unwrap();
+    let config = conf::load_raw_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_collection = db.collection("filters");
     let filter_result = ZtfFilter::build("thisdoesntexist", &filter_collection).await;

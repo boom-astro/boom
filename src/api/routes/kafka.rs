@@ -1,8 +1,8 @@
 //! Routes for managing BOOM's Kafka cluster.
 
-use crate::models::response;
-use crate::routes::users::User;
-use actix_web::{HttpResponse, get, post, web};
+use crate::api::models::response;
+use crate::api::routes::users::User;
+use actix_web::{get, post, web, HttpResponse};
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;

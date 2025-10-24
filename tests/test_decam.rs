@@ -23,7 +23,7 @@ async fn test_process_decam_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "DECAM_alerts";
     let filter = doc! {"_id": candid};

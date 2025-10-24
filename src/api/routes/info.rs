@@ -1,6 +1,6 @@
-use crate::models::response;
-use crate::routes::users::User;
-use actix_web::{HttpResponse, get, web};
+use crate::api::models::response;
+use crate::api::routes::users::User;
+use actix_web::{get, web, HttpResponse};
 use std::str;
 
 /// Check the health of the API server
