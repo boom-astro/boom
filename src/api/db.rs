@@ -1,5 +1,5 @@
 // Database related functionality
-use crate::{
+use crate::api::{
     conf::{AppConfig, AuthConfig},
     routes::users::User,
 };
