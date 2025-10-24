@@ -82,7 +82,8 @@ pub async fn build_lsst_alerts(
             .get_binary_generic("cutoutDifference")?
             .to_vec();
 
-        // let's create the array of photometry (non forced phot only for now)
+        // let's create the array of photometry
+
         let mut photometry = Vec::new();
         for doc in alert_document.get_array("prv_candidates")?.iter() {
             let doc = match doc.as_document() {
@@ -90,8 +91,8 @@ pub async fn build_lsst_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?;
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            let flux = doc.get_f64("psfFlux")?; // in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
@@ -116,15 +117,16 @@ pub async fn build_lsst_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?;
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            // flux may be None in forced photometry
+            let flux = doc.get_f64("psfFlux").map(|f| f * 1e-9).ok(); // from nJy to Jy
+            let flux_err = doc.get_f64("psfFluxErr")? * 1e-9; // from nJy to Jy
             let band = doc.get_str("band")?.to_string();
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
 
             photometry.push(Photometry {
                 jd,
-                flux: Some(flux),
+                flux,
                 flux_err,
                 band: format!("lsst{}", band),
                 zero_point: 8.9,

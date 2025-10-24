@@ -4,6 +4,7 @@ use serde_with::{serde_as, skip_serializing_none};
 
 pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitudes
 pub const SNT: f32 = 3.0; // Signal-to-noise threshold for detection
+const FACTOR: f32 = 1.0857362047581294; // where 1.0857362047581294 = 2.5 / np.log(10)
 
 pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {
     let mag = -2.5 * (flux).log10() + zp;
@@ -14,6 +15,16 @@ pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {
 
 pub fn fluxerr2diffmaglim(flux_err: f32, zp: f32) -> f32 {
     -2.5 * (5.0 * flux_err).log10() + zp
+}
+
+pub fn mag2flux(mag: f32, mag_err: f32, zp: f32) -> (f32, f32) {
+    let flux = 10.0_f32.powf(-0.4 * (mag - zp));
+    let fluxerr = mag_err / FACTOR * flux;
+    (flux, fluxerr)
+}
+
+pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
+    10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
 #[derive(Debug, Clone)]
