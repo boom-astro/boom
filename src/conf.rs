@@ -18,8 +18,8 @@ pub enum BoomConfigError {
     ConnectRedisError(#[from] redis::RedisError),
     #[error("could not find config file")]
     ConfigFileNotFound,
-    #[error("missing key in config")]
-    MissingKeyError,
+    #[error("missing key in config: {0}")]
+    MissingKeyError(String),
 }
 /// Loads environment variables from a .env file if it exists.
 /// This function should be called early in the application startup,
@@ -64,7 +64,11 @@ pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
 
     let conf = Config::builder()
         .add_source(File::from(path))
-        .add_source(config::Environment::with_prefix("BOOM").separator("__"))
+        .add_source(
+            config::Environment::with_prefix("boom")
+                .prefix_separator("_")
+                .separator("__"),
+        )
         .build()?;
 
     Ok(conf)
@@ -252,19 +256,19 @@ impl CatalogXmatchConfig {
 
         let catalog = hashmap_xmatch
             .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
             .clone()
             .into_string()?;
 
         let radius = hashmap_xmatch
             .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
             .clone()
             .into_float()?;
 
         let projection = hashmap_xmatch
             .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
             .clone()
             .into_table()?;
 
@@ -325,11 +329,14 @@ impl CatalogXmatchConfig {
 #[instrument(skip(conf), err)]
 pub fn build_xmatch_configs(
     conf: &Config,
-    stream_name: &str,
+    survey_name: &Survey,
 ) -> Result<Vec<CatalogXmatchConfig>, BoomConfigError> {
     let crossmatches = conf.get_table("crossmatch")?;
 
-    let crossmatches_stream = match crossmatches.get(stream_name).cloned() {
+    let crossmatches_stream = match crossmatches
+        .get(&survey_name.to_string().to_lowercase())
+        .cloned()
+    {
         Some(x) => x,
         None => {
             return Ok(Vec::new());
@@ -346,10 +353,18 @@ pub fn build_xmatch_configs(
 }
 
 #[derive(Debug, Clone)]
-pub struct SurveyKafkaConfig {
-    pub consumer: String, // URL of the Kafka broker for the consumer (alert worker input)
-    pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
+pub struct KafkaConsumerConfig {
+    pub server: String,                  // URL of the Kafka broker
+    pub group_id: String,                // Consumer group ID
     pub schema_registry: Option<String>, // URL of the schema registry (if any)
+    pub username: Option<String>,        // Username for authentication (if any)
+    pub password: Option<String>,        // Password for authentication (if any)
+}
+
+#[derive(Debug, Clone)]
+pub struct SurveyKafkaConfig {
+    pub consumer: KafkaConsumerConfig, // Configuration for the Kafka consumer (filter worker input)
+    pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
 }
 
 impl SurveyKafkaConfig {
@@ -362,33 +377,54 @@ impl SurveyKafkaConfig {
         // kafka section has a consumer and producer key
         // consumer has a key per survey, producer is global
 
-        let consumer = kafka_conf
+        let consumer_config = kafka_conf
             .get("consumer")
             .cloned()
             .unwrap_or_default()
             .into_table()?
-            .get(&survey.to_string())
+            .get(&survey.to_string().to_lowercase())
+            .cloned()
+            .unwrap_or_default()
+            .into_table()?;
+
+        let consumer_server = consumer_config
+            .get("server")
             .and_then(|c| c.clone().into_string().ok())
-            .unwrap_or_else(|| "localhost:9092".to_string());
+            .ok_or(BoomConfigError::MissingKeyError("server".to_string()))?;
+
+        // the schema registry is optional
+        let consumer_schema_registry = consumer_config
+            .get("schema_registry")
+            .and_then(|c| c.clone().into_string().ok());
+
+        let consumer_username = consumer_config
+            .get("username")
+            .and_then(|c| c.clone().into_string().ok());
+
+        let consumer_password = consumer_config
+            .get("password")
+            .and_then(|c| c.clone().into_string().ok());
+
+        // group_id defaults to boom-<survey>-consumer-group
+        let consumer_group_id = consumer_config
+            .get("group_id")
+            .and_then(|c| c.clone().into_string().ok())
+            .ok_or(BoomConfigError::MissingKeyError("group_id".to_string()))?;
+
+        let consumer = KafkaConsumerConfig {
+            server: consumer_server,
+            group_id: consumer_group_id,
+            schema_registry: consumer_schema_registry.clone(),
+            username: consumer_username,
+            password: consumer_password,
+        };
 
         let producer = kafka_conf
             .get("producer")
             .and_then(|p| p.clone().into_string().ok())
             .unwrap_or_else(|| "localhost:9092".to_string());
 
-        let schema_registry = kafka_conf
-            .get("schema_registry")
-            .cloned()
-            .unwrap_or_default()
-            .into_table()?
-            .get(&survey.to_string())
-            .and_then(|sr| sr.clone().into_string().ok());
-
-        Ok(SurveyKafkaConfig {
-            consumer,
-            producer,
-            schema_registry,
-        })
+        Ok(SurveyKafkaConfig { consumer, producer })
     }
 }
 

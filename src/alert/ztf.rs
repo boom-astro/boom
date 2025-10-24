@@ -6,6 +6,7 @@ use crate::{
     conf,
     utils::{
         db::{mongify, update_timeseries_op},
+        enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, fluxerr2diffmaglim, mag2flux, SNT},
         o11y::logging::as_error,
         spatial::xmatch,
@@ -652,7 +653,7 @@ impl AlertWorker for ZtfAlertWorker {
         let config_file =
             conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Ztf)
             .inspect_err(as_error!("failed to load xmatch config"))?;
 
         let db: mongodb::Database = conf::build_db(&config_file)

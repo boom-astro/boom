@@ -20,14 +20,22 @@ redis:
   port: 6379
 kafka:
   consumer:
-    ZTF: "localhost:9092" # ZTF alert consumer
-    LSST: "usdf-alert-stream-dev.lsst.cloud:9094" # LSST alert consumer
-    DECAM: "localhost:9092" # DECam alert consumer
-  producer: "localhost:9092" # Only one global producer for now (filter worker output)
-  schema_registry:
-    LSST: "https://usdf-alert-schemas-dev.slac.stanford.edu" # LSST schema registry URL
+    ztf:
+      server: "localhost:9092"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+    lsst:
+      server: "usdf-alert-stream-dev.lsst.cloud:9094"
+      schema_registry: "https://usdf-alert-schemas-dev.slac.stanford.edu"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
+      username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
+      password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
+    decam:
+      server: "localhost:9092"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
+  producer:
+    server: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
-  ZTF:
+  ztf:
     command_interval: 500
     alert:
       n_workers: 1
@@ -35,7 +43,7 @@ workers:
       n_workers: 1
     filter:
       n_workers: 1
-  LSST:
+  lsst:
     command_interval: 500
     alert:
       n_workers: 1
@@ -43,7 +51,7 @@ workers:
       n_workers: 0
     filter:
       n_workers: 1
-  DECAM:
+  decam:
     command_interval: 500
     alert:
       n_workers: 1
@@ -52,9 +60,9 @@ workers:
     filter:
       n_workers: 1
 crossmatch:
-  LSST: []
-  DECAM: []
-  ZTF:
+  lsst: []
+  decam: []
+  ztf:
     - catalog: PS1_DR1
       radius: 2.0 # 2 arcseconds
       use_distance: false
