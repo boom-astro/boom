@@ -149,36 +149,36 @@ pub struct DecamAvroAlert {
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-struct DecamAliases {
+pub struct DecamAliases {
     #[serde(rename = "ZTF")]
-    ztf: Vec<String>,
+    pub ztf: Vec<String>,
     #[serde(rename = "LSST")]
-    lsst: Vec<String>,
+    pub lsst: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct DecamObject {
+pub struct DecamObject {
     #[serde(rename = "_id")]
-    object_id: String,
-    prv_candidates: Vec<DecamCandidate>,
-    fp_hists: Vec<DecamForcedPhot>,
-    cross_matches: Option<HashMap<String, Vec<Document>>>,
-    aliases: Option<DecamAliases>,
-    coordinates: Coordinates,
-    created_at: f64,
-    updated_at: f64,
+    pub object_id: String,
+    pub prv_candidates: Vec<DecamCandidate>,
+    pub fp_hists: Vec<DecamForcedPhot>,
+    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub aliases: Option<DecamAliases>,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
-struct DecamAlert {
+pub struct DecamAlert {
     #[serde(rename = "_id")]
-    candid: i64,
+    pub candid: i64,
     #[serde(rename = "objectId")]
-    object_id: String,
-    candidate: DecamCandidate,
-    coordinates: Coordinates,
-    created_at: f64,
-    updated_at: f64,
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 pub struct DecamAlertWorker {

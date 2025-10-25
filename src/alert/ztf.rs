@@ -564,38 +564,38 @@ where
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-struct ZtfAliases {
+pub struct ZtfAliases {
     #[serde(rename = "LSST")]
-    lsst: Vec<String>,
+    pub lsst: Vec<String>,
     #[serde(rename = "DECAM")]
-    decam: Vec<String>,
+    pub decam: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct ZtfObject {
+pub struct ZtfObject {
     #[serde(rename = "_id")]
-    object_id: String,
-    prv_candidates: Vec<ZtfPrvCandidate>,
+    pub object_id: String,
+    pub prv_candidates: Vec<ZtfPrvCandidate>,
     #[serde(default)]
-    prv_nondetections: Vec<ZtfPrvCandidate>,
-    fp_hists: Vec<ZtfForcedPhot>,
-    cross_matches: Option<HashMap<String, Vec<Document>>>,
-    aliases: Option<ZtfAliases>,
-    coordinates: Coordinates,
-    created_at: f64,
-    updated_at: f64,
+    pub prv_nondetections: Vec<ZtfPrvCandidate>,
+    pub fp_hists: Vec<ZtfForcedPhot>,
+    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub aliases: Option<ZtfAliases>,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
-struct ZtfAlert {
+pub struct ZtfAlert {
     #[serde(rename = "_id")]
-    candid: i64,
+    pub candid: i64,
     #[serde(rename = "objectId")]
-    object_id: String,
-    candidate: ZtfCandidate,
-    coordinates: Coordinates,
-    created_at: f64,
-    updated_at: f64,
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 pub struct ZtfAlertWorker {

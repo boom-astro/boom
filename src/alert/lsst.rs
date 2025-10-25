@@ -651,36 +651,36 @@ where
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-struct LsstAliases {
+pub struct LsstAliases {
     #[serde(rename = "ZTF")]
-    ztf: Vec<String>,
+    pub ztf: Vec<String>,
     #[serde(rename = "DECAM")]
-    decam: Vec<String>,
+    pub decam: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct LsstObject {
+pub struct LsstObject {
     #[serde(rename = "_id")]
-    object_id: String,
-    prv_candidates: Vec<LsstCandidate>,
-    fp_hists: Vec<LsstForcedPhot>,
-    cross_matches: Option<HashMap<String, Vec<Document>>>,
-    aliases: Option<LsstAliases>,
-    coordinates: Coordinates,
-    created_at: f64,
-    updated_at: f64,
+    pub object_id: String,
+    pub prv_candidates: Vec<LsstCandidate>,
+    pub fp_hists: Vec<LsstForcedPhot>,
+    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub aliases: Option<LsstAliases>,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
-struct LsstAlert {
+pub struct LsstAlert {
     #[serde(rename = "_id")]
-    candid: i64,
+    pub candid: i64,
     #[serde(rename = "objectId")]
-    object_id: String,
-    candidate: LsstCandidate,
-    coordinates: Coordinates,
-    created_at: f64,
-    updated_at: f64,
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 pub struct LsstAlertWorker {
