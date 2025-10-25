@@ -29,6 +29,20 @@ EXPECTED_ALERTS=29142
 N_FILTERS=25
 TIMEOUT_SECS=300 # 5 minutes
 
+# Wait for the kafka consumer to start expecting messages (when it logs "Starting Kafka consumer loop...")
+echo "$(current_datetime) - Waiting for Kafka consumer to start"
+START_TIME=$(date +%s)
+while ! docker compose -f $COMPOSE_CONFIG logs consumer | grep -q "Consumer received first message, continuing..."; do
+    CURRENT_TIME=$(date +%s)
+    ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+    if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+        echo "$(current_datetime) - Timeout reached while waiting for Kafka consumer to start"
+        docker compose -f $COMPOSE_CONFIG down
+        exit 1
+    fi
+    sleep 1
+done
+
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
