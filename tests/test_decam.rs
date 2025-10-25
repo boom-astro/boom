@@ -37,6 +37,8 @@ async fn test_process_decam_alert() {
     let alert = alert.unwrap();
     assert_eq!(alert.get_i64("_id").unwrap(), candid);
     assert_eq!(alert.get_str("objectId").unwrap(), object_id);
+    println!("_id: {}", alert.get_i64("_id").unwrap());
+    println!("objectId: {}", alert.get_str("objectId").unwrap());
     let candidate = alert.get_document("candidate").unwrap();
     assert_eq!(candidate.get_f64("ra").unwrap(), ra);
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);

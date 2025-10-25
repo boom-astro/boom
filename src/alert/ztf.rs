@@ -1,14 +1,14 @@
 use crate::{
     alert::{
         base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
-        decam, lsst,
+        decam, lsst, AlertCutout,
     },
     conf,
     utils::{
         db::{mongify, update_timeseries_op},
-        lightcurves::{diffmaglim2fluxerr, flux2mag, fluxerr2diffmaglim, mag2flux, SNT},
+        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, SNT},
         o11y::logging::as_error,
-        spatial::xmatch,
+        spatial::{xmatch, Coordinates},
     },
 };
 use constcat::concat;
@@ -16,7 +16,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::fmt::Debug;
+use std::collections::HashMap;
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
@@ -54,7 +54,8 @@ pub struct Cutout {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default)]
+#[serde(default)]
 pub struct PrvCandidate {
     pub jd: f64,
     pub fid: i32,
@@ -102,7 +103,7 @@ pub struct PrvCandidate {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ZtfPrvCandidate {
     #[serde(flatten)]
     pub prv_candidate: PrvCandidate,
@@ -154,7 +155,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
     }
 }
 
-fn deserialize_prv_candidates<'de, D>(
+pub fn deserialize_prv_candidates<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<ZtfPrvCandidate>>, D::Error>
 where
@@ -179,10 +180,19 @@ where
     }
 }
 
+pub fn deserialize_prv_candidate<'de, D>(deserializer: D) -> Result<ZtfPrvCandidate, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let prv_candidate: PrvCandidate = PrvCandidate::deserialize(deserializer)?;
+    ZtfPrvCandidate::try_from(prv_candidate).map_err(serde::de::Error::custom)
+}
+
 /// avro alert schema
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default)]
+#[serde(default)]
 pub struct FpHist {
     pub field: Option<i32>,
     pub rcid: Option<i32>,
@@ -219,13 +229,12 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ZtfForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
     pub magpsf: Option<f32>,
     pub sigmapsf: Option<f32>,
-    pub diffmaglim: f32,
     pub isdiffpos: Option<bool>,
     pub snr: Option<f32>,
     pub band: String,
@@ -259,13 +268,10 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             _ => (None, None, None, None),
         };
 
-        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, magzpsci);
-
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
-            diffmaglim,
             isdiffpos,
             snr,
             band,
@@ -276,7 +282,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 /// avro alert schema
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Candidate {
     pub jd: f64,
     pub fid: i32,
@@ -392,7 +398,7 @@ where
     deserialize_isdiffpos_option(deserializer).map(|x| x.unwrap())
 }
 
-fn deserialize_fp_hists<'de, D>(deserializer: D) -> Result<Option<Vec<ZtfForcedPhot>>, D::Error>
+pub fn deserialize_fp_hists<'de, D>(deserializer: D) -> Result<Option<Vec<ZtfForcedPhot>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -415,7 +421,7 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ZtfCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
@@ -452,6 +458,60 @@ impl TryFrom<Candidate> for ZtfCandidate {
     }
 }
 
+impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
+    type Error = AlertError;
+    fn try_from(ztf_candidate: &ZtfCandidate) -> Result<Self, Self::Error> {
+        Ok(ZtfPrvCandidate {
+            prv_candidate: PrvCandidate {
+                jd: ztf_candidate.candidate.jd,
+                fid: ztf_candidate.candidate.fid,
+                pid: ztf_candidate.candidate.pid,
+                diffmaglim: ztf_candidate.candidate.diffmaglim,
+                programpi: ztf_candidate.candidate.programpi.clone(),
+                programid: ztf_candidate.candidate.programid,
+                candid: Some(ztf_candidate.candidate.candid),
+                isdiffpos: Some(ztf_candidate.candidate.isdiffpos),
+                nid: ztf_candidate.candidate.nid,
+                rcid: ztf_candidate.candidate.rcid,
+                field: ztf_candidate.candidate.field,
+                ra: Some(ztf_candidate.candidate.ra),
+                dec: Some(ztf_candidate.candidate.dec),
+                magpsf: Some(ztf_candidate.candidate.magpsf),
+                sigmapsf: Some(ztf_candidate.candidate.sigmapsf),
+                chipsf: ztf_candidate.candidate.chipsf,
+                magap: ztf_candidate.candidate.magap,
+                sigmagap: ztf_candidate.candidate.sigmagap,
+                distnr: ztf_candidate.candidate.distnr,
+                magnr: ztf_candidate.candidate.magnr,
+                sigmagnr: ztf_candidate.candidate.sigmagnr,
+                chinr: ztf_candidate.candidate.chinr,
+                sharpnr: ztf_candidate.candidate.sharpnr,
+                sky: ztf_candidate.candidate.sky,
+                fwhm: ztf_candidate.candidate.fwhm,
+                mindtoedge: ztf_candidate.candidate.mindtoedge,
+                seeratio: ztf_candidate.candidate.seeratio,
+                aimage: ztf_candidate.candidate.aimage,
+                bimage: ztf_candidate.candidate.bimage,
+                elong: ztf_candidate.candidate.elong,
+                nneg: ztf_candidate.candidate.nneg,
+                nbad: ztf_candidate.candidate.nbad,
+                rb: ztf_candidate.candidate.rb,
+                ssdistnr: ztf_candidate.candidate.ssdistnr,
+                ssmagnr: ztf_candidate.candidate.ssmagnr,
+                ssnamenr: ztf_candidate.candidate.ssnamenr.clone(),
+                ranr: Some(ztf_candidate.candidate.ranr),
+                decnr: Some(ztf_candidate.candidate.decnr),
+                scorr: ztf_candidate.candidate.scorr,
+                magzpsci: ztf_candidate.candidate.magzpsci,
+            },
+            psf_flux: Some(ztf_candidate.psf_flux),
+            psf_flux_err: Some(ztf_candidate.psf_flux_err),
+            snr: Some(ztf_candidate.snr),
+            band: ztf_candidate.band.clone(),
+        })
+    }
+}
+
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
 where
     D: Deserializer<'de>,
@@ -461,7 +521,7 @@ where
 }
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct ZtfAlert {
+pub struct ZtfAvroAlert {
     pub schemavsn: String,
     pub publisher: String,
     #[serde(rename = "objectId")]
@@ -502,6 +562,48 @@ where
     }
 }
 
+impl Alert for ZtfAvroAlert {
+    fn object_id(&self) -> String {
+        self.object_id.clone()
+    }
+    fn ra(&self) -> f64 {
+        self.candidate.candidate.ra
+    }
+    fn dec(&self) -> f64 {
+        self.candidate.candidate.dec
+    }
+    fn candid(&self) -> i64 {
+        self.candid
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ZtfObject {
+    #[serde(rename = "_id")]
+    object_id: String,
+    prv_candidates: Vec<ZtfPrvCandidate>,
+    #[serde(default)]
+    prv_nondetections: Vec<ZtfPrvCandidate>,
+    fp_hists: Vec<ZtfForcedPhot>,
+    cross_matches: Option<std::collections::HashMap<String, Vec<Document>>>,
+    aliases: Option<std::collections::HashMap<String, Vec<String>>>,
+    coordinates: Coordinates,
+    created_at: f64,
+    updated_at: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+struct ZtfAlert {
+    #[serde(rename = "_id")]
+    candid: i64,
+    #[serde(rename = "objectId")]
+    object_id: String,
+    candidate: ZtfCandidate,
+    coordinates: Coordinates,
+    created_at: f64,
+    updated_at: f64,
+}
+
 impl Alert for ZtfAlert {
     fn object_id(&self) -> String {
         self.object_id.clone()
@@ -521,9 +623,9 @@ pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
-    alert_collection: mongodb::Collection<Document>,
-    alert_aux_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_collection: mongodb::Collection<ZtfAlert>,
+    alert_aux_collection: mongodb::Collection<ZtfObject>,
+    alert_cutout_collection: mongodb::Collection<AlertCutout>,
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
@@ -531,7 +633,12 @@ pub struct ZtfAlertWorker {
 
 impl ZtfAlertWorker {
     #[instrument(skip(self), err)]
-    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
+    async fn get_survey_matches(
+        &self,
+        ra: f64,
+        dec: f64,
+    ) -> Result<HashMap<String, Vec<String>>, AlertError> {
+        let mut survey_matches: HashMap<String, Vec<String>> = HashMap::new();
         let lsst_matches = self
             .get_matches(
                 ra,
@@ -541,6 +648,7 @@ impl ZtfAlertWorker {
                 &self.lsst_alert_aux_collection,
             )
             .await?;
+        survey_matches.insert("LSST".into(), lsst_matches);
 
         let decam_matches = self
             .get_matches(
@@ -551,97 +659,55 @@ impl ZtfAlertWorker {
                 &self.decam_alert_aux_collection,
             )
             .await?;
-
-        Ok(doc! {
-            "LSST": lsst_matches,
-            "DECAM": decam_matches,
-        })
+        survey_matches.insert("DECAM".into(), decam_matches);
+        Ok(survey_matches)
     }
 
     #[instrument(
-        skip(
-            self,
-            prv_candidates_doc,
-            prv_nondetections_doc,
-            fp_hist_doc,
-            xmatches,
-            survey_matches
-        ),
+        skip(self, prv_candidates, prv_nondetections, fp_hists, survey_matches),
         err
     )]
-    async fn insert_alert_aux(
-        &self,
-        object_id: String,
-        ra: f64,
-        dec: f64,
-        prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        xmatches: Document,
-        survey_matches: &Option<Document>,
+    async fn update_aux(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates: &Vec<ZtfPrvCandidate>,
+        prv_nondetections: &Vec<ZtfPrvCandidate>,
+        fp_hists: &Vec<ZtfForcedPhot>,
+        survey_matches: &Option<HashMap<String, Vec<String>>>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let alert_aux_doc = doc! {
-            "_id": object_id,
-            "prv_candidates": prv_candidates_doc,
-            "prv_nondetections": prv_nondetections_doc,
-            "fp_hists": fp_hist_doc,
-            "cross_matches": xmatches,
-            "aliases": survey_matches,
-            "created_at": now,
-            "updated_at": now,
-            "coordinates": {
-                "radec_geojson": {
-                    "type": "Point",
-                    "coordinates": [ra - 180.0, dec],
-                },
-            },
-        };
-
+        let update_pipeline = vec![doc! {
+            "$set": {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "aliases": mongify(survey_matches),
+                "updated_at": now,
+            }
+        }];
         self.alert_aux_collection
-            .insert_one(alert_aux_doc)
-            .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
-                _ => e.into(),
-            })?;
+            .update_one(doc! { "_id": object_id }, update_pipeline)
+            .await?;
         Ok(())
     }
 
-    #[instrument(skip(self), err)]
-    async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
-        let alert_aux_exists = self
-            .alert_aux_collection
-            .count_documents(doc! { "_id": object_id })
-            .await?
-            > 0;
-        Ok(alert_aux_exists)
-    }
-
     #[instrument(skip_all)]
-    fn format_prv_candidates_and_fp_hist(
+    fn format_prv_candidates(
         &self,
-        prv_candidates: &Vec<ZtfPrvCandidate>,
-        candidate_doc: Document,
-        fp_hist: &Vec<ZtfForcedPhot>,
-    ) -> (Vec<Document>, Vec<Document>, Vec<Document>) {
-        // we split the prv_candidates into detections and non-detections
-        let mut prv_candidates_doc = vec![];
-        let mut prv_nondetections_doc = vec![];
+        prv_candidates: Vec<ZtfPrvCandidate>,
+        candidate: &ZtfCandidate,
+    ) -> (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) {
+        // // we split the prv_candidates into detections and non-detections
+        let (mut new_prv_candidates, prv_nondetections): (
+            Vec<ZtfPrvCandidate>,
+            Vec<ZtfPrvCandidate>,
+        ) = prv_candidates
+            .into_iter()
+            .partition(|p| p.prv_candidate.magpsf.is_some());
+        // use the from candidate to create a PrvCandidate and add to new_prv_candidates
+        new_prv_candidates.push(ZtfPrvCandidate::try_from(candidate).unwrap());
 
-        for p in prv_candidates {
-            if p.prv_candidate.magpsf.is_some() {
-                prv_candidates_doc.push(mongify(&p));
-            } else {
-                prv_nondetections_doc.push(mongify(&p));
-            }
-        }
-        prv_candidates_doc.push(candidate_doc);
-
-        let fp_hist_doc = fp_hist.into_iter().map(|x| mongify(&x)).collect::<Vec<_>>();
-        (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc)
+        (new_prv_candidates, prv_nondetections)
     }
 }
 
@@ -695,113 +761,40 @@ impl AlertWorker for ZtfAlertWorker {
         format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
-    #[instrument(
-        skip(
-            self,
-            ra,
-            dec,
-            prv_candidates_doc,
-            prv_nondetections_doc,
-            fp_hist_doc,
-            survey_matches
-        ),
-        err
-    )]
-    async fn insert_aux(
-        self: &mut Self,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError> {
-        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-        self.insert_alert_aux(
-            object_id.into(),
-            ra,
-            dec,
-            prv_candidates_doc,
-            prv_nondetections_doc,
-            fp_hist_doc,
-            xmatches,
-            survey_matches,
-            now,
-        )
-        .await?;
-        Ok(())
-    }
-
-    #[instrument(
-        skip(
-            self,
-            prv_candidates_doc,
-            prv_nondetections_doc,
-            fp_hist_doc,
-            survey_matches
-        ),
-        err
-    )]
-    async fn update_aux(
-        self: &mut Self,
-        object_id: &str,
-        prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
-            "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
-                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", prv_nondetections_doc),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
-                "aliases": survey_matches,
-                "updated_at": now,
-            }
-        }];
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
-            .await?;
-        Ok(())
-    }
-
     #[instrument(skip_all, err)]
     async fn process_alert(
         self: &mut Self,
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut alert: ZtfAlert = self
+        let mut avro_alert: ZtfAvroAlert = self
             .schema_cache
             .alert_from_avro_bytes(avro_bytes)
             .inspect_err(as_error!())?;
 
-        let candid = alert.candid();
-        let object_id = alert.object_id();
-        let ra = alert.ra();
-        let dec = alert.dec();
+        let candid = avro_alert.candid();
+        let object_id = avro_alert.object_id();
+        let ra = avro_alert.ra();
+        let dec = avro_alert.dec();
 
-        let prv_candidates = match alert.prv_candidates.take() {
+        let prv_candidates = match avro_alert.prv_candidates.take() {
             Some(candidates) => candidates,
             None => Vec::new(),
         };
-        let fp_hist = match alert.fp_hists.take() {
-            Some(hist) => hist,
+        let fp_hists = match avro_alert.fp_hists.take() {
+            Some(hists) => hists,
             None => Vec::new(),
         };
 
-        let candidate_doc = mongify(&alert.candidate);
+        let candidate: ZtfCandidate = avro_alert.candidate;
 
         // add the cutouts, skip processing if the cutouts already exist
         let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
-                alert.cutout_science,
-                alert.cutout_template,
-                alert.cutout_difference,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
                 &self.alert_cutout_collection,
             )
             .await
@@ -812,12 +805,12 @@ impl AlertWorker for ZtfAlertWorker {
         }
 
         let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id)
+            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
             .await
             .inspect_err(as_error!())?;
 
-        let (prv_candidates_doc, prv_nondetections_doc, fp_hist_doc) = self
-            .format_prv_candidates_and_fp_hist(&prv_candidates, candidate_doc.clone(), &fp_hist);
+        let (prv_candidates, prv_nondetections) =
+            self.format_prv_candidates(prv_candidates, &candidate);
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -826,25 +819,26 @@ impl AlertWorker for ZtfAlertWorker {
         );
 
         if !alert_aux_exists {
-            let result = self
-                .insert_aux(
-                    &object_id,
-                    ra,
-                    dec,
-                    &prv_candidates_doc,
-                    &prv_nondetections_doc,
-                    &fp_hist_doc,
-                    &survey_matches,
-                    now,
-                )
-                .await;
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let obj = ZtfObject {
+                object_id: object_id.clone(),
+                prv_candidates,
+                prv_nondetections,
+                fp_hists,
+                cross_matches: Some(xmatches),
+                aliases: survey_matches,
+                coordinates: Coordinates::new(ra, dec),
+                created_at: now,
+                updated_at: now,
+            };
+            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
                 self.update_aux(
                     &object_id,
-                    &prv_candidates_doc,
-                    &prv_nondetections_doc,
-                    &fp_hist_doc,
-                    &survey_matches,
+                    &obj.prv_candidates,
+                    &obj.prv_nondetections,
+                    &obj.fp_hists,
+                    &obj.aliases,
                     now,
                 )
                 .await
@@ -855,9 +849,9 @@ impl AlertWorker for ZtfAlertWorker {
         } else {
             self.update_aux(
                 &object_id,
-                &prv_candidates_doc,
-                &prv_nondetections_doc,
-                &fp_hist_doc,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
                 &survey_matches,
                 now,
             )
@@ -865,17 +859,17 @@ impl AlertWorker for ZtfAlertWorker {
             .inspect_err(as_error!())?;
         }
 
-        // insert the alert
+        let alert = ZtfAlert {
+            candid,
+            object_id: object_id.clone(),
+            candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
         let status = self
-            .format_and_insert_alert(
-                candid,
-                &object_id,
-                ra,
-                dec,
-                &candidate_doc,
-                now,
-                &self.alert_collection,
-            )
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
@@ -897,22 +891,22 @@ mod tests {
 
         let (candid, object_id, ra, dec, bytes_content) =
             AlertRandomizer::new_randomized(Survey::Ztf).get().await;
-        let alert = alert_worker
+        let avro_alert = alert_worker
             .schema_cache
             .alert_from_avro_bytes(&bytes_content);
-        assert!(alert.is_ok());
+        assert!(avro_alert.is_ok());
 
         // validate the alert
-        let alert: ZtfAlert = alert.unwrap();
-        assert_eq!(alert.schemavsn, "4.02");
-        assert_eq!(alert.publisher, "ZTF (www.ztf.caltech.edu)");
-        assert_eq!(alert.object_id, object_id);
-        assert_eq!(alert.candid, candid);
-        assert_eq!(alert.candidate.candidate.ra, ra);
-        assert_eq!(alert.candidate.candidate.dec, dec);
+        let avro_alert: ZtfAvroAlert = avro_alert.unwrap();
+        assert_eq!(avro_alert.schemavsn, "4.02");
+        assert_eq!(avro_alert.publisher, "ZTF (www.ztf.caltech.edu)");
+        assert_eq!(avro_alert.object_id, object_id);
+        assert_eq!(avro_alert.candid, candid);
+        assert_eq!(avro_alert.candidate.candidate.ra, ra);
+        assert_eq!(avro_alert.candidate.candidate.dec, dec);
 
         // validate the prv_candidates
-        let prv_candidates = alert.clone().prv_candidates;
+        let prv_candidates = avro_alert.clone().prv_candidates;
         assert!(!prv_candidates.is_none());
 
         let prv_candidates = prv_candidates.unwrap();
@@ -929,7 +923,7 @@ mod tests {
         assert_eq!(detection.prv_candidate.isdiffpos.is_some(), true);
 
         // validate the fp_hists
-        let fp_hists = alert.clone().fp_hists;
+        let fp_hists = avro_alert.clone().fp_hists;
         assert!(fp_hists.is_some());
 
         let fp_hists = fp_hists.unwrap();
@@ -940,7 +934,11 @@ mod tests {
         let fp_negative_det = fp_hists.get(0).unwrap();
         assert!((fp_negative_det.magpsf.unwrap() - 15.949999).abs() < 1e-6);
         assert!((fp_negative_det.sigmapsf.unwrap() - 0.002316).abs() < 1e-6);
-        assert!((fp_negative_det.diffmaglim - 20.879942).abs() < 1e-6);
+        println!(
+            "diffmaglim: {:?}",
+            fp_negative_det.fp_hist.diffmaglim.unwrap()
+        );
+        assert!((fp_negative_det.fp_hist.diffmaglim.unwrap() - 20.4005).abs() < 1e-6);
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
@@ -948,14 +946,18 @@ mod tests {
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
         assert!((fp_positive_det.sigmapsf.unwrap() - 0.3616859).abs() < 1e-6);
-        assert!((fp_positive_det.diffmaglim - 20.247562).abs() < 1e-6);
+        println!(
+            "diffmaglim: {:?}",
+            fp_positive_det.fp_hist.diffmaglim.unwrap()
+        );
+        assert!((fp_positive_det.fp_hist.diffmaglim.unwrap() - 19.7873).abs() < 1e-6);
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
 
         // validate the cutouts
-        assert_eq!(alert.cutout_science.len(), 13107);
-        assert_eq!(alert.cutout_template.len(), 12410);
-        assert_eq!(alert.cutout_difference.len(), 14878);
+        assert_eq!(avro_alert.cutout_science.len(), 13107);
+        assert_eq!(avro_alert.cutout_template.len(), 12410);
+        assert_eq!(avro_alert.cutout_difference.len(), 14878);
     }
 }

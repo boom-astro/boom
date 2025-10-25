@@ -2,7 +2,7 @@ use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
-        db::{cutout2bsonbinary, get_coordinates},
+        // db::{cutout2bsonbinary},
         o11y::{
             logging::{as_error, log_error, WARN},
             metrics::SCHEDULER_METER,
@@ -24,7 +24,7 @@ use opentelemetry::{
     KeyValue,
 };
 use redis::AsyncCommands;
-use serde::{de::Deserializer, Deserialize};
+use serde::{de::Deserializer, Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
@@ -156,7 +156,7 @@ where
 }
 
 pub trait Alert:
-    Debug + PartialEq + Clone + serde::de::DeserializeOwned + serde::Serialize
+    Debug + PartialEq + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync
 {
     fn object_id(&self) -> String;
     fn candid(&self) -> i64;
@@ -425,6 +425,45 @@ impl Default for SchemaCache {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AlertCutout {
+    #[serde(rename = "_id")]
+    candid: i64,
+    #[serde(rename = "cutoutScience")]
+    #[serde(serialize_with = "serialize_cutout")]
+    #[serde(deserialize_with = "deserialize_cutout")]
+    cutout_science: Vec<u8>,
+    #[serde(serialize_with = "serialize_cutout")]
+    #[serde(deserialize_with = "deserialize_cutout")]
+    #[serde(rename = "cutoutTemplate")]
+    cutout_template: Vec<u8>,
+    #[serde(serialize_with = "serialize_cutout")]
+    #[serde(deserialize_with = "deserialize_cutout")]
+    #[serde(rename = "cutoutDifference")]
+    cutout_difference: Vec<u8>,
+}
+
+// immplement deserialize_cutout
+fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let binary = <mongodb::bson::Binary as Deserialize>::deserialize(deserializer)?;
+    Ok(binary.bytes)
+}
+
+// implement serialize_cutout
+fn serialize_cutout<S>(cutout: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let binary = mongodb::bson::Binary {
+        subtype: mongodb::bson::spec::BinarySubtype::Generic,
+        bytes: cutout.clone(),
+    };
+    binary.serialize(serializer)
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum AlertWorkerError {
     #[error("failed to load config")]
@@ -443,28 +482,15 @@ pub trait AlertWorker {
     fn stream_name(&self) -> String;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
-    #[instrument(skip(self, ra, dec, candidate_doc, now, collection), err)]
-    async fn format_and_insert_alert(
+    #[instrument(skip(self, alert, collection), err)]
+    async fn format_and_insert_alert<T: Alert>(
         &self,
         candid: i64,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        candidate_doc: &Document,
-        now: f64,
-        collection: &mongodb::Collection<Document>,
+        alert: &T,
+        collection: &mongodb::Collection<T>,
     ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_doc = doc! {
-            "_id": candid,
-            "objectId": object_id,
-            "candidate": candidate_doc,
-            "coordinates": get_coordinates(ra, dec),
-            "created_at": now,
-            "updated_at": now,
-        };
-
         let status = collection
-            .insert_one(alert_doc)
+            .insert_one(alert)
             .await
             .map(|_| ProcessAlertStatus::Added(candid))
             .or_else(|error| match *error.kind {
@@ -475,26 +501,41 @@ pub trait AlertWorker {
             })?;
         Ok(status)
     }
-    async fn insert_aux(
-        self: &mut Self,
+    #[instrument(skip(self, obj, alert_aux_collection), err)]
+    async fn insert_aux<T>(
+        &self,
+        obj: &T,
+        alert_aux_collection: &Collection<T>,
+    ) -> Result<(), AlertError>
+    where
+        T: Send + Sync + Serialize,
+    {
+        alert_aux_collection
+            .insert_one(obj)
+            .await
+            .map_err(|e| match *e.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
+                _ => e.into(),
+            })?;
+        Ok(())
+    }
+    #[instrument(skip(self, alert_aux_collection), err)]
+    async fn check_alert_aux_exists<T>(
+        &self,
         object_id: &str,
-        ra: f64,
-        dec: f64,
-        prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError>;
-    async fn update_aux(
-        self: &mut Self,
-        object_id: &str,
-        prv_candidates_doc: &Vec<Document>,
-        prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError>;
+        alert_aux_collection: &Collection<T>,
+    ) -> Result<bool, AlertError>
+    where
+        T: Send + Sync + Serialize,
+    {
+        let alert_aux_exists = alert_aux_collection
+            .count_documents(doc! { "_id": object_id })
+            .await?
+            > 0;
+        Ok(alert_aux_exists)
+    }
     #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
     async fn format_and_insert_cutouts(
         &self,
@@ -502,17 +543,17 @@ pub trait AlertWorker {
         cutout_science: Vec<u8>,
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
-        collection: &Collection<Document>,
+        collection: &Collection<AlertCutout>,
     ) -> Result<ProcessAlertStatus, AlertError> {
-        let cutout_doc = doc! {
-            "_id": &candid,
-            "cutoutScience": cutout2bsonbinary(cutout_science),
-            "cutoutTemplate": cutout2bsonbinary(cutout_template),
-            "cutoutDifference": cutout2bsonbinary(cutout_difference),
+        let alert_cutout = AlertCutout {
+            candid,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
         };
 
         let status = collection
-            .insert_one(cutout_doc)
+            .insert_one(alert_cutout)
             .await
             .map(|_| ProcessAlertStatus::Added(candid))
             .or_else(|error| match *error.kind {

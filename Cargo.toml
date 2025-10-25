@@ -42,6 +42,9 @@ zune-inflate = { version = "0.2", default-features = false, features = [
     "gzip",
     "std",
 ] }
+schemars = "1.0.4"
+async-channel = "2.5.0"
+anyhow = "1.0.100"
 
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
