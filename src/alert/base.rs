@@ -443,7 +443,6 @@ pub struct AlertCutout {
     cutout_difference: Vec<u8>,
 }
 
-// immplement deserialize_cutout
 fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -452,7 +451,6 @@ where
     Ok(binary.bytes)
 }
 
-// implement serialize_cutout
 fn serialize_cutout<S>(cutout: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,

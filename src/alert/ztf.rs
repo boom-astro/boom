@@ -698,7 +698,7 @@ impl ZtfAlertWorker {
         prv_candidates: Vec<ZtfPrvCandidate>,
         candidate: &ZtfCandidate,
     ) -> (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) {
-        // // we split the prv_candidates into detections and non-detections
+        // we split the prv_candidates into detections and non-detections
         let (mut new_prv_candidates, prv_nondetections): (
             Vec<ZtfPrvCandidate>,
             Vec<ZtfPrvCandidate>,
@@ -935,7 +935,7 @@ mod tests {
         let fp_negative_det = fp_hists.get(0).unwrap();
         assert!((fp_negative_det.magpsf.unwrap() - 15.949999).abs() < 1e-6);
         assert!((fp_negative_det.sigmapsf.unwrap() - 0.002316).abs() < 1e-6);
-        assert!((fp_negative_det.diffmaglim - 20.4005).abs() < 1e-6);
+        assert!((fp_negative_det.fp_hist.diffmaglim.unwrap() - 20.4005).abs() < 1e-6);
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);

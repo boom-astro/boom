@@ -247,7 +247,6 @@ pub async fn xmatch(
                     matches_filtered.push(xmatch_doc);
                 }
             }
-            // xmatch_results.insert(&xmatch_config.catalog, matches_filtered);
             xmatch_results
                 .get_mut(catalog)
                 .unwrap()
