@@ -1,11 +1,12 @@
-use crate::enrichment::{
-    fetch_alerts,
-    models::{AcaiModel, BtsBotModel, Model},
-    EnrichmentWorker, EnrichmentWorkerError,
-};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{
-    analyze_photometry, parse_photometry, prepare_photometry, PhotometryMag,
+use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
+use crate::{
+    alert::ZtfCandidate,
+    enrichment::{
+        fetch_alert_cutouts, fetch_alerts,
+        models::{AcaiModel, BtsBotModel, Model},
+        EnrichmentWorker, EnrichmentWorkerError,
+    },
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -68,10 +69,20 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
-                "fp_hists.snr": 1,
             }
         },
     ]
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ZtfAlertEnrichment {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -141,13 +152,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts = fetch_alerts(
-            &candids,
-            &self.alert_pipeline,
-            &self.alert_collection,
-            Some(&self.alert_cutout_collection),
-        )
-        .await?;
+        let alerts: Vec<ZtfAlertEnrichment> =
+            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -156,9 +162,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 candids.len()
             );
         }
-
         if alerts.is_empty() {
             return Ok(vec![]);
+        }
+
+        let candid_to_cutouts =
+            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
+
+        if candid_to_cutouts.len() != alerts.len() {
+            warn!(
+                "only {} cutouts fetched from {} candids",
+                candid_to_cutouts.len(),
+                alerts.len()
+            );
         }
 
         // we keep it very simple for now, let's run on 1 alert at a time
@@ -166,7 +182,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         for i in 0..alerts.len() {
-            let candid = alerts[i].get_i64("_id")?;
+            let candid = alerts[i].candid;
+            let cutouts = candid_to_cutouts
+                .get(&candid)
+                .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, _lightcurve) =
@@ -174,7 +193,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // Now, prepare inputs for ML models and run inference
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
-            let triplet = self.acai_h_model.get_triplet(&alerts[i..i + 1])?;
+            let triplet = self.acai_h_model.get_triplet(&[cutouts])?;
 
             let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
             let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
@@ -226,28 +245,26 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 impl ZtfEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &Document,
+        alert: &ZtfAlertEnrichment,
     ) -> Result<(Document, Document, i32, Vec<PhotometryMag>), EnrichmentWorkerError> {
-        let candidate = alert.get_document("candidate")?;
-        let jd = candidate.get_f64("jd")?;
-        let programid = candidate.get_i32("programid")?;
-        let ssdistnr = candidate.get_f64("ssdistnr").unwrap_or(-999.0);
-        let ssmagnr = candidate.get_f64("ssmagnr").unwrap_or(-999.0);
-
+        let candidate = &alert.candidate.candidate;
+        let programid = candidate.programid;
+        let ssdistnr = candidate.ssdistnr.unwrap_or(-999.0);
+        let ssmagnr = candidate.ssmagnr.unwrap_or(-999.0);
         let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
 
-        let sgscore1 = candidate.get_f64("sgscore1").unwrap_or(0.0);
-        let sgscore2 = candidate.get_f64("sgscore2").unwrap_or(0.0);
-        let sgscore3 = candidate.get_f64("sgscore3").unwrap_or(0.0);
-        let distpsnr1 = candidate.get_f64("distpsnr1").unwrap_or(f64::INFINITY);
-        let distpsnr2 = candidate.get_f64("distpsnr2").unwrap_or(f64::INFINITY);
-        let distpsnr3 = candidate.get_f64("distpsnr3").unwrap_or(f64::INFINITY);
+        let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
+        let sgscore2 = candidate.sgscore2.unwrap_or(0.0);
+        let sgscore3 = candidate.sgscore3.unwrap_or(0.0);
+        let distpsnr1 = candidate.distpsnr1.unwrap_or(f32::INFINITY);
+        let distpsnr2 = candidate.distpsnr2.unwrap_or(f32::INFINITY);
+        let distpsnr3 = candidate.distpsnr3.unwrap_or(f32::INFINITY);
 
-        let srmag1 = candidate.get_f64("srmag1").unwrap_or(f64::INFINITY);
-        let srmag2 = candidate.get_f64("srmag2").unwrap_or(f64::INFINITY);
-        let srmag3 = candidate.get_f64("srmag3").unwrap_or(f64::INFINITY);
-        let sgmag1 = candidate.get_f64("sgmag1").unwrap_or(f64::INFINITY);
-        let simag1 = candidate.get_f64("simag1").unwrap_or(f64::INFINITY);
+        let srmag1 = candidate.srmag1.unwrap_or(f32::INFINITY);
+        let srmag2 = candidate.srmag2.unwrap_or(f32::INFINITY);
+        let srmag3 = candidate.srmag3.unwrap_or(f32::INFINITY);
+        let sgmag1 = candidate.sgmag1.unwrap_or(f32::INFINITY);
+        let simag1 = candidate.simag1.unwrap_or(f32::INFINITY);
 
         let is_star = sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0;
 
@@ -259,13 +276,11 @@ impl ZtfEnrichmentWorker {
                     && distpsnr1 < 0.5
                     && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
 
-        let prv_candidates = alert.get_array("prv_candidates")?;
-        let fp_hists = alert.get_array("fp_hists")?;
-        let mut lightcurve =
-            parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
-        lightcurve.extend(parse_photometry(
-            fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
-        ));
+        let prv_candidates = alert.prv_candidates.clone();
+        let fp_hists = alert.fp_hists.clone();
+
+        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
+        let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);

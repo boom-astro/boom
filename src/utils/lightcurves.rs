@@ -27,10 +27,13 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
     10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PhotometryMag {
+    #[serde(alias = "jd")]
     pub time: f64,
+    #[serde(alias = "magpsf")]
     pub mag: f32,
+    #[serde(alias = "sigmapsf")]
     pub mag_err: f32,
     pub band: String,
 }

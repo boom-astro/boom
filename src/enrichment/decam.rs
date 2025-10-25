@@ -1,6 +1,7 @@
+use crate::alert::DecamCandidate;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::fetch_timeseries_op;
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry, prepare_photometry};
+use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -30,11 +31,22 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "prv_candidates": fetch_timeseries_op(
+                    "aux.prv_candidates",
+                    "candidate.jd",
+                    365,
+                    None
+                ),
                 "fp_hists": fetch_timeseries_op(
                     "aux.fp_hists",
                     "candidate.jd",
                     365,
-                    None
+                    Some(vec![doc! {
+                        "$gte": [
+                            "$$x.snr",
+                            3.0
+                        ]
+                    }]),
                 )
             }
         },
@@ -42,13 +54,28 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "prv_candidates.jd": 1,
+                "prv_candidates.magpsf": 1,
+                "prv_candidates.sigmapsf": 1,
+                "prv_candidates.band": 1,
                 "fp_hists.jd": 1,
-                "fp_hists.magap": 1,
-                "fp_hists.sigmagap": 1,
+                "fp_hists.magpsf": 1,
+                "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
             }
         },
     ]
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DecamAlertEnrichment {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
 }
 
 pub struct DecamEnrichmentWorker {
@@ -93,8 +120,8 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts =
-            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
+        let alerts: Vec<DecamAlertEnrichment> =
+            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -113,7 +140,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         for i in 0..alerts.len() {
-            let candid = alerts[i].get_i64("_id")?;
+            let candid = alerts[i].candid;
 
             let properties = self.get_alert_properties(&alerts[i]).await?;
 
@@ -148,15 +175,13 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 impl DecamEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &Document,
+        alert: &DecamAlertEnrichment,
     ) -> Result<Document, EnrichmentWorkerError> {
-        // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = alert.get_document("candidate")?;
+        let prv_candidates = alert.prv_candidates.clone();
+        let fp_hists = alert.fp_hists.clone();
 
-        let jd = candidate.get_f64("jd")?;
-
-        let fp_hists = alert.get_array("fp_hists")?;
-        let mut lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
+        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
+        let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
