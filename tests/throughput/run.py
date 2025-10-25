@@ -97,7 +97,7 @@ boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
 boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
 t1_b, t2_b = None, None
 # To calculate BOOM wall time, take:
-# - Start: first timestamp where the consumer is awaiting messages
+# - Start: timestamp of the first message received by the consumer
 # - End: last timestamp in the scheduler log
 with open(boom_consumer_log_fpath) as f:
     lines = f.readlines()
