@@ -155,15 +155,6 @@ where
     }
 }
 
-pub trait Alert:
-    Debug + PartialEq + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync
-{
-    fn object_id(&self) -> String;
-    fn candid(&self) -> i64;
-    fn ra(&self) -> f64;
-    fn dec(&self) -> f64;
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum SchemaRegistryError {
     #[error("error from avro")]
@@ -344,7 +335,7 @@ impl SchemaRegistry {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn alert_from_avro_bytes<T: Alert>(
+    pub async fn alert_from_avro_bytes<T: for<'a> Deserialize<'a>>(
         self: &mut Self,
         avro_bytes: &[u8],
     ) -> Result<T, AlertError> {
@@ -372,7 +363,10 @@ pub struct SchemaCache {
 
 impl SchemaCache {
     #[instrument(skip_all, err)]
-    pub fn alert_from_avro_bytes<T: Alert>(&mut self, avro_bytes: &[u8]) -> Result<T, AlertError> {
+    pub fn alert_from_avro_bytes<T: for<'a> Deserialize<'a>>(
+        &mut self,
+        avro_bytes: &[u8],
+    ) -> Result<T, AlertError> {
         // if the schema is not cached, get it from the avro_bytes
         let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
             (Some(schema), Some(start_idx)) => (schema, start_idx),
@@ -481,7 +475,7 @@ pub trait AlertWorker {
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
     #[instrument(skip(self, alert, collection), err)]
-    async fn format_and_insert_alert<T: Alert>(
+    async fn format_and_insert_alert<T: Serialize + Send + Sync>(
         &self,
         candid: i64,
         alert: &T,

@@ -1,6 +1,6 @@
 use crate::{
     alert::{
-        base::{Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
+        base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
         decam, lsst, AlertCutout,
     },
     conf,
@@ -563,21 +563,6 @@ where
     }
 }
 
-impl Alert for ZtfAvroAlert {
-    fn object_id(&self) -> String {
-        self.object_id.clone()
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.candidate.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.candidate.dec
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 struct ZtfObject {
     #[serde(rename = "_id")]
@@ -603,21 +588,6 @@ struct ZtfAlert {
     coordinates: Coordinates,
     created_at: f64,
     updated_at: f64,
-}
-
-impl Alert for ZtfAlert {
-    fn object_id(&self) -> String {
-        self.object_id.clone()
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.candidate.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.candidate.dec
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
 }
 
 pub struct ZtfAlertWorker {
@@ -773,10 +743,10 @@ impl AlertWorker for ZtfAlertWorker {
             .alert_from_avro_bytes(avro_bytes)
             .inspect_err(as_error!())?;
 
-        let candid = avro_alert.candid();
-        let object_id = avro_alert.object_id();
-        let ra = avro_alert.ra();
-        let dec = avro_alert.dec();
+        let candid = avro_alert.candid;
+        let object_id = avro_alert.object_id;
+        let ra = avro_alert.candidate.candidate.ra;
+        let dec = avro_alert.candidate.candidate.dec;
 
         let prv_candidates = match avro_alert.prv_candidates.take() {
             Some(candidates) => candidates,

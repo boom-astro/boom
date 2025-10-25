@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use crate::{
     alert::{
         base::{
-            Alert, AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
-            SchemaCache,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache,
         },
         lsst, ztf,
     },
@@ -149,21 +148,6 @@ pub struct DecamAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
-impl Alert for DecamAvroAlert {
-    fn object_id(&self) -> String {
-        self.object_id.clone()
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.candidate.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.candidate.dec
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 struct DecamObject {
     #[serde(rename = "_id")]
@@ -187,21 +171,6 @@ struct DecamAlert {
     coordinates: Coordinates,
     created_at: f64,
     updated_at: f64,
-}
-
-impl Alert for DecamAlert {
-    fn object_id(&self) -> String {
-        self.object_id.clone()
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.candidate.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.candidate.dec
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
 }
 
 pub struct DecamAlertWorker {
@@ -326,10 +295,10 @@ impl AlertWorker for DecamAlertWorker {
             .alert_from_avro_bytes(avro_bytes)
             .inspect_err(as_error!())?;
 
-        let candid = avro_alert.candid();
-        let object_id = avro_alert.object_id();
-        let ra = avro_alert.ra();
-        let dec = avro_alert.dec();
+        let candid = avro_alert.candid;
+        let object_id = avro_alert.object_id;
+        let ra = avro_alert.candidate.candidate.ra;
+        let dec = avro_alert.candidate.candidate.dec;
 
         let prv_candidates = vec![avro_alert.candidate.clone()];
         let fp_hists = avro_alert.fp_hists;

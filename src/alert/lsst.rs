@@ -1,7 +1,7 @@
 use crate::{
     alert::{
         base::{
-            Alert, AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
             SchemaRegistry,
         },
         decam, ztf,
@@ -650,21 +650,6 @@ where
     Ok(Some(forced_phots))
 }
 
-impl Alert for LsstAvroAlert {
-    fn object_id(&self) -> String {
-        self.candidate.object_id.clone()
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.dia_source.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.dia_source.dec
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 struct LsstObject {
     #[serde(rename = "_id")]
@@ -688,21 +673,6 @@ struct LsstAlert {
     coordinates: Coordinates,
     created_at: f64,
     updated_at: f64,
-}
-
-impl Alert for LsstAlert {
-    fn object_id(&self) -> String {
-        self.object_id.clone()
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.dia_source.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.dia_source.dec
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
 }
 
 pub struct LsstAlertWorker {
@@ -842,10 +812,10 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        let candid = avro_alert.candid();
-        let object_id = avro_alert.object_id();
-        let ra = avro_alert.ra();
-        let dec = avro_alert.dec();
+        let candid = avro_alert.candid;
+        let object_id = avro_alert.candidate.object_id.clone();
+        let ra = avro_alert.candidate.dia_source.ra;
+        let dec = avro_alert.candidate.dia_source.dec;
 
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
         let fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
