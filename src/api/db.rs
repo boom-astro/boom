@@ -1,8 +1,6 @@
 // Database related functionality
-use crate::{
-    conf::{AppConfig, AuthConfig},
-    routes::users::User,
-};
+use crate::api::routes::users::User;
+use crate::conf::{AppConfig, AuthConfig};
 
 use mongodb::bson::doc;
 use mongodb::{Client, Database};

@@ -6,6 +6,7 @@ use crate::{
     conf,
     utils::{
         db::{mongify, update_timeseries_op},
+        enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -716,9 +717,9 @@ impl AlertWorker for ZtfAlertWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
         let config_file =
-            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
+            conf::load_raw_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Ztf)
             .inspect_err(as_error!("failed to load xmatch config"))?;
 
         let db: mongodb::Database = conf::build_db(&config_file)
@@ -934,11 +935,7 @@ mod tests {
         let fp_negative_det = fp_hists.get(0).unwrap();
         assert!((fp_negative_det.magpsf.unwrap() - 15.949999).abs() < 1e-6);
         assert!((fp_negative_det.sigmapsf.unwrap() - 0.002316).abs() < 1e-6);
-        println!(
-            "diffmaglim: {:?}",
-            fp_negative_det.fp_hist.diffmaglim.unwrap()
-        );
-        assert!((fp_negative_det.fp_hist.diffmaglim.unwrap() - 20.4005).abs() < 1e-6);
+        assert!((fp_negative_det.diffmaglim - 20.4005).abs() < 1e-6);
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
@@ -946,10 +943,6 @@ mod tests {
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
         assert!((fp_positive_det.sigmapsf.unwrap() - 0.3616859).abs() < 1e-6);
-        println!(
-            "diffmaglim: {:?}",
-            fp_positive_det.fp_hist.diffmaglim.unwrap()
-        );
         assert!((fp_positive_det.fp_hist.diffmaglim.unwrap() - 19.7873).abs() < 1e-6);
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);

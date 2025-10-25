@@ -30,7 +30,7 @@ async fn test_process_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
@@ -89,7 +89,7 @@ async fn test_process_ztf_alert() {
 
 #[tokio::test]
 async fn test_process_ztf_alert_xmatch() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
@@ -320,7 +320,7 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(alert, &format!("1,{}", candid));
 
     // check that the alert was inserted in the DB, and ML scores added later
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
