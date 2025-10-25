@@ -310,6 +310,7 @@ async fn test_enrich_ztf_alert() {
 
     let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
+    println!("{:?}", result);
     assert!(result.is_ok());
 
     // the result should be a vec of String, for ZTF with the format

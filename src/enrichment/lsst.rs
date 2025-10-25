@@ -1,6 +1,7 @@
+use crate::alert::LsstCandidate;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry, prepare_photometry};
+use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -62,10 +63,20 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
-                "fp_hists.snr": 1,
             }
         },
     ]
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct LsstAlertEnrichment {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -110,8 +121,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts =
-            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
+        let alerts: Vec<LsstAlertEnrichment> =
+            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -130,7 +141,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         for i in 0..alerts.len() {
-            let candid = alerts[i].get_i64("_id")?;
+            let candid = alerts[i].candid;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let properties = self.get_alert_properties(&alerts[i]).await?;
@@ -166,22 +177,18 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 impl LsstEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &Document,
+        alert: &LsstAlertEnrichment,
     ) -> Result<Document, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = alert.get_document("candidate")?;
+        let candidate = &alert.candidate;
 
-        let jd = candidate.get_f64("jd")?;
+        let is_rock = candidate.is_sso;
 
-        let is_rock = candidate.get_bool("is_sso").unwrap_or(false);
+        let prv_candidates = alert.prv_candidates.clone();
+        let fp_hists = alert.fp_hists.clone();
 
-        let prv_candidates = alert.get_array("prv_candidates")?;
-        let fp_hists = alert.get_array("fp_hists")?;
-        let mut lightcurve =
-            parse_photometry(prv_candidates, "jd", "magpsf", "sigmapsf", "band", jd);
-        lightcurve.extend(parse_photometry(
-            fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
-        ));
+        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
+        let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
