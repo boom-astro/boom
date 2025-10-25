@@ -681,6 +681,9 @@ pub async fn consumer(
                         start.elapsed()
                     );
                 }
+                if total == 1 {
+                    info!("Consumer received first message, continuing...");
+                }
             }
             Some(Err(e)) => {
                 error!("Error while consuming from Kafka, retrying: {}", e);
