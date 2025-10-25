@@ -41,7 +41,8 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
     #[serde(rename = "candid")]
@@ -54,11 +55,11 @@ pub struct DiaSource {
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "diaObjectId")]
     #[serde(deserialize_with = "deserialize_optional_id")]
-    pub dia_object_id: Option<String>,
+    pub dia_object_id: Option<i64>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
     #[serde(deserialize_with = "deserialize_optional_id")]
-    pub ss_object_id: Option<String>,
+    pub ss_object_id: Option<i64>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
     pub parent_dia_source_id: Option<i64>,
@@ -239,8 +240,8 @@ impl TryFrom<DiaSource> for LsstCandidate {
             dia_source.dia_object_id.clone(),
             dia_source.ss_object_id.clone(),
         ) {
-            (Some(dia_id), None) => (dia_id, false),
-            (None, Some(ss_id)) => (format!("sso{}", ss_id), true),
+            (Some(dia_id), None) => (dia_id.to_string(), false),
+            (None, Some(ss_id)) => (format!("sso{}", ss_id.to_string()), true),
             (None, None) => return Err(AlertError::MissingObjectId),
             (Some(dia_id), Some(ss_id)) => {
                 return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
@@ -268,9 +269,8 @@ impl TryFrom<DiaSource> for LsstCandidate {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
-    #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    #[serde(deserialize_with = "deserialize_objid")]
-    pub object_id: String,
+    #[serde(rename = "diaObjectId")]
+    pub dia_object_id: i64,
     /// Processing time when validity of this diaObject starts, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "validityStartMjdTai")]
     pub validity_start_mjd_tai: f64,
@@ -460,16 +460,15 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
     #[serde(rename = "diaForcedSourceId")]
     pub dia_forced_source_id: i64,
     /// Id of the DiaObject that this DiaForcedSource was associated with.
-    #[serde(rename = "objectId")]
-    #[serde(alias = "diaObjectId")]
-    #[serde(deserialize_with = "deserialize_objid")]
-    pub object_id: String,
+    #[serde(rename = "diaObjectId")]
+    pub object_id: i64,
     /// Right ascension coordinate of the position of the DiaObject at time radecMjdTai.
     pub ra: f64,
     /// Declination coordinate of the position of the DiaObject at time radecMjdTai.
@@ -580,23 +579,13 @@ pub struct LsstAvroAlert {
     pub cutout_template: Vec<u8>,
 }
 
-// Deserialize helper functions
-fn deserialize_objid<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // it's an i64 in the avro but we want to have it as a string
-    let objid: i64 = <i64 as Deserialize>::deserialize(deserializer)?;
-    Ok(objid.to_string())
-}
-
-fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: Deserializer<'de>,
 {
     match <Option<i64> as Deserialize>::deserialize(deserializer)? {
         Some(0) | None => Ok(None),
-        Some(i) => Ok(Some(i.to_string())),
+        Some(i) => Ok(Some(i)),
     }
 }
 

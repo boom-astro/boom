@@ -194,7 +194,7 @@ pub enum AlertError {
     #[error("missing object_id")]
     MissingObjectId,
     #[error("ambiguous object_id")]
-    AmbiguousObjectId(String, String),
+    AmbiguousObjectId(i64, i64),
     #[error("missing cutout")]
     MissingCutout,
     #[error("missing psf flux")]
@@ -422,19 +422,19 @@ impl Default for SchemaCache {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AlertCutout {
     #[serde(rename = "_id")]
-    candid: i64,
+    pub candid: i64,
     #[serde(rename = "cutoutScience")]
     #[serde(serialize_with = "serialize_cutout")]
     #[serde(deserialize_with = "deserialize_cutout")]
-    cutout_science: Vec<u8>,
+    pub cutout_science: Vec<u8>,
     #[serde(serialize_with = "serialize_cutout")]
     #[serde(deserialize_with = "deserialize_cutout")]
     #[serde(rename = "cutoutTemplate")]
-    cutout_template: Vec<u8>,
+    pub cutout_template: Vec<u8>,
     #[serde(serialize_with = "serialize_cutout")]
     #[serde(deserialize_with = "deserialize_cutout")]
     #[serde(rename = "cutoutDifference")]
-    cutout_difference: Vec<u8>,
+    pub cutout_difference: Vec<u8>,
 }
 
 fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>

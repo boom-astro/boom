@@ -283,7 +283,8 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 /// avro alert schema
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct Candidate {
     pub jd: f64,
     pub fid: i32,
