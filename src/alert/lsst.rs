@@ -41,7 +41,7 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
     #[serde(rename = "candid")]
@@ -195,7 +195,7 @@ pub struct DiaSource {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
@@ -650,20 +650,28 @@ where
     Ok(Some(forced_phots))
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct LsstAliases {
+    #[serde(rename = "ZTF")]
+    ztf: Vec<String>,
+    #[serde(rename = "DECAM")]
+    decam: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct LsstObject {
     #[serde(rename = "_id")]
     object_id: String,
     prv_candidates: Vec<LsstCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
-    cross_matches: Option<std::collections::HashMap<String, Vec<Document>>>,
-    aliases: Option<std::collections::HashMap<String, Vec<String>>>,
+    cross_matches: Option<HashMap<String, Vec<Document>>>,
+    aliases: Option<LsstAliases>,
     coordinates: Coordinates,
     created_at: f64,
     updated_at: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
 struct LsstAlert {
     #[serde(rename = "_id")]
     candid: i64,
@@ -689,12 +697,7 @@ pub struct LsstAlertWorker {
 
 impl LsstAlertWorker {
     #[instrument(skip(self), err)]
-    async fn get_survey_matches(
-        &self,
-        ra: f64,
-        dec: f64,
-    ) -> Result<HashMap<String, Vec<String>>, AlertError> {
-        let mut survey_matches: HashMap<String, Vec<String>> = HashMap::new();
+    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<LsstAliases, AlertError> {
         let ztf_matches = self
             .get_matches(
                 ra,
@@ -704,7 +707,6 @@ impl LsstAlertWorker {
                 &self.ztf_alert_aux_collection,
             )
             .await?;
-        survey_matches.insert("ZTF".into(), ztf_matches);
 
         let decam_matches = self
             .get_matches(
@@ -715,8 +717,11 @@ impl LsstAlertWorker {
                 &self.decam_alert_aux_collection,
             )
             .await?;
-        survey_matches.insert("DECAM".into(), decam_matches);
-        Ok(survey_matches)
+
+        Ok(LsstAliases {
+            ztf: ztf_matches,
+            decam: decam_matches,
+        })
     }
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
     async fn update_aux(
@@ -724,7 +729,7 @@ impl LsstAlertWorker {
         object_id: &str,
         prv_candidates: &Vec<LsstCandidate>,
         fp_hists: &Vec<LsstForcedPhot>,
-        survey_matches: &Option<HashMap<String, Vec<String>>>,
+        survey_matches: &Option<LsstAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {

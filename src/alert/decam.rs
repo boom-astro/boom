@@ -52,7 +52,7 @@ pub struct FpHist {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct Candidate {
     pub mjd: f64,
     pub forcediffimflux: f64,
@@ -69,7 +69,7 @@ pub struct Candidate {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct DecamCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
@@ -148,20 +148,28 @@ pub struct DecamAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct DecamAliases {
+    #[serde(rename = "ZTF")]
+    ztf: Vec<String>,
+    #[serde(rename = "LSST")]
+    lsst: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct DecamObject {
     #[serde(rename = "_id")]
     object_id: String,
     prv_candidates: Vec<DecamCandidate>,
     fp_hists: Vec<DecamForcedPhot>,
-    cross_matches: Option<std::collections::HashMap<String, Vec<Document>>>,
-    aliases: Option<std::collections::HashMap<String, Vec<String>>>,
+    cross_matches: Option<HashMap<String, Vec<Document>>>,
+    aliases: Option<DecamAliases>,
     coordinates: Coordinates,
     created_at: f64,
     updated_at: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
 struct DecamAlert {
     #[serde(rename = "_id")]
     candid: i64,
@@ -187,12 +195,7 @@ pub struct DecamAlertWorker {
 
 impl DecamAlertWorker {
     #[instrument(skip(self), err)]
-    async fn get_survey_matches(
-        &self,
-        ra: f64,
-        dec: f64,
-    ) -> Result<HashMap<String, Vec<String>>, AlertError> {
-        let mut survey_matches: HashMap<String, Vec<String>> = HashMap::new();
+    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<DecamAliases, AlertError> {
         let ztf_matches = self
             .get_matches(
                 ra,
@@ -202,9 +205,8 @@ impl DecamAlertWorker {
                 &self.ztf_alert_aux_collection,
             )
             .await?;
-        survey_matches.insert("ZTF".into(), ztf_matches);
 
-        let decam_matches = self
+        let lsst_matches = self
             .get_matches(
                 ra,
                 dec,
@@ -213,8 +215,10 @@ impl DecamAlertWorker {
                 &self.lsst_alert_aux_collection,
             )
             .await?;
-        survey_matches.insert("LSST".into(), decam_matches);
-        Ok(survey_matches)
+        Ok(DecamAliases {
+            ztf: ztf_matches,
+            lsst: lsst_matches,
+        })
     }
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
     async fn update_aux(
@@ -222,7 +226,7 @@ impl DecamAlertWorker {
         object_id: &str,
         prv_candidates: &Vec<DecamCandidate>,
         fp_hists: &Vec<DecamForcedPhot>,
-        survey_matches: &Option<HashMap<String, Vec<String>>>,
+        survey_matches: &Option<DecamAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {

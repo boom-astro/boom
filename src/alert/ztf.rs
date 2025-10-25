@@ -563,6 +563,14 @@ where
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct ZtfAliases {
+    #[serde(rename = "LSST")]
+    lsst: Vec<String>,
+    #[serde(rename = "DECAM")]
+    decam: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ZtfObject {
     #[serde(rename = "_id")]
@@ -571,14 +579,14 @@ struct ZtfObject {
     #[serde(default)]
     prv_nondetections: Vec<ZtfPrvCandidate>,
     fp_hists: Vec<ZtfForcedPhot>,
-    cross_matches: Option<std::collections::HashMap<String, Vec<Document>>>,
-    aliases: Option<std::collections::HashMap<String, Vec<String>>>,
+    cross_matches: Option<HashMap<String, Vec<Document>>>,
+    aliases: Option<ZtfAliases>,
     coordinates: Coordinates,
     created_at: f64,
     updated_at: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
 struct ZtfAlert {
     #[serde(rename = "_id")]
     candid: i64,
@@ -604,12 +612,7 @@ pub struct ZtfAlertWorker {
 
 impl ZtfAlertWorker {
     #[instrument(skip(self), err)]
-    async fn get_survey_matches(
-        &self,
-        ra: f64,
-        dec: f64,
-    ) -> Result<HashMap<String, Vec<String>>, AlertError> {
-        let mut survey_matches: HashMap<String, Vec<String>> = HashMap::new();
+    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<ZtfAliases, AlertError> {
         let lsst_matches = self
             .get_matches(
                 ra,
@@ -619,7 +622,6 @@ impl ZtfAlertWorker {
                 &self.lsst_alert_aux_collection,
             )
             .await?;
-        survey_matches.insert("LSST".into(), lsst_matches);
 
         let decam_matches = self
             .get_matches(
@@ -630,8 +632,10 @@ impl ZtfAlertWorker {
                 &self.decam_alert_aux_collection,
             )
             .await?;
-        survey_matches.insert("DECAM".into(), decam_matches);
-        Ok(survey_matches)
+        Ok(ZtfAliases {
+            lsst: lsst_matches,
+            decam: decam_matches,
+        })
     }
 
     #[instrument(
@@ -644,7 +648,7 @@ impl ZtfAlertWorker {
         prv_candidates: &Vec<ZtfPrvCandidate>,
         prv_nondetections: &Vec<ZtfPrvCandidate>,
         fp_hists: &Vec<ZtfForcedPhot>,
-        survey_matches: &Option<HashMap<String, Vec<String>>>,
+        survey_matches: &Option<ZtfAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {
