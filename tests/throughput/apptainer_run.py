@@ -31,14 +31,18 @@ parser.add_argument(
 args = parser.parse_args()
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
-config["workers"]["ZTF"]["alert"]["n_workers"] = args.n_alert_workers
-config["workers"]["ZTF"]["enrichment"]["n_workers"] = args.n_enrichment_workers
-config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
+config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
+config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
+config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["host"] = "localhost"
-config["kafka"]["consumer"]["ZTF"] = "localhost:9092"
+config["database"]["password"] = "mongoadminsecret"
+config["kafka"]["consumer"]["ztf"]["server"] = "localhost:29092"
+config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
 config["kafka"]["producer"] = "localhost:9092"
 config["redis"]["host"] = "localhost"
+config["api"]["auth"]["secret_key"] = "1234"
+config["api"]["auth"]["admin_password"] = "adminsecret"
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
@@ -79,20 +83,31 @@ logs_dir = os.path.join(
 subprocess.run(["bash", "tests/throughput/apptainer_run.sh", boom_dir, logs_dir], check=True)
 
 # Now analyze the logs and raise an error if we're too slow
+t1_b, t2_b = None, None
 
-# To calculate BOOM wall time, take the first timestamp from the consumer log
-# as the start and the last timestamp of the scheduler as the end
+# To calculate BOOM wall time, take:
+# - Start: timestamp of the first message received by the consumer
+# - End: last timestamp in the scheduler log
 with open(f"{logs_dir}/consumer.log") as f:
-    line = f.readline()
-    t1_b = pd.to_datetime(
-        line.split()[0].replace("\x1b[2m", "").replace("\x1b[0m", "")
-    )
+    lines = f.readlines()
+    for line in lines:
+        if "Consumer received first message, continuing..." in line:
+            t1_b = pd.to_datetime(
+                line.split()[0].replace("\x1b[2m", "").replace("\x1b[0m", "")
+            )
+            break
+if t1_b is None:
+    raise ValueError("Could not find start time in consumer log")
+
 with open(f"{logs_dir}/scheduler.log") as f:
     lines = f.readlines()
+    if len(lines) < 3:
+        raise ValueError("Scheduler log has fewer than 3 lines; cannot determine end time.")
     line = lines[-3]
     t2_b = pd.to_datetime(
         line.split()[0].replace("\x1b[2m", "").replace("\x1b[0m", "")
     )
+
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
 
