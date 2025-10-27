@@ -21,7 +21,7 @@ use std::io::Read;
 pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
 
 async fn test_db() -> mongodb::Database {
-    let config_file = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
     db
 }
@@ -56,7 +56,7 @@ pub async fn drop_alert_collections(
     alert_cutout_collection_name: &str,
     alert_aux_collection_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     db.collection::<mongodb::bson::Document>(alert_collection_name)
         .drop()
@@ -74,7 +74,7 @@ pub async fn drop_alert_from_collections(
     candid: i64,
     stream_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let alert_collection_name = format!("{}_alerts", stream_name);
     let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
@@ -116,7 +116,7 @@ pub async fn remove_test_filter(
     filter_id: &str,
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
@@ -166,7 +166,7 @@ pub async fn insert_test_filter(
         "last_modified": {"$date": "2023-05-04T23:39:07.090Z"}
     };
 
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
@@ -180,7 +180,7 @@ pub async fn empty_processed_alerts_queue(
     input_queue_name: &str,
     output_queue_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = conf::load_config("tests/config.test.yaml")?;
+    let config = conf::load_raw_config("tests/config.test.yaml")?;
     let mut con = conf::build_redis(&config).await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
     con.del::<&str, usize>("{}_temp").await.unwrap();

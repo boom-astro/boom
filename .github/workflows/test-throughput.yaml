@@ -54,8 +54,6 @@ jobs:
         run: |
           mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
-      - name: Create ZTF alerts directory
-        run: mkdir -p ./data/alerts/ztf/public/20250311
       - name: Cache ZTF alerts
         id: cache-ztf-alerts
         uses: actions/cache@v4
@@ -66,6 +64,7 @@ jobs:
         run: |
           uv run tests/throughput/run.py
       - name: Upload logs (including wall time) as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: throughput-logs
@@ -114,8 +113,6 @@ jobs:
             | New wall time | Baseline wall time | Difference |
             | -------------- | ------------------ | ---------- |
             | ${{ steps.compare-with-baseline.outputs.current }} | ${{ steps.compare-with-baseline.outputs.baseline }} | ${{ steps.compare-with-baseline.outputs.percentage_diff }}% |
-          comment-type: edit
-          reuse-existing-comment: true
           edit-mode: replace
       - name: Fail if wall time increased too much (PR only)
         if: github.event_name == 'pull_request'
@@ -125,4 +122,3 @@ jobs:
             echo "Wall time increased by $percentage_diff%, which is more than the allowed $TOLERANCE_PERCENTAGE%."
             exit 1
           fi
-          

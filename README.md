@@ -49,28 +49,48 @@ This is especially useful for running BOOM on HPC systems where Docker is not av
 
 ## Setup
 
+### Environment configuration
+
+BOOM uses environment variables for sensitive configuration like passwords
+and API keys.
+For local development, you can use the defaults in `.env.example`
+by copying it to `.env`:
+
+```sh
+cp .env.example .env
+```
+
+**Note:** Do not commit `.env` to Git or use the example values
+in production.
+
+### Start services for local development
+
 1. Install lfs and pull the large files:
     ```bash
     git lfs install
     git lfs pull
     ```
-2. Launch `Valkey`, `MongoDB`, and `Kafka` using docker, using the provided `docker-compose.yaml` file:
-    ```bash
-    docker compose up -d
-    ```
-    This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
-    *To check if the containers are running and healthy, run `docker ps`.*
+2. Launch `Valkey`, `MongoDB`, and `Kafka`:
 
-3. Launch `Valkey`, `MongoDB`, `Kafka`, `Otel Collector`, `Prometheus` and `boom` using Apptainer:
-    First, build the SIF files. You can do this by running:
-    ```bash
-    ./apptainer.sh build
-    ```
-    Then you can launch the services with:
-    ```bash
-    ./apptainer.sh start
-    ```
-    *To check if the instances are running and healthy, run `./apptainer.sh health`.*
+   - With docker, using the provided `docker-compose.yaml` file:
+      ```bash
+     docker compose up -d
+     ```
+     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
+     *To check if the containers are running and healthy, run `docker ps`.*
+
+     **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+
+   - With Apptainer, using the shell script `apptainer.sh`:
+       First, build the SIF files. You can do this by running:
+       ```bash
+       ./apptainer.sh build
+       ```
+       Then you can launch the services with:
+       ```bash
+       ./apptainer.sh start
+       ```
+     *To check if the instances are running and healthy, run `./apptainer.sh health`.*
 4. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
@@ -275,5 +295,5 @@ Using Apptainer:
 
 ## Contributing
 
-We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information. 
+We welcome contributions! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information.
 We rely on [GitHub issues](https://github.com/boom-astro/boom/issues) to track bugs and feature requests.

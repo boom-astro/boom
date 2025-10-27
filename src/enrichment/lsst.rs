@@ -1,6 +1,6 @@
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry};
+use crate::utils::lightcurves::{analyze_photometry, parse_photometry, prepare_photometry};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use redis::AsyncCommands;
@@ -82,7 +82,7 @@ pub struct LsstEnrichmentWorker {
 impl EnrichmentWorker for LsstEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_config(&config_path)?;
+        let config_file = crate::conf::load_raw_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
@@ -214,7 +214,8 @@ impl LsstEnrichmentWorker {
             fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
         ));
 
-        let (photstats, _, stationary) = analyze_photometry(lightcurve);
+        prepare_photometry(&mut lightcurve);
+        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
         let properties = doc! {
             // properties

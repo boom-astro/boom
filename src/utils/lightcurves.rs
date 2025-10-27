@@ -4,6 +4,7 @@ use serde_with::{serde_as, skip_serializing_none};
 
 pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitudes
 pub const SNT: f32 = 3.0; // Signal-to-noise threshold for detection
+const FACTOR: f32 = 1.0857362047581294; // where 1.0857362047581294 = 2.5 / np.log(10)
 
 pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {
     let mag = -2.5 * (flux).log10() + zp;
@@ -14,6 +15,16 @@ pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {
 
 pub fn fluxerr2diffmaglim(flux_err: f32, zp: f32) -> f32 {
     -2.5 * (5.0 * flux_err).log10() + zp
+}
+
+pub fn mag2flux(mag: f32, mag_err: f32, zp: f32) -> (f32, f32) {
+    let flux = 10.0_f32.powf(-0.4 * (mag - zp));
+    let fluxerr = mag_err / FACTOR * flux;
+    (flux, fluxerr)
+}
+
+pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
+    10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
 #[derive(Debug, Clone)]
@@ -72,20 +83,21 @@ pub struct PhotometryProperties {
     pub linear_fit_after: [f32; 3],  // slope, intercept, r-squared
 }
 
+pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
+    // sort by time
+    photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+
+    // remove duplicates (same time and band)
+    photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
+}
+
 // we want a function that takes a Vec of PhotometryMag and:
 // - sort by time (ascending)
 // - divide it by band
 // - identifies the index of the peak (minimum magnitude) for each band
 // - for each band, do a linear fit of the data before the peak and after the peak independently
 // - return a vec of PhotometryProperties
-pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> (Document, Document, bool) {
-    // first sort by time
-    let mut sorted_photometry = photometry;
-    sorted_photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-
-    // deduplicate by time and band, keeping the first occurrence
-    sorted_photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
-
+pub fn analyze_photometry(sorted_photometry: &[PhotometryMag]) -> (Document, Document, bool) {
     let stationary = sorted_photometry.len() > 0
         && (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
 
@@ -101,7 +113,7 @@ pub fn analyze_photometry(photometry: Vec<PhotometryMag>) -> (Document, Document
     let last_jd = sorted_photometry.last().unwrap().time;
 
     // group by band
-    let mut bands: std::collections::HashMap<String, Vec<PhotometryMag>> =
+    let mut bands: std::collections::HashMap<String, Vec<&PhotometryMag>> =
         std::collections::HashMap::new();
     for mag in sorted_photometry {
         bands
@@ -385,15 +397,44 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_photometry() {
+        let mut photometry = vec![
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.5,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            }, // later point that should be sorted down
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            }, // earlier point that should be sorted up
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: "r".to_string(),
+            }, // duplicate that should be removed
+        ];
+        prepare_photometry(&mut photometry);
+        assert_eq!(photometry.len(), 2);
+        assert_eq!(photometry[0].time, 2459000.5);
+        assert_eq!(photometry[1].time, 2459001.5);
+    }
+
+    #[test]
     fn test_analyze_photometry() {
         // Test case 1: only one data point
-        let data = vec![PhotometryMag {
+        let mut data = vec![PhotometryMag {
             time: 2459000.5,
             mag: 20.0,
             mag_err: 0.1,
             band: "r".to_string(),
         }];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, false);
@@ -419,7 +460,7 @@ mod tests {
         assert_eq!(data[0].band, peak_band);
 
         // Test case 2: 2 data points in the same band, rising
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -433,7 +474,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -466,7 +508,7 @@ mod tests {
         assert_eq!(data[1].band, peak_band);
 
         // Test case 3: 2 data points in the same band, fading
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 19.0,
@@ -480,7 +522,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -512,7 +555,7 @@ mod tests {
         assert_eq!(data[0].band, peak_band);
 
         // Test case 4: 3 data points in the same band, rising then fading
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -532,7 +575,8 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -573,7 +617,7 @@ mod tests {
         // Test case 5: multiple bands
         // - rising and fading in r band (3 points)
         // - only rising in g band (2 points)
-        let data = vec![
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -605,7 +649,8 @@ mod tests {
                 band: "g".to_string(),
             },
         ];
-        let (results, all_bands_props, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -615,9 +660,11 @@ mod tests {
         let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
         let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
         let r_peak_mag_err = r_stats.get_f64("peak_mag_err").unwrap() as f32;
-        assert!((data[1].time - r_peak_jd).abs() < 1e-6);
-        assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
-        assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        // the original array was sorted and deduplicated,
+        // so the r-band peak is now at index 2 (not 1)
+        assert!((data[2].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[2].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[2].mag_err - r_peak_mag_err).abs() < 1e-6);
         assert_eq!(r_stats.contains_key("rising"), true);
         assert_eq!(r_stats.contains_key("fading"), true);
         // check the rising stats in r band
@@ -641,9 +688,11 @@ mod tests {
         let g_peak_jd = g_stats.get_f64("peak_jd").unwrap();
         let g_peak_mag = g_stats.get_f64("peak_mag").unwrap() as f32;
         let g_peak_mag_err = g_stats.get_f64("peak_mag_err").unwrap() as f32;
-        assert!((data[4].time - g_peak_jd).abs() < 1e-6);
-        assert!((data[4].mag - g_peak_mag).abs() < 1e-6);
-        assert!((data[4].mag_err - g_peak_mag_err).abs() < 1e-6);
+        // the original array was sorted and deduplicated,
+        // so the g-band peak is now at index 3 (not 4)
+        assert!((data[3].time - g_peak_jd).abs() < 1e-6);
+        assert!((data[3].mag - g_peak_mag).abs() < 1e-6);
+        assert!((data[3].mag_err - g_peak_mag_err).abs() < 1e-6);
         assert_eq!(g_stats.contains_key("rising"), true);
         assert_eq!(g_stats.contains_key("fading"), false);
         // check the rising stats in g band
@@ -660,13 +709,13 @@ mod tests {
         let peak_mag = all_bands_props.get_f64("peak_mag").unwrap() as f32;
         let peak_mag_err = all_bands_props.get_f64("peak_mag_err").unwrap() as f32;
         let peak_band = all_bands_props.get_str("peak_band").unwrap();
-        assert!((data[1].time - peak_jd).abs() < 1e-6);
-        assert!((data[1].mag - peak_mag).abs() < 1e-6);
-        assert!((data[1].mag_err - peak_mag_err).abs() < 1e-6);
-        assert_eq!(data[1].band, peak_band);
+        assert!((data[2].time - peak_jd).abs() < 1e-6);
+        assert!((data[2].mag - peak_mag).abs() < 1e-6);
+        assert!((data[2].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[2].band, peak_band);
 
-        // Edge case 1: duplicated points (same time and band)
-        let data = vec![
+        // Edge case 1: duplicated points (same time and band, different mag)
+        let mut data = vec![
             PhotometryMag {
                 time: 2459000.5,
                 mag: 20.0,
@@ -687,15 +736,18 @@ mod tests {
                 band: "r".to_string(),
             },
         ];
-        let (results, _, stationary) = analyze_photometry(data.clone());
+        prepare_photometry(&mut data);
+        let (results, _, stationary) = analyze_photometry(&data);
         // make sure that only 2 points were used (the duplicate should be removed)
         assert_eq!(stationary, true);
         assert_eq!(results.len(), 1);
         let r_stats = results.get_document("r").unwrap();
         let r_peak_jd = r_stats.get_f64("peak_jd").unwrap();
         let r_peak_mag = r_stats.get_f64("peak_mag").unwrap() as f32;
-        assert!((data[2].time - r_peak_jd).abs() < 1e-6);
-        assert!((data[2].mag - r_peak_mag).abs() < 1e-6);
+        // the original array was sorted and deduplicated,
+        // so the r-band peak is now at index 1 (not 2)
+        assert!((data[1].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
         let rising_stats = r_stats.get_document("rising").unwrap();
         let rising_nb_data = rising_stats.get_i32("nb_data").unwrap();
         assert_eq!(rising_nb_data, 2);

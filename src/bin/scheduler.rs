@@ -1,5 +1,5 @@
 use boom::{
-    conf,
+    conf::{self, load_dotenv},
     scheduler::{get_num_workers, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
@@ -47,7 +47,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         warn!("no config file provided, using {}", default_config_path);
         default_config_path
     });
-    let config = conf::load_config(&config_path).expect("could not load config file");
+    let config = conf::load_raw_config(&config_path).expect("could not load config file");
 
     // get num workers from config file
     let n_alert = get_num_workers(&config, &args.survey, "alert")
@@ -127,6 +127,9 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file before anything else
+    load_dotenv();
+
     let args = Cli::parse();
 
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");

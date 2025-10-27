@@ -4,7 +4,9 @@ use crate::enrichment::{
     EnrichmentWorker, EnrichmentWorkerError,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry, PhotometryMag};
+use crate::utils::lightcurves::{
+    analyze_photometry, parse_photometry, prepare_photometry, PhotometryMag,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -93,7 +95,7 @@ pub struct ZtfEnrichmentWorker {
 impl EnrichmentWorker for ZtfEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_config(&config_path)?;
+        let config_file = crate::conf::load_raw_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
@@ -174,7 +176,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let candid = alerts[i].get_i64("_id")?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, all_bands_properties, programid, lightcurve) =
+            let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alerts[i]).await?;
 
             // Now, prepare inputs for ML models and run inference
@@ -201,7 +203,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .predict(&metadata_cider, &triplet_cider)?;
 
             let (photometry_data_array, photometry_mask) =
-                self.ciderphotometry_model.photometry_inputs(lightcurve)?;
+                self.ciderphotometry_model.photometry_inputs(_lightcurve)?;
 
             let cider_photo_scores = self
                 .ciderphotometry_model
@@ -229,7 +231,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "classifications.cider_photo_cataclysmic": cider_photo_scores[2],
                     "classifications.cider_photo_agn": cider_photo_scores[3],
                     "classifications.cider_photo_tde": cider_photo_scores[4],
-
                     // properties
                     "properties": properties,
                 }
@@ -297,7 +298,8 @@ impl ZtfEnrichmentWorker {
             fp_hists, "jd", "magpsf", "sigmapsf", "band", jd,
         ));
 
-        let (photstats, all_bands_properties, stationary) = analyze_photometry(lightcurve.clone());
+        prepare_photometry(&mut lightcurve);
+        let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
         Ok((
             doc! {

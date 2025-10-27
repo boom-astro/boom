@@ -1,4 +1,4 @@
-use flare::phot::{limmag_to_fluxerr, mag_to_flux};
+use flare::phot::limmag_to_fluxerr;
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
@@ -11,6 +11,8 @@ use crate::filter::{
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
+
+const ZTF_ZP: f64 = 23.9;
 
 #[instrument(skip_all, err)]
 pub async fn build_ztf_alerts(
@@ -95,25 +97,19 @@ pub async fn build_ztf_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let mag = doc.get_f64("magpsf")?;
-            let mag_err = doc.get_f64("sigmapsf")?;
-            let isdiffpos = doc.get_bool("isdiffpos")?;
+            let flux = doc.get_f64("psfFlux").ok(); // optional, might not be present
+            let flux_err = doc.get_f64("psfFluxErr")?;
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
-            let zero_point = 23.9;
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
 
-            let (flux, flux_err) = mag_to_flux(mag, mag_err, zero_point);
             photometry.push(Photometry {
                 jd,
-                flux: match isdiffpos {
-                    true => Some(flux),
-                    false => Some(-1.0 * flux),
-                },
+                flux,
                 flux_err,
                 band: format!("ztf{}", band),
-                zero_point,
+                zero_point: ZTF_ZP,
                 origin: Origin::Alert,
                 programid,
                 survey: Survey::Ztf,
@@ -129,19 +125,16 @@ pub async fn build_ztf_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let mag_limit = doc.get_f64("diffmaglim")?;
+            let flux_err = doc.get_f64("psfFluxErr")?;
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
-            let zero_point = 23.9;
-
-            let flux_err = limmag_to_fluxerr(mag_limit, zero_point, 5.0);
 
             photometry.push(Photometry {
                 jd,
                 flux: None, // for non-detections, flux is None
                 flux_err,
                 band: format!("ztf{}", band),
-                zero_point,
+                zero_point: ZTF_ZP,
                 origin: Origin::Alert,
                 programid,
                 survey: Survey::Ztf,
@@ -155,7 +148,13 @@ pub async fn build_ztf_alerts(
                 Some(doc) => doc,
                 None => continue, // skip if not a document
             };
+
+            // we only want forced photometry with procstatus == "0"
+            if doc.get_str("procstatus")? != "0" {
+                continue;
+            }
             let jd = doc.get_f64("jd")?;
+            let magzpsci = doc.get_f64("magzpsci")?;
             let flux = match doc.get_f64("forcediffimflux") {
                 Ok(flux) => Some(flux),
                 Err(_) => None,
@@ -524,7 +523,7 @@ impl FilterWorker for ZtfFilterWorker {
         config_path: &str,
         filter_ids: Option<Vec<String>>,
     ) -> Result<Self, FilterWorkerError> {
-        let config_file = crate::conf::load_config(&config_path)?;
+        let config_file = crate::conf::load_raw_config(&config_path)?;
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let alert_collection = db.collection("ZTF_alerts");
         let filter_collection = db.collection("filters");
