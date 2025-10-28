@@ -13,13 +13,6 @@ GREEN="\e[32m"
 YELLOW="\e[33m"
 END="\e[0m"
 
-if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
-  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] \
-  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|log} [args...]"
-  exit 1
-fi
-
 kill_process() {
   local process="$1"
   local name="$2"
@@ -39,6 +32,13 @@ stop_service() {
     fi
     return 1
 }
+
+if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
+  && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] \
+  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|log} [args...]"
+  exit 1
+fi
 
 # -----------------------------
 # 1. Build SIF files

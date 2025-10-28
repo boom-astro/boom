@@ -147,13 +147,13 @@ fi
 # -----------------------------
 # 8. Wait for consumer to start expecting messages
 # -----------------------------
-echo "$(current_datetime) - Waiting for Kafka consumer to start"
+echo && echo "$(current_datetime) - Waiting for Kafka consumer to start"
 START_TIME=$(date +%s)
 while ! grep -q "Consumer received first message, continuing..." "$LOGS_DIR/consumer.log"; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-        echo "$(current_datetime) - Timeout reached while waiting for Kafka consumer to start"
+        echo -e "$(current_datetime) - ${RED} Timeout reached while waiting for Kafka consumer to start${END}"
         stop_all_instances
         exit 1
     fi
@@ -163,13 +163,13 @@ done
 # -----------------------------
 # 9. Wait for alerts ingestion
 # -----------------------------
-echo && echo "$(current_datetime) - Waiting for all alerts to be ingested"
+echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
 while [ "$(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()")" -lt $EXPECTED_ALERTS ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-        echo "$(current_datetime) - Timeout reached while waiting for alerts to be ingested"
+        echo -e "$(current_datetime) - ${RED}Timeout reached while waiting for alerts to be ingested${END}"
         stop_all_instances
         exit 1
     fi
@@ -182,7 +182,7 @@ while [ "$(apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoad
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-        echo "$(current_datetime) - Timeout reached while waiting for alerts to be classified"
+        echo -e "$(current_datetime) - ${RED}Timeout reached while waiting for alerts to be classified${END}"
         stop_all_instances
         exit 1
     fi
@@ -209,7 +209,7 @@ done
 # -----------------------------
 # 10. Stop all instances
 # -----------------------------
-echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
-stop_all_instances
+echo -e "$(current_datetime) - ${GREEN}All tasks completed; shutting down BOOM services${END}"
+echo && stop_all_instances
 
 exit 0
