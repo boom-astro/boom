@@ -14,7 +14,7 @@ END="\e[0m"
 NB_RETRIES=${1:-}
 
 cpt=0
-until apptainer exec instance://kafka /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server localhost:9092 > /dev/null 2>&1; do
+until apptainer exec instance://kafka /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server localhost:29092 > /dev/null 2>&1; do
     echo -e "${RED}$(current_datetime) - kafka unhealthy${END}"
     if [ -n "$NB_RETRIES" ] && [ $cpt -ge $NB_RETRIES ]; then
       exit 1

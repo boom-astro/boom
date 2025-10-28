@@ -36,11 +36,21 @@ stop_all_instances() {
 }
 
 # -----------------------------
+# Load environment variables
+# -----------------------------
+set -a
+source "$BOOM_DIR/.env"
+set +a
+
+# -----------------------------
 # 1. MongoDB
 # -----------------------------
 echo && echo "$(current_datetime) - Starting MongoDB"
 mkdir -p "$PERSISTENT_DIR/mongodb"
-apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
+apptainer instance run \
+  --env MONGO_INITDB_ROOT_USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin} \
+  --env MONGO_INITDB_ROOT_PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set} \
+  --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
 sleep 5
 "$SCRIPTS_DIR/mongodb-healthcheck.sh"
 
@@ -73,6 +83,7 @@ echo && echo "$(current_datetime) - Starting Kafka"
 mkdir -p "$PERSISTENT_DIR/kafka_data"
 mkdir -p "$LOGS_DIR/kafka"
 apptainer instance run \
+    --bind "$BOOM_DIR/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
     --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
     --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
     --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
@@ -85,6 +96,9 @@ apptainer instance run \
 echo && echo "$(current_datetime) - Starting BOOM instance"
 mkdir -p "$PERSISTENT_DIR/alerts"
 apptainer instance start \
+  --env BOOM_DATABASE__PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set} \
+  --env BOOM_DATABASE__USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin} \
+  --env RUST_LOG=debug,ort=error \
   --bind "$CONFIG_FILE:/app/config.yaml" \
   --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
   "$SIF_DIR/boom.sif" boom
@@ -99,7 +113,7 @@ if pgrep -f "/app/kafka_producer" > /dev/null; then
   echo -e "${RED}Boom producer already running.${END}"
 else
   apptainer exec --pwd /app \
-    instance://boom /app/kafka_producer ztf 20250311 public \
+    instance://boom /app/kafka_producer ztf 20250311 public --server-url localhost:29092 \
     > "$LOGS_DIR/producer.log" 2>&1
   echo -e "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
 fi

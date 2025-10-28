@@ -3,24 +3,25 @@ From: rust:1.87-slim-bookworm
 
 %environment
     export PATH=/app:$PATH
+    # Optional overrides
+    export BOOM_DATABASE__HOST=localhost
 
 %files
     Cargo.toml /app/Cargo.toml
     Cargo.lock /app/Cargo.lock
     src /app/src
-    api /app/api
     data/models /app/data/models
 
 %post
     apt-get update && \
     apt-get install -y \
-        curl gcc g++ make perl \
-        libhdf5-dev libsasl2-dev \
-        libssl-dev pkg-config && \
+      curl gcc g++ libhdf5-dev perl \
+      make libsasl2-dev pkg-config \
+      libsasl2-2 ca-certificates && \
     apt-get autoremove && apt-get clean && rm -rf /var/lib/apt/lists/*
 
     cd /app
-    cargo build --release --workspace
+    cargo build --release
 
     cp /app/target/release/kafka_producer /app/kafka_producer
     cp /app/target/release/kafka_consumer /app/kafka_consumer

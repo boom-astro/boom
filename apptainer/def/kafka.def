@@ -4,8 +4,8 @@ From: apache/kafka:latest
 %environment
     export PATH=/opt/kafka/bin:$PATH
     export KAFKA_BROKER_ID=1
-    export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
-    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:29092,PLAINTEXT_HOST://127.0.0.1:9092
+    export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:29092,PLAINTEXT_HOST://127.0.0.1:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9093
     export KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
     export KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
     export KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
@@ -13,8 +13,18 @@ From: apache/kafka:latest
     export KAFKA_PROCESS_ROLES=broker,controller
     export KAFKA_NODE_ID=1
     export KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:29093
-    export KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+    export KAFKA_LISTENERS=PLAINTEXT://127.0.0.1:29092,CONTROLLER://127.0.0.1:29093,PLAINTEXT_HOST://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
     export KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
     export KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
     export KAFKA_LOG_DIRS=/var/lib/kafka/data
     export KAFKA_NUM_PARTITIONS=15
+    export KAFKA_SASL_ENABLED_MECHANISMS=SCRAM-SHA-512
+    export KAFKA_LISTENER_NAME_EXTERNAL_SASL_ENABLED_MECHANISMS=SCRAM-SHA-512
+    export KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer
+    export KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND='true'
+    # Include ANONYMOUS because inter-broker + controller channels use PLAINTEXT (no SASL),
+    # so the principal resolves to User:ANONYMOUS. Without granting it super-user rights,
+    # controller metadata or internal admin ops can be unauthorized and cause the process to exit.
+    # (Alternative=secure internal listener with SASL and drop ANONYMOUS.)
+    export KAFKA_SUPER_USERS="User:admin;User:ANONYMOUS"
+    export KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf

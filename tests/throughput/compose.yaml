@@ -94,7 +94,7 @@ services:
     image: boom/boom-benchmarking:latest
     hostname: producer
     build:
-      dockerfile: ${PWD}/Dockerfile-benchmark
+      dockerfile: ${PWD}/Dockerfile
       context: ${PWD}
       pull: false
     command:
@@ -104,6 +104,8 @@ services:
       - public
       - --server-url
       - broker:29092
+    environment:
+      RUST_LOG: debug,ort=error
     networks:
       - boom
     depends_on:
@@ -113,19 +115,19 @@ services:
     volumes:
       - ${PWD}/data/alerts:/app/data/alerts
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-  # TODO: Add a prestart script here to load in some filters and have others
-  # depend on its "service_completed_successfully" healthcheck
   consumer:
-    image: boom/boom-benchmarking:latest
+    image: boom-astro/boom:latest
     hostname: consumer
     build:
-      dockerfile: ${PWD}/Dockerfile-benchmark
+      dockerfile: ${PWD}/Dockerfile
       context: ${PWD}
       pull: false
     networks:
       - boom
     # have it sleep 5 seconds to allow kafka to finish producing
     command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 public"]
+    environment:
+      RUST_LOG: debug,ort=error
     depends_on:
       producer:
         condition: service_completed_successfully
@@ -138,10 +140,10 @@ services:
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
   scheduler:
-    image: boom/boom-benchmarking:latest
+    image: boom-astro/boom:latest
     hostname: scheduler
     build:
-      dockerfile: ${PWD}/Dockerfile-benchmark
+      dockerfile: ${PWD}/Dockerfile
       context: ${PWD}
       pull: false
     command:
