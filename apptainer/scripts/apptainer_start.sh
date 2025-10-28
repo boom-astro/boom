@@ -58,6 +58,13 @@ if [ "$2" != "all" ] && [ "$2" != "boom" ] && [ "$2" != "consumer" ] && [ "$2" !
 fi
 
 # -----------------------------
+# Load environment variables from .env file
+# -----------------------------
+set -a
+source .env
+set +a
+
+# -----------------------------
 # 1. MongoDB
 # -----------------------------
 if start_service "mongo" "$2"; then
@@ -83,18 +90,26 @@ if start_service "valkey" "$2"; then
 fi
 
 # -----------------------------
-# 3. Kafka kafka
+# 3. Kafka
 # -----------------------------
 if start_service "kafka" "$2"; then
   echo && echo "$(current_datetime) - Starting Kafka"
   mkdir -p "$PERSISTENT_DIR/kafka_data"
   mkdir -p "$LOGS_DIR/kafka"
   apptainer instance run \
-      --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
-      --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
-      --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
-      "$SIF_DIR/kafka.sif" kafka
+    --bind "$BOOM_DIR/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
+    --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
+    --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
+    --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
+    "$SIF_DIR/kafka.sif" kafka
   "$SCRIPTS_DIR/kafka-healthcheck.sh"
+
+  echo "$(current_datetime) - Initializing Kafka ACLs"
+  apptainer exec \
+    --env KAFKA_ADMIN_PASSWORD="${KAFKA_ADMIN_PASSWORD}" \
+    --env KAFKA_READONLY_PASSWORD="${KAFKA_READONLY_PASSWORD}" \
+    --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
+    "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
 fi
 
 # -----------------------------
@@ -161,20 +176,26 @@ if [ -n "$3" ] && { start_service "boom" "$2" || start_service "consumer" "$2" |
     exit 1
   fi
 
+  # -----------------------------
+  # 4a. Boom Consumer
+  # -----------------------------
   if start_service "boom" "$2" || start_service "consumer" "$2"; then
     ARGS=("$survey")
     [ -n "$4" ] && ARGS+=("$4") # $4=date
     [ -n "$5" ] && ARGS+=("$5") # $5=program ID
-    if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
+    if pgrep -f "/app/kafka_consumer ${ARGS[*]} --auto-switch-date" > /dev/null; then
       echo -e "${RED}Boom consumer already running.${END}"
     else
-      apptainer exec --env-file .env --pwd /app \
+      apptainer exec --pwd /app \
         instance://boom /app/kafka_consumer "${ARGS[@]}" \
         > "$LOGS_DIR/${survey}${4:+_$4}${5:+_$5}_consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
   fi
 
+  # -----------------------------
+  # 4a. Boom Scheduler
+  # -----------------------------
   if start_service "boom" "$2" || start_service "scheduler" "$2"; then
     ARGS=("$survey")
     [ -n "$6" ] && ARGS+=("$6") # $6=config path
