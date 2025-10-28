@@ -23,6 +23,7 @@ jobs:
     env:
       ENVIRONMENT: production
       DOMAIN: ${{ vars.DOMAIN }}
+      BOOM_DATABASE__HOST: ${{ vars.BOOM_DATABASE__HOST }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_USERNAME: ${{ vars.BOOM_API__AUTH__ADMIN_USERNAME }}
@@ -40,7 +41,7 @@ jobs:
           ref: ${{ github.event.inputs.version || github.ref }}
       - run: >
           docker compose --profile prod
-          -f docker-compose.yml build
+          -f docker-compose.yaml build
       - run: >
           docker compose --profile prod
-          -f docker-compose.yml up -d
+          -f docker-compose.yaml up -d
