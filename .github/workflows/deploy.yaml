@@ -40,7 +40,7 @@ jobs:
           ref: ${{ github.event.inputs.version || github.ref }}
       - run: >
           docker compose --profile prod --profile babamul
-          -f docker-compose.yml build
+          -f docker-compose.yaml build
       - run: >
           docker compose --profile prod --profile babamul
-          -f docker-compose.yml up -d
+          -f docker-compose.yaml up -d
