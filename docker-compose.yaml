@@ -121,6 +121,7 @@ services:
       # Optional overrides (these have defaults in config.yaml)
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
     networks:
       - boom
       - traefik-public
@@ -202,6 +203,7 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
     networks:
       - boom
     profiles:
@@ -223,6 +225,7 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
     networks:
       - boom
     profiles:
