@@ -3,8 +3,11 @@
 #   test - send message to testing chat instead of info chat
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
-SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
-KAFKA_TEMP_GROUP="temp_group"
+HEALTHCHECK_DIR="$BOOM_DIR/apptainer/scripts/healthcheck"
+KAFKA_TEMP_GROUP="temp_group_$(date +%s)"
+
+RED="\e[31m"
+END="\e[0m"
 
 get_kafka_temp_group(){
   local survey=$1
@@ -18,7 +21,8 @@ for survey in LSST ZTF; do
     --topic "${survey}_alerts_results" \
     --group "$(get_kafka_temp_group "$survey")" \
     --from-beginning \
-    --max-messages 1 > /dev/null 2>&1
+    --max-messages 1 \
+    --timeout-ms 5000 > /dev/null 2>&1
 done
 
 if [[ -f "$BOOM_DIR/.env" ]]; then
@@ -26,7 +30,7 @@ if [[ -f "$BOOM_DIR/.env" ]]; then
   source "$BOOM_DIR/.env"
   set +a
 else
-  echo -e "\e[31mError: .env file is missing in $BOOM_DIR\e[0m"
+  echo -e "${RED}Error: .env file is missing in $BOOM_DIR${END}"
   exit 1
 fi
 
@@ -124,17 +128,17 @@ while true; do
   for survey in LSST ZTF; do
     # --- Get new counts from Kafka ---
     filtered_alerts=0
-    if "$SCRIPTS_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
+    if "$HEALTHCHECK_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
       filtered_alerts=$(get_kafka_count "$survey")
       filtered_msg=$(format "$((filtered_alerts - old_alerts_count["${survey}_filtered"]))")
       old_alerts_count["${survey}_filtered"]=$filtered_alerts
     else
-      filtered_alerts=old_alerts_count["${survey}_filtered"]
+      filtered_alerts=${old_alerts_count["${survey}_filtered"]}
       filtered_msg="Kafka is down!"
     fi
 
     # --- Get new counts from MongoDB ---
-    if "$SCRIPTS_DIR/mongodb-healthcheck.sh" > /dev/null 2>&1; then
+    if "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" > /dev/null 2>&1; then
       for col in "${collections[@]}"; do
           current_db["${survey}_alerts${col}"]=$(get_mongo_count "${survey}_alerts${col}")
       done
