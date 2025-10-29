@@ -5,6 +5,7 @@
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
+HEALTHCHECK_DIR="$SCRIPTS_DIR/healthcheck"
 LOGS_DIR="$BOOM_DIR/logs/boom"
 
 BLUE="\e[0;34m"
@@ -145,15 +146,14 @@ fi
 # -----------------------------
 if [ "$1" == "health" ]; then
   apptainer instance list && echo
-  "$SCRIPTS_DIR/mongodb-healthcheck.sh" 0
-  "$SCRIPTS_DIR/valkey-healthcheck.sh" 0
-  "$SCRIPTS_DIR/kafka-healthcheck.sh" 0
-  "$SCRIPTS_DIR/process-healthcheck.sh" "/app/kafka_consumer" consumer
-  "$SCRIPTS_DIR/process-healthcheck.sh" "/app/scheduler" scheduler
-  "$SCRIPTS_DIR/prometheus-healthcheck.sh" 0
-  "$SCRIPTS_DIR/process-healthcheck.sh" "/otelcol" otel-collector
-  "$SCRIPTS_DIR/boom-listener-healthcheck.sh" 0
-  "$SCRIPTS_DIR/kuma-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/valkey-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/kafka-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/boom-healthcheck.sh"
+  "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/process-healthcheck.sh" "/otelcol" otel-collector
+  "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/kuma-healthcheck.sh" 0
   exit 0
 fi
 

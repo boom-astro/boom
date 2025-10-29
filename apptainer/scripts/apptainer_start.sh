@@ -25,6 +25,7 @@ BOOM_DIR="$1"
 LOGS_DIR="$BOOM_DIR/logs/boom"
 PERSISTENT_DIR="$BOOM_DIR/apptainer/persistent"
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
+HEALTHCHECK_DIR="$SCRIPTS_DIR/healthcheck"
 CONFIG_FILE="$BOOM_DIR/config.yaml"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
@@ -72,7 +73,7 @@ if start_service "mongo" "$2"; then
   mkdir -p "$PERSISTENT_DIR/mongodb"
   apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
   sleep 5
-  "$SCRIPTS_DIR/mongodb-healthcheck.sh"
+  "$HEALTHCHECK_DIR/mongodb-healthcheck.sh"
 fi
 
 # -----------------------------
@@ -86,7 +87,7 @@ if start_service "valkey" "$2"; then
     --bind "$PERSISTENT_DIR/valkey:/data" \
     --bind "$LOGS_DIR/valkey:/log" \
     "$SIF_DIR/valkey.sif" valkey
-  "$SCRIPTS_DIR/valkey-healthcheck.sh"
+  "$HEALTHCHECK_DIR/valkey-healthcheck.sh"
 fi
 
 # -----------------------------
@@ -102,7 +103,7 @@ if start_service "kafka" "$2"; then
     --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
     --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
     "$SIF_DIR/kafka.sif" kafka
-  "$SCRIPTS_DIR/kafka-healthcheck.sh"
+  "$HEALTHCHECK_DIR/kafka-healthcheck.sh"
 
   echo "$(current_datetime) - Initializing Kafka ACLs"
   apptainer exec \
@@ -122,7 +123,7 @@ if start_service "prometheus" "$2"; then
     --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
     --bind "$LOGS_DIR/prometheus:/var/log" \
     "$SIF_DIR/prometheus.sif" prometheus
-  "$SCRIPTS_DIR/prometheus-healthcheck.sh"
+  "$HEALTHCHECK_DIR/prometheus-healthcheck.sh"
 fi
 
 # -----------------------------
@@ -141,7 +142,7 @@ if start_service "otel" "$2"; then
       > "$LOGS_DIR/otel/otel.log" 2>&1 &
   fi
   sleep 1
-  "$SCRIPTS_DIR/process-healthcheck.sh" "otelcol" otel-collector
+  "$HEALTHCHECK_DIR/process-healthcheck.sh" "otelcol" otel-collector
 fi
 
 # -----------------------------
@@ -153,9 +154,9 @@ if start_service "listener" "$2"; then
     echo "$(current_datetime) - Boom healthcheck listener already running"
   else
     mkdir -p "$LOGS_DIR/listener"
-    python "$SCRIPTS_DIR/boom-healthcheck-listener.py" > "$LOGS_DIR/listener/listener.log" 2>&1 &
+    python "$HEALTHCHECK_DIR/boom-healthcheck-listener.py" > "$LOGS_DIR/listener/listener.log" 2>&1 &
   fi
-  "$SCRIPTS_DIR/boom-listener-healthcheck.sh"
+  "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh"
 fi
 
 # -----------------------------
@@ -220,5 +221,5 @@ if start_service "kuma" "$2"; then
     --bind "$PERSISTENT_DIR/kuma:/app/data" \
     --bind "$LOGS_DIR/kuma:/app/logs" \
     "$SIF_DIR/kuma.sif" kuma
-  "$SCRIPTS_DIR/kuma-healthcheck.sh"
+  "$HEALTHCHECK_DIR/kuma-healthcheck.sh"
 fi

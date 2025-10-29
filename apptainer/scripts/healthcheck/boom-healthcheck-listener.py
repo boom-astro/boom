@@ -5,7 +5,7 @@ def check_process(process_name):
     """Call the shell process-healthcheck.sh script and return True if healthy."""
     try:
         subprocess.run(
-            [f"apptainer/scripts/process-healthcheck.sh", process_name],
+            [f"apptainer/scripts/healthcheck/process-healthcheck.sh", process_name],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
@@ -20,7 +20,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.respond(200, "ok\n")
         elif self.path == "/consumer_health":
-            status = check_process("/app/kafka_consume")
+            status = check_process("/app/kafka_consumer")
             self.respond(200 if status else 503,
                          f"consumer {'is healthy' if status else 'unhealthy'}\n")
         elif self.path == "/scheduler_health":
