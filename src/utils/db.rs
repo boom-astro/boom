@@ -1,4 +1,3 @@
-use flare::spatial::radec2lb;
 use mongodb::{
     bson::{doc, to_document, Document},
     options::IndexOptions,
@@ -34,19 +33,6 @@ pub fn mongify<T: Serialize>(value: &T) -> Document {
     // ahead of time.
     // TODO: drop this function entirely and avoid unwrapping
     to_document(value).unwrap()
-}
-
-#[instrument]
-pub fn get_coordinates(ra: f64, dec: f64) -> Document {
-    let (l, b) = radec2lb(ra, dec);
-    doc! {
-        "radec_geojson": {
-            "type": "Point",
-            "coordinates": [ra - 180.0, dec]
-        },
-        "l": l,
-        "b": b
-    }
 }
 
 #[instrument(skip_all)]
