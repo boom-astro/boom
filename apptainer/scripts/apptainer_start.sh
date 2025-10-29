@@ -162,7 +162,7 @@ fi
 # -----------------------------
 # 4. Boom
 # -----------------------------
-if [ -n "$3" ] && { start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; }; then
+if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   echo && echo "$(current_datetime) - Starting BOOM instance"
   mkdir -p "$PERSISTENT_DIR/alerts"
   apptainer instance start \
@@ -187,7 +187,7 @@ if [ -n "$3" ] && { start_service "boom" "$2" || start_service "consumer" "$2" |
     if pgrep -f "/app/kafka_consumer ${ARGS[*]} --auto-switch-date" > /dev/null; then
       echo -e "${RED}Boom consumer already running.${END}"
     else
-      apptainer exec --pwd /app \
+      apptainer exec --pwd /app --env-file .env \
         instance://boom /app/kafka_consumer "${ARGS[@]}" \
         > "$LOGS_DIR/${survey}${4:+_$4}${5:+_$5}_consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
@@ -203,7 +203,7 @@ if [ -n "$3" ] && { start_service "boom" "$2" || start_service "consumer" "$2" |
     if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
       echo -e "${RED}Boom scheduler already running.${END}"
     else
-      apptainer exec --pwd /app instance://boom /app/scheduler \
+      apptainer exec --pwd /app --env-file .env instance://boom /app/scheduler \
         "${ARGS[@]}" > "$LOGS_DIR/${survey}_scheduler.log" 2>&1 &
       echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
     fi
