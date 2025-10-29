@@ -1,5 +1,7 @@
 use crate::api::models::response;
+use crate::api::routes::users::User;
 use actix_web::{get, web, HttpResponse};
+use std::str;
 
 /// Check the health of the API server
 #[utoipa::path(
@@ -28,7 +30,14 @@ pub async fn get_health() -> HttpResponse {
     tags=["Info"]
 )]
 #[get("/db-info")]
-pub async fn get_db_info(db: web::Data<mongodb::Database>) -> HttpResponse {
+pub async fn get_db_info(
+    db: web::Data<mongodb::Database>,
+    current_user: web::ReqData<User>,
+) -> HttpResponse {
+    // Only admins can access this endpoint
+    if !current_user.is_admin {
+        return response::forbidden("Access denied: Admins only");
+    }
     match db.run_command(mongodb::bson::doc! { "dbstats": 1 }).await {
         Ok(stats) => response::ok("success", serde_json::to_value(stats).unwrap()),
         Err(e) => response::internal_error(&format!("Error getting database info: {:?}", e)),

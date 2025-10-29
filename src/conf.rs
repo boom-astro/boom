@@ -437,6 +437,19 @@ pub fn build_kafka_config(
     SurveyKafkaConfig::from_config(conf, survey)
 }
 
+/// Return whether the babamul worker is enabled per config `babamul.enabled`.
+/// If the key is missing, returns false.
+pub fn babamul_enabled(conf: &Config) -> bool {
+    // try to read the `babamul` table first; if missing, default to false
+    match conf.get_table("babamul") {
+        Ok(table) => match table.get("enabled") {
+            Some(v) => v.clone().into_bool().unwrap_or(false),
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub struct AuthConfig {
     pub secret_key: String,

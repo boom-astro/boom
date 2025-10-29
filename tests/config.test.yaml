@@ -8,6 +8,8 @@ database:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+babamul:
+  enabled: false
 api:
   auth:
     secret_key: "1234"
