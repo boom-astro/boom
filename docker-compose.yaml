@@ -49,6 +49,7 @@ services:
     networks:
       - boom
       - traefik-public
+    restart: always
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
@@ -79,8 +80,14 @@ services:
       - kafka_data:/var/lib/kafka/data
       - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
     healthcheck:
-      test: ["CMD", "/opt/kafka/bin/kafka-cluster.sh", "cluster-id", "--bootstrap-server", "broker:29092"]
+      # Robust readiness: ensure controller quorum responds and broker APIs are available, with explicit timeouts
+      test: ["CMD-SHELL", "set -euo pipefail; \
+        timeout 8s /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server broker:29092 describe --status >/dev/null 2>&1 && \
+        timeout 6s /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server broker:29092 >/dev/null 2>&1"]
       interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public

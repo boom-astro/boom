@@ -20,41 +20,44 @@ ADMIN_USER="admin"
 ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
 READ_PWD="${KAFKA_READONLY_PASSWORD}"
-TIMEOUT=60
+TIMEOUT=60 # seconds
 
 # KAFKA_OPTS with JAAS is set at container level (docker-compose).
 
 kafka_log() { echo "[init-kafka] $*"; }
 
 wait_for_kafka() {
-  local -r start=$(date +%s)
+  local start=$(date +%s)
   kafka_log "Waiting for Kafka at $BROKER (cluster-id)"
   until /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server "$BROKER" >/dev/null 2>&1; do
-    if (( $(date +%s) - start > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for cluster-id from $BROKER"; exit 1
     fi
     sleep 3
   done
 
+  local start=$(date +%s)
   kafka_log "Waiting for metadata quorum readiness"
   until /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server "$BROKER" describe --status >/dev/null 2>&1; do
-    if (( $(date +%s) - start > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for metadata quorum describe --status"; exit 1
     fi
     sleep 3
   done
 
+  local start=$(date +%s)
   kafka_log "Waiting for configs API (users --describe)"
   until /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" --entity-type users --describe >/dev/null 2>&1; do
-    if (( $(date +%s) - start > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for configs API to respond"; exit 1
     fi
     sleep 3
   done
 
+  local start=$(date +%s)
   kafka_log "Waiting for authorizer (acls --list)"
   until /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$BROKER" --list >/dev/null 2>&1; do
-    if (( $(date +%s) - start > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for authorizer to respond"; exit 1
     fi
     sleep 3
