@@ -54,17 +54,6 @@ fi
 # 2. Start services
 # -----------------------------
 if [ "$1" == "start" ]; then
-  if { [ "$2" == "boom" ] || [ "$2" == "consumer" ] || [ "$2" == "scheduler" ]; } && [ -z "$3" ]; then
-    echo -e "${RED}Error: Missing survey name argument.${END}"
-    echo -e "Usage: ${BLUE}$0 start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
-    echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
-    echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
-    echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
-    echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
-    echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
-    exit 1
-  fi
-
   ARGS=("$BOOM_DIR")
   # Check if $2 is a survey name
   if [ -z "$2" ] || [ "$2" = "lsst" ] || [ "$2" = "ztf" ] || [ "$2" = "decam" ]; then
@@ -87,12 +76,12 @@ fi
 # -----------------------------
 if [ "$1" == "stop" ]; then
   target="$2"
-  if [ -n "$target" ] && [ "$target" != "all" ] && [ "$target" != "boom" ] && [ "$target" != "consumer" ] && [ "$target" != "scheduler" ] \
+  if [ -n "$target" ] && [ "$target" != "all" ] && [[ "$target" != boom* ]] && [ "$target" != "consumer" ] && [ "$target" != "scheduler" ] \
     && [ "$target" != "mongo" ] && [ "$target" != "kafka" ] && [ "$target" != "valkey" ] && [ "$target" != "prometheus" ] \
     && [ "$target" != "otel" ] && [ "$target" != "listener" ] && [ "$target" != "kuma" ]; then
     echo -e "${RED}Error: Invalid service name '$target'.${END}"
     echo -e "Usage: ${BLUE}$0 stop [service|all|'empty']${END} ${YELLOW}('empty' will default to all)${END}"
-    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma ${END}"
+    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom_<survey> | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma ${END}"
     exit 1
   fi
 
@@ -109,7 +98,13 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop prometheus
   fi
   if stop_service "boom" "$target"; then
-    apptainer instance stop boom
+    echo "Stopping all boom instances..."
+    for instance in $(apptainer instance list | awk '{print $1}' | grep "^boom"); do
+        apptainer instance stop "$instance"
+    done
+  elif [[ "$target" == boom* ]]; then
+    apptainer instance stop "$target"
+    exit 0
   elif stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed

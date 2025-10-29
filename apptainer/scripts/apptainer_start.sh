@@ -29,6 +29,7 @@ HEALTHCHECK_DIR="$SCRIPTS_DIR/healthcheck"
 CONFIG_FILE="$BOOM_DIR/config.yaml"
 SIF_DIR="$BOOM_DIR/apptainer/sif"
 
+YELLOW="\e[33m"
 GREEN="\e[32m"
 BLUE="\e[34m"
 RED="\e[31m"
@@ -163,19 +164,27 @@ fi
 # 4. Boom
 # -----------------------------
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
-  echo && echo "$(current_datetime) - Starting BOOM instance"
-  mkdir -p "$PERSISTENT_DIR/alerts"
-  apptainer instance start \
-    --bind "$CONFIG_FILE:/app/config.yaml" \
-    --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
-    "$SIF_DIR/boom.sif" boom
-
-  sleep 3
   survey=$3
-  if [ -z "$survey" ]; then
-    echo -e "${RED}Missing required argument: survey name${END}"
-    exit 1
+  if ! apptainer instance list | awk '{print $1}' | grep -xq "boom${survey:+_$survey}"; then
+    echo && echo "$(current_datetime) - Starting boom_$survey instance"
+    apptainer instance start \
+      --bind "$CONFIG_FILE:/app/config.yaml" \
+      "$SIF_DIR/boom.sif" "boom${survey:+_$survey}"
+    sleep 3
+  else
+    echo && echo -e "$(current_datetime) - ${YELLOW}BOOM instance already running${END}"
   fi
+
+  if [ -z "$survey" ]; then
+      echo -e "${RED}Survey name not provided, consumer or scheduler cannot be started.${END}"
+      echo -e "${BLUE}apptainer_start.sh start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
+      echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
+      echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
+      echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
+      echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
+      echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
+      exit 1
+    fi
 
   # -----------------------------
   # 4a. Boom Consumer
@@ -188,7 +197,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       echo -e "${RED}Boom consumer already running.${END}"
     else
       apptainer exec --pwd /app --env-file .env \
-        instance://boom /app/kafka_consumer "${ARGS[@]}" \
+        "instance://boom_$survey" /app/kafka_consumer "${ARGS[@]}" \
         > "$LOGS_DIR/${survey}${4:+_$4}${5:+_$5}_consumer.log" 2>&1 &
       echo -e "${GREEN}Boom consumer started for survey $survey${END}"
     fi
@@ -203,7 +212,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
       echo -e "${RED}Boom scheduler already running.${END}"
     else
-      apptainer exec --pwd /app --env-file .env instance://boom /app/scheduler \
+      apptainer exec --pwd /app --env-file .env "instance://boom_$survey" /app/scheduler \
         "${ARGS[@]}" > "$LOGS_DIR/${survey}_scheduler.log" 2>&1 &
       echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
     fi
