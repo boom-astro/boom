@@ -221,33 +221,40 @@ if [ "$1" == "log" ]; then
   if [ "$service" = "scheduler" ] || [ "$service" = "s" ]; then
     echo -e "${BLUE}Displaying $survey scheduler log...${END}"
     tail -f "$LOGS_DIR/${survey}_scheduler.log"
-  else
-    date="$4"
-    program="$5"
-
-    if [ "$date" == "public" ] || [ "$date" == "partnership" ] || [ "$date" == "part" ] || [ "$date" == "caltech" ]; then
-      program="$date"
-      date=""
-    elif [ $survey == "ztf" ] && [ -z "$program" ]; then
-      program="public"
-    fi
-
-    if [ "$program" == "part" ]; then
-      program="partnership"
-    fi
-
-    if [ -n "$date" ]; then
-      echo -e "${BLUE}Displaying $survey${program:+ $program} consumer log for date $date...${END}"
-      tail -f "$LOGS_DIR/${survey}_${date}${program:+_$program}_consumer.log"
-    else # no date provided, display the latest consumer log
-      latest_log="$(ls -t "$LOGS_DIR/${survey}_"*"${program:+_$program}_consumer.log" 2>/dev/null | head -n 1)"
-      if [ -z "$latest_log" ]; then
-        echo -e "${RED}Error: No consumer log files found for survey $survey${program:+ and program $program}.${END}"
-        exit 1
-      fi
-
-      echo -e "${BLUE}Displaying latest $survey${program:+ $program} consumer log ($(basename  "$latest_log"))...${END}"
-      tail -f "$latest_log"
-    fi
+    exit 0
   fi
+
+  # --- Consumer ---
+  shift 3
+  args=("$@")
+
+  date_arg=""
+  program_arg=""
+  logs_found=($(ls "$LOGS_DIR" | grep -E "^${survey}_[0-9]{8}_[a-z]+_consumer\.log$" | sort))
+
+  for arg in "${args[@]}"; do
+    case "$arg" in
+      public|partnership|part|caltech)
+        [ "$arg" = "part" ] && arg="partnership"
+        program_arg="$arg"
+        ;;
+      last) # find the latest date available
+        date_arg=$(echo "${logs_found[-1]}" | cut -d'_' -f2)
+        ;;
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+        date_arg="$arg"
+        ;;
+    esac
+  done
+
+  log_pattern="${survey}_${date_arg:-*}_${program_arg:-*}_consumer.log"
+  log_files=($LOGS_DIR/$log_pattern)
+
+  if [ ${#log_files[@]} -eq 0 ]; then
+    echo -e "${RED}No matching log files found for pattern: ${log_pattern}${END}"
+    exit 1
+  fi
+
+  echo -e "${BLUE}Displaying ${log_pattern} file(s):${END}"
+  tail -f "${log_files[@]}"
 fi
