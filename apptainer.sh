@@ -98,7 +98,6 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop prometheus
   fi
   if stop_service "boom" "$target"; then
-    echo "Stopping all boom instances..."
     for instance in $(apptainer instance list | awk '{print $1}' | grep "^boom"); do
         apptainer instance stop "$instance"
     done
