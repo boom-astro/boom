@@ -246,7 +246,7 @@ if [ "$1" == "log" ]; then
     esac
   done
 
-  log_pattern="${survey}_${date_arg:-*}_${program_arg:-*}_consumer.log"
+  log_pattern="${survey}_${date_arg:-*}${program_arg:+_${program_arg}}*consumer.log"
   log_files=($LOGS_DIR/$log_pattern)
 
   if [ ${#log_files[@]} -eq 0 ]; then
