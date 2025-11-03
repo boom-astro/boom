@@ -105,7 +105,7 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop "boom_lsst"
     apptainer instance stop "boom_ztf"
     apptainer instance stop "boom_decam"
-  if stop_service "consumer" "$target"; then
+  elif stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
     [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all dates are killed
