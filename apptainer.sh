@@ -98,13 +98,14 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop prometheus
   fi
   if stop_service "boom" "$target"; then
-    for instance in $(apptainer instance list | awk '{print $1}' | grep "^boom"); do
-        apptainer instance stop "$instance"
-    done
-  elif [[ "$target" == boom* ]]; then
-    apptainer instance stop "$target"
-    exit 0
-  elif stop_service "consumer" "$target"; then
+    if [ "$target" = "boom" ] && [ -n "$3" ]; then
+      apptainer instance stop "boom_$3"
+      exit 0
+    fi
+    apptainer instance stop "boom_lsst"
+    apptainer instance stop "boom_ztf"
+    apptainer instance stop "boom_decam"
+  if stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
     [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all dates are killed
