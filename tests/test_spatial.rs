@@ -19,6 +19,5 @@ async fn test_xmatch() {
         .unwrap();
     assert_eq!(xmatches.len(), 4);
 
-    // xmatch is a Vec<Vec<bson::Document>>
-    let _ps1_xmatch = &xmatches.get("PS1_DR1").unwrap();
+    let _ps1_xmatch = xmatches.get("PS1_DR1").unwrap();
 }
