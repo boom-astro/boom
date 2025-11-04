@@ -1,5 +1,7 @@
-use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
+use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
+use crate::utils::lightcurves::{
+    analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
+};
 use crate::{
     alert::ZtfCandidate,
     enrichment::{
@@ -83,6 +85,15 @@ pub struct ZtfAlertEnrichment {
     pub candidate: ZtfCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ZtfAlertProperties {
+    pub rock: bool,
+    pub star: bool,
+    pub near_brightstar: bool,
+    pub stationary: bool,
+    pub photstats: PerBandProperties,
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -206,10 +217,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
-            let find_document = doc! {
-                "_id": candid
-            };
-
             let update_alert_document = doc! {
                 "$set": {
                     // ML scores
@@ -220,14 +227,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "classifications.acai_b": acai_b_scores[0],
                     "classifications.btsbot": btsbot_scores[0],
                     // properties
-                    "properties": properties,
+                    "properties": mongify(&properties),
                 }
             };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(find_document)
+                    .filter(doc! {"_id": candid})
                     .update(update_alert_document)
                     .build(),
             );
@@ -246,11 +253,19 @@ impl ZtfEnrichmentWorker {
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertEnrichment,
-    ) -> Result<(Document, Document, i32, Vec<PhotometryMag>), EnrichmentWorkerError> {
+    ) -> Result<
+        (
+            ZtfAlertProperties,
+            AllBandsProperties,
+            i32,
+            Vec<PhotometryMag>,
+        ),
+        EnrichmentWorkerError,
+    > {
         let candidate = &alert.candidate.candidate;
         let programid = candidate.programid;
-        let ssdistnr = candidate.ssdistnr.unwrap_or(-999.0);
-        let ssmagnr = candidate.ssmagnr.unwrap_or(-999.0);
+        let ssdistnr = candidate.ssdistnr.unwrap_or(f32::INFINITY);
+        let ssmagnr = candidate.ssmagnr.unwrap_or(f32::INFINITY);
         let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
 
         let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
@@ -265,16 +280,29 @@ impl ZtfEnrichmentWorker {
         let srmag3 = candidate.srmag3.unwrap_or(f32::INFINITY);
         let sgmag1 = candidate.sgmag1.unwrap_or(f32::INFINITY);
         let simag1 = candidate.simag1.unwrap_or(f32::INFINITY);
+        let szmag1 = candidate.szmag1.unwrap_or(f32::INFINITY);
 
-        let is_star = sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0;
+        let neargaiabright = candidate.neargaiabright.unwrap_or(f32::INFINITY);
+        let maggaiabright = candidate.maggaiabright.unwrap_or(f32::INFINITY);
 
-        let is_near_brightstar =
-            (sgscore1 > 0.49 && distpsnr1 <= 20.0 && srmag1 > 0.0 && srmag1 <= 15.0)
-                || (sgscore2 > 0.49 && distpsnr2 <= 20.0 && srmag2 > 0.0 && srmag2 <= 15.0)
-                || (sgscore3 > 0.49 && distpsnr3 <= 20.0 && srmag3 > 0.0 && srmag3 <= 15.0)
-                || (sgscore1 == 0.5
-                    && distpsnr1 < 0.5
-                    && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
+        let is_star = (sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0)
+            || (sgscore1 > 0.2
+                && distpsnr1 >= 0.0
+                && distpsnr1 <= 1.0
+                && srmag1 > 0.0
+                && ((szmag1 > 0.0 && srmag1 - szmag1 > 3.0)
+                    || (simag1 > 0.0 && srmag1 - simag1 > 3.0)));
+
+        let is_near_brightstar = (neargaiabright >= 0.0
+            && neargaiabright <= 20.0
+            && maggaiabright > 0.0
+            && maggaiabright <= 12.0)
+            || (sgscore1 > 0.49 && distpsnr1 <= 20.0 && srmag1 > 0.0 && srmag1 <= 15.0)
+            || (sgscore2 > 0.49 && distpsnr2 <= 20.0 && srmag2 > 0.0 && srmag2 <= 15.0)
+            || (sgscore3 > 0.49 && distpsnr3 <= 20.0 && srmag3 > 0.0 && srmag3 <= 15.0)
+            || (sgscore1 == 0.5
+                && distpsnr1 < 0.5
+                && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
 
         let prv_candidates = alert.prv_candidates.clone();
         let fp_hists = alert.fp_hists.clone();
@@ -286,12 +314,12 @@ impl ZtfEnrichmentWorker {
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
         Ok((
-            doc! {
-                "rock": is_rock,
-                "star": is_star,
-                "near_brightstar": is_near_brightstar,
-                "stationary": stationary,
-                "photstats": photstats,
+            ZtfAlertProperties {
+                rock: is_rock,
+                star: is_star,
+                near_brightstar: is_near_brightstar,
+                stationary,
+                photstats,
             },
             all_bands_properties,
             programid,

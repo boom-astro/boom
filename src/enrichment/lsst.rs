@@ -1,7 +1,9 @@
 use crate::alert::LsstCandidate;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::{fetch_timeseries_op, get_array_element};
-use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
+use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
+use crate::utils::lightcurves::{
+    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -79,6 +81,13 @@ pub struct LsstAlertEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct LsstAlertProperties {
+    pub rock: bool,
+    pub stationary: bool,
+    pub photstats: PerBandProperties,
+}
+
 pub struct LsstEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -146,20 +155,16 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let properties = self.get_alert_properties(&alerts[i]).await?;
 
-            let find_document = doc! {
-                "_id": candid
-            };
-
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": mongify(&properties),
                 }
             };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(find_document)
+                    .filter(doc! {"_id": candid})
                     .update(update_alert_document)
                     .build(),
             );
@@ -178,7 +183,7 @@ impl LsstEnrichmentWorker {
     async fn get_alert_properties(
         &self,
         alert: &LsstAlertEnrichment,
-    ) -> Result<Document, EnrichmentWorkerError> {
+    ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let candidate = &alert.candidate;
 
@@ -193,12 +198,10 @@ impl LsstEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
-        let properties = doc! {
-            // properties
-            "rock": is_rock,
-            "stationary": stationary,
-            "photstats": photstats,
-        };
-        Ok(properties)
+        Ok(LsstAlertProperties {
+            rock: is_rock,
+            stationary,
+            photstats,
+        })
     }
 }

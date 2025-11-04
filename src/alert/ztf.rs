@@ -363,7 +363,9 @@ pub struct Candidate {
     pub clrcoeff: Option<f32>,
     pub clrcounc: Option<f32>,
     pub neargaia: Option<f32>,
+    pub maggaia: Option<f32>,
     pub neargaiabright: Option<f32>,
+    pub maggaiabright: Option<f32>,
 }
 
 fn deserialize_isdiffpos_option<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>

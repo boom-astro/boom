@@ -1,8 +1,10 @@
-use crate::enrichment::{
-    models::{load_model, Model, ModelError},
-    ZtfAlertEnrichment,
+use crate::{
+    enrichment::{
+        models::{load_model, Model, ModelError},
+        ZtfAlertEnrichment,
+    },
+    utils::lightcurves::AllBandsProperties,
 };
-use mongodb::bson::Document;
 use ndarray::{Array, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
@@ -44,7 +46,7 @@ impl BtsBotModel {
     pub fn get_metadata(
         &self,
         alerts: &[ZtfAlertEnrichment],
-        alert_properties: &[Document],
+        alert_properties: &[AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
@@ -87,11 +89,11 @@ impl BtsBotModel {
                 .ok_or(ModelError::MissingFeature("distpsnr2"))? as f32;
 
             // alert properties already computed from lightcurve analysis
-            let peakmag = alert_properties[i].get_f64("peak_mag").unwrap();
-            let peakjd = alert_properties[i].get_f64("peak_jd").unwrap();
-            let faintestmag = alert_properties[i].get_f64("faintest_mag").unwrap();
-            let firstjd = alert_properties[i].get_f64("first_jd").unwrap();
-            let lastjd = alert_properties[i].get_f64("last_jd").unwrap();
+            let peakmag = alert_properties[i].peak_mag;
+            let peakjd = alert_properties[i].peak_jd;
+            let faintestmag = alert_properties[i].faintest_mag;
+            let firstjd = alert_properties[i].first_jd;
+            let lastjd = alert_properties[i].last_jd;
 
             let days_since_peak = (lastjd - peakjd) as f32;
             let days_to_peak = (peakjd - firstjd) as f32;

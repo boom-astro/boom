@@ -1,7 +1,9 @@
 use crate::alert::DecamCandidate;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::fetch_timeseries_op;
-use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
+use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::utils::lightcurves::{
+    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -78,6 +80,12 @@ pub struct DecamAlertEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DecamAlertProperties {
+    pub stationary: bool,
+    pub photstats: PerBandProperties,
+}
+
 pub struct DecamEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -144,20 +152,16 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
             let properties = self.get_alert_properties(&alerts[i]).await?;
 
-            let find_document = doc! {
-                "_id": candid
-            };
-
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": mongify(&properties),
                 }
             };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(find_document)
+                    .filter(doc! {"_id": candid})
                     .update(update_alert_document)
                     .build(),
             );
@@ -176,7 +180,7 @@ impl DecamEnrichmentWorker {
     async fn get_alert_properties(
         &self,
         alert: &DecamAlertEnrichment,
-    ) -> Result<Document, EnrichmentWorkerError> {
+    ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
         let prv_candidates = alert.prv_candidates.clone();
         let fp_hists = alert.fp_hists.clone();
 
@@ -186,10 +190,9 @@ impl DecamEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
-        let properties = doc! {
-            "stationary": stationary,
-            "photstats": photstats,
-        };
-        Ok(properties)
+        Ok(DecamAlertProperties {
+            stationary,
+            photstats,
+        })
     }
 }
