@@ -30,7 +30,7 @@ pub struct FailedAuthResponse {
 #[utoipa::path(
     post,
     path = "/auth",
-    request_body = AuthPost,
+    request_body(content = AuthPost, content_type = "application/x-www-form-urlencoded"),
     responses(
         (status = 200, description = "Successful authentication", body = AuthResponse),
         (status = 401, description = "Invalid Client", body = FailedAuthResponse),
