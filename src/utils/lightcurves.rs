@@ -27,10 +27,8 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
     10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema)]
 pub enum Band {
-    #[serde(rename = "all")]
-    All,
     #[serde(rename = "g")]
     G,
     #[serde(rename = "r")]
@@ -43,21 +41,6 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
-}
-
-// we want to impl From<String> for Band
-impl From<&str> for Band {
-    fn from(s: &str) -> Self {
-        match s {
-            "g" => Band::G,
-            "r" => Band::R,
-            "i" => Band::I,
-            "z" => Band::Z,
-            "y" => Band::Y,
-            "u" => Band::U,
-            _ => Band::All,
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -320,7 +303,6 @@ pub fn analyze_photometry(
             Band::Z => results.z = Some(band_properties),
             Band::Y => results.y = Some(band_properties),
             Band::U => results.u = Some(band_properties),
-            Band::All => {}
         }
     }
 

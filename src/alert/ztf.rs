@@ -7,7 +7,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
-        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, SNT},
+        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -35,11 +35,11 @@ pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
 
 const ZTF_ZP: f32 = 23.9;
 
-fn fid2band(fid: i32) -> Result<String, AlertError> {
+fn fid2band(fid: i32) -> Result<Band, AlertError> {
     match fid {
-        1 => Ok("g".to_string()),
-        2 => Ok("r".to_string()),
-        3 => Ok("i".to_string()),
+        1 => Ok(Band::G),
+        2 => Ok(Band::R),
+        3 => Ok(Band::I),
         _ => Err(AlertError::UnknownFid(fid)),
     }
 }
@@ -113,7 +113,7 @@ pub struct ZtfPrvCandidate {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
     pub snr: Option<f32>,
-    pub band: String,
+    pub band: Band,
 }
 
 impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
@@ -238,7 +238,7 @@ pub struct ZtfForcedPhot {
     pub sigmapsf: Option<f32>,
     pub isdiffpos: Option<bool>,
     pub snr: Option<f32>,
-    pub band: String,
+    pub band: Band,
 }
 
 impl TryFrom<FpHist> for ZtfForcedPhot {
@@ -434,7 +434,7 @@ pub struct ZtfCandidate {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: f32,
     pub snr: f32,
-    pub band: String,
+    pub band: Band,
 }
 
 impl TryFrom<Candidate> for ZtfCandidate {
@@ -916,6 +916,7 @@ mod tests {
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
+        assert_eq!(fp_negative_det.band, Band::G);
 
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
@@ -924,6 +925,7 @@ mod tests {
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
+        assert_eq!(fp_positive_det.band, Band::G);
 
         // validate the cutouts
         assert_eq!(avro_alert.cutout_science.len(), 13107);
