@@ -1,5 +1,6 @@
 use crate::{
     conf,
+    filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -554,6 +555,80 @@ pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Val
         ))?;
 
     Ok(filter_pipeline.to_vec())
+}
+
+pub async fn build_loaded_filter(
+    filter_id: &str,
+    survey: &Survey,
+    filter_collection: &mongodb::Collection<Filter>,
+) -> Result<LoadedFilter, FilterError> {
+    let filter = get_filter(filter_id, survey, filter_collection).await?;
+
+    if filter.permissions.is_empty() {
+        return Err(FilterError::InvalidFilterPermissions);
+    }
+
+    let pipeline = get_active_filter_pipeline(&filter)?;
+
+    // let pipeline = build_ztf_filter_pipeline(&pipeline, &filter.permissions).await?;
+    let pipeline = match filter.survey {
+        Survey::Ztf => {
+            if filter.permissions.is_empty() {
+                return Err(FilterError::InvalidFilterPermissions);
+            }
+            build_ztf_filter_pipeline(&pipeline, &filter.permissions).await?
+        }
+        Survey::Lsst => build_lsst_filter_pipeline(&pipeline).await?,
+        _ => {
+            return Err(FilterError::InvalidFilterPipeline(
+                "Unsupported survey for filter pipeline".to_string(),
+            ));
+        }
+    };
+
+    let loaded = LoadedFilter {
+        id: filter.id.clone(),
+        pipeline: pipeline,
+        permissions: filter.permissions,
+    };
+    Ok(loaded)
+}
+
+pub async fn build_loaded_filters(
+    filter_ids: &Option<Vec<String>>,
+    survey: &Survey,
+    filter_collection: &mongodb::Collection<Filter>,
+) -> Result<Vec<LoadedFilter>, FilterError> {
+    let all_filter_ids: Vec<String> = filter_collection
+        .distinct("_id", doc! {"active": true, "survey": survey.to_string()})
+        .await?
+        .into_iter()
+        .map(|x| {
+            x.as_str()
+                .map(|s| s.to_string())
+                .ok_or(FilterError::InvalidFilterId)
+        })
+        .collect::<Result<Vec<String>, FilterError>>()?;
+
+    let filter_ids = match filter_ids {
+        Some(ids) => {
+            // verify that they all exist in all_filter_ids
+            for id in ids {
+                if !all_filter_ids.contains(id) {
+                    return Err(FilterError::FilterNotFound);
+                }
+            }
+            ids.clone()
+        }
+        None => all_filter_ids.clone(),
+    };
+
+    let mut filters: Vec<LoadedFilter> = Vec::new();
+    for filter_id in filter_ids {
+        filters.push(build_loaded_filter(&filter_id, survey, &filter_collection).await?);
+    }
+
+    Ok(filters)
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use tracing::{info, instrument};
 
 use crate::filter::{
-    get_active_filter_pipeline, get_filter, run_filter, uses_field_in_filter,
-    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
-    FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
+    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
+    Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
+    Origin, Photometry,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;
@@ -286,23 +286,6 @@ pub async fn build_lsst_filter_pipeline(
     Ok(pipeline)
 }
 
-pub async fn build_lsst_loaded_filter(
-    filter_id: &str,
-    filter_collection: &mongodb::Collection<Filter>,
-) -> Result<LoadedFilter, FilterError> {
-    let filter = get_filter(filter_id, &Survey::Lsst, filter_collection).await?;
-
-    let pipeline = get_active_filter_pipeline(&filter)?;
-    let pipeline = build_lsst_filter_pipeline(&pipeline).await?;
-
-    let loaded = LoadedFilter {
-        id: filter.id.clone(),
-        pipeline: pipeline,
-        permissions: vec![], // permissions are not used for LSST filters
-    };
-    Ok(loaded)
-}
-
 pub struct LsstFilterWorker {
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     input_queue: String,
@@ -325,34 +308,7 @@ impl FilterWorker for LsstFilterWorker {
         let input_queue = "LSST_alerts_filter_queue".to_string();
         let output_topic = "LSST_alerts_results".to_string();
 
-        let all_filter_ids: Vec<String> = filter_collection
-            .distinct("_id", doc! {"active": true, "survey": "LSST"})
-            .await?
-            .into_iter()
-            .map(|x| {
-                x.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or(FilterError::InvalidFilterId)
-            })
-            .collect::<Result<Vec<String>, FilterError>>()?;
-
-        let filter_ids = match &filter_ids {
-            Some(ids) => {
-                // verify that they all exist in all_filter_ids
-                for id in ids {
-                    if !all_filter_ids.contains(id) {
-                        return Err(FilterWorkerError::FilterNotFound);
-                    }
-                }
-                ids.clone()
-            }
-            None => all_filter_ids.clone(),
-        };
-
-        let mut filters: Vec<LoadedFilter> = Vec::new();
-        for filter_id in filter_ids {
-            filters.push(build_lsst_loaded_filter(&filter_id, &filter_collection).await?);
-        }
+        let filters = build_loaded_filters(&filter_ids, &Survey::Lsst, &filter_collection).await?;
 
         Ok(LsstFilterWorker {
             alert_collection,

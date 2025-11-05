@@ -4,11 +4,10 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
-use crate::filter::base::{get_active_filter_pipeline, LoadedFilter};
 use crate::filter::{
-    get_filter, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
-    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
-    FilterWorker, FilterWorkerError, Origin, Photometry,
+    build_loaded_filters, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, Alert, Classification, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, LoadedFilter, Origin, Photometry,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
@@ -398,28 +397,6 @@ pub async fn build_ztf_filter_pipeline(
     Ok(pipeline)
 }
 
-pub async fn build_ztf_loaded_filter(
-    filter_id: &str,
-    filter_collection: &mongodb::Collection<Filter>,
-) -> Result<LoadedFilter, FilterError> {
-    let filter = get_filter(filter_id, &Survey::Ztf, filter_collection).await?;
-
-    if filter.permissions.is_empty() {
-        return Err(FilterError::InvalidFilterPermissions);
-    }
-
-    let pipeline = get_active_filter_pipeline(&filter)?;
-
-    let pipeline = build_ztf_filter_pipeline(&pipeline, &filter.permissions).await?;
-
-    let loaded = LoadedFilter {
-        id: filter.id.clone(),
-        pipeline: pipeline,
-        permissions: filter.permissions,
-    };
-    Ok(loaded)
-}
-
 pub struct ZtfFilterWorker {
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     input_queue: String,
@@ -443,34 +420,7 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let all_filter_ids: Vec<String> = filter_collection
-            .distinct("_id", doc! {"active": true, "survey": "ZTF"})
-            .await?
-            .into_iter()
-            .map(|x| {
-                x.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or(FilterError::InvalidFilterId)
-            })
-            .collect::<Result<Vec<String>, FilterError>>()?;
-
-        let filter_ids = match &filter_ids {
-            Some(ids) => {
-                // verify that they all exist in all_filter_ids
-                for id in ids {
-                    if !all_filter_ids.contains(id) {
-                        return Err(FilterWorkerError::FilterNotFound);
-                    }
-                }
-                ids.clone()
-            }
-            None => all_filter_ids.clone(),
-        };
-
-        let mut filters: Vec<LoadedFilter> = Vec::new();
-        for filter_id in filter_ids {
-            filters.push(build_ztf_loaded_filter(&filter_id, &filter_collection).await?);
-        }
+        let filters = build_loaded_filters(&filter_ids, &Survey::Ztf, &filter_collection).await?;
 
         // Create a hashmap of filters per programid (permissions)
         // basically we'll have the 4 programid (from 0 to 3) as keys
