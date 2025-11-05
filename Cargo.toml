@@ -22,6 +22,7 @@ indicatif = "0.18.0"
 jsonwebtoken = "9.3.1"
 mongodb = "3.3.0"
 ndarray = "0.16.1"
+openidconnect = { version = "4.0.1", features = ["reqwest"] }
 openssl = { version = "0.10.73", features = ["vendored"] }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
