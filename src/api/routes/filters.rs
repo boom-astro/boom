@@ -43,7 +43,6 @@ impl From<Filter> for FilterPublic {
     }
 }
 
-// tests the functionality of a filter by running it on alerts in database
 async fn run_test_pipeline(
     db: web::Data<Database>,
     catalog: &Survey,
@@ -87,7 +86,6 @@ async fn run_test_pipeline(
     }
 }
 
-// now let's make a method that builds and tests a new filter version
 async fn build_and_test_filter_version(
     db: web::Data<Database>,
     survey: &Survey,
