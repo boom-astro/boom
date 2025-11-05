@@ -10,6 +10,12 @@ mod tests {
     use boom::conf::{load_dotenv, AppConfig};
     use mongodb::{bson::doc, Database};
 
+    #[derive(serde::Serialize)]
+    struct AuthForm {
+        username: String,
+        password: String,
+    }
+
     /// Test POST /auth
     #[actix_rt::test]
     async fn test_post_auth() {
@@ -36,10 +42,10 @@ mod tests {
         // Now try to authenticate with the admin user, to retrieve a JWT token
         let req = test::TestRequest::post()
             .uri("/auth")
-            .set_json(&serde_json::json!({
-                "username": admin_username,
-                "password": admin_password
-            }))
+            .set_form(&AuthForm {
+                username: admin_username.clone(),
+                password: admin_password.clone(),
+            })
             .to_request();
 
         let resp = test::call_service(&app, req).await;
