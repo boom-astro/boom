@@ -30,6 +30,8 @@ async fn main() -> std::io::Result<()> {
             .service(routes::info::get_health)
             .service(routes::info::get_db_info)
             .service(routes::auth::post_auth)
+            .service(routes::auth::oauth2_login)
+            .service(routes::auth::oauth2_callback)
             .service(
                 actix_web::web::scope("")
                     .wrap(from_fn(auth_middleware))
