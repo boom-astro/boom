@@ -1,5 +1,5 @@
 use crate::api::{models::response, routes::users::User};
-use crate::filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline, Filter, FilterVersion};
+use crate::filter::{build_filter_pipeline, Filter, FilterError, FilterVersion};
 use crate::utils::enums::Survey;
 
 use actix_web::{get, patch, post, web, HttpResponse};
@@ -47,19 +47,55 @@ impl From<Filter> for FilterPublic {
 async fn run_test_pipeline(
     db: web::Data<Database>,
     catalog: &Survey,
-    pipeline: Vec<mongodb::bson::Document>,
-) -> Result<(), mongodb::error::Error> {
+    mut pipeline: Vec<mongodb::bson::Document>,
+) -> Result<(), FilterError> {
     let collection: Collection<mongodb::bson::Document> =
         db.collection(format!("{}_alerts", catalog).as_str());
-    let result = collection.aggregate(pipeline).await;
-    match result {
-        Ok(_) => {
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(e);
+    // get the latest candid from the alerts collection
+    let result = collection
+        .find_one(doc! {})
+        .projection(doc! { "_id": 1 })
+        .sort(doc! { "candidate.jd": -1 })
+        .await?;
+    let candid = match result {
+        Some(doc) => Some(doc.get_i64("_id").unwrap()),
+        None => None,
+    };
+    if candid.is_some() {
+        match pipeline.get_mut(0) {
+            Some(first_stage) => {
+                if first_stage.get("$match").is_none() {
+                    return Err(FilterError::InvalidFilterPipeline(
+                        "first stage of pipeline must be a $match stage".to_string(),
+                    ));
+                }
+                first_stage.insert("$match", doc! { "_id": candid.as_ref().unwrap() });
+            }
+            None => {
+                return Err(FilterError::InvalidFilterPipeline(
+                    "pipeline must have at least one stage".to_string(),
+                ));
+            }
         }
     }
+    match collection.aggregate(pipeline).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(FilterError::FilterExecutionError(format!(
+            "failed to run test filter on alert with candid {:?}: {}",
+            candid, e
+        ))),
+    }
+}
+
+// now let's make a method that builds and tests a new filter version
+async fn build_and_test_filter_version(
+    db: web::Data<Database>,
+    survey: &Survey,
+    pipeline: &Vec<serde_json::Value>,
+    permissions: &Vec<i32>,
+) -> Result<(), FilterError> {
+    let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
+    run_test_pipeline(db, survey, test_pipeline).await
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
@@ -109,30 +145,10 @@ pub async fn post_filter_version(
 
     let survey = filter.survey;
     let permissions = filter.permissions.clone();
-    // Create test version of filter and test it
-    // Convert pipeline from JSON to an array of Documents
-    let filter_pipeline = body.pipeline.clone();
-    let test_pipeline = match survey {
-        Survey::Ztf => build_ztf_filter_pipeline(&filter_pipeline, &permissions).await,
-        Survey::Lsst => build_lsst_filter_pipeline(&filter_pipeline).await,
-        _ => {
-            return response::bad_request(&format!(
-                "Unsupported survey: {}. Supported surveys are 'ztf' and 'lsst'",
-                survey
-            ));
-        }
-    };
-    let test_pipeline = match test_pipeline {
-        Ok(p) => p,
-        Err(e) => {
-            return response::bad_request(&format!(
-                "Invalid filter submitted, failed to build filter pipeline: {}",
-                e
-            ));
-        }
-    };
+    let new_pipeline = body.pipeline.clone();
 
-    match run_test_pipeline(db.clone(), &survey, test_pipeline).await {
+    // Test the filter to ensure it works
+    match build_and_test_filter_version(db.clone(), &survey, &new_pipeline, &permissions).await {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -143,7 +159,7 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
-    let new_pipeline_json: String = serde_json::to_string(&filter_pipeline).unwrap();
+    let new_pipeline_json: String = serde_json::to_string(&new_pipeline).unwrap();
     let mut update_doc = doc! {
         "$push": {
             "fv": {
@@ -210,43 +226,8 @@ pub async fn post_filter(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    // Test filter received from user
-    // Create production version of filter
-    let pipeline_bson: Vec<Document> = pipeline
-        .clone()
-        .into_iter()
-        .map(|v| {
-            mongodb::bson::to_document(&v).map_err(|e| {
-                response::bad_request(&format!(
-                    "Failed to convert pipeline step to BSON Document: {}",
-                    e
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let test_pipeline = match survey {
-        Survey::Ztf => build_ztf_filter_pipeline(&pipeline, &permissions).await,
-        Survey::Lsst => build_lsst_filter_pipeline(&pipeline).await,
-        _ => {
-            return response::bad_request(&format!(
-                "Unsupported survey: {}. Supported surveys are 'ztf' and 'lsst'",
-                survey
-            ));
-        }
-    };
-    let test_pipeline = match test_pipeline {
-        Ok(p) => p,
-        Err(e) => {
-            return response::bad_request(&format!(
-                "Invalid filter submitted, failed to build filter pipeline: {}",
-                e
-            ));
-        }
-    };
-
     // Test the filter to ensure it works
-    match run_test_pipeline(db.clone(), &survey, test_pipeline).await {
+    match build_and_test_filter_version(db.clone(), &survey, &pipeline, &permissions).await {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -261,7 +242,7 @@ pub async fn post_filter(
     let filter_version: String = uuid::Uuid::new_v4().to_string();
     let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
-    let pipeline_json = serde_json::to_string(&pipeline_bson).unwrap();
+    let pipeline_json = serde_json::to_string(&pipeline).unwrap();
     let now = Time::now().to_jd();
     let filter = Filter {
         permissions,

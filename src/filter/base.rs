@@ -137,6 +137,10 @@ pub enum FilterError {
     InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
+    #[error("unsupported survey for filter")]
+    UnsupportedSurvey(Survey),
+    #[error("error during filter execution")]
+    FilterExecutionError(String),
 }
 
 pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
@@ -557,6 +561,28 @@ pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Val
     Ok(filter_pipeline.to_vec())
 }
 
+pub async fn build_filter_pipeline(
+    pipeline: &Vec<serde_json::Value>,
+    permissions: &Vec<i32>,
+    survey: &Survey,
+) -> Result<Vec<Document>, FilterError> {
+    let pipeline = match survey {
+        Survey::Ztf => {
+            if permissions.is_empty() {
+                return Err(FilterError::InvalidFilterPermissions);
+            }
+            build_ztf_filter_pipeline(pipeline, permissions).await?
+        }
+        Survey::Lsst => build_lsst_filter_pipeline(pipeline).await?,
+        _ => {
+            return Err(FilterError::InvalidFilterPipeline(
+                "Unsupported survey for filter pipeline".to_string(),
+            ));
+        }
+    };
+    Ok(pipeline)
+}
+
 pub async fn build_loaded_filter(
     filter_id: &str,
     survey: &Survey,
@@ -564,27 +590,8 @@ pub async fn build_loaded_filter(
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
 
-    if filter.permissions.is_empty() {
-        return Err(FilterError::InvalidFilterPermissions);
-    }
-
     let pipeline = get_active_filter_pipeline(&filter)?;
-
-    // let pipeline = build_ztf_filter_pipeline(&pipeline, &filter.permissions).await?;
-    let pipeline = match filter.survey {
-        Survey::Ztf => {
-            if filter.permissions.is_empty() {
-                return Err(FilterError::InvalidFilterPermissions);
-            }
-            build_ztf_filter_pipeline(&pipeline, &filter.permissions).await?
-        }
-        Survey::Lsst => build_lsst_filter_pipeline(&pipeline).await?,
-        _ => {
-            return Err(FilterError::InvalidFilterPipeline(
-                "Unsupported survey for filter pipeline".to_string(),
-            ));
-        }
-    };
+    let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
     let loaded = LoadedFilter {
         id: filter.id.clone(),
