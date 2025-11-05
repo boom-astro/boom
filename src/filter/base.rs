@@ -1,7 +1,6 @@
 use crate::{
     conf,
     utils::{
-        db::get_array_element,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
@@ -134,7 +133,7 @@ pub enum FilterError {
     #[error("filter pipeline could not be parsed")]
     FilterPipelineError,
     #[error("invalid filter pipeline")]
-    InvalidFilterPipeline,
+    InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
 }
@@ -344,7 +343,9 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
             || stage.get("$unwind").is_some()
             || stage.get("$lookup").is_some()
         {
-            return Err(FilterError::InvalidFilterPipeline);
+            return Err(FilterError::InvalidFilterPipeline(
+                "group, unwind, and lookup stages are not allowed".to_string(),
+            ));
         }
         // check for project stages
         if stage.get("$project").is_some() {
@@ -378,15 +379,21 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
             }
             // make sure that _id is never excluded
             if excludes_id {
-                return Err(FilterError::InvalidFilterPipeline);
+                return Err(FilterError::InvalidFilterPipeline(
+                    "_id field cannot be excluded".to_string(),
+                ));
             }
             // if it's an exclude, make sure that objectId is not excluded
             if !include_stage && excludes_object_id {
-                return Err(FilterError::InvalidFilterPipeline);
+                return Err(FilterError::InvalidFilterPipeline(
+                    "objectId field cannot be excluded".to_string(),
+                ));
             }
             // if it's an include, make sure that objectId is included
             if include_stage && !includes_object_id {
-                return Err(FilterError::InvalidFilterPipeline);
+                return Err(FilterError::InvalidFilterPipeline(
+                    "objectId field must be included".to_string(),
+                ));
             }
         }
 
@@ -399,15 +406,21 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
                     if value == &serde_json::Value::String("objectId".to_string())
                         || value == &serde_json::Value::String("_id".to_string())
                     {
-                        return Err(FilterError::InvalidFilterPipeline);
+                        return Err(FilterError::InvalidFilterPipeline(
+                            "objectId and _id fields cannot be unset".to_string(),
+                        ));
                     }
                 }
             } else if let Some(unset_str) = unset_stage.as_str() {
                 if unset_str == "objectId" || unset_str == "_id" {
-                    return Err(FilterError::InvalidFilterPipeline);
+                    return Err(FilterError::InvalidFilterPipeline(
+                        "objectId and _id fields cannot be unset".to_string(),
+                    ));
                 }
             } else {
-                return Err(FilterError::InvalidFilterPipeline);
+                return Err(FilterError::InvalidFilterPipeline(
+                    "invalid $unset stage".to_string(),
+                ));
             }
         }
 
@@ -419,73 +432,25 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
                     if !project_obj.contains_key("objectId")
                         || project_obj.get("objectId") != Some(&serde_json::Value::Number(1.into()))
                     {
-                        return Err(FilterError::InvalidFilterPipeline);
+                        return Err(FilterError::InvalidFilterPipeline(
+                            "the last stage must be a $project stage that includes objectId"
+                                .to_string(),
+                        ));
                     }
                 } else {
-                    return Err(FilterError::InvalidFilterPipeline);
+                    return Err(FilterError::InvalidFilterPipeline(
+                        "the last stage must be a $project stage that includes objectId"
+                            .to_string(),
+                    ));
                 }
             } else {
-                return Err(FilterError::InvalidFilterPipeline);
+                return Err(FilterError::InvalidFilterPipeline(
+                    "the last stage must be a $project stage that includes objectId".to_string(),
+                ));
             }
         }
     }
-
     Ok(())
-}
-
-#[instrument(skip(filter_collection), err)]
-pub async fn get_filter_object(
-    filter_id: &str,
-    catalog: &str,
-    filter_collection: &mongodb::Collection<mongodb::bson::Document>,
-) -> Result<Document, FilterError> {
-    let mut filter_obj = filter_collection
-        .aggregate(vec![
-            doc! {
-                "$match": doc! {
-                    "_id": filter_id,
-                    "active": true,
-                    "catalog": catalog
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "fv": doc! {
-                        "$filter": doc! {
-                            "input": "$fv",
-                            "as": "x",
-                            "cond": doc! {
-                                "$eq": [
-                                    "$$x.fid",
-                                    "$active_fid"
-                                ]
-                            }
-                        }
-                    },
-                    "group_id": 1,
-                    "permissions": 1,
-                    "catalog": 1
-                }
-            },
-            doc! {
-                "$project": doc! {
-                    "pipeline": get_array_element("fv.pipeline"),
-                    "group_id": 1,
-                    "permissions": 1,
-                    "catalog": 1
-                }
-            },
-        ])
-        .await?;
-
-    let advance = filter_obj.advance().await?;
-    let filter_obj = if advance {
-        filter_obj.deserialize_current()?
-    } else {
-        return Err(FilterError::FilterNotFound);
-    };
-
-    Ok(filter_obj)
 }
 
 #[instrument(skip(candids, pipeline, alert_collection), err)]
@@ -522,14 +487,73 @@ pub async fn run_filter(
     Ok(out_documents)
 }
 
-#[async_trait::async_trait]
-pub trait Filter {
-    async fn build(
-        filter_id: &str,
-        filter_collection: &mongodb::Collection<mongodb::bson::Document>,
-    ) -> Result<Self, FilterError>
-    where
-        Self: Sized;
+#[derive(serde::Deserialize, serde::Serialize, Clone, utoipa::ToSchema)]
+pub struct FilterVersion {
+    pub fid: String,
+    pub pipeline: String,
+    pub created_at: f64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, utoipa::ToSchema)]
+pub struct Filter {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub permissions: Vec<i32>,
+    pub user_id: String,
+    pub survey: Survey,
+    pub active: bool,
+    pub active_fid: String,
+    pub fv: Vec<FilterVersion>,
+    pub created_at: f64,
+    pub updated_at: f64,
+}
+
+pub struct LoadedFilter {
+    pub id: String,
+    pub permissions: Vec<i32>,
+    pub pipeline: Vec<Document>,
+}
+
+#[instrument(skip(filter_collection), err)]
+pub async fn get_filter(
+    filter_id: &str,
+    survey: &Survey,
+    filter_collection: &mongodb::Collection<Filter>,
+) -> Result<Filter, FilterError> {
+    info!(
+        "Getting filter object for filter_id: {}, survey: {}",
+        filter_id,
+        survey.to_string()
+    );
+    let filter_obj = filter_collection
+        .find_one(doc! {
+            "_id": filter_id,
+            "active": true,
+            "survey": survey.to_string()
+        })
+        .await?
+        .ok_or(FilterError::FilterNotFound)?;
+
+    Ok(filter_obj)
+}
+
+#[instrument(skip(filter), err)]
+pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Value>, FilterError> {
+    // find the active filter version
+    let active_fv = filter
+        .fv
+        .iter()
+        .find(|fv| fv.fid == filter.active_fid)
+        .ok_or(FilterError::FilterNotFound)?;
+
+    let filter_pipeline = serde_json::from_str::<serde_json::Value>(&active_fv.pipeline)?;
+    let filter_pipeline = filter_pipeline
+        .as_array()
+        .ok_or(FilterError::InvalidFilterPipeline(
+            "Filter pipeline must be an array".to_string(),
+        ))?;
+
+    Ok(filter_pipeline.to_vec())
 }
 
 #[derive(thiserror::Error, Debug)]

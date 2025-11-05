@@ -7,7 +7,7 @@ mod tests {
     use boom::api::auth::{auth_middleware, get_test_auth};
     use boom::api::db::get_test_db;
     use boom::api::routes;
-    use boom::api::test_utils::read_json_response;
+    use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use mongodb::bson::{doc, Document};
     use mongodb::{Collection, Database};
@@ -27,8 +27,8 @@ mod tests {
     /// Helper function to create a simple test filter JSON object
     fn create_test_filter_json() -> serde_json::Value {
         serde_json::json!({
-            "pipeline": [{"$match": {"something": 5}}],
-            "catalog": "ZTF_alerts",
+            "pipeline": [{"$match": {"something": 5}}, {"$project": {"objectId": 1}}],
+            "survey": "ZTF",
             "permissions": [1, 2],
         })
     }
@@ -59,7 +59,12 @@ mod tests {
             .set_json(&new_filter)
             .to_request();
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to create test filter: {:?}",
+            read_str_response(resp).await
+        );
         let resp = read_json_response(resp).await;
         assert!(!resp["data"].as_object().unwrap().contains_key("_id"));
         let filter_id = resp["data"]["id"].as_str().unwrap().to_string();
@@ -87,7 +92,12 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to get test filter: {:?}",
+            read_str_response(resp).await
+        );
         let get_resp = read_json_response(resp).await;
         // Assert we have no _id field in the response
         assert!(!get_resp["data"].as_object().unwrap().contains_key("_id"));
@@ -177,7 +187,12 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to get filters: {:?}",
+            read_str_response(resp).await
+        );
         let resp = read_json_response(resp).await;
 
         assert!(resp["data"].is_array());
@@ -194,7 +209,7 @@ mod tests {
 
         // Now post a new version to this filter
         let new_version = serde_json::json!({
-            "pipeline": [{"$match": {"somethingelse": 10}}],
+            "pipeline": [{"$match": {"somethingelse": 10}}, {"$project": {"objectId": 1}}],
             "set_as_active": true
         });
         let active_fid_after = post_new_filter_version(&filter_id, &token, &new_version).await;
@@ -212,7 +227,7 @@ mod tests {
 
         // Post another version, but don't set it as active
         let new_version = serde_json::json!({
-            "pipeline": [{"$match": {"somethingelseelse": 20}}],
+            "pipeline": [{"$match": {"somethingelseelse": 20}}, {"$project": {"objectId": 1}}],
             "set_as_active": false
         });
         let active_fid_after2 = post_new_filter_version(&filter_id, &token, &new_version).await;
@@ -251,7 +266,7 @@ mod tests {
 
         // POST a new version to ensure we have something to patch to
         let new_version = serde_json::json!({
-            "pipeline": [{"$match": {"somethingelse": 10}}],
+            "pipeline": [{"$match": {"somethingelse": 10}}, {"$project": {"objectId": 1}}],
             "set_as_active": false
         });
         let active_fid_after = post_new_filter_version(&filter_id, &token, &new_version).await;

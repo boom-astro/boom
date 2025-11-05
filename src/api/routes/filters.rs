@@ -1,4 +1,6 @@
 use crate::api::{models::response, routes::users::User};
+use crate::filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline, Filter, FilterVersion};
+use crate::utils::enums::Survey;
 
 use actix_web::{get, patch, post, web, HttpResponse};
 use flare::Time;
@@ -12,33 +14,12 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-pub struct FilterVersion {
-    fid: String,
-    pipeline: String,
-    created_at: f64,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-pub struct Filter {
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub permissions: Vec<i32>,
-    pub user_id: String,
-    pub catalog: String,
-    pub active: bool,
-    pub active_fid: String,
-    pub fv: Vec<FilterVersion>,
-    pub created_at: f64,
-    pub updated_at: f64,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
 pub struct FilterPublic {
     #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub permissions: Vec<i32>,
     pub user_id: String,
-    pub catalog: String,
+    pub survey: Survey,
     pub active: bool,
     pub active_fid: String,
     pub fv: Vec<FilterVersion>,
@@ -52,7 +33,7 @@ impl From<Filter> for FilterPublic {
             id: filter.id,
             permissions: filter.permissions,
             user_id: filter.user_id,
-            catalog: filter.catalog,
+            survey: filter.survey,
             active: filter.active,
             active_fid: filter.active_fid,
             fv: filter.fv,
@@ -62,87 +43,10 @@ impl From<Filter> for FilterPublic {
     }
 }
 
-fn build_test_pipeline(
-    filter_catalog: String,
-    filter_perms: Vec<i32>,
-    mut filter_pipeline: Vec<Document>,
-) -> Vec<Document> {
-    let mut out_pipeline = vec![
-        doc! {
-            "$match": doc! {
-                // during filter::run proper candis are inserted here
-            }
-        },
-        doc! {
-            "$lookup": doc! {
-                "from": format!("{}_aux", filter_catalog),
-                "localField": "objectId",
-                "foreignField": "_id",
-                "as": "aux"
-            }
-        },
-        doc! {
-            "$project": doc! {
-                "objectId": 1,
-                "candidate": 1,
-                "classifications": 1,
-                "coordinates": 1,
-                "cross_matches": doc! {
-                    "$arrayElemAt": [
-                        "$aux.cross_matches",
-                        0
-                    ]
-                },
-                "prv_candidates": doc! {
-                    "$filter": doc! {
-                        "input": doc! {
-                            "$arrayElemAt": [
-                                "$aux.prv_candidates",
-                                0
-                            ]
-                        },
-                        "as": "x",
-                        "cond": doc! {
-                            "$and": [
-                                {
-                                    "$in": [
-                                        "$$x.programid",
-                                        &filter_perms
-                                    ]
-                                },
-                                { // maximum 1 year of past data
-                                    "$lt": [
-                                        {
-                                            "$subtract": [
-                                                "$candidate.jd",
-                                                "$$x.jd"
-                                            ]
-                                        },
-                                        365
-                                    ]
-                                },
-                                { // only datapoints up to (and including) current alert
-                                    "$lte": [
-                                        "$$x.jd",
-                                        "$candidate.jd"
-                                    ]
-                                }
-
-                            ]
-                        }
-                    }
-                },
-            }
-        },
-    ];
-    out_pipeline.append(&mut filter_pipeline);
-    return out_pipeline;
-}
-
 // tests the functionality of a filter by running it on alerts in database
 async fn run_test_pipeline(
     db: web::Data<Database>,
-    catalog: String,
+    catalog: &Survey,
     pipeline: Vec<mongodb::bson::Document>,
 ) -> Result<(), mongodb::error::Error> {
     let collection: Collection<mongodb::bson::Document> =
@@ -203,26 +107,32 @@ pub async fn post_filter_version(
         return response::forbidden("only the filter owner or an admin can modify a filter");
     }
 
-    let catalog = filter.catalog.clone();
+    let survey = filter.survey;
     let permissions = filter.permissions.clone();
     // Create test version of filter and test it
     // Convert pipeline from JSON to an array of Documents
-    let pipeline = body.pipeline.clone();
-    let pipeline: Vec<mongodb::bson::Document> = pipeline
-        .into_iter()
-        .map(|v| {
-            mongodb::bson::to_document(&v).map_err(|e| {
-                response::bad_request(&format!(
-                    "Failed to convert new filter version to a valid BSON Document: {}",
-                    e
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let test_pipeline = build_test_pipeline(catalog.to_string(), permissions, pipeline.clone());
+    let filter_pipeline = body.pipeline.clone();
+    let test_pipeline = match survey {
+        Survey::Ztf => build_ztf_filter_pipeline(&filter_pipeline, &permissions).await,
+        Survey::Lsst => build_lsst_filter_pipeline(&filter_pipeline).await,
+        _ => {
+            return response::bad_request(&format!(
+                "Unsupported survey: {}. Supported surveys are 'ztf' and 'lsst'",
+                survey
+            ));
+        }
+    };
+    let test_pipeline = match test_pipeline {
+        Ok(p) => p,
+        Err(e) => {
+            return response::bad_request(&format!(
+                "Invalid filter submitted, failed to build filter pipeline: {}",
+                e
+            ));
+        }
+    };
 
-    match run_test_pipeline(db.clone(), catalog.to_string(), test_pipeline).await {
+    match run_test_pipeline(db.clone(), &survey, test_pipeline).await {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -233,7 +143,7 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
-    let new_pipeline_json: String = serde_json::to_string(&pipeline).unwrap();
+    let new_pipeline_json: String = serde_json::to_string(&filter_pipeline).unwrap();
     let mut update_doc = doc! {
         "$push": {
             "fv": {
@@ -272,7 +182,7 @@ pub async fn post_filter_version(
 pub struct FilterPost {
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: Vec<i32>,
-    pub catalog: String,
+    pub survey: Survey,
 }
 
 /// Create a new filter
@@ -296,7 +206,7 @@ pub async fn post_filter(
     let current_user = current_user.unwrap();
     let body = body.clone();
 
-    let catalog = body.catalog;
+    let survey = body.survey;
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
@@ -315,11 +225,28 @@ pub async fn post_filter(
         })
         .collect::<Result<_, _>>()
         .unwrap();
-    let test_pipeline =
-        build_test_pipeline(catalog.clone(), permissions.clone(), pipeline_bson.clone());
+    let test_pipeline = match survey {
+        Survey::Ztf => build_ztf_filter_pipeline(&pipeline, &permissions).await,
+        Survey::Lsst => build_lsst_filter_pipeline(&pipeline).await,
+        _ => {
+            return response::bad_request(&format!(
+                "Unsupported survey: {}. Supported surveys are 'ztf' and 'lsst'",
+                survey
+            ));
+        }
+    };
+    let test_pipeline = match test_pipeline {
+        Ok(p) => p,
+        Err(e) => {
+            return response::bad_request(&format!(
+                "Invalid filter submitted, failed to build filter pipeline: {}",
+                e
+            ));
+        }
+    };
 
     // Test the filter to ensure it works
-    match run_test_pipeline(db.clone(), catalog.clone(), test_pipeline).await {
+    match run_test_pipeline(db.clone(), &survey, test_pipeline).await {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -338,7 +265,7 @@ pub async fn post_filter(
     let now = Time::now().to_jd();
     let filter = Filter {
         permissions,
-        catalog,
+        survey,
         id: filter_id,
         user_id: current_user.id.clone(),
         active: true,
