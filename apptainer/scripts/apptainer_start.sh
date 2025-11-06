@@ -70,7 +70,7 @@ set +a
 # 1. MongoDB
 # -----------------------------
 if start_service "mongo" "$2"; then
-  if "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" > /dev/null 2>&1; then
+  if "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" 0 > /dev/null 2>&1; then
     echo && echo -e "${YELLOW}$(current_datetime) - MongoDB is already running${END}"
   else
     echo && echo "$(current_datetime) - Starting MongoDB"
@@ -88,7 +88,7 @@ fi
 # 2. Valkey
 # -----------------------------
 if start_service "valkey" "$2"; then
-  if "$HEALTHCHECK_DIR/valkey-healthcheck.sh" > /dev/null 2>&1; then
+  if "$HEALTHCHECK_DIR/valkey-healthcheck.sh" 0 > /dev/null 2>&1; then
     echo && echo -e "${YELLOW}$(current_datetime) - Valkey is already running${END}"
   else
     echo && echo "$(current_datetime) - Starting Valkey"
@@ -106,7 +106,7 @@ fi
 # 3. Kafka
 # -----------------------------
 if start_service "kafka" "$2"; then
-  if "$HEALTHCHECK_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
+  if "$HEALTHCHECK_DIR/kafka-healthcheck.sh" 0 > /dev/null 2>&1; then
     echo && echo -e "${YELLOW}$(current_datetime) - Kafka is already running${END}"
   else
     echo && echo "$(current_datetime) - Starting Kafka"
@@ -133,7 +133,7 @@ fi
 # 5. Prometheus
 # -----------------------------
 if start_service "prometheus" "$2"; then
-  if "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" > /dev/null 2>&1; then
+  if "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" 0 > /dev/null 2>&1; then
     echo && echo -e "${YELLOW}$(current_datetime) - Prometheus is already running${END}"
   else
     echo && echo "$(current_datetime) - Starting Prometheus instance"
@@ -171,7 +171,7 @@ fi
 # 7. Healthcheck listener
 # -----------------------------
 if start_service "listener" "$2"; then
-  if "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh" > /dev/null 2>&1; then
+  if "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh" 0 > /dev/null 2>&1; then
     echo && echo -e "${YELLOW}$(current_datetime) - Boom healthcheck listener is already running${END}"
   else
     echo && echo "$(current_datetime) - Starting Boom healthcheck listener"
@@ -254,7 +254,7 @@ fi
 # 8. Uptime Kuma
 # -----------------------------
 if start_service "kuma" "$2"; then
-  if "$HEALTHCHECK_DIR/kuma-healthcheck.sh" > /dev/null 2>&1; then
+  if "$HEALTHCHECK_DIR/kuma-healthcheck.sh" 0 > /dev/null 2>&1; then
     echo && echo -e "${YELLOW}$(current_datetime) - Uptime Kuma is already running${END}"
   else
     echo && echo "$(current_datetime) - Starting Uptime Kuma"
