@@ -205,22 +205,33 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       sleep 3
     fi
 
-  # -----------------------------
-  # 4a. Boom Consumer
-  # -----------------------------
-  if start_service "boom" "$2" || start_service "consumer" "$2"; then
-    ARGS=("$survey")
-    [ -n "$4" ] && ARGS+=("$4") # $4=date
-    [ -n "$5" ] && ARGS+=("$5") # $5=program ID
-    if pgrep -f "/app/kafka_consumer ${ARGS[*]} --auto-switch-date" > /dev/null; then
-      echo -e "${RED}Boom consumer already running.${END}"
-    else
-      apptainer exec --pwd /app --env-file .env \
-        "instance://boom_$survey" /app/kafka_consumer "${ARGS[@]}" \
-        > "$LOGS_DIR/${survey}${4:+_$4}${5:+_$5}_consumer.log" 2>&1 &
-      echo -e "${GREEN}Boom consumer started for survey $survey${END}"
+    # -----------------------------
+    # 4a. Boom Consumer
+    # -----------------------------
+    if start_service "boom" "$2" || start_service "consumer" "$2"; then
+      # If program ID is "all", consume for all programs
+      if [ "$5" = "all" ]; then
+        PROGRAMS=("public" "partnership" "caltech")
+      elif [ -z "$5" ]; then
+        PROGRAMS=("")
+      else
+        PROGRAMS=("$5")
+      fi
+
+      for prog in "${PROGRAMS[@]}"; do
+        ARGS=("$survey")
+        [ -n "$4" ] && ARGS+=("$4") # date
+        [ -n "$prog" ] && ARGS+=("$prog") # program ID
+        if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
+          echo -e "${YELLOW}Boom consumer already running for survey $survey${4:+ on date $4}${prog:+ for program $prog}.${END}"
+        else
+          apptainer exec --pwd /app --env-file .env \
+            "instance://boom_$survey" /app/kafka_consumer "${ARGS[@]}" \
+            > "$LOGS_DIR/${survey}${4:+_$4}${prog:+_$prog}_consumer.log" 2>&1 &
+          echo -e "${GREEN}Boom consumer started for survey $survey${4:+ on date $4}${prog:+ for program $prog}${END}"
+        fi
+      done
     fi
-  fi
 
     # -----------------------------
     # 4a. Boom Scheduler
