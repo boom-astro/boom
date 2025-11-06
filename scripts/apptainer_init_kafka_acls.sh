@@ -14,27 +14,54 @@ set -euo pipefail
 #
 # NOTE: Broker requires no explicit JAAS file for SCRAM; credentials are stored in metadata log.
 
-BROKER="localhost:29092"  # Use internal PLAINTEXT inter-broker listener for administrative operations
+# Allow overriding the bootstrap address (useful in CI); default to internal broker listener
+BROKER="${KAFKA_BOOTSTRAP_SERVER:-localhost:29092}"  # Use internal PLAINTEXT inter-broker listener for administrative operations
 ADMIN_USER="admin"
 ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
 READ_PWD="${KAFKA_READONLY_PASSWORD}"
-
-# KAFKA_OPTS with JAAS is set at container level.
+TIMEOUT=60 # seconds
 
 kafka_log() { echo "[init-kafka] $*"; }
 
 wait_for_kafka() {
-  local -r start=$(date +%s)
-  kafka_log "Waiting for broker API on $BROKER"
-  until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "$BROKER" >/dev/null 2>&1; do
-    if (( $(date +%s) - start > 120 )); then
-      kafka_log "Broker did not become ready in time"; exit 1
+  local start=$(date +%s)
+  kafka_log "Waiting for Kafka at $BROKER (cluster-id)"
+  until /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server "$BROKER" >/dev/null 2>&1; do
+    if (( $(date +%s) - $start > $TIMEOUT )); then
+      kafka_log "Timed out waiting for cluster-id from $BROKER"; exit 1
     fi
     sleep 3
   done
-  # Additional small delay to allow controller metadata log operations (esp first boot)
-  sleep 5
+
+  local start=$(date +%s)
+  kafka_log "Waiting for metadata quorum readiness"
+  until /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server "$BROKER" describe --status >/dev/null 2>&1; do
+    if (( $(date +%s) - $start > $TIMEOUT )); then
+      kafka_log "Timed out waiting for metadata quorum describe --status"; exit 1
+    fi
+    sleep 3
+  done
+
+  local start=$(date +%s)
+  kafka_log "Waiting for configs API (users --describe)"
+  until /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" --entity-type users --describe >/dev/null 2>&1; do
+    if (( $(date +%s) - $start > $TIMEOUT )); then
+      kafka_log "Timed out waiting for configs API to respond"; exit 1
+    fi
+    sleep 3
+  done
+
+  local start=$(date +%s)
+  kafka_log "Waiting for authorizer (acls --list)"
+  until /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$BROKER" --list >/dev/null 2>&1; do
+    if (( $(date +%s) - $start > $TIMEOUT )); then
+      kafka_log "Timed out waiting for authorizer to respond"; exit 1
+    fi
+    sleep 3
+  done
+
+  kafka_log "Kafka is ready"
 }
 
 wait_for_kafka
