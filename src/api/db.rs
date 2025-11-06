@@ -129,21 +129,27 @@ async fn db_from_config(config: AppConfig) -> Database {
         .await
         .expect("failed to create username index on users collection");
 
-    // Create babamul_users collection with unique email index
-    use crate::api::routes::babamul::BabamulUser;
-    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
-    let email_index = mongodb::IndexModel::builder()
-        .keys(doc! { "email": 1})
-        .options(
-            mongodb::options::IndexOptions::builder()
-                .unique(true)
-                .build(),
-        )
-        .build();
-    let _ = babamul_users_collection
-        .create_index(email_index)
-        .await
-        .expect("failed to create email index on babamul_users collection");
+    // Only create babamul_users collection if Babamul is enabled
+    let raw_config = crate::conf::load_raw_config("config.yaml").expect("Failed to load config");
+    if crate::conf::babamul_enabled(&raw_config) {
+        // Create babamul_users collection with unique email index
+        use crate::api::routes::babamul::BabamulUser;
+        let babamul_users_collection: mongodb::Collection<BabamulUser> =
+            db.collection("babamul_users");
+        let email_index = mongodb::IndexModel::builder()
+            .keys(doc! { "email": 1})
+            .options(
+                mongodb::options::IndexOptions::builder()
+                    .unique(true)
+                    .build(),
+            )
+            .build();
+        let _ = babamul_users_collection
+            .create_index(email_index)
+            .await
+            .expect("failed to create email index on babamul_users collection");
+        println!("Babamul database collection initialized");
+    }
 
     // Initialize the API admin user if it does not exist
     if let Err(e) = init_api_admin_user(&config.api.auth, &users_collection).await {

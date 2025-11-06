@@ -9,7 +9,7 @@ database:
   password: mongoadminsecret
   srv: false
 babamul:
-  enabled: false
+  enabled: true # Enabled for testing
 api:
   auth:
     secret_key: "1234"

@@ -186,6 +186,10 @@ kafka-acls.sh --add \
 Required settings in `config.yaml`:
 
 ```yaml
+# Enable/disable Babamul API endpoints
+babamul:
+  enabled: true  # Set to false to disable Babamul endpoints
+
 api:
   auth:
     secret_key: "..."           # JWT signing secret
@@ -199,6 +203,8 @@ database:
 
 Environment variables:
 - `KAFKA_INTERNAL_BROKER`: Kafka broker address (default: `broker:29092`)
+
+**Note**: When `babamul.enabled` is set to `false`, all Babamul endpoints (`/babamul/*`) and documentation (`/babamul/docs`) will be disabled, and the `babamul_users` collection will not be created.
 
 ## Development
 
