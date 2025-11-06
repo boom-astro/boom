@@ -53,7 +53,7 @@ get_mongo_count(){
   apptainer exec instance://mongo \
     mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
     --quiet \
-    --eval "db.$collection.countDocuments()"
+    --eval "db.$collection.estimatedDocumentCount()"
 }
 
 get_kafka_count(){
