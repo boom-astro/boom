@@ -72,7 +72,10 @@ set +a
 if start_service "mongo" "$2"; then
   echo && echo "$(current_datetime) - Starting MongoDB"
   mkdir -p "$PERSISTENT_DIR/mongodb"
-  apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
+  mkdir -p "$LOGS_DIR/mongodb"
+  apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" \
+    --bind "$LOGS_DIR/mongodb:/log" \
+    "$SIF_DIR/mongo.sif" mongo
   sleep 5
   "$HEALTHCHECK_DIR/mongodb-healthcheck.sh"
 fi
@@ -120,8 +123,10 @@ fi
 if start_service "prometheus" "$2"; then
   echo && echo "$(current_datetime) - Starting Prometheus instance"
   mkdir -p "$LOGS_DIR/prometheus"
+  mkdir -p "$PERSISTENT_DIR/prometheus"
   apptainer instance start \
     --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
+    --bind "$PERSISTENT_DIR/prometheus:/prometheus/data" \
     --bind "$LOGS_DIR/prometheus:/var/log" \
     "$SIF_DIR/prometheus.sif" prometheus
   "$HEALTHCHECK_DIR/prometheus-healthcheck.sh"
@@ -166,7 +171,7 @@ fi
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   survey=$3
   if ! apptainer instance list | awk '{print $1}' | grep -xq "boom${survey:+_$survey}"; then
-    echo && echo "$(current_datetime) - Starting boom_$survey instance"
+    echo && echo "$(current_datetime) - Starting boom${survey:+_$survey} instance"
     apptainer instance start \
       --bind "$CONFIG_FILE:/app/config.yaml" \
       "$SIF_DIR/boom.sif" "boom${survey:+_$survey}"
