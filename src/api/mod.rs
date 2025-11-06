@@ -3,6 +3,7 @@ pub mod babamul_auth;
 pub mod catalogs;
 pub mod db;
 pub mod docs;
+pub mod email;
 pub mod filters;
 pub mod models;
 pub mod routes;

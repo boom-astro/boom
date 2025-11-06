@@ -206,6 +206,32 @@ Environment variables:
 
 **Note**: When `babamul.enabled` is set to `false`, all Babamul endpoints (`/babamul/*`) and documentation (`/babamul/docs`) will be disabled, and the `babamul_users` collection will not be created.
 
+### Email Configuration
+
+Babamul can optionally send activation codes via email when users sign up. This requires SMTP configuration through environment variables:
+
+**Environment Variables:**
+- `EMAIL_ENABLED`: Set to `true` to enable email sending (default: `false`)
+- `SMTP_SERVER`: SMTP server address (e.g., `smtp.caltech.edu`)
+- `SMTP_USERNAME`: Username for SMTP authentication
+- `SMTP_PASSWORD`: Password for SMTP authentication
+- `SMTP_FROM_ADDRESS`: Email address for sending activation codes (e.g., `boom@caltech.edu`)
+
+**Example `.env` configuration:**
+```sh
+EMAIL_ENABLED=true
+SMTP_SERVER=smtp.caltech.edu
+SMTP_USERNAME=boom_service
+SMTP_PASSWORD=your_smtp_password
+SMTP_FROM_ADDRESS=boom@caltech.edu
+```
+
+**Behavior:**
+- If email is enabled and configured, activation codes are sent via email upon signup
+- If email is disabled or not configured, activation codes are printed to console logs
+- Email send failures do not prevent signup completion (logged as errors)
+- Users can contact administrators to retrieve activation codes if email fails
+
 ## Development
 
 ### Testing
@@ -244,9 +270,11 @@ db.babamul_users.deleteOne({email: "test@example.com"})
 
 ## Future Enhancements
 
-- Email delivery of activation codes (currently stored in database only)
 - Activation code expiration (e.g., 24-hour TTL)
+- Resend activation code endpoint
+- HTML email templates for activation codes
 - Rate limiting on signup endpoint
 - Password reset functionality
 - Account management endpoints (update email, deactivate account)
 - Usage metrics and monitoring
+- Email delivery tracking and logging

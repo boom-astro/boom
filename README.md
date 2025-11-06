@@ -58,6 +58,27 @@ cp .env.example .env
 **Note:** Do not commit `.env` to Git or use the example values
 in production.
 
+#### Email Configuration (Babamul Activation)
+
+If you have the Babamul user authentication system enabled (`babamul.enabled: true` in `config.yaml`), you can optionally configure SMTP email to send activation codes to users who sign up. This requires the following environment variables:
+
+- `EMAIL_ENABLED`: Set to `true` to enable email sending (default: `false`)
+- `SMTP_SERVER`: Your SMTP server address (e.g., `smtp.caltech.edu`)
+- `SMTP_USERNAME`: Username for SMTP authentication
+- `SMTP_PASSWORD`: Password for SMTP authentication
+- `SMTP_FROM_ADDRESS`: Email address that activation emails will be sent from (e.g., `boom@caltech.edu`)
+
+Example `.env` configuration:
+```sh
+EMAIL_ENABLED=true
+SMTP_SERVER=smtp.caltech.edu
+SMTP_USERNAME=boom_service
+SMTP_PASSWORD=your_smtp_password
+SMTP_FROM_ADDRESS=boom@caltech.edu
+```
+
+If email is not configured or disabled, activation codes will be printed to the console logs instead, and users will need to contact an administrator to retrieve their activation code.
+
 ### Start services for local development
 
 1. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode

@@ -3,6 +3,7 @@ use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom::api::auth::{auth_middleware, get_auth};
 use boom::api::db::get_db;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
+use boom::api::email::EmailService;
 use boom::api::routes;
 use boom::conf::{babamul_enabled, load_dotenv, load_raw_config};
 use utoipa::OpenApi;
@@ -15,6 +16,9 @@ async fn main() -> std::io::Result<()> {
 
     let database = get_db().await;
     let auth = get_auth(&database).await.unwrap();
+
+    // Initialize email service
+    let email_service = EmailService::new();
 
     // Initialize logging
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
@@ -37,6 +41,7 @@ async fn main() -> std::io::Result<()> {
         let mut app = App::new()
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(email_service.clone()))
             .service(Scalar::with_url("/docs", api_doc.clone()))
             .service(routes::info::get_health)
             .service(routes::auth::post_auth);

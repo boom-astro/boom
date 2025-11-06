@@ -1,4 +1,5 @@
 use crate::api::auth::AuthProvider;
+use crate::api::email::EmailService;
 use crate::api::models::response;
 use actix_web::{post, web, HttpResponse};
 use mongodb::bson::doc;
@@ -60,6 +61,7 @@ pub struct BabamulSignupResponse {
 #[post("/babamul/signup")]
 pub async fn post_babamul_signup(
     db: web::Data<Database>,
+    email_service: web::Data<EmailService>,
     body: web::Json<BabamulSignupPost>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
@@ -123,6 +125,23 @@ pub async fn post_babamul_signup(
     // Note: Kafka user/ACLs will be created upon activation, not signup
     match babamul_users_collection.insert_one(babamul_user).await {
         Ok(_) => {
+            // Try to send activation email if email service is enabled
+            let activation_code_to_send = activation_code.clone().unwrap_or_default();
+            if email_service.is_enabled() {
+                if let Err(e) =
+                    email_service.send_activation_email(&email, &activation_code_to_send)
+                {
+                    eprintln!("Failed to send activation email to {}: {}", email, e);
+                    // Don't fail the signup, just log the error
+                    // In production, you might want to queue this for retry
+                }
+            } else {
+                println!(
+                    "Email service disabled - activation code for {}: {}",
+                    email, activation_code_to_send
+                );
+            }
+
             HttpResponse::Ok().json(BabamulSignupResponse {
                 message: format!(
                     "Signup successful. An activation code has been sent to {}. Use the /babamul/activate endpoint to activate your account and receive your password.",
