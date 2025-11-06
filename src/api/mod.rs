@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod babamul_auth;
 pub mod catalogs;
 pub mod db;
 pub mod docs;

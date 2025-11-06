@@ -7,7 +7,7 @@ use mongodb::{Client, Database};
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
-pub const PROTECTED_COLLECTION_NAMES: [&str; 2] = ["users", "filters"];
+pub const PROTECTED_COLLECTION_NAMES: [&str; 3] = ["users", "filters", "babamul_users"];
 
 async fn init_api_admin_user(
     auth_config: &AuthConfig,
@@ -128,6 +128,22 @@ async fn db_from_config(config: AppConfig) -> Database {
         .create_index(username_index)
         .await
         .expect("failed to create username index on users collection");
+
+    // Create babamul_users collection with unique email index
+    use crate::api::routes::babamul::BabamulUser;
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    let email_index = mongodb::IndexModel::builder()
+        .keys(doc! { "email": 1})
+        .options(
+            mongodb::options::IndexOptions::builder()
+                .unique(true)
+                .build(),
+        )
+        .build();
+    let _ = babamul_users_collection
+        .create_index(email_index)
+        .await
+        .expect("failed to create email index on babamul_users collection");
 
     // Initialize the API admin user if it does not exist
     if let Err(e) = init_api_admin_user(&config.api.auth, &users_collection).await {

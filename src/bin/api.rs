@@ -29,6 +29,8 @@ async fn main() -> std::io::Result<()> {
             .service(Scalar::with_url("/docs", api_doc.clone()))
             .service(routes::info::get_health)
             .service(routes::auth::post_auth)
+            .service(routes::babamul::post_babamul_signup)
+            .service(routes::babamul::post_babamul_activate)
             .service(
                 actix_web::web::scope("")
                     .wrap(from_fn(auth_middleware))
