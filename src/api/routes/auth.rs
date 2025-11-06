@@ -30,7 +30,7 @@ pub struct FailedAuthResponse {
 #[utoipa::path(
     post,
     path = "/auth",
-    request_body = AuthPost,
+    request_body(content = AuthPost, content_type = "application/x-www-form-urlencoded"),
     responses(
         (status = 200, description = "Successful authentication", body = AuthResponse),
         (status = 401, description = "Invalid Client", body = FailedAuthResponse),
@@ -39,7 +39,7 @@ pub struct FailedAuthResponse {
     tags=["Auth"]
 )]
 #[post("/auth")]
-pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Json<AuthPost>) -> HttpResponse {
+pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Form<AuthPost>) -> HttpResponse {
     // Check if the user exists and the password matches
     match auth
         .create_token_for_user(&body.username, &body.password)
