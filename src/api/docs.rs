@@ -1,5 +1,5 @@
 use crate::api::routes;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::security::{Flow, OAuth2, Password, Scopes, SecurityScheme};
 use utoipa::openapi::Components;
 use utoipa::Modify;
 use utoipa::OpenApi;
@@ -14,12 +14,10 @@ impl Modify for SecurityAddon {
 
         openapi.components.as_mut().unwrap().add_security_scheme(
             "api_jwt_token",
-            SecurityScheme::Http(
-                HttpBuilder::new()
-                    .scheme(HttpAuthScheme::Bearer)
-                    .bearer_format("JWT")
-                    .build(),
-            ),
+            SecurityScheme::OAuth2(OAuth2::new([Flow::Password(Password::new(
+                "/auth",
+                Scopes::default(),
+            ))])),
         );
     }
 }
