@@ -1,2 +1,5 @@
 Bootstrap: docker
 From: mongo:8.0
+
+%runscript
+    exec mongod --logpath /log/mongo.log
