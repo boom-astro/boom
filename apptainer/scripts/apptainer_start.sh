@@ -70,99 +70,115 @@ set +a
 # 1. MongoDB
 # -----------------------------
 if start_service "mongo" "$2"; then
-  echo && echo "$(current_datetime) - Starting MongoDB"
-  mkdir -p "$PERSISTENT_DIR/mongodb"
-  mkdir -p "$LOGS_DIR/mongodb"
-  apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" \
-    --bind "$LOGS_DIR/mongodb:/log" \
-    "$SIF_DIR/mongo.sif" mongo
-  sleep 5
-  "$HEALTHCHECK_DIR/mongodb-healthcheck.sh"
+  if "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - MongoDB is already running${END}"
+  else
+    echo && echo "$(current_datetime) - Starting MongoDB"
+    mkdir -p "$PERSISTENT_DIR/mongodb"
+    mkdir -p "$LOGS_DIR/mongodb"
+    apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" \
+      --bind "$LOGS_DIR/mongodb:/log" \
+      "$SIF_DIR/mongo.sif" mongo
+    sleep 5
+    "$HEALTHCHECK_DIR/mongodb-healthcheck.sh"
+  fi
 fi
 
 # -----------------------------
 # 2. Valkey
 # -----------------------------
 if start_service "valkey" "$2"; then
-  echo && echo "$(current_datetime) - Starting Valkey"
-  mkdir -p "$PERSISTENT_DIR/valkey"
-  mkdir -p "$LOGS_DIR/valkey"
-  apptainer instance run \
-    --bind "$PERSISTENT_DIR/valkey:/data" \
-    --bind "$LOGS_DIR/valkey:/log" \
-    "$SIF_DIR/valkey.sif" valkey
-  "$HEALTHCHECK_DIR/valkey-healthcheck.sh"
+  if "$HEALTHCHECK_DIR/valkey-healthcheck.sh" > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Valkey is already running${END}"
+  else
+    echo && echo "$(current_datetime) - Starting Valkey"
+    mkdir -p "$PERSISTENT_DIR/valkey"
+    mkdir -p "$LOGS_DIR/valkey"
+    apptainer instance run \
+      --bind "$PERSISTENT_DIR/valkey:/data" \
+      --bind "$LOGS_DIR/valkey:/log" \
+      "$SIF_DIR/valkey.sif" valkey
+    "$HEALTHCHECK_DIR/valkey-healthcheck.sh"
+  fi
 fi
 
 # -----------------------------
 # 3. Kafka
 # -----------------------------
 if start_service "kafka" "$2"; then
-  echo && echo "$(current_datetime) - Starting Kafka"
-  mkdir -p "$PERSISTENT_DIR/kafka_data"
-  mkdir -p "$LOGS_DIR/kafka"
-  apptainer instance run \
-    --bind "$BOOM_DIR/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
-    --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
-    --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
-    --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
-    "$SIF_DIR/kafka.sif" kafka
-  "$HEALTHCHECK_DIR/kafka-healthcheck.sh"
+  if "$HEALTHCHECK_DIR/kafka-healthcheck.sh" > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Kafka is already running${END}"
+  else
+    echo && echo "$(current_datetime) - Starting Kafka"
+    mkdir -p "$PERSISTENT_DIR/kafka_data"
+    mkdir -p "$LOGS_DIR/kafka"
+    apptainer instance run \
+      --bind "$BOOM_DIR/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
+      --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
+      --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
+      --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
+      "$SIF_DIR/kafka.sif" kafka
+    "$HEALTHCHECK_DIR/kafka-healthcheck.sh"
 
-  echo "$(current_datetime) - Initializing Kafka ACLs"
-  apptainer exec \
-    --env KAFKA_ADMIN_PASSWORD="${KAFKA_ADMIN_PASSWORD}" \
-    --env KAFKA_READONLY_PASSWORD="${KAFKA_READONLY_PASSWORD}" \
-    --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
-    "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
+    echo "$(current_datetime) - Initializing Kafka ACLs"
+    apptainer exec \
+      --env KAFKA_ADMIN_PASSWORD="${KAFKA_ADMIN_PASSWORD}" \
+      --env KAFKA_READONLY_PASSWORD="${KAFKA_READONLY_PASSWORD}" \
+      --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
+      "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
+  fi
 fi
 
 # -----------------------------
 # 5. Prometheus
 # -----------------------------
 if start_service "prometheus" "$2"; then
-  echo && echo "$(current_datetime) - Starting Prometheus instance"
-  mkdir -p "$LOGS_DIR/prometheus"
-  mkdir -p "$PERSISTENT_DIR/prometheus"
-  apptainer instance start \
-    --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
-    --bind "$PERSISTENT_DIR/prometheus:/prometheus/data" \
-    --bind "$LOGS_DIR/prometheus:/var/log" \
-    "$SIF_DIR/prometheus.sif" prometheus
-  "$HEALTHCHECK_DIR/prometheus-healthcheck.sh"
+  if "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Prometheus is already running${END}"
+  else
+    echo && echo "$(current_datetime) - Starting Prometheus instance"
+    mkdir -p "$LOGS_DIR/prometheus"
+    mkdir -p "$PERSISTENT_DIR/prometheus"
+    apptainer instance start \
+      --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
+      --bind "$PERSISTENT_DIR/prometheus:/prometheus/data" \
+      --bind "$LOGS_DIR/prometheus:/var/log" \
+      "$SIF_DIR/prometheus.sif" prometheus
+    "$HEALTHCHECK_DIR/prometheus-healthcheck.sh"
+  fi
 fi
 
 # -----------------------------
 # 6. OpenTelemetry Collector
 # -----------------------------
 if start_service "otel" "$2"; then
-  echo && echo "$(current_datetime) - Starting Otel Collector"
-  if pgrep -f "otelcol" > /dev/null; then
-    echo "$(current_datetime) - Otel Collector already running"
+  if "$HEALTHCHECK_DIR/process-healthcheck.sh" "otelcol" otel-collector > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Otel Collector is already running${END}"
   else
+    echo && echo "$(current_datetime) - Starting Otel Collector"
     mkdir -p "$LOGS_DIR/otel"
     apptainer exec \
       --bind "$BOOM_DIR/config/apptainer-otel-collector-config.yaml:/etc/otelcol/config.yaml" \
       --bind "$LOGS_DIR/otel:/var/log/otel" \
       "$SIF_DIR/otel.sif" /otelcol --config /etc/otelcol/config.yaml \
       > "$LOGS_DIR/otel/otel.log" 2>&1 &
+    sleep 1
+    "$HEALTHCHECK_DIR/process-healthcheck.sh" "otelcol" otel-collector
   fi
-  sleep 1
-  "$HEALTHCHECK_DIR/process-healthcheck.sh" "otelcol" otel-collector
 fi
 
 # -----------------------------
 # 7. Healthcheck listener
 # -----------------------------
 if start_service "listener" "$2"; then
-  echo && echo "$(current_datetime) - Starting Boom healthcheck listener"
-  if pgrep -f "boom-healthcheck-listener.py" > /dev/null; then
-    echo "$(current_datetime) - Boom healthcheck listener already running"
+  if "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh" > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Boom healthcheck listener is already running${END}"
   else
+    echo && echo "$(current_datetime) - Starting Boom healthcheck listener"
     mkdir -p "$LOGS_DIR/listener"
     python "$HEALTHCHECK_DIR/boom-healthcheck-listener.py" > "$LOGS_DIR/listener/listener.log" 2>&1 &
+    "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh"
   fi
-  "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh"
 fi
 
 # -----------------------------
@@ -170,25 +186,23 @@ fi
 # -----------------------------
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   survey=$3
-  if ! apptainer instance list | awk '{print $1}' | grep -xq "boom${survey:+_$survey}"; then
-    echo && echo "$(current_datetime) - Starting boom${survey:+_$survey} instance"
-    apptainer instance start \
-      --bind "$CONFIG_FILE:/app/config.yaml" \
-      "$SIF_DIR/boom.sif" "boom${survey:+_$survey}"
-    sleep 3
-  else
-    echo && echo -e "$(current_datetime) - ${YELLOW}BOOM instance already running${END}"
-  fi
-
   if [ -z "$survey" ]; then
-      echo -e "${RED}Survey name not provided, consumer or scheduler cannot be started.${END}"
-      echo -e "${BLUE}apptainer_start.sh start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
-      echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
-      echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
-      echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
-      echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
-      echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
-      exit 1
+    echo && echo -e "${RED}$(current_datetime) - Survey name not provided, boom cannot be started.${END}"
+    echo -e "${BLUE}apptainer_start.sh start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
+    echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
+    echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
+    echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
+    echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
+    echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
+  else
+    if apptainer instance list | awk '{print $1}' | grep -xq "boom${survey:+_$survey}"; then
+      echo && echo -e "${YELLOW}$(current_datetime) - BOOM is already running${END}"
+    else
+      echo && echo "$(current_datetime) - Starting boom${survey:+_$survey} instance"
+      apptainer instance start \
+        --bind "$CONFIG_FILE:/app/config.yaml" \
+        "$SIF_DIR/boom.sif" "boom${survey:+_$survey}"
+      sleep 3
     fi
 
   # -----------------------------
@@ -208,18 +222,19 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     fi
   fi
 
-  # -----------------------------
-  # 4a. Boom Scheduler
-  # -----------------------------
-  if start_service "boom" "$2" || start_service "scheduler" "$2"; then
-    ARGS=("$survey")
-    [ -n "$6" ] && ARGS+=("$6") # $6=config path
-    if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
-      echo -e "${RED}Boom scheduler already running.${END}"
-    else
-      apptainer exec --pwd /app --env-file .env "instance://boom_$survey" /app/scheduler \
-        "${ARGS[@]}" > "$LOGS_DIR/${survey}_scheduler.log" 2>&1 &
-      echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
+    # -----------------------------
+    # 4a. Boom Scheduler
+    # -----------------------------
+    if start_service "boom" "$2" || start_service "scheduler" "$2"; then
+      ARGS=("$survey")
+      [ -n "$6" ] && ARGS+=("$6") # $6=config path
+      if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
+        echo -e "${YELLOW}Boom scheduler already running.${END}"
+      else
+        apptainer exec --pwd /app --env-file .env "instance://boom_$survey" /app/scheduler \
+          "${ARGS[@]}" > "$LOGS_DIR/${survey}_scheduler.log" 2>&1 &
+        echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
+      fi
     fi
   fi
 fi
@@ -228,12 +243,16 @@ fi
 # 8. Uptime Kuma
 # -----------------------------
 if start_service "kuma" "$2"; then
-  echo && echo "$(current_datetime) - Starting Uptime Kuma"
-  mkdir -p "$PERSISTENT_DIR/kuma"
-  mkdir -p "$LOGS_DIR/kuma"
-  apptainer instance start \
-    --bind "$PERSISTENT_DIR/kuma:/app/data" \
-    --bind "$LOGS_DIR/kuma:/app/logs" \
-    "$SIF_DIR/kuma.sif" kuma
-  "$HEALTHCHECK_DIR/kuma-healthcheck.sh"
+  if "$HEALTHCHECK_DIR/kuma-healthcheck.sh" > /dev/null 2>&1; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Uptime Kuma is already running${END}"
+  else
+    echo && echo "$(current_datetime) - Starting Uptime Kuma"
+    mkdir -p "$PERSISTENT_DIR/kuma"
+    mkdir -p "$LOGS_DIR/kuma"
+    apptainer instance start \
+      --bind "$PERSISTENT_DIR/kuma:/app/data" \
+      --bind "$LOGS_DIR/kuma:/app/logs" \
+      "$SIF_DIR/kuma.sif" kuma
+    "$HEALTHCHECK_DIR/kuma-healthcheck.sh"
+  fi
 fi
