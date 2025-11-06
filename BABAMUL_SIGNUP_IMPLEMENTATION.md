@@ -2,211 +2,200 @@
 
 ## Overview
 
-This document summarizes the implementation of the Babamul public signup API endpoint at `/babamul/signup` and related functionality.
+Implemented a public signup API for Babamul users with email-based registration, activation workflow, and dual authentication (Kafka SCRAM + JWT API access).
 
-## Changes Made
+## Authentication Flow
 
-### 1. New Files Created
-
-#### `/src/api/routes/babamul.rs`
-- **POST /babamul/signup**: Public endpoint for user registration
-- **POST /babamul/activate**: Endpoint for account activation
-- Data models: `BabamulUser`, `BabamulSignupPost`, `BabamulSignupResponse`, etc.
-- Helper functions:
-  - `create_kafka_user_and_acls()`: Creates Kafka SCRAM user and ACLs
-  - `create_babamul_jwt()`: Generates JWT tokens with `babamul:` prefix
-
-#### `/src/api/babamul_auth.rs`
-- `babamul_auth_middleware()`: Middleware for authenticating Babamul users
-- Validates JWT tokens with `babamul:` prefix
-- Fetches BabamulUser from database and injects into request
-- Checks activation status
-
-#### `/tests/api/test_babamul.rs`
-- Comprehensive test suite for signup and activation
-- Tests for duplicate email handling, invalid emails, activation codes
-
-#### `/docs/babamul-api.md`
-- Complete documentation for the Babamul public API
-- Usage examples for both API and Kafka access
-- Security considerations and implementation details
-
-### 2. Modified Files
-
-#### `/src/api/mod.rs`
-- Added `pub mod babamul_auth;`
-
-#### `/src/api/routes/mod.rs`
-- Added `pub mod babamul;`
-
-#### `/src/api/auth.rs`
-- Made `encoding_key` field public in `AuthProvider`
-- Made `Claims` struct and its fields (`iat`, `exp`) public
-- Updated `authenticate_user()` to reject Babamul users (with `babamul:` prefix)
-
-#### `/src/api/db.rs`
-- Added `"babamul_users"` to `PROTECTED_COLLECTION_NAMES`
-- Created `babamul_users` collection with unique email index in `db_from_config()`
-
-#### `/src/bin/api.rs`
-- Registered `routes::babamul::post_babamul_signup`
-- Registered `routes::babamul::post_babamul_activate`
-
-#### `/src/api/docs.rs`
-- Added both Babamul endpoints to OpenAPI documentation
-
-#### `/tests/api/mod.rs`
-- Added `pub mod test_babamul;`
-
-## Key Features
-
-### User Account Separation
-
-- **Babamul users** are stored in a separate `babamul_users` collection
-- JWT tokens have `sub: "babamul:<user_id>"` to distinguish them
-- Auth middleware prevents Babamul users from accessing main API endpoints
-- Main API users cannot use Babamul-specific endpoints (enforced by babamul_auth middleware)
-
-### Signup Flow
-
-1. User submits email to `/babamul/signup`
-2. System validates email (basic format check)
-3. Checks for duplicate email (unique constraint)
-4. Generates:
-   - User ID (UUID)
-   - Token/password (UUID) for Kafka access
-   - Activation code (UUID)
-5. Stores user in database with hashed password
-6. Creates Kafka SCRAM user (username = email, password = token)
-7. Adds Kafka ACLs for `babamul.*` topics
-8. Returns JWT token for API access
-
-### Activation Flow
-
-1. User receives activation code (in future: via email)
-2. Submits email + code to `/babamul/activate`
-3. System verifies code matches stored value
-4. Sets `is_activated: true`, clears activation code
-5. Account is now fully active
-
-### Kafka Integration
-
-Babamul users automatically get:
-- **SCRAM-SHA-512 user** in Kafka (username = email)
-- **READ** permission on `babamul.*` topics
-- **DESCRIBE** permission on `babamul.*` topics
-- **READ** permission on `babamul-*` consumer groups
-
-This allows them to consume from any Babamul stream using their email and token.
-
-## Security
-
-- All passwords hashed with bcrypt
-- JWT tokens contain `babamul:` prefix to prevent privilege escalation
-- Email normalized (lowercase, trimmed) before storage
-- Unique index prevents duplicate accounts
-- Separate authentication middleware for Babamul endpoints
-- Activation required before full access (configurable)
-
-## Database Schema
-
-### Collection: `babamul_users`
-
-```javascript
-{
-  _id: String,              // UUID
-  email: String,            // Unique index
-  password_hash: String,    // bcrypt hash
-  activation_code: String?, // Optional, cleared after activation
-  is_activated: Boolean,    // Activation status
-  created_at: i64          // Unix timestamp
-}
+```
+1. User signs up with email only (POST /babamul/signup)
+   ↓
+2. System creates user with activation code
+   ↓
+3. User receives activation code (currently in DB, future: via email)
+   ↓
+4. User activates account (POST /babamul/activate)
+   ↓
+5. System generates 32-char random password
+   ↓
+6. System creates Kafka SCRAM user + ACLs
+   ↓
+7. Password returned to user (shown ONCE)
+   ↓
+8. User authenticates (POST /babamul/auth) with email+password
+   ↓
+9. System returns JWT token for API access
 ```
 
-### Indexes
+## Key Design Decisions
 
-- `email` (unique): Enforces one account per email
+### Password-Based Approach
+- **Single password for both uses**: Simplified from initial dual-token design
+- **32-character random string**: Secure, no special format needed
+- **One-time reveal**: Password only shown during activation for security
+- **Standard OAuth-like flow**: Separate authentication endpoint for JWT tokens
+
+### Account Separation
+- **JWT claim prefix**: Babamul users have `sub: "babamul:<user_id>"`
+- **Middleware enforcement**: Main API endpoints reject Babamul users
+- **Separate collection**: `babamul_users` isolated from main `users`
+- **Future-proof**: Easy to add Babamul-specific endpoints
+
+### Kafka Integration
+- **SCRAM-SHA-512**: Industry-standard authentication
+- **Username = email**: Natural user identifier
+- **Password = activation password**: Same credential for simplicity
+- **ACL pattern**: `babamul.*` topics, `babamul-*` consumer groups
 
 ## API Endpoints
 
-### Public Endpoints (No Auth Required)
+### POST /babamul/signup
+- **Public**: No authentication required
+- **Input**: `{ "email": "user@example.com" }`
+- **Output**: `{ "message": "...", "activation_required": true }`
+- **Side effects**: Creates user in database with activation code
 
-- `POST /babamul/signup` - Create account
-- `POST /babamul/activate` - Activate account
+### POST /babamul/activate
+- **Public**: No authentication required
+- **Input**: `{ "email": "...", "activation_code": "..." }`
+- **Output**: `{ "message": "...", "activated": true, "email": "...", "password": "..." }`
+- **Side effects**:
+  - Generates 32-char password
+  - Creates Kafka SCRAM user
+  - Adds Kafka ACLs
+  - Marks user as activated
+  - Clears activation code
 
-### Protected Babamul Endpoints (Babamul Auth Required)
+### POST /babamul/auth
+- **Public**: No authentication required
+- **Input**: `{ "email": "...", "password": "..." }`
+- **Output**: `{ "access_token": "JWT...", "token_type": "Bearer", "expires_in": 86400 }`
+- **Validates**: Email, password (bcrypt), and activation status
 
-None yet, but the middleware is in place for future endpoints like:
-- `GET /babamul/streams` - List available streams
-- `GET /babamul/profile` - Get user profile
-- `PATCH /babamul/profile` - Update preferences
+## Database Schema
 
-## Future Enhancements
+```rust
+Collection: babamul_users
+{
+  "_id": String,              // UUID
+  "email": String,            // Unique, indexed
+  "password_hash": String,    // bcrypt hash
+  "activation_code": Option<String>,  // UUID, cleared after activation
+  "is_activated": bool,       // false until activated
+  "created_at": i64          // Unix timestamp
+}
+```
 
-1. **Email Integration**
-   - Send activation codes via email
-   - Welcome emails with setup instructions
-   - Password reset functionality
+**Indexes:**
+- Unique index on `email`
 
-2. **Rate Limiting**
-   - Prevent signup spam
-   - Limit activation attempts
+## Kafka Configuration
 
-3. **Expiration**
-   - Activation codes expire after 24 hours
-   - Option to resend activation code
+**User Creation:**
+```bash
+kafka-configs.sh --alter \
+  --add-config 'SCRAM-SHA-512=[password=...]' \
+  --entity-type users \
+  --entity-name user@example.com
+```
 
-4. **User Management**
-   - Admin endpoints to manage Babamul users
-   - User metrics and analytics
-   - Quota management
+**ACLs Added:**
+- Topic: `babamul.*` - READ, DESCRIBE
+- Group: `babamul-*` - READ
 
-5. **Additional Babamul Endpoints**
-   - Profile management
-   - Stream subscription preferences
-   - Usage statistics
+## Files Modified/Created
+
+### Core Implementation
+- `/src/api/routes/babamul.rs` - Signup, activation, and auth endpoints
+- `/src/api/babamul_auth.rs` - Middleware for Babamul authentication
+- `/src/api/mod.rs` - Module registration
+- `/src/api/routes/mod.rs` - Route registration
+- `/src/api/auth.rs` - Made Claims public, added Babamul rejection
+- `/src/api/db.rs` - Database initialization with indexes
+- `/src/bin/api.rs` - Endpoint registration
+
+### Testing
+- `/tests/api/test_babamul.rs` - Comprehensive test suite
+- `/tests/api/mod.rs` - Module registration
+- `/scripts/test_babamul_signup.sh` - Manual testing script
+
+### Documentation
+- `/docs/babamul-api.md` - Full API documentation
+- `/docs/babamul-quick-reference.md` - Quick reference guide
+- `/BABAMUL_SIGNUP_IMPLEMENTATION.md` - This file
+
+## Security Features
+
+1. **Password hashing**: bcrypt with DEFAULT_COST
+2. **Email uniqueness**: Database constraint prevents duplicates
+3. **Activation required**: Users must verify email before Kafka access
+4. **One-time password reveal**: Password only shown during activation
+5. **JWT expiration**: Tokens expire after 24 hours (configurable)
+6. **Account isolation**: Middleware prevents cross-contamination
 
 ## Testing
 
-Run tests with:
 ```bash
+# Run unit/integration tests (requires MongoDB)
 cargo test test_babamul
+
+# Manual end-to-end test
+./scripts/test_babamul_signup.sh
 ```
 
-Tests cover:
-- Successful signup
-- Duplicate email rejection
-- Invalid email validation
-- Correct/incorrect activation codes
-- Already-activated accounts
-- Database state verification
+## Future Enhancements
 
-## Dependencies
+### Planned
+1. **Email integration**: Send activation codes via email
+2. **Code expiration**: Activation codes expire after N hours
+3. **Rate limiting**: Prevent signup abuse
+4. **Password reset**: Allow users to reset forgotten passwords
+5. **Account management**: Update email, view Kafka topics, etc.
 
-No new dependencies were added. Implementation uses existing:
-- actix-web
-- mongodb
-- bcrypt
-- jsonwebtoken
-- uuid
-- serde
+### Possible
+- Token rotation/refresh tokens
+- 2FA support
+- Usage analytics
+- Topic subscription management UI
 
-## Deployment Considerations
+## Configuration
 
-1. **Environment Variables**
-   - `KAFKA_INTERNAL_BROKER`: Override default broker address
-   - Ensure Kafka CLI tools are available at `/opt/kafka/bin/`
+Requires these config values:
+- `api.auth.secret_key` - JWT signing secret
+- `api.auth.token_expiration` - JWT TTL (seconds)
+- Kafka broker access for SCRAM user creation
+- MongoDB connection for user storage
 
-2. **Database Migrations**
-   - Index creation is automatic on first startup
-   - No manual migration required
+## Migration Notes
 
-3. **Kafka Setup**
-   - Ensure SCRAM-SHA-512 is enabled
-   - Verify ACL authorizer is configured
-   - Test topic prefix pattern matching
+**Evolution of Design:**
+1. **Initial**: Dual tokens (JWT for API, bbml_* for Kafka)
+2. **Iteration 1**: Single bbml_* token for both uses
+3. **Final**: Pure password-based (activation reveals password, separate /auth endpoint)
 
-4. **Monitoring**
-   - Log Kafka user/ACL creation failures
-   - Track signup success/failure rates
-   - Monitor activation rates
+**Rationale for final design:**
+- Simpler user experience (one credential)
+- Standard OAuth-like pattern (familiar to developers)
+- Password-based Kafka auth is industry standard
+- JWT tokens can be refreshed without changing Kafka password
+
+## Production Checklist
+
+Before deploying:
+- [ ] Configure email sending for activation codes
+- [ ] Set up rate limiting on signup endpoint
+- [ ] Add activation code expiration
+- [ ] Configure secure JWT secret
+- [ ] Set up monitoring for signup/activation metrics
+- [ ] Test Kafka broker connectivity from API container
+- [ ] Verify MongoDB indexes are created
+- [ ] Test complete flow in staging environment
+- [ ] Document operational procedures (user deletion, password reset, etc.)
+
+## Support
+
+For questions or issues:
+- See `/docs/babamul-api.md` for API documentation
+- See `/docs/babamul-quick-reference.md` for quick examples
+- Run `./scripts/test_babamul_signup.sh` for testing
+- Check MongoDB `babamul_users` collection for user data
+- Check Kafka ACLs with `kafka-acls.sh --list`

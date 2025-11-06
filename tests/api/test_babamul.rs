@@ -43,11 +43,20 @@ mod tests {
         );
 
         let body = read_json_response(resp).await;
-        assert!(body["token"].is_string(), "Response should contain token");
+        assert!(
+            body["message"].is_string(),
+            "Response should contain message"
+        );
         assert_eq!(
             body["activation_required"].as_bool().unwrap(),
             true,
             "Activation should be required"
+        );
+
+        // No password should be returned yet (only after activation)
+        assert!(
+            body["password"].is_null() || !body.get("password").is_some(),
+            "Password should not be returned before activation"
         );
 
         // Verify the user was created in the database
@@ -100,7 +109,8 @@ mod tests {
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .service(routes::babamul::post_babamul_signup)
-                .service(routes::babamul::post_babamul_activate),
+                .service(routes::babamul::post_babamul_activate)
+                .service(routes::babamul::post_babamul_auth),
         )
         .await;
 
@@ -158,6 +168,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(body["activated"].as_bool().unwrap(), true);
+        assert!(
+            body["password"].is_string(),
+            "Password should be returned on activation"
+        );
+
+        let password = body["password"].as_str().unwrap();
+        assert_eq!(password.len(), 32, "Password should be 32 characters");
+
+        // Save password for later use
+        let user_password = password.to_string();
 
         // Verify user is activated in database
         let user = babamul_users_collection
@@ -171,7 +191,36 @@ mod tests {
             "Activation code should be cleared"
         );
 
-        // Try to activate again - should succeed but indicate already activated
+        // Verify password is stored (hashed)
+        assert!(
+            !user.password_hash.is_empty(),
+            "Password hash should be stored"
+        );
+
+        // Test authentication with the password
+        let req = test::TestRequest::post()
+            .uri("/babamul/auth")
+            .set_json(serde_json::json!({
+                "email": test_email,
+                "password": user_password
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Authentication should succeed"
+        );
+
+        let auth_body = read_json_response(resp).await;
+        assert!(
+            auth_body["access_token"].is_string(),
+            "Should return access token"
+        );
+        assert_eq!(auth_body["token_type"].as_str().unwrap(), "Bearer");
+
+        // Try to activate again - should succeed but not return password
         let req = test::TestRequest::post()
             .uri("/babamul/activate")
             .set_json(serde_json::json!({
@@ -187,6 +236,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("already activated"));
+        assert!(
+            body["password"].is_null(),
+            "Password should not be returned for already-activated account"
+        );
 
         // Clean up: delete the test user
         babamul_users_collection

@@ -1,39 +1,66 @@
-# Babamul Signup Quick Reference
+# Babamul API Quick Reference
 
-## For API Users
+## Signup Flow
 
-### Sign Up
 ```bash
-curl -X POST http://localhost:4000/babamul/signup \
+# 1. Sign up with email
+curl -X POST https://api.boom.example.com/babamul/signup \
   -H "Content-Type: application/json" \
-  -d '{"email": "your.email@example.com"}'
-```
+  -d '{"email": "user@example.com"}'
 
-Response:
-```json
-{
-  "message": "Signup successful. Please check your email for activation instructions.",
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 86400,
-  "activation_required": true
-}
-```
+# Response:
+# {
+#   "message": "Signup successful. An activation code has been sent to user@example.com...",
+#   "activation_required": true
+# }
 
-### Activate Account
-```bash
-curl -X POST http://localhost:4000/babamul/activate \
+# 2. Activate account with code (check email or database)
+curl -X POST https://api.boom.example.com/babamul/activate \
   -H "Content-Type: application/json" \
   -d '{
-    "email": "your.email@example.com",
+    "email": "user@example.com",
     "activation_code": "550e8400-e29b-41d4-a716-446655440000"
   }'
+
+# Response (SAVE THE PASSWORD!):
+# {
+#   "message": "Account activated successfully. Save your password - it won't be shown again!",
+#   "activated": true,
+#   "email": "user@example.com",
+#   "password": "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV"
+# }
+
+# 3. Get JWT token for API access
+curl -X POST https://api.boom.example.com/babamul/auth \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV"
+  }'
+
+# Response:
+# {
+#   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+#   "token_type": "Bearer",
+#   "expires_in": 86400
+# }
 ```
 
-### Use Token for Protected Endpoints (Future)
+## API Authentication
+
+Use the JWT token from `/babamul/auth` in your requests:
+
 ```bash
-curl -X GET http://localhost:4000/babamul/streams \
-  -H "Authorization: Bearer <your-token>"
+curl https://api.boom.example.com/babamul/some-endpoint \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
+
+## Kafka Authentication
+
+Use your email and password from activation:
+
+- **Username**: `user@example.com`
+- **Password**: `aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV` (from activation response)
 
 ### Connect to Kafka Streams
 ```python
@@ -44,14 +71,21 @@ consumer = KafkaConsumer(
     bootstrap_servers='kafka.boom.example.com:9092',
     security_protocol='SASL_SSL',
     sasl_mechanism='SCRAM-SHA-512',
-    sasl_plain_username='your.email@example.com',  # Your email
-    sasl_plain_password='<token-from-signup>',     # Token from signup
+    sasl_plain_username='user@example.com',  # Your email
+    sasl_plain_password='aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV',  # Password from activation
     group_id='babamul-myapp'
 )
 
 for msg in consumer:
     print(msg.value)
 ```
+
+## Key Concepts
+
+- **One password, dual purpose**: The password from activation works for both Kafka (SCRAM) and API (via `/babamul/auth`)
+- **Password shown once**: Save it during activation - it won't be displayed again
+- **JWT tokens**: Get fresh JWT tokens via `/babamul/auth` endpoint as needed
+- **Account separation**: Babamul users (prefix `babamul:`) are isolated from main API users
 
 ## For Developers
 
@@ -94,19 +128,23 @@ db.babamul_users.deleteOne({email: "test@example.com"})
 
 ### User Flow
 ```
-1. POST /babamul/signup
+1. POST /babamul/signup (email only)
    ↓
-2. Create user in database
+2. Create user in database with activation code
    ↓
-3. Create Kafka SCRAM user
+3. User activates via POST /babamul/activate
    ↓
-4. Add Kafka ACLs (babamul.* topics)
+4. Generate 32-char random password
    ↓
-5. Return JWT token
+5. Create Kafka SCRAM user with password
    ↓
-6. POST /babamul/activate (with code)
+6. Add Kafka ACLs (babamul.* topics)
    ↓
-7. Account activated
+7. Return password to user (shown once!)
+   ↓
+8. User authenticates via POST /babamul/auth
+   ↓
+9. Receive JWT token for API access
 ```
 
 ### Authentication
@@ -117,6 +155,8 @@ db.babamul_users.deleteOne({email: "test@example.com"})
 ### Database Collections
 - `users` - Main API users
 - `babamul_users` - Babamul users (separate)
+  - Fields: `id`, `email`, `password_hash`, `activation_code`, `is_activated`, `created_at`
+  - Indexes: unique on `email`
 - `filters` - Filter definitions
 
 ## Common Issues
@@ -132,7 +172,7 @@ db.babamul_users.deleteOne({email: "test@example.com"})
 
 ### Issue: Can't connect to Kafka
 **Solution**: Verify:
-- Email and token are correct
+- Email and password are correct
 - Kafka broker is accessible
 - SCRAM-SHA-512 is enabled
 - Topics exist with `babamul.*` prefix
@@ -166,6 +206,7 @@ database:
 
 1. Implement email sending for activation codes
 2. Add rate limiting to prevent signup spam
-3. Create additional Babamul endpoints (streams list, profile management)
-4. Add monitoring and metrics for signups/activations
-5. Implement activation code expiration
+3. Add activation code expiration
+4. Create additional Babamul endpoints (streams list, profile management)
+5. Add monitoring and metrics for signups/activations
+6. Implement password reset functionality

@@ -36,14 +36,12 @@ This separation is enforced via JWT token claims (Babamul users have a `babamul:
 
 ```json
 {
-  "message": "Signup successful. Please check your email for activation instructions.",
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 86400,
+  "message": "Signup successful. An activation code has been sent to user@example.com. Use the /babamul/activate endpoint to activate your account and receive your password.",
   "activation_required": true
 }
 ```
 
-The `token` can be used immediately for API calls, but certain features may be restricted until the account is activated.
+**Note:** No credentials are provided at signup. You must activate your account first to receive your password.
 
 #### Error Responses
 
@@ -68,10 +66,14 @@ The `token` can be used immediately for API calls, but certain features may be r
 
 ```json
 {
-  "message": "Account activated successfully",
-  "activated": true
+  "message": "Account activated successfully. Save your password - it won't be shown again!",
+  "activated": true,
+  "email": "user@example.com",
+  "password": "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV"
 }
 ```
+
+**Important:** The password is only shown once during activation. Save it securely! You'll need it for both Kafka and API authentication.
 
 #### Error Responses
 
@@ -79,14 +81,42 @@ The `token` can be used immediately for API calls, but certain features may be r
 - **404 Not Found**: Email not found
 - **500 Internal Server Error**: Database error
 
+### POST /babamul/auth
+
+**Public endpoint** - Authenticate with email and password to get a JWT token for API access.
+
+#### Request Body
+
+```json
+{
+  "email": "user@example.com",
+  "password": "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV"
+}
+```
+
+#### Response (200 OK)
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 86400
+}
+```
+
+Use the `access_token` in the Authorization header for subsequent API requests:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+#### Error Responses
+
+- **401 Unauthorized**: Invalid credentials or account not activated
+- **500 Internal Server Error**: Database or system error
+
 ## Kafka Access
 
-After signup, users can connect to Babamul Kafka streams using:
-
-- **Username**: Their email address (as provided during signup)
-- **Password**: The JWT token received during signup
-- **Topics**: All topics matching the pattern `babamul.*`
-- **Consumer Groups**: Groups matching the pattern `babamul-*`
+After activation, use your email and password for Kafka authentication:
 
 ### Kafka Configuration Example
 
@@ -99,7 +129,7 @@ consumer = KafkaConsumer(
     security_protocol='SASL_SSL',
     sasl_mechanism='SCRAM-SHA-512',
     sasl_plain_username='user@example.com',
-    sasl_plain_password='<JWT_TOKEN_FROM_SIGNUP>',
+    sasl_plain_password='aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV',  # Password from activation
     group_id='babamul-myapp-consumer'
 )
 
@@ -123,14 +153,16 @@ Babamul users are stored in the `babamul_users` collection with the following sc
 
 ```rust
 {
-  "_id": String,              // UUID
+  "_id": String,              // UUID (user ID)
   "email": String,            // Unique, indexed
-  "password_hash": String,    // bcrypt hash of the token (used for Kafka SCRAM)
+  "password_hash": String,    // bcrypt hash of the password (32 chars)
   "activation_code": Option<String>,  // Cleared after activation
   "is_activated": bool,       // true after activation
   "created_at": i64          // Unix timestamp
 }
 ```
+
+The password is a 32-character random alphanumeric string, generated during activation and hashed for storage.
 
 ## Implementation Details
 
@@ -138,14 +170,17 @@ Babamul users are stored in the `babamul_users` collection with the following sc
 
 1. User signs up with email
 2. System generates:
-   - Unique user ID
-   - Random token (used as Kafka password)
-   - Activation code
-3. Token is hashed and stored in database
-4. JWT token is created with `sub: "babamul:<user_id>"`
-5. Kafka SCRAM user is created with email as username
-6. Kafka ACLs are added for `babamul.*` topics
-7. JWT token and setup instructions are returned to user
+   - Unique user ID (UUID)
+   - Activation code (UUID)
+3. User activates account with activation code
+4. Upon activation, system generates:
+   - Password (32 random alphanumeric characters)
+   - Password is hashed (bcrypt) and stored
+   - Kafka SCRAM user is created with email as username
+   - Kafka ACLs are added for `babamul.*` topics
+5. Password is returned to user (shown only once!)
+6. For API access: POST to `/babamul/auth` with email + password → get JWT token
+7. For Kafka access: Use email + password directly (SCRAM)
 
 ### Security Considerations
 

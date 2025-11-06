@@ -40,6 +40,7 @@ impl Modify for SecurityAddon {
         routes::auth::post_auth,
         routes::babamul::post_babamul_signup,
         routes::babamul::post_babamul_activate,
+        routes::babamul::post_babamul_auth,
         routes::surveys::get_object,
         routes::catalogs::get_catalogs,
         routes::catalogs::get_catalog_indexes,

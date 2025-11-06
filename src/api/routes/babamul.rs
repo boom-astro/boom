@@ -15,7 +15,7 @@ pub struct BabamulUser {
     #[serde(rename = "_id")]
     pub id: String,
     pub email: String,
-    pub password_hash: String, // This will be the token, hashed for Kafka SCRAM auth
+    pub password_hash: String, // Hashed password (for both Kafka SCRAM auth and API auth)
     pub activation_code: Option<String>,
     pub is_activated: bool,
     pub created_at: i64, // Unix timestamp
@@ -31,16 +31,16 @@ pub struct BabamulSignupPost {
 #[derive(Serialize, Clone, ToSchema)]
 pub struct BabamulSignupResponse {
     pub message: String,
-    pub token: String,
-    pub expires_in: Option<usize>,
     pub activation_required: bool,
 }
 
 /// Babamul signup endpoint - creates a new Babamul user with email only
 ///
-/// This endpoint is public and creates a new Babamul user account. The user
-/// will receive a token that can be used both as a Bearer token for Babamul API
-/// endpoints and as a password for Kafka stream access (username = email).
+/// This endpoint is public and creates a new Babamul user account. After signup,
+/// the user must activate their account using the activation code sent to their email.
+/// Once activated, they will receive their password which can be used for:
+/// - Kafka authentication (email + password via SCRAM)
+/// - API authentication (POST to /babamul/auth with email + password to get JWT)
 ///
 /// Babamul users are separate from main API users and have limited permissions:
 /// - Can access Babamul-specific endpoints
@@ -60,7 +60,6 @@ pub struct BabamulSignupResponse {
 #[post("/babamul/signup")]
 pub async fn post_babamul_signup(
     db: web::Data<Database>,
-    auth: web::Data<AuthProvider>,
     body: web::Json<BabamulSignupPost>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
@@ -92,12 +91,14 @@ pub async fn post_babamul_signup(
         }
     }
 
-    // Generate a unique token/password for the user
+    // Generate user ID and password
     let user_id = uuid::Uuid::new_v4().to_string();
-    let token = uuid::Uuid::new_v4().to_string();
 
-    // Hash the token for storage (used as Kafka password)
-    let password_hash = match bcrypt::hash(&token, bcrypt::DEFAULT_COST) {
+    // Generate a long random password (32 characters for good security)
+    let password = generate_random_string(32);
+
+    // Hash the password for storage (used for both Kafka SCRAM and API auth)
+    let password_hash = match bcrypt::hash(&password, bcrypt::DEFAULT_COST) {
         Ok(hash) => hash,
         Err(e) => {
             eprintln!("Failed to hash password: {}", e);
@@ -105,7 +106,7 @@ pub async fn post_babamul_signup(
         }
     };
 
-    // TODO: Generate activation code if email verification is enabled
+    // Generate activation code - user must activate before getting their password
     let activation_code = Some(uuid::Uuid::new_v4().to_string());
     let is_activated = false; // Require activation
 
@@ -119,28 +120,14 @@ pub async fn post_babamul_signup(
     };
 
     // Insert the user into the database
+    // Note: Kafka user/ACLs will be created upon activation, not signup
     match babamul_users_collection.insert_one(babamul_user).await {
         Ok(_) => {
-            // Create Kafka SCRAM user and ACLs for babamul.* topics
-            if let Err(e) = create_kafka_user_and_acls(&email, &token).await {
-                eprintln!("Failed to create Kafka user/ACLs for {}: {}", email, e);
-                // Continue anyway - user is created, Kafka access can be added later
-            }
-
-            // Generate JWT token for API access
-            let (jwt_token, expires_in) = match create_babamul_jwt(&auth, &user_id).await {
-                Ok(result) => result,
-                Err(e) => {
-                    eprintln!("Failed to create JWT token: {}", e);
-                    return response::internal_error("Failed to generate API token");
-                }
-            };
-
             HttpResponse::Ok().json(BabamulSignupResponse {
-                message: "Signup successful. Please check your email for activation instructions."
-                    .to_string(),
-                token: jwt_token,
-                expires_in,
+                message: format!(
+                    "Signup successful. An activation code has been sent to {}. Use the /babamul/activate endpoint to activate your account and receive your password.",
+                    email
+                ),
                 activation_required: true,
             })
         }
@@ -156,6 +143,24 @@ pub async fn post_babamul_signup(
             }
         }
     }
+}
+
+/// Generate a random alphanumeric string of specified length
+fn generate_random_string(length: usize) -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::rng();
+    (0..length)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+/// Generate a new password for a user (called during activation)
+fn generate_password() -> String {
+    generate_random_string(32)
 }
 
 /// Create Kafka SCRAM user and ACLs to allow babamul user to read from babamul.* topics
@@ -291,12 +296,15 @@ pub struct BabamulActivatePost {
 pub struct BabamulActivateResponse {
     pub message: String,
     pub activated: bool,
+    pub email: String,
+    pub password: Option<String>, // Only returned on successful activation (not if already activated)
 }
 
 /// Activate a Babamul user account
 ///
 /// This endpoint allows users to activate their account using the activation
-/// code sent to their email during signup.
+/// code sent to their email during signup. Upon successful activation, the user
+/// receives their password which can be used for both Kafka and API authentication.
 #[utoipa::path(
     post,
     path = "/babamul/activate",
@@ -328,31 +336,60 @@ pub async fn post_babamul_activate(
             // Check if already activated
             if user.is_activated {
                 return HttpResponse::Ok().json(BabamulActivateResponse {
-                    message: "Account is already activated".to_string(),
+                    message: "Account is already activated. Your password was provided during initial activation.".to_string(),
                     activated: true,
+                    email: user.email.clone(),
+                    password: None, // Don't return password again for security
                 });
             }
 
             // Verify activation code
             match &user.activation_code {
                 Some(stored_code) if stored_code == activation_code => {
-                    // Activate the user
+                    // Generate a new password for the user
+                    let password = generate_password();
+
+                    // Hash the password
+                    let password_hash = match bcrypt::hash(&password, bcrypt::DEFAULT_COST) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            eprintln!("Failed to hash password: {}", e);
+                            return response::internal_error("Failed to generate password");
+                        }
+                    };
+
+                    // Activate the user and update password
                     match babamul_users_collection
                         .update_one(
                             doc! { "_id": &user.id },
                             doc! {
                                 "$set": {
                                     "is_activated": true,
-                                    "activation_code": mongodb::bson::Bson::Null
+                                    "activation_code": mongodb::bson::Bson::Null,
+                                    "password_hash": password_hash
                                 }
                             },
                         )
                         .await
                     {
-                        Ok(_) => HttpResponse::Ok().json(BabamulActivateResponse {
-                            message: "Account activated successfully".to_string(),
-                            activated: true,
-                        }),
+                        Ok(_) => {
+                            // Create Kafka SCRAM user and ACLs now that account is activated
+                            if let Err(e) = create_kafka_user_and_acls(&user.email, &password).await
+                            {
+                                eprintln!(
+                                    "Failed to create Kafka user/ACLs for {}: {}",
+                                    user.email, e
+                                );
+                                // Continue anyway - user can contact support for Kafka access
+                            }
+
+                            HttpResponse::Ok().json(BabamulActivateResponse {
+                                message: "Account activated successfully. Save your password - it won't be shown again!".to_string(),
+                                activated: true,
+                                email: user.email.clone(),
+                                password: Some(password), // Return the password ONCE
+                            })
+                        }
                         Err(e) => {
                             eprintln!("Database error activating user: {}", e);
                             response::internal_error("Failed to activate account")
@@ -363,6 +400,100 @@ pub async fn post_babamul_activate(
             }
         }
         Ok(None) => response::not_found("User not found"),
+        Err(e) => {
+            eprintln!("Database error fetching user: {}", e);
+            response::internal_error("Database error")
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct BabamulAuthPost {
+    pub email: String,
+    pub password: String,
+}
+
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Serialize, Clone, ToSchema)]
+pub struct BabamulAuthResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: Option<usize>,
+}
+
+/// Authenticate a Babamul user and get a JWT token
+///
+/// This endpoint allows activated Babamul users to authenticate using their
+/// email and password to receive a JWT token for API access.
+///
+/// The password is the one received during account activation.
+/// The JWT token should be used in the Authorization header as: Bearer {token}
+#[utoipa::path(
+    post,
+    path = "/babamul/auth",
+    request_body(content = BabamulAuthPost, content_type = "application/json"),
+    responses(
+        (status = 200, description = "Successful authentication", body = BabamulAuthResponse),
+        (status = 401, description = "Invalid credentials or account not activated"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[post("/babamul/auth")]
+pub async fn post_babamul_auth(
+    db: web::Data<Database>,
+    auth: web::Data<AuthProvider>,
+    body: web::Json<BabamulAuthPost>,
+) -> HttpResponse {
+    let email = body.email.trim().to_lowercase();
+    let password = &body.password;
+
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    // Find user by email
+    match babamul_users_collection
+        .find_one(doc! { "email": &email })
+        .await
+    {
+        Ok(Some(user)) => {
+            // Check if account is activated
+            if !user.is_activated {
+                return HttpResponse::Unauthorized().json(serde_json::json!({
+                    "error": "Account not activated. Please activate your account first."
+                }));
+            }
+
+            // Verify password
+            match bcrypt::verify(password, &user.password_hash) {
+                Ok(true) => {
+                    // Generate JWT token
+                    match create_babamul_jwt(&auth, &user.id).await {
+                        Ok((token, expires_in)) => HttpResponse::Ok()
+                            .insert_header(("Cache-Control", "no-store"))
+                            .json(BabamulAuthResponse {
+                                access_token: token,
+                                token_type: "Bearer".into(),
+                                expires_in,
+                            }),
+                        Err(e) => {
+                            eprintln!("Failed to create JWT token: {}", e);
+                            response::internal_error("Failed to generate token")
+                        }
+                    }
+                }
+                Ok(false) => HttpResponse::Unauthorized().json(serde_json::json!({
+                    "error": "Invalid credentials"
+                })),
+                Err(e) => {
+                    eprintln!("Password verification error: {}", e);
+                    response::internal_error("Authentication error")
+                }
+            }
+        }
+        Ok(None) => HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Invalid credentials"
+        })),
         Err(e) => {
             eprintln!("Database error fetching user: {}", e);
             response::internal_error("Database error")

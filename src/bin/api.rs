@@ -31,6 +31,7 @@ async fn main() -> std::io::Result<()> {
             .service(routes::auth::post_auth)
             .service(routes::babamul::post_babamul_signup)
             .service(routes::babamul::post_babamul_activate)
+            .service(routes::babamul::post_babamul_auth)
             .service(
                 actix_web::web::scope("")
                     .wrap(from_fn(auth_middleware))
