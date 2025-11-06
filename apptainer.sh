@@ -102,6 +102,7 @@ if [ "$1" == "stop" ]; then
       apptainer instance stop "boom_$3"
       exit 0
     fi
+    apptainer instance stop "boom"
     apptainer instance stop "boom_lsst"
     apptainer instance stop "boom_ztf"
     apptainer instance stop "boom_decam"
