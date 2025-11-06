@@ -2,7 +2,7 @@ use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom::api::auth::{auth_middleware, get_auth};
 use boom::api::db::get_db;
-use boom::api::docs::ApiDoc;
+use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::routes;
 use boom::conf::load_dotenv;
 use utoipa::OpenApi;
@@ -21,12 +21,14 @@ async fn main() -> std::io::Result<()> {
 
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
+    let babamul_doc = BabamulApiDoc::openapi();
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
             .service(Scalar::with_url("/docs", api_doc.clone()))
+            .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
             .service(routes::info::get_health)
             .service(routes::auth::post_auth)
             .service(routes::babamul::post_babamul_signup)

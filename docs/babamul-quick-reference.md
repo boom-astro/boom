@@ -1,5 +1,9 @@
 # Babamul API Quick Reference
 
+## Interactive Documentation
+
+🚀 **Try it live**: Visit `/babamul/docs` on your BOOM API instance for interactive Swagger UI documentation where you can test all endpoints directly from your browser.
+
 ## Signup Flow
 
 ```bash

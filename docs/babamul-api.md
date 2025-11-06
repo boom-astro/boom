@@ -2,12 +2,20 @@
 
 This document describes the public-facing Babamul API endpoints that allow users to sign up for access to Babamul alert streams.
 
+# Babamul API Documentation
+
 ## Overview
 
-Babamul is a public service that provides access to processed astronomical alert streams. Users can sign up with just an email address to receive:
+The Babamul API provides public access to BOOM's transient alert streams via Kafka. Users can sign up with just an email address and receive credentials to access real-time astronomical transient data.
 
-1. A JWT token for accessing Babamul-specific API endpoints
-2. Kafka credentials (using their email as username) for consuming alert streams
+**Interactive API Documentation**: Visit `/babamul/docs` on your BOOM API instance for an interactive Swagger UI where you can test all endpoints.
+
+## Quick Links
+
+- **Interactive Docs**: `/babamul/docs` (Swagger UI)
+- **Signup**: `POST /babamul/signup`
+- **Activation**: `POST /babamul/activate`
+- **Authentication**: `POST /babamul/auth`
 
 ## User Account Separation
 
