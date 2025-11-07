@@ -35,18 +35,7 @@ pub struct BabamulSignupResponse {
     pub activation_required: bool,
 }
 
-/// Babamul signup endpoint - creates a new Babamul user with email only
-///
-/// This endpoint is public and creates a new Babamul user account. After signup,
-/// the user must activate their account using the activation code sent to their email.
-/// Once activated, they will receive their password which can be used for:
-/// - Kafka authentication (email + password via SCRAM)
-/// - API authentication (POST to /babamul/auth with email + password to get JWT)
-///
-/// Babamul users are separate from main API users and have limited permissions:
-/// - Can access Babamul-specific endpoints
-/// - Can read from babamul.* Kafka topics
-/// - Cannot access main API features like catalog queries
+/// Sign up for a Babamul account using an email address
 #[utoipa::path(
     post,
     path = "/babamul/signup",
@@ -350,10 +339,6 @@ pub struct BabamulActivateResponse {
 }
 
 /// Activate a Babamul user account
-///
-/// This endpoint allows users to activate their account using the activation
-/// code sent to their email during signup. Upon successful activation, the user
-/// receives their password which can be used for both Kafka and API authentication.
 #[utoipa::path(
     post,
     path = "/babamul/activate",
@@ -472,12 +457,6 @@ pub struct BabamulAuthResponse {
 }
 
 /// Authenticate a Babamul user and get a JWT token
-///
-/// This endpoint allows activated Babamul users to authenticate using their
-/// email and password to receive a JWT token for API access.
-///
-/// The password is the one received during account activation.
-/// The JWT token should be used in the Authorization header as: Bearer {token}
 #[utoipa::path(
     post,
     path = "/babamul/auth",
