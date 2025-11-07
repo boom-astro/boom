@@ -236,6 +236,10 @@ pub struct ZtfForcedPhot {
     pub fp_hist: FpHist,
     pub magpsf: Option<f32>,
     pub sigmapsf: Option<f32>,
+    #[serde(rename = "psfFlux")]
+    pub psf_flux: Option<f32>,
+    #[serde(rename = "psfFluxErr")]
+    pub psf_flux_err: Option<f32>,
     pub isdiffpos: Option<bool>,
     pub snr: Option<f32>,
     pub band: Band,
@@ -251,7 +255,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
 
-        let (magpsf, sigmapsf, isdiffpos, snr) = match fp_hist.forcediffimflux {
+        let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
                 let psf_flux_abs = psf_flux.abs();
                 if (psf_flux_abs / psf_flux_err) > SNT {
@@ -261,18 +265,21 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
                         Some(psf_flux_abs / psf_flux_err),
+                        Some(psf_flux * 1e9_f32), // convert to nJy
                     )
                 } else {
-                    (None, None, None, None)
+                    (None, None, None, None, Some(psf_flux * 1e9_f32)) // convert to nJy
                 }
             }
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
+            psf_flux,
+            psf_flux_err: Some(psf_flux_err * 1e9_f32), // convert to nJy
             isdiffpos,
             snr,
             band,

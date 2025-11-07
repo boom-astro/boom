@@ -214,6 +214,7 @@ services:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models
     command:
       - /app/scheduler
       - ztf
@@ -235,6 +236,7 @@ services:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models
     command:
       - /app/scheduler
       - lsst

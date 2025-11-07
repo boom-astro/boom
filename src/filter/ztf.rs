@@ -97,8 +97,8 @@ pub async fn build_ztf_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux").ok(); // optional, might not be present
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            let flux = doc.get_f64("psfFlux").ok(); // optional, might not be present, in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
@@ -155,15 +155,15 @@ pub async fn build_ztf_alerts(
             }
             let jd = doc.get_f64("jd")?;
             let magzpsci = doc.get_f64("magzpsci")?;
-            let flux = match doc.get_f64("forcediffimflux") {
+            let flux = match doc.get_f64("psfFlux") {
                 Ok(flux) => Some(flux),
                 Err(_) => None,
             };
-            let flux_err = match doc.get_f64("forcediffimfluxunc") {
+            let flux_err = match doc.get_f64("psfFluxErr") {
                 Ok(flux_err) => flux_err,
                 Err(_) => {
                     let diffmaglim = doc.get_f64("diffmaglim")?;
-                    limmag_to_fluxerr(diffmaglim, magzpsci, 5.0)
+                    limmag_to_fluxerr(diffmaglim, magzpsci, 5.0) * 1e9_f64 // convert to nJy
                 }
             };
             let band = doc.get_str("band")?.to_string();
