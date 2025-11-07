@@ -66,8 +66,8 @@ pub async fn post_babamul_signup(
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
 
-    // Basic email validation
-    if !email.contains('@') || email.len() < 3 {
+    // Basic email validation (single '@', non-empty local part, domain contains a dot and at least two segments)
+    if !is_valid_email(&email) {
         return response::bad_request("Invalid email address");
     }
 
@@ -180,6 +180,36 @@ fn generate_random_string(length: usize) -> String {
 /// Generate a new password for a user (called during activation)
 fn generate_password() -> String {
     generate_random_string(32)
+}
+
+/// Basic email validation tailored for activation flow (not full RFC compliance)
+fn is_valid_email(email: &str) -> bool {
+    // Must contain exactly one '@'
+    let parts: Vec<&str> = email.split('@').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let (local, domain) = (parts[0], parts[1]);
+    if local.is_empty() || domain.is_empty() {
+        return false;
+    }
+    // Domain must contain at least one dot and two non-empty labels
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+        return false;
+    }
+    // Basic allowed character check (alphanumeric plus common symbols)
+    let is_allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+');
+    if !local.chars().all(is_allowed) {
+        return false;
+    }
+    if !domain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    true
 }
 
 /// Create Kafka SCRAM user and ACLs to allow babamul user to read from babamul.* topics

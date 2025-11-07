@@ -4,6 +4,7 @@ mod tests {
     use actix_web::{test, web, App};
     use boom::api::auth::get_test_auth;
     use boom::api::db::get_test_db;
+    use boom::api::email::EmailService;
     use boom::api::routes;
     use boom::api::test_utils::read_json_response;
     use boom::conf::load_dotenv;
@@ -20,6 +21,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(EmailService::new()))
                 .service(routes::babamul::post_babamul_signup),
         )
         .await;
@@ -108,6 +110,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(EmailService::new()))
                 .service(routes::babamul::post_babamul_signup)
                 .service(routes::babamul::post_babamul_activate)
                 .service(routes::babamul::post_babamul_auth),
@@ -258,6 +261,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(EmailService::new()))
                 .service(routes::babamul::post_babamul_signup),
         )
         .await;
