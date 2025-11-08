@@ -33,12 +33,14 @@ jobs:
       run: cp .env.example .env
     - name: Install Kafka CLI tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y openjdk-17-jre-headless
-        wget https://archive.apache.org/dist/kafka/3.5.0/kafka_3.5.0.tgz
-        tar -xzf kafka_3.5.0.tgz
-        sudo mv kafka_3.5.0 /opt/kafka
-        export PATH=$PATH:/opt/kafka/bin
+        KAFKA_VERSION=3.7.1
+        SCALA_VERSION=2.13
+        apt-get update && apt-get install -y --no-install-recommends \
+            libsasl2-2 ca-certificates openjdk-17-jre-headless curl bash tar
+        curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz
+        tar -xzf /tmp/kafka.tgz -C /opt
+        ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
+        rm -f /tmp/kafka.tgz
     - name: Start services
       run: docker compose up --build -d
     - name: Wait for Kafka ACL initialization
