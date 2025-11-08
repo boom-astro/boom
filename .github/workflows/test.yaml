@@ -31,6 +31,14 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Create default .env file
       run: cp .env.example .env
+    - name: Install Kafka CLI tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y openjdk-17-jre-headless
+        wget https://archive.apache.org/dist/kafka/3.5.0/kafka_3.5.0.tgz
+        tar -xzf kafka_3.5.0.tgz
+        sudo mv kafka_3.5.0 /opt/kafka
+        export PATH=$PATH:/opt/kafka/bin
     - name: Start services
       run: docker compose up --build -d
     - name: Wait for Kafka ACL initialization
