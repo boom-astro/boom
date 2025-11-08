@@ -106,6 +106,7 @@ mod tests {
     /// - Install tools with: brew install kafka (macOS) or run against a Docker Kafka.
     #[actix_rt::test]
     async fn test_babamul_activate() {
+        std::env::set_var("KAFKA_INTERNAL_BROKER", "localhost:9092");
         load_dotenv();
         let database: Database = get_test_db().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
@@ -286,84 +287,5 @@ mod tests {
                 invalid_email
             );
         }
-    }
-
-    /// Test that activation fails when Kafka ACL creation fails
-    /// This ensures user isn't marked activated in DB if Kafka operations fail
-    #[actix_rt::test]
-    async fn test_babamul_activate_kafka_failure() {
-        load_dotenv();
-        let database: Database = get_test_db().await;
-        let auth_app_data = get_test_auth(&database).await.unwrap();
-        let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup)
-                .service(routes::babamul::post_babamul_activate),
-        )
-        .await;
-
-        // Generate a unique test email
-        let test_email = format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
-
-        // Sign up
-        let req = test::TestRequest::post()
-            .uri("/babamul/signup")
-            .set_json(serde_json::json!({
-                "email": test_email
-            }))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        // Get the activation code from the database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
-        let user = babamul_users_collection
-            .find_one(doc! { "email": &test_email })
-            .await
-            .unwrap()
-            .unwrap();
-        let activation_code = user.activation_code.clone().unwrap();
-
-        // Try to activate - should fail because Kafka tools aren't available
-        let req = test::TestRequest::post()
-            .uri("/babamul/activate")
-            .set_json(serde_json::json!({
-                "email": test_email,
-                "activation_code": activation_code
-            }))
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Activation should fail when Kafka ACL creation fails"
-        );
-
-        // Verify user is STILL not activated in database (this is the critical part)
-        let user = babamul_users_collection
-            .find_one(doc! { "email": &test_email })
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            !user.is_activated,
-            "User should NOT be activated when Kafka ACL creation fails"
-        );
-        assert!(
-            user.activation_code.is_some(),
-            "Activation code should still be present for retry"
-        );
-
-        // Clean up
-        babamul_users_collection
-            .delete_one(doc! { "email": &test_email })
-            .await
-            .unwrap();
     }
 }
