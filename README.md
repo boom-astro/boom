@@ -22,7 +22,7 @@ BOOM runs on macOS and Linux. You'll need:
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
 - If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
-- Kafka, available with `brew install kafka`.
+- Kafka CLI tools, available with `brew install kafka`.
 
 ### Installation steps:
 
