@@ -52,6 +52,7 @@ impl Modify for BabamulSecurityAddon {
         routes::info::get_health,
         routes::info::get_db_info,
         routes::kafka::get_kafka_acls,
+        routes::kafka::delete_babamul_kafka_acls,
         routes::users::post_user,
         routes::users::get_users,
         routes::users::delete_user,

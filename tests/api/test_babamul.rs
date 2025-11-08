@@ -5,6 +5,7 @@ mod tests {
     use boom::api::auth::get_test_auth;
     use boom::api::db::get_test_db;
     use boom::api::email::EmailService;
+    use boom::api::kafka::delete_acls_for_babamul_user;
     use boom::api::routes;
     use boom::api::test_utils::read_json_response;
     use boom::conf::load_dotenv;
@@ -253,6 +254,9 @@ mod tests {
             .delete_one(doc! { "email": &test_email })
             .await
             .unwrap();
+
+        // Clean up: delete Kafka ACLs for the user
+        delete_acls_for_babamul_user(&test_email).unwrap();
     }
 
     /// Test that invalid emails are rejected
