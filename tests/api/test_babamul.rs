@@ -103,21 +103,9 @@ mod tests {
     /// Test POST /babamul/activate
     /// NOTE:
     /// - This test requires Kafka CLI tools (kafka-configs / kafka-acls) and a reachable Kafka broker.
-    /// - By default we skip unless RUN_KAFKA_CLI_TESTS=1 is set in the environment.
     /// - Install tools with: brew install kafka (macOS) or run against a Docker Kafka.
     #[actix_rt::test]
     async fn test_babamul_activate() {
-        // Require explicit opt-in to run this integration-like test
-        if std::env::var("RUN_KAFKA_CLI_TESTS").ok().as_deref() != Some("1") {
-            eprintln!("Skipping test_babamul_activate: set RUN_KAFKA_CLI_TESTS=1 to enable");
-            return;
-        }
-        // Also ensure Kafka CLI tools are on PATH
-        if which::which("kafka-configs").is_err() && which::which("kafka-configs.sh").is_err() {
-            eprintln!("Skipping test_babamul_activate: Kafka CLI tools not found in PATH");
-            return;
-        }
-
         load_dotenv();
         let database: Database = get_test_db().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
