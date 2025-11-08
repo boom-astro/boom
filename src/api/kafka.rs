@@ -2,7 +2,7 @@ use std::env;
 /// Functionality for working with Kafka in the API.
 use std::process::Command;
 
-pub fn delete_acls_for_babamul_user(user: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn delete_acls_for_user(user: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Determine broker
     let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
 
@@ -16,12 +16,12 @@ pub fn delete_acls_for_babamul_user(user: &str) -> Result<(), Box<dyn std::error
     // Remove the same ACLs we add during activation
     // These should be idempotent: if an ACL isn't present, we ignore the "No matching ACLs found" message.
     let removals = vec![
-        // Topic READ on babamul.* (prefixed)
-        ("--topic", "babamul.", "READ", "prefixed"),
-        // Topic DESCRIBE on babamul.* (prefixed)
-        ("--topic", "babamul.", "DESCRIBE", "prefixed"),
-        // Group READ on babamul- (prefixed)
-        ("--group", "babamul-", "READ", "prefixed"),
+        // Topic READ on * (match all)
+        ("--topic", "*", "READ", "match"),
+        // Topic DESCRIBE on * (match all)
+        ("--topic", "*", "DESCRIBE", "match"),
+        // Group READ on * (match all)
+        ("--group", "*", "READ", "match"),
     ];
 
     let mut errors: Vec<String> = Vec::new();
