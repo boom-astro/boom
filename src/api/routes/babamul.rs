@@ -202,13 +202,27 @@ fn is_valid_email(email: &str) -> bool {
 }
 
 /// Create Kafka SCRAM user and ACLs to allow babamul user to read from babamul.* topics
+/// This function is idempotent - it can be called multiple times safely.
+/// kafka-acls --add operations will silently succeed if the ACL already exists.
 async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), String> {
-    // Determine broker and CLI paths
+    // Determine broker
     let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
-    let configs_cli = "/opt/kafka/bin/kafka-configs.sh";
-    let acls_cli = "/opt/kafka/bin/kafka-acls.sh";
 
-    // First, create SCRAM user credentials
+    // Try to find the right command names
+    // Homebrew on macOS: kafka-configs, kafka-acls (no .sh)
+    // Docker container: kafka-configs.sh, kafka-acls.sh (with .sh)
+    let (configs_cli, acls_cli) = match which::which("kafka-configs") {
+        Ok(_) => {
+            // Found kafka-configs without .sh (Homebrew)
+            ("kafka-configs", "kafka-acls")
+        }
+        Err(_) => {
+            // Fall back to .sh version (Docker container)
+            ("kafka-configs.sh", "kafka-acls.sh")
+        }
+    };
+
+    // Create or update SCRAM user credentials (idempotent: --alter will create or update)
     let output = Command::new(configs_cli)
         .arg("--bootstrap-server")
         .arg(&broker)
@@ -220,14 +234,14 @@ async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), S
         .arg("--add-config")
         .arg(format!("SCRAM-SHA-512=[password={}]", password))
         .output()
-        .map_err(|e| format!("Failed to execute kafka-configs.sh: {}", e))?;
+        .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to create SCRAM user: {}", stderr));
     }
 
-    // Grant READ permission on babamul.* topics
+    // Grant READ permission on babamul.* topics (idempotent: kafka-acls --add ignores duplicates)
     let output = Command::new(acls_cli)
         .arg("--bootstrap-server")
         .arg(&broker)
@@ -241,14 +255,14 @@ async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), S
         .arg("--resource-pattern-type")
         .arg("prefixed")
         .output()
-        .map_err(|e| format!("Failed to execute kafka-acls.sh: {}", e))?;
+        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to add READ ACL: {}", stderr));
     }
 
-    // Grant DESCRIBE permission on babamul.* topics
+    // Grant DESCRIBE permission on babamul.* topics (idempotent)
     let output = Command::new(acls_cli)
         .arg("--bootstrap-server")
         .arg(&broker)
@@ -262,14 +276,14 @@ async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), S
         .arg("--resource-pattern-type")
         .arg("prefixed")
         .output()
-        .map_err(|e| format!("Failed to execute kafka-acls.sh: {}", e))?;
+        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to add DESCRIBE ACL: {}", stderr));
     }
 
-    // Grant READ permission on consumer groups (for offset commits)
+    // Grant READ permission on consumer groups (for offset commits, idempotent)
     let output = Command::new(acls_cli)
         .arg("--bootstrap-server")
         .arg(&broker)
@@ -283,7 +297,7 @@ async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), S
         .arg("--resource-pattern-type")
         .arg("prefixed")
         .output()
-        .map_err(|e| format!("Failed to execute kafka-acls.sh: {}", e))?;
+        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -392,7 +406,17 @@ pub async fn post_babamul_activate(
                         }
                     };
 
-                    // Activate the user and update password
+                    // CRITICAL: Create Kafka SCRAM user and ACLs BEFORE marking user as activated
+                    // This ensures we don't activate a user who can't access Kafka
+                    // The Kafka operations are idempotent, so retries are safe
+                    if let Err(e) = create_kafka_user_and_acls(&user.email, &password).await {
+                        eprintln!("Failed to create Kafka user/ACLs for {}: {}", user.email, e);
+                        return response::internal_error(
+                            "Failed to configure Kafka access. Please try again or contact support.",
+                        );
+                    }
+
+                    // Now that Kafka is configured, mark the user as activated in the database
                     match babamul_users_collection
                         .update_one(
                             doc! { "_id": &user.id },
@@ -407,16 +431,6 @@ pub async fn post_babamul_activate(
                         .await
                     {
                         Ok(_) => {
-                            // Create Kafka SCRAM user and ACLs now that account is activated
-                            if let Err(e) = create_kafka_user_and_acls(&user.email, &password).await
-                            {
-                                eprintln!(
-                                    "Failed to create Kafka user/ACLs for {}: {}",
-                                    user.email, e
-                                );
-                                // Continue anyway - user can contact support for Kafka access
-                            }
-
                             HttpResponse::Ok().json(BabamulActivateResponse {
                                 message: "Account activated successfully. Save your password - it won't be shown again!".to_string(),
                                 activated: true,

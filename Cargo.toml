@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "registry"]
 utoipa = { version = "5.4.0", features = ["actix_extras"] }
 utoipa-scalar = { version = "0.3.0", features = ["actix-web"] }
 uuid = { version = "1.18", features = ["v4"] }
+which = "7.0.0"
 zune-inflate = { version = "0.2", default-features = false, features = [
     "gzip",
     "std",
