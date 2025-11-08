@@ -41,7 +41,6 @@ jobs:
         sudo tar -xzf /tmp/kafka.tgz -C /opt
         sudo ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
         sudo rm -f /tmp/kafka.tgz
-        export PATH="/opt/kafka/bin:$PATH"
     - name: Start services
       run: docker compose up --build -d
     - name: Wait for Kafka ACL initialization
@@ -67,4 +66,4 @@ jobs:
         fi
         echo "kafka-acl-init completed successfully."
     - name: Test BOOM
-      run: cargo test --release
+      run: PATH=/opt/kafka/bin:$PATH cargo test --release
