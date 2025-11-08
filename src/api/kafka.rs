@@ -173,7 +173,7 @@ pub fn get_acls() -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
     }
 }
 
-pub fn delete_acls_for_user(user: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn delete_acls_for_user(user_email: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Determine broker
     let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
 
@@ -184,30 +184,62 @@ pub fn delete_acls_for_user(user: &str) -> Result<(), Box<dyn std::error::Error>
         "kafka-acls.sh"
     };
 
-    // Remove the same ACLs we add during activation
-    // These should be idempotent: if an ACL isn't present, we ignore the "No matching ACLs found" message.
-    let removals = vec![
-        // Topic READ on * (match all)
-        ("--topic", "*", "READ", "match"),
-        // Topic DESCRIBE on * (match all)
-        ("--topic", "*", "DESCRIBE", "match"),
-        // Group READ on * (match all)
-        ("--group", "*", "READ", "match"),
-    ];
+    // Fetch all ACLs and filter for ones matching the user
+    let acls = get_acls()?;
+    let user_acls: Vec<KafkaAclEntry> = acls
+        .into_iter()
+        .filter(|entry| entry.principal == format!("User:{}", user_email))
+        .collect();
 
     let mut errors: Vec<String> = Vec::new();
-    for (resource_flag, resource, operation, pattern_type) in removals {
-        // Build command with args so we can log the exact invocation for debugging
+    for acl in user_acls {
+        let resource_flag = match acl.resource_type.as_str() {
+            "TOPIC" => "--topic",
+            "GROUP" => "--group",
+            "CLUSTER" => "--cluster",
+            "TRANSACTIONAL_ID" => "--transactional-id",
+            "DELEGATION_TOKEN" => "--delegation-token",
+            _ => {
+                errors.push(format!(
+                    "Unknown resource type '{}' for ACL entry: {:?}",
+                    acl.resource_type, acl
+                ));
+                continue;
+            }
+        };
+        let pattern_type = match acl.pattern_type.as_str() {
+            "LITERAL" => "LITERAL",
+            "PREFIXED" => "PREFIXED",
+            "ANY" => "ANY",
+            _ => {
+                errors.push(format!(
+                    "Unknown pattern type '{}' for ACL entry: {:?}",
+                    acl.pattern_type, acl
+                ));
+                continue;
+            }
+        };
+        let permission_flag = match acl.permission_type.as_str() {
+            "ALLOW" => "--allow-principal",
+            "DENY" => "--deny-principal",
+            _ => {
+                errors.push(format!(
+                    "Unknown permission type '{}' for ACL entry: {:?}",
+                    acl.permission_type, acl
+                ));
+                continue;
+            }
+        };
         let mut cmd = Command::new(acls_cli);
         cmd.arg("--bootstrap-server")
             .arg(&broker)
             .arg("--remove")
-            .arg("--allow-principal")
-            .arg(format!("User:{}", user))
+            .arg(permission_flag)
+            .arg(format!("User:{}", user_email))
             .arg("--operation")
-            .arg(operation)
+            .arg(acl.operation)
             .arg(resource_flag)
-            .arg(resource)
+            .arg(acl.resource_name)
             .arg("--resource-pattern-type")
             .arg(pattern_type)
             .arg("--force");
@@ -234,8 +266,12 @@ pub fn delete_acls_for_user(user: &str) -> Result<(), Box<dyn std::error::Error>
 
     if !errors.is_empty() {
         let combined = errors.join("; ");
-        eprintln!("Error deleting ACLs for user {}: {}", user, combined);
-        return Err(format!("Failed to delete ACLs for user {}: {}", user, combined).into());
+        eprintln!("Error deleting ACLs for user {}: {}", user_email, combined);
+        return Err(format!(
+            "Failed to delete ACLs for user {}: {}",
+            user_email, combined
+        )
+        .into());
     }
 
     Ok(())
