@@ -35,12 +35,13 @@ jobs:
       run: |
         KAFKA_VERSION=3.7.1
         SCALA_VERSION=2.13
-        apt-get update && apt-get install -y --no-install-recommends \
+        sudo apt-get install -y --no-install-recommends \
             libsasl2-2 ca-certificates openjdk-17-jre-headless curl bash tar
-        curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz
-        tar -xzf /tmp/kafka.tgz -C /opt
-        ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
-        rm -f /tmp/kafka.tgz
+        sudo curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz
+        sudo tar -xzf /tmp/kafka.tgz -C /opt
+        sudo ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
+        sudo rm -f /tmp/kafka.tgz
+        export PATH="/opt/kafka/bin:$PATH"
     - name: Start services
       run: docker compose up --build -d
     - name: Wait for Kafka ACL initialization
