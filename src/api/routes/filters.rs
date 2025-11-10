@@ -451,7 +451,9 @@ pub struct FilterTestRequest {
     pub survey: Survey,
     pub start_jd: Option<f64>,
     pub end_jd: Option<f64>,
+    #[schema(max_items = 1000)]
     pub object_ids: Option<Vec<String>>,
+    #[schema(max_items = 100000)]
     pub candids: Option<Vec<String>>,
 }
 
@@ -494,7 +496,18 @@ pub async fn post_filter_test(
         .filter(|s| !s.is_empty())
         .collect();
     if let (Some(start_jd), Some(end_jd)) = (body.start_jd, body.end_jd) {
+        if end_jd - start_jd > 1.0 {
+            return response::bad_request(
+                "JD window for filter test cannot exceed 1.0 JD (one day)",
+            );
+        }
         match_stage.insert("candidate.jd", doc! { "$gte": start_jd, "$lte": end_jd });
+    }
+    if obj_ids.len() > 1000 {
+        return response::bad_request("maximum of 1000 object_ids allowed for filter test");
+    }
+    if candid_ids.len() > 100000 {
+        return response::bad_request("maximum of 100000 candids allowed for filter test");
     }
     if !obj_ids.is_empty() {
         match_stage.insert("objectId", doc! { "$in": obj_ids });
