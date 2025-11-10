@@ -118,8 +118,8 @@ pub async fn build_lsst_alerts(
             };
             let jd = doc.get_f64("jd")?;
             // flux may be None in forced photometry
-            let flux = doc.get_f64("psfFlux").map(|f| f * 1e-9).ok(); // from nJy to Jy
-            let flux_err = doc.get_f64("psfFluxErr")? * 1e-9; // from nJy to Jy
+            let flux = doc.get_f64("psfFlux").ok(); // in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
