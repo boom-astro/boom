@@ -288,7 +288,6 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
-#[instrument(skip_all)]
 pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     // we consider a value is a match with field if it is:
     // - equal to the field
@@ -320,7 +319,6 @@ pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     false
 }
 
-#[instrument(skip_all)]
 pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) -> Option<usize> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
         if uses_field_in_stage(stage, field) {
@@ -343,6 +341,12 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // - we don't have any group, unwind, or lookup stages
     // - that the last stage is a project that includes objectId
     let nb_stages = filter_pipeline.len();
+    if nb_stages == 0 {
+        return Err(FilterError::InvalidFilterPipeline(
+            "Filter pipeline cannot be empty".to_string(),
+        ));
+    }
+    let mut nb_match_stages = 0;
     for (i, stage) in filter_pipeline.iter().enumerate() {
         if stage.get("$group").is_some()
             || stage.get("$unwind").is_some()
@@ -454,6 +458,14 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
                 ));
             }
         }
+        if stage.get("$match").is_some() {
+            nb_match_stages += 1;
+        }
+    }
+    if nb_match_stages == 0 {
+        return Err(FilterError::InvalidFilterPipeline(
+            "Filter pipeline must have at least one $match stage".to_string(),
+        ));
     }
     Ok(())
 }

@@ -45,6 +45,7 @@ impl Modify for SecurityAddon {
         routes::filters::get_filters,
         routes::filters::get_filter,
         routes::filters::post_filter_version,
+        routes::filters::post_filter_test,
         routes::queries::count::post_count_query,
         routes::queries::count::post_estimated_count_query,
         routes::queries::find::post_find_query,
