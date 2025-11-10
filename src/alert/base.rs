@@ -212,6 +212,8 @@ pub enum AlertError {
     AlertAuxNotFound,
     #[error("unexpected fid value")]
     UnknownFid(i32),
+    #[error("missing diffmaglim value")]
+    MissingDiffmaglim,
 }
 
 #[derive(Debug, PartialEq)]

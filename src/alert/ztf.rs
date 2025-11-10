@@ -143,7 +143,9 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
                 let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP) * 1e9_f32; // convert to nJy
                 (None, Some(flux_err), None)
             }
-            _ => (None, None, None),
+            _ => {
+                return Err(AlertError::MissingDiffmaglim);
+            }
         };
 
         Ok(ZtfPrvCandidate {
