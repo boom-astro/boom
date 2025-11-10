@@ -554,7 +554,7 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
 
 /// Rubin Avro alert schema v7.3
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct LsstAvroAlert {
+pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
     pub candid: i64,
     #[serde(rename(deserialize = "diaSource"))]
@@ -800,7 +800,7 @@ impl AlertWorker for LsstAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut avro_alert: LsstAvroAlert = self
+        let mut avro_alert: LsstRawAvroAlert = self
             .schema_registry
             .alert_from_avro_bytes(avro_bytes)
             .await
@@ -913,7 +913,7 @@ mod tests {
         assert!(alert.is_ok());
 
         // validate the alert
-        let alert: LsstAvroAlert = alert.unwrap();
+        let alert: LsstRawAvroAlert = alert.unwrap();
         assert_eq!(alert.candid, candid);
         assert_eq!(alert.candidate.object_id, object_id);
         assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
