@@ -129,7 +129,7 @@ impl TryFrom<FpHist> for DecamForcedPhot {
 }
 
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
-pub struct DecamAvroAlert {
+pub struct DecamRawAvroAlert {
     pub publisher: String,
     #[serde(rename = "objectId")]
     pub object_id: String,
@@ -295,7 +295,7 @@ impl AlertWorker for DecamAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let avro_alert: DecamAvroAlert = self
+        let avro_alert: DecamRawAvroAlert = self
             .schema_cache
             .alert_from_avro_bytes(avro_bytes)
             .inspect_err(as_error!())?;
@@ -404,7 +404,7 @@ mod tests {
         assert!(alert.is_ok());
 
         // validate the alert
-        let alert: DecamAvroAlert = alert.unwrap();
+        let alert: DecamRawAvroAlert = alert.unwrap();
         assert_eq!(alert.publisher, "DESIRT");
         assert_eq!(alert.object_id, object_id);
         assert_eq!(alert.candid, candid);

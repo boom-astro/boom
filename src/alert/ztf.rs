@@ -532,7 +532,7 @@ where
 }
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct ZtfAvroAlert {
+pub struct ZtfRawAvroAlert {
     pub schemavsn: String,
     pub publisher: String,
     #[serde(rename = "objectId")]
@@ -752,7 +752,7 @@ impl AlertWorker for ZtfAlertWorker {
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut avro_alert: ZtfAvroAlert = self
+        let mut avro_alert: ZtfRawAvroAlert = self
             .schema_cache
             .alert_from_avro_bytes(avro_bytes)
             .inspect_err(as_error!())?;
@@ -882,7 +882,7 @@ mod tests {
         assert!(avro_alert.is_ok());
 
         // validate the alert
-        let avro_alert: ZtfAvroAlert = avro_alert.unwrap();
+        let avro_alert: ZtfRawAvroAlert = avro_alert.unwrap();
         assert_eq!(avro_alert.schemavsn, "4.02");
         assert_eq!(avro_alert.publisher, "ZTF (www.ztf.caltech.edu)");
         assert_eq!(avro_alert.object_id, object_id);
