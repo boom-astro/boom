@@ -496,10 +496,11 @@ pub async fn post_filter_test(
         .filter(|s| !s.is_empty())
         .collect();
     if let (Some(start_jd), Some(end_jd)) = (body.start_jd, body.end_jd) {
-        if end_jd - start_jd > 1.0 {
-            return response::bad_request(
-                "JD window for filter test cannot exceed 1.0 JD (one day)",
-            );
+        if end_jd <= start_jd {
+            return response::bad_request("end_jd cannot be less than or equal to start_jd");
+        }
+        if end_jd - start_jd > 7.0 {
+            return response::bad_request("JD window for filter test cannot exceed 7.0 JD");
         }
         match_stage.insert("candidate.jd", doc! { "$gte": start_jd, "$lte": end_jd });
     }
