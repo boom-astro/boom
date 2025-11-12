@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize)]
+#[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Survey {
+    #[serde(alias = "ztf")]
     Ztf,
+    #[serde(alias = "lsst")]
     Lsst,
+    #[serde(alias = "decam")]
     Decam,
 }
 
