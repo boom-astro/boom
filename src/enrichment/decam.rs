@@ -69,8 +69,11 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+/// DECAM alert structure used to deserialize alerts
+/// from the database, used by the enrichment worker
+/// to compute features and ML scores
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct DecamAlertEnrichment {
+pub struct DecamAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -80,6 +83,8 @@ pub struct DecamAlertEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
+/// DECAM alert properties computed during enrichment
+/// and inserted back into the alert document
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct DecamAlertProperties {
     pub stationary: bool,
@@ -128,7 +133,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts: Vec<DecamAlertEnrichment> =
+        let alerts: Vec<DecamAlertForEnrichment> =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
@@ -179,7 +184,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 impl DecamEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &DecamAlertEnrichment,
+        alert: &DecamAlertForEnrichment,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
         let prv_candidates = alert.prv_candidates.clone();
         let fp_hists = alert.fp_hists.clone();

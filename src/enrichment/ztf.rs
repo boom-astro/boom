@@ -76,6 +76,9 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+/// ZTF alert structure used to deserialize alerts
+/// from the database, used by the enrichment worker
+/// to compute features and ML scores
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ZtfAlertForEnrichment {
     #[serde(rename = "_id")]
@@ -87,6 +90,8 @@ pub struct ZtfAlertForEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
+/// ZTF alert properties computed during enrichment
+/// and inserted back into the alert document
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ZtfAlertProperties {
     pub rock: bool,

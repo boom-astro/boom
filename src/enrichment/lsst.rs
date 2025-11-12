@@ -70,6 +70,9 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+/// LSST alert structure used to deserialize alerts
+/// from the database, used by the enrichment worker
+/// to compute features and ML scores
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct LsstAlertForEnrichment {
     #[serde(rename = "_id")]
@@ -81,6 +84,8 @@ pub struct LsstAlertForEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
+/// LSST alert properties computed during enrichment
+/// and inserted back into the alert document
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct LsstAlertProperties {
     pub rock: bool,
