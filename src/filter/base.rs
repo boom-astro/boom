@@ -137,8 +137,6 @@ pub enum FilterError {
     InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
-    #[error("unsupported survey for filter")]
-    UnsupportedSurvey(Survey),
     #[error("error during filter execution")]
     FilterExecutionError(String),
 }
