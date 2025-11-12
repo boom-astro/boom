@@ -14,6 +14,14 @@ use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 const ZTF_ZP: f64 = 23.9;
 
+/// Builds ZTF Alert objects from the provided filter results and alert collection.
+///
+/// # Arguments
+/// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
+/// * `alert_collection` - The MongoDB collection containing ZTF alert documents.
+///
+/// # Returns
+/// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
 pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
@@ -243,6 +251,18 @@ pub async fn build_ztf_alerts(
     Ok(alerts_output)
 }
 
+/// Builds a MongoDB aggregation pipeline for ZTF filter execution.
+///
+/// This function validates the provided filter pipeline and augments it with necessary
+/// auxiliary data lookups (prv_candidates, fp_hists, cross_matches, aliases) based on
+/// which fields are referenced in the filter. The resulting pipeline starts with a match stage
+/// to filter by candids, and should be populated with the actual candids before execution.
+///
+/// # Arguments
+/// * `filter_pipeline` - The user-defined filter pipeline stages
+///
+/// # Returns
+/// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
 pub async fn build_ztf_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
     permissions: &Vec<i32>,

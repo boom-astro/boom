@@ -11,6 +11,14 @@ use crate::filter::{
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;
 
+/// Builds LSST Alert objects from the provided filter results and alert collection.
+///
+/// # Arguments
+/// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
+/// * `alert_collection` - The MongoDB collection containing LSST alert documents.
+///
+/// # Returns
+/// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
 pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
@@ -176,6 +184,18 @@ pub async fn build_lsst_alerts(
     Ok(alerts_output)
 }
 
+/// Builds a MongoDB aggregation pipeline for LSST filter execution.
+///
+/// This function validates the provided filter pipeline and augments it with necessary
+/// auxiliary data lookups (prv_candidates, fp_hists, cross_matches, aliases) based on
+/// which fields are referenced in the filter. The resulting pipeline starts with a match stage
+/// to filter by candids, and should be populated with the actual candids before execution.
+///
+/// # Arguments
+/// * `filter_pipeline` - The user-defined filter pipeline stages
+///
+/// # Returns
+/// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
 pub async fn build_lsst_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
 ) -> Result<Vec<Document>, FilterError> {
