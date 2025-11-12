@@ -10,7 +10,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
-        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
+        lightcurves::{flux2mag, fluxerr2diffmaglim, Band, SNT, ZP_AB},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -183,7 +183,7 @@ pub struct DiaSource {
     /// A measure of reliability, computed using information from the source and image characterization, as well as the information on the Telescope and Camera system (e.g., ghost maps, defect maps, etc.).
     pub reliability: Option<f32>,
     /// Filter band this source was observed with.
-    pub band: Option<String>,
+    pub band: Option<Band>,
     /// Source well fit by a dipole.
     #[serde(rename = "isDipole")]
     pub is_dipole: Option<bool>,
@@ -493,7 +493,7 @@ pub struct DiaForcedSource {
     #[serde(rename = "scienceFluxErr")]
     pub science_flux_err: Option<f32>,
     /// Filter band this source was observed with.
-    pub band: Option<String>,
+    pub band: Option<Band>,
 }
 
 #[serde_as]
@@ -924,7 +924,7 @@ mod tests {
         assert!((alert.candidate.diffmaglim - 23.675514).abs() < 1e-5);
         assert!(alert.candidate.snr - 5.002406 < 1e-6);
         assert_eq!(alert.candidate.isdiffpos, false);
-        assert_eq!(alert.candidate.dia_source.band.unwrap(), "r");
+        assert_eq!(alert.candidate.dia_source.band.unwrap(), Band::R);
         // TODO: check prv_candidates and forced photometry once we have alerts
         //       where they aren't empty
         // TODO: check non detections once these are available in the schema

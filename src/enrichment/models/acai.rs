@@ -1,5 +1,7 @@
-use crate::enrichment::models::{load_model, Model, ModelError};
-use mongodb::bson::Document;
+use crate::enrichment::{
+    models::{load_model, Model, ModelError},
+    ZtfAlertForEnrichment,
+};
 use ndarray::{Array, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
@@ -40,44 +42,66 @@ impl AcaiModel {
     #[instrument(skip_all, err)]
     pub fn get_metadata(
         &self,
-        alerts: &[Document],
+        alerts: &[ZtfAlertForEnrichment],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
         for alert in alerts {
-            let candidate = alert.get_document("candidate")?;
+            let candidate = &alert.candidate.candidate;
 
-            let drb = candidate.get_f64("drb")? as f32;
-            let diffmaglim = candidate.get_f64("diffmaglim")? as f32;
-            let ra = candidate.get_f64("ra")? as f32;
-            let dec = candidate.get_f64("dec")? as f32;
-            let magpsf = candidate.get_f64("magpsf")? as f32;
-            let sigmapsf = candidate.get_f64("sigmapsf")? as f32;
-            let chipsf = candidate.get_f64("chipsf")? as f32;
-            let fwhm = candidate.get_f64("fwhm")? as f32;
-            let sky = candidate.get_f64("sky")? as f32;
-            let chinr = candidate.get_f64("chinr")? as f32;
-            let sharpnr = candidate.get_f64("sharpnr")? as f32;
-
-            // TODO: handle missing sgscore and distpsnr values
-            // to use sensible defaults if missing
-            let sgscore1 = candidate.get_f64("sgscore1")? as f32;
-            let distpsnr1 = candidate.get_f64("distpsnr1")? as f32;
-            let sgscore2 = candidate.get_f64("sgscore2")? as f32;
-            let distpsnr2 = candidate.get_f64("distpsnr2")? as f32;
-            let sgscore3 = candidate.get_f64("sgscore3")? as f32;
-            let distpsnr3 = candidate.get_f64("distpsnr3")? as f32;
-
-            let ndethist = candidate.get_i32("ndethist")? as f32;
-            let ncovhist = candidate.get_i32("ncovhist")? as f32;
-            let scorr = candidate.get_f64("scorr")? as f32;
-            let nmtchps = candidate.get_i32("nmtchps")? as f32;
-            let clrcoeff = candidate.get_f64("clrcoeff")? as f32;
-            let clrcounc = candidate.get_f64("clrcounc")? as f32;
-
-            // TODO: handle missing neargaia and neargaiabright values
-            let neargaia = candidate.get_f64("neargaia")? as f32;
-            let neargaiabright = candidate.get_f64("neargaiabright")? as f32;
+            let drb = candidate.drb.ok_or(ModelError::MissingFeature("drb"))? as f32;
+            let diffmaglim = candidate
+                .diffmaglim
+                .ok_or(ModelError::MissingFeature("diffmaglim"))?
+                as f32;
+            let ra = candidate.ra as f32;
+            let dec = candidate.dec as f32;
+            let magpsf = candidate.magpsf;
+            let sigmapsf = candidate.sigmapsf;
+            let chipsf = candidate
+                .chipsf
+                .ok_or(ModelError::MissingFeature("chipsf"))? as f32;
+            let fwhm = candidate.fwhm.ok_or(ModelError::MissingFeature("fwhm"))? as f32;
+            let sky = candidate.sky.ok_or(ModelError::MissingFeature("sky"))? as f32;
+            let chinr = candidate.chinr.ok_or(ModelError::MissingFeature("chinr"))? as f32;
+            let sharpnr = candidate
+                .sharpnr
+                .ok_or(ModelError::MissingFeature("sharpnr"))? as f32;
+            let sgscore1 = candidate
+                .sgscore1
+                .ok_or(ModelError::MissingFeature("sgscore1"))? as f32;
+            let distpsnr1 = candidate
+                .distpsnr1
+                .ok_or(ModelError::MissingFeature("distpsnr1"))? as f32;
+            let sgscore2 = candidate
+                .sgscore2
+                .ok_or(ModelError::MissingFeature("sgscore2"))? as f32;
+            let distpsnr2 = candidate
+                .distpsnr2
+                .ok_or(ModelError::MissingFeature("distpsnr2"))? as f32;
+            let sgscore3 = candidate
+                .sgscore3
+                .ok_or(ModelError::MissingFeature("sgscore3"))? as f32;
+            let distpsnr3 = candidate
+                .distpsnr3
+                .ok_or(ModelError::MissingFeature("distpsnr3"))? as f32;
+            let ndethist = candidate.ndethist as f32;
+            let ncovhist = candidate.ncovhist as f32;
+            let scorr = candidate.scorr.ok_or(ModelError::MissingFeature("scorr"))? as f32;
+            let nmtchps = candidate.nmtchps as f32;
+            let clrcoeff = candidate
+                .clrcoeff
+                .ok_or(ModelError::MissingFeature("clrcoeff"))? as f32;
+            let clrcounc = candidate
+                .clrcounc
+                .ok_or(ModelError::MissingFeature("clrcounc"))? as f32;
+            let neargaia = candidate
+                .neargaia
+                .ok_or(ModelError::MissingFeature("neargaia"))? as f32;
+            let neargaiabright = candidate
+                .neargaiabright
+                .ok_or(ModelError::MissingFeature("neargaiabright"))?
+                as f32;
 
             // the vec is nested because we need it to be of shape (1, N), not just a flat array
             let alert_features = [

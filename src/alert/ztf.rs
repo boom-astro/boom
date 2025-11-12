@@ -7,7 +7,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
-        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, SNT},
+        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -35,11 +35,11 @@ pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
 
 const ZTF_ZP: f32 = 23.9;
 
-fn fid2band(fid: i32) -> Result<String, AlertError> {
+fn fid2band(fid: i32) -> Result<Band, AlertError> {
     match fid {
-        1 => Ok("g".to_string()),
-        2 => Ok("r".to_string()),
-        3 => Ok("i".to_string()),
+        1 => Ok(Band::G),
+        2 => Ok(Band::R),
+        3 => Ok(Band::I),
         _ => Err(AlertError::UnknownFid(fid)),
     }
 }
@@ -113,7 +113,7 @@ pub struct ZtfPrvCandidate {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
     pub snr: Option<f32>,
-    pub band: String,
+    pub band: Band,
 }
 
 impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
@@ -143,7 +143,9 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
                 let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP) * 1e9_f32; // convert to nJy
                 (None, Some(flux_err), None)
             }
-            _ => (None, None, None),
+            _ => {
+                return Err(AlertError::MissingDiffmaglim);
+            }
         };
 
         Ok(ZtfPrvCandidate {
@@ -236,9 +238,13 @@ pub struct ZtfForcedPhot {
     pub fp_hist: FpHist,
     pub magpsf: Option<f32>,
     pub sigmapsf: Option<f32>,
+    #[serde(rename = "psfFlux")]
+    pub psf_flux: Option<f32>,
+    #[serde(rename = "psfFluxErr")]
+    pub psf_flux_err: Option<f32>,
     pub isdiffpos: Option<bool>,
     pub snr: Option<f32>,
-    pub band: String,
+    pub band: Band,
 }
 
 impl TryFrom<FpHist> for ZtfForcedPhot {
@@ -251,7 +257,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
 
-        let (magpsf, sigmapsf, isdiffpos, snr) = match fp_hist.forcediffimflux {
+        let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
                 let psf_flux_abs = psf_flux.abs();
                 if (psf_flux_abs / psf_flux_err) > SNT {
@@ -261,18 +267,21 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
                         Some(psf_flux_abs / psf_flux_err),
+                        Some(psf_flux * 1e9_f32), // convert to nJy
                     )
                 } else {
-                    (None, None, None, None)
+                    (None, None, None, None, Some(psf_flux * 1e9_f32)) // convert to nJy
                 }
             }
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
+            psf_flux,
+            psf_flux_err: Some(psf_flux_err * 1e9_f32), // convert to nJy
             isdiffpos,
             snr,
             band,
@@ -363,7 +372,9 @@ pub struct Candidate {
     pub clrcoeff: Option<f32>,
     pub clrcounc: Option<f32>,
     pub neargaia: Option<f32>,
+    pub maggaia: Option<f32>,
     pub neargaiabright: Option<f32>,
+    pub maggaiabright: Option<f32>,
 }
 
 fn deserialize_isdiffpos_option<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -432,7 +443,7 @@ pub struct ZtfCandidate {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: f32,
     pub snr: f32,
-    pub band: String,
+    pub band: Band,
 }
 
 impl TryFrom<Candidate> for ZtfCandidate {
@@ -914,6 +925,7 @@ mod tests {
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
+        assert_eq!(fp_negative_det.band, Band::G);
 
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
@@ -922,6 +934,7 @@ mod tests {
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
+        assert_eq!(fp_positive_det.band, Band::G);
 
         // validate the cutouts
         assert_eq!(avro_alert.cutout_science.len(), 13107);

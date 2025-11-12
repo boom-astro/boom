@@ -1,4 +1,3 @@
-use flare::phot::limmag_to_fluxerr;
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
@@ -105,8 +104,8 @@ pub async fn build_ztf_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux").ok(); // optional, might not be present
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            let flux = doc.get_f64("psfFlux")?; // in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
@@ -114,7 +113,7 @@ pub async fn build_ztf_alerts(
 
             photometry.push(Photometry {
                 jd,
-                flux,
+                flux: Some(flux),
                 flux_err,
                 band: format!("ztf{}", band),
                 zero_point: ZTF_ZP,
@@ -163,17 +162,8 @@ pub async fn build_ztf_alerts(
             }
             let jd = doc.get_f64("jd")?;
             let magzpsci = doc.get_f64("magzpsci")?;
-            let flux = match doc.get_f64("forcediffimflux") {
-                Ok(flux) => Some(flux),
-                Err(_) => None,
-            };
-            let flux_err = match doc.get_f64("forcediffimfluxunc") {
-                Ok(flux_err) => flux_err,
-                Err(_) => {
-                    let diffmaglim = doc.get_f64("diffmaglim")?;
-                    limmag_to_fluxerr(diffmaglim, magzpsci, 5.0)
-                }
-            };
+            let flux = doc.get_f64("psfFlux").ok();
+            let flux_err = doc.get_f64("psfFluxErr")?;
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
 
