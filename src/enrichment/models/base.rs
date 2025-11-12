@@ -48,7 +48,7 @@ pub trait Model {
     #[instrument(skip_all, err)]
     fn get_triplet(
         &self,
-        alerts: &[&AlertCutout],
+        alert_cutouts: &[&AlertCutout],
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
         for i in 0..alerts.len() {
