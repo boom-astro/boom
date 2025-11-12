@@ -71,7 +71,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct LsstAlertEnrichment {
+pub struct LsstAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -130,7 +130,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts: Vec<LsstAlertEnrichment> =
+        let alerts: Vec<LsstAlertForEnrichment> =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
@@ -182,7 +182,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 impl LsstEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &LsstAlertEnrichment,
+        alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let candidate = &alert.candidate;

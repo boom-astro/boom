@@ -50,9 +50,10 @@ pub trait Model {
         &self,
         alert_cutouts: &[&AlertCutout],
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
-        for i in 0..alerts.len() {
-            let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(alerts[i])?;
+        let mut triplets = Array::zeros((alert_cutouts.len(), 63, 63, 3));
+        for i in 0..alert_cutouts.len() {
+            let (cutout_science, cutout_template, cutout_difference) =
+                prepare_triplet(alert_cutouts[i])?;
             for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
                 .iter()
                 .enumerate()

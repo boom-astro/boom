@@ -9,4 +9,4 @@ pub use base::{
 };
 pub use decam::DecamEnrichmentWorker;
 pub use lsst::LsstEnrichmentWorker;
-pub use ztf::{ZtfAlertEnrichment, ZtfEnrichmentWorker};
+pub use ztf::{ZtfAlertForEnrichment, ZtfEnrichmentWorker};

@@ -77,7 +77,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct ZtfAlertEnrichment {
+pub struct ZtfAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -163,7 +163,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts: Vec<ZtfAlertEnrichment> =
+        let alerts: Vec<ZtfAlertForEnrichment> =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
@@ -252,7 +252,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 impl ZtfEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &ZtfAlertEnrichment,
+        alert: &ZtfAlertForEnrichment,
     ) -> Result<
         (
             ZtfAlertProperties,
