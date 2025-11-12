@@ -57,7 +57,14 @@ async fn run_test_pipeline(
         .sort(doc! { "candidate.jd": -1 })
         .await?;
     let candid = match result {
-        Some(doc) => Some(doc.get_i64("_id").unwrap()),
+        Some(doc) => match doc.get_i64("_id").ok() {
+            Some(id) => Some(id),
+            None => {
+                return Err(FilterError::FilterExecutionError(
+                    "Document missing _id field or _id is not an i64. Could not determine latest candid.".to_string(),
+                ));
+            }
+        },
         None => None,
     };
     if candid.is_some() {
@@ -157,12 +164,11 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
-    let new_pipeline_json: String = serde_json::to_string(&new_pipeline).unwrap();
     let mut update_doc = doc! {
         "$push": {
             "fv": {
                 "fid": &new_pipeline_id,
-                "pipeline": new_pipeline_json,
+                "pipeline": serde_json::to_string(&new_pipeline).unwrap(),
                 "created_at": Time::now().to_jd(),
             }
         },
@@ -483,18 +489,7 @@ pub async fn post_filter_test(
 
     // the first stage of test_pipeline is a match stage, we can overwrite it based on the test criteria
     let mut match_stage = Document::new();
-    let obj_ids: Vec<String> = body
-        .object_ids
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect();
-    let candid_ids: Vec<String> = body
-        .candids
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect();
+
     if let (Some(start_jd), Some(end_jd)) = (body.start_jd, body.end_jd) {
         if end_jd <= start_jd {
             return response::bad_request("end_jd cannot be less than or equal to start_jd");
@@ -504,14 +499,28 @@ pub async fn post_filter_test(
         }
         match_stage.insert("candidate.jd", doc! { "$gte": start_jd, "$lte": end_jd });
     }
+
+    let obj_ids: Vec<String> = body
+        .object_ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
     if obj_ids.len() > 1000 {
         return response::bad_request("maximum of 1000 object_ids allowed for filter test");
     }
-    if candid_ids.len() > 100000 {
-        return response::bad_request("maximum of 100000 candids allowed for filter test");
-    }
     if !obj_ids.is_empty() {
         match_stage.insert("objectId", doc! { "$in": obj_ids });
+    }
+
+    let candid_ids: Vec<String> = body
+        .candids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if candid_ids.len() > 100000 {
+        return response::bad_request("maximum of 100000 candids allowed for filter test");
     }
     if !candid_ids.is_empty() {
         let candids_i64: Vec<i64> = candid_ids
@@ -520,6 +529,7 @@ pub async fn post_filter_test(
             .collect();
         match_stage.insert("_id", doc! { "$in": candids_i64 });
     }
+
     if match_stage.is_empty() {
         return response::bad_request(
             "at least one of (start_jd and end_jd), object_ids, or candid_ids must be provided",
