@@ -6,9 +6,27 @@ use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
+use apache_avro::{Schema, Writer};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
+
+// Avro schema for enriched LSST alerts sent to Babamul
+// TODO: This needs to be fully defined
+const ENRICHED_LSST_ALERT_SCHEMA: &str = r#"
+{
+    "type": "record",
+    "name": "EnrichedLsstAlert",
+    "fields": [
+        {"name": "candid", "type": "long"},
+        {"name": "objectId", "type": "string"},
+        {"name": "candidate", "type": "string"},
+        {"name": "prv_candidates", "type": "string"},
+        {"name": "fp_hists", "type": "string"},
+        {"name": "properties", "type": "string"}
+    ]
+}
+"#;
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     vec![
@@ -74,6 +92,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
 
 pub struct Babamul {
     kafka_producer: rdkafka::producer::FutureProducer,
+    avro_schema: Schema,
 }
 
 impl Babamul {
@@ -101,7 +120,56 @@ impl Babamul {
                 .set("retries", "3")
                 .create()
                 .unwrap();
-        Babamul { kafka_producer }
+
+        // Parse the Avro schema
+        let avro_schema =
+            Schema::parse_str(ENRICHED_LSST_ALERT_SCHEMA).expect("Failed to parse Avro schema");
+
+        Babamul {
+            kafka_producer,
+            avro_schema,
+        }
+    }
+
+    /// Convert an enriched LSST alert to Avro bytes
+    fn to_avro_bytes(&self, alert: &EnrichedLsstAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
+        // Serialize complex fields to JSON strings for the Avro schema
+        let candidate_json = serde_json::to_string(&alert.candidate)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+        let prv_candidates_json = serde_json::to_string(&alert.prv_candidates)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+        let fp_hists_json = serde_json::to_string(&alert.fp_hists)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+        let properties_json = serde_json::to_string(&alert.properties)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+
+        // Create a simplified structure for Avro encoding
+        let avro_record = serde_json::json!({
+            "candid": alert.candid,
+            "objectId": alert.object_id,
+            "candidate": candidate_json,
+            "prv_candidates": prv_candidates_json,
+            "fp_hists": fp_hists_json,
+            "properties": properties_json,
+        });
+
+        let mut writer =
+            Writer::with_codec(&self.avro_schema, Vec::new(), apache_avro::Codec::Snappy);
+        writer
+            .append_ser(avro_record)
+            .inspect_err(|e| {
+                error!("Failed to serialize alert to Avro: {}", e);
+            })
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+
+        let encoded = writer
+            .into_inner()
+            .inspect_err(|e| {
+                error!("Failed to finalize Avro writer: {}", e);
+            })
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+
+        Ok(encoded)
     }
 
     async fn process_alerts(
@@ -142,7 +210,35 @@ impl Babamul {
         // Now iterate over topic, alerts vectors to send them to Kafka
         for (topic_name, alerts) in alerts_by_topic {
             println!("Sending {} alerts to topic {}", alerts.len(), topic_name);
-            // TODO: Add function to bulk write to Kafka
+
+            // Convert all alerts to Avro format first (to avoid lifetime issues)
+            let mut payloads = Vec::new();
+            for alert in &alerts {
+                let payload = self.to_avro_bytes(alert)?;
+                payloads.push(payload);
+            }
+
+            // Send all messages to Kafka without awaiting (allows batching)
+            let mut send_futures = Vec::new();
+            for payload in &payloads {
+                // Create Kafka record
+                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
+                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
+
+                // Send to Kafka (non-blocking) and collect the future
+                let future = self
+                    .kafka_producer
+                    .send(record, std::time::Duration::from_secs(5));
+                send_futures.push(future);
+            }
+
+            // Now await all the sends
+            // This allows Kafka to batch them efficiently based on batch.size and linger.ms settings
+            for send_result in send_futures {
+                send_result.await.map_err(|(e, _)| {
+                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
+                })?;
+            }
         }
 
         Ok(())
