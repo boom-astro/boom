@@ -1,11 +1,12 @@
+use std::collections::HashMap;
+
 use crate::alert::LsstCandidate;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
-use crate::filter::Alert;
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
@@ -103,55 +104,46 @@ impl Babamul {
         Babamul { kafka_producer }
     }
 
-    async fn process_alert(
+    async fn process_alerts(
         &self,
-        alert: Document,
-        properties: Document,
+        alerts: Vec<EnrichedLsstAlert>,
     ) -> Result<(), EnrichmentWorkerError> {
-        // Merge properties into the alert document
-        let mut merged = alert.clone();
-        merged.insert("properties", Bson::Document(properties.clone()));
+        // Create a hash map for alerts to send to each topic
+        // For now, we will just send all alerts to "babamul.none"
+        // In the future, we will determine the topic based on the alert properties
+        let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
         let min_reliability = 0.5;
-        let pixel_flags = vec![1, 2, 3];
         let sso = false;
 
-        if (merged.get_f64("candidate.reliability").unwrap_or(0.0) < min_reliability)
-            || (merged
-                .get_document("candidate")
-                .unwrap()
-                .get_i32("pixel_flags")
-                .map(|pf| pixel_flags.contains(&pf))
-                .unwrap_or(false))
-            || (merged
-                .get_document("properties")
-                .unwrap()
-                .get_bool("rock")
-                .unwrap_or(false)
-                == sso)
-        {
-            // Skip this alert, it doesn't meet the criteria
-            return Ok(());
+        // Iterate over the alerts
+        for alert in alerts {
+            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < min_reliability
+                || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
+                || alert.properties.rock == sso
+            {
+                // Skip this alert, it doesn't meet the criteria
+                continue;
+            }
+
+            // Determine which topic this alert should go to
+            // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
+            // TODO: Get this implemented
+            // For now, all LSST alerts go to "babamul.none"
+            let category: String = "none".to_string();
+            let topic_name = format!("babamul.{}", category);
+            alerts_by_topic
+                .entry(topic_name)
+                .or_insert_with(Vec::new)
+                .push(alert);
         }
 
-        // Determine which topic this alert should go to
-        // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
-        // TODO: Get this implemented
-        // For now, all LSST alerts go to "babamul.none"
-        let category: String = "none".to_string();
-        let topic_name = format!("babamul.{}", category);
-        let schema = crate::filter::load_alert_schema().unwrap();
-        // Convert the merged document into an Alert
-        let alert_obj = Alert::from_bson_document(&merged).unwrap();
-        let _ = crate::filter::send_alert_to_kafka(
-            &alert_obj,
-            &schema,
-            &self.kafka_producer,
-            &topic_name,
-        )
-        .await
-        .unwrap();
+        // Now iterate over topic, alerts vectors to send them to Kafka
+        for (topic_name, alerts) in alerts_by_topic {
+            println!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+            // TODO: Add function to bulk write to Kafka
+        }
 
         Ok(())
     }
@@ -160,7 +152,7 @@ impl Babamul {
 /// LSST alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LsstAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
@@ -173,11 +165,40 @@ pub struct LsstAlertForEnrichment {
 
 /// LSST alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
+}
+
+/// LSST with propertied (i.e., it's enriched)
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct EnrichedLsstAlert {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
+    pub properties: LsstAlertProperties,
+}
+
+impl EnrichedLsstAlert {
+    pub fn from_alert_and_properties(
+        alert: LsstAlertForEnrichment,
+        properties: LsstAlertProperties,
+    ) -> Self {
+        EnrichedLsstAlert {
+            candid: alert.candid,
+            object_id: alert.object_id,
+            candidate: alert.candidate,
+            prv_candidates: alert.prv_candidates,
+            fp_hists: alert.fp_hists,
+            properties,
+        }
+    }
 }
 
 pub struct LsstEnrichmentWorker {
@@ -251,6 +272,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
+        let mut enriched_alerts: Vec<EnrichedLsstAlert> = Vec::new();
         for i in 0..alerts.len() {
             let candid = alerts[i].candid;
 
@@ -274,18 +296,25 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             updates.push(update);
             processed_alerts.push(format!("{}", candid));
 
-            // If Babamul is enabled, process this alert for its streams
+            // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let _ = self
-                    .babamul
-                    .as_ref()
-                    .unwrap()
-                    .process_alert(alerts[i].clone(), properties.clone())
-                    .await;
+                let enriched_alert =
+                    EnrichedLsstAlert::from_alert_and_properties(alerts[i].clone(), properties);
+                enriched_alerts.push(enriched_alert);
             }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // Send to Babamul for batch processing
+        if self.babamul.is_some() {
+            let _ = self
+                .babamul
+                .as_ref()
+                .unwrap()
+                .process_alerts(enriched_alerts)
+                .await;
+        }
 
         Ok(processed_alerts)
     }
