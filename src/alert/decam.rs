@@ -11,6 +11,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
+        lightcurves::Band,
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -46,7 +47,7 @@ pub struct FpHist {
     pub magap: f64,
     #[serde(rename(deserialize = "forcediffimmagunc"))]
     pub sigmagap: f64,
-    pub band: String,
+    pub band: Band,
     pub diffmaglim: f64,
 }
 
@@ -61,7 +62,7 @@ pub struct Candidate {
     pub magap: f64,
     #[serde(rename(deserialize = "forcediffimmagunc"))]
     pub sigmagap: f64,
-    pub band: String,
+    pub band: Band,
     pub diffmaglim: f64,
     pub ra: f64,
     pub dec: f64,
@@ -418,7 +419,7 @@ mod tests {
         assert!((fp_positive_det.fp_hist.magap - 22.595936).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.sigmagap - 0.093660).abs() < 1e-6);
         assert!((fp_positive_det.jd - 2460709.838387).abs() < 1e-6);
-        assert_eq!(fp_positive_det.fp_hist.band, "g");
+        assert_eq!(fp_positive_det.fp_hist.band, Band::G);
 
         // validate the cutouts
         assert_eq!(alert.cutout_science.clone().len(), 54561);

@@ -1,4 +1,3 @@
-use flare::phot::limmag_to_fluxerr;
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
@@ -14,6 +13,14 @@ use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 const ZTF_ZP: f64 = 23.9;
 
+/// Builds ZTF Alert objects from the provided filter results and alert collection.
+///
+/// # Arguments
+/// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
+/// * `alert_collection` - The MongoDB collection containing ZTF alert documents.
+///
+/// # Returns
+/// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
 pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
@@ -97,8 +104,8 @@ pub async fn build_ztf_alerts(
                 None => continue, // skip if not a document
             };
             let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux").ok(); // optional, might not be present
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            let flux = doc.get_f64("psfFlux")?; // in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
@@ -106,7 +113,7 @@ pub async fn build_ztf_alerts(
 
             photometry.push(Photometry {
                 jd,
-                flux,
+                flux: Some(flux),
                 flux_err,
                 band: format!("ztf{}", band),
                 zero_point: ZTF_ZP,
@@ -155,17 +162,8 @@ pub async fn build_ztf_alerts(
             }
             let jd = doc.get_f64("jd")?;
             let magzpsci = doc.get_f64("magzpsci")?;
-            let flux = match doc.get_f64("forcediffimflux") {
-                Ok(flux) => Some(flux),
-                Err(_) => None,
-            };
-            let flux_err = match doc.get_f64("forcediffimfluxunc") {
-                Ok(flux_err) => flux_err,
-                Err(_) => {
-                    let diffmaglim = doc.get_f64("diffmaglim")?;
-                    limmag_to_fluxerr(diffmaglim, magzpsci, 5.0)
-                }
-            };
+            let flux = doc.get_f64("psfFlux").ok();
+            let flux_err = doc.get_f64("psfFluxErr")?;
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
 
@@ -243,6 +241,18 @@ pub async fn build_ztf_alerts(
     Ok(alerts_output)
 }
 
+/// Builds a MongoDB aggregation pipeline for ZTF filter execution.
+///
+/// This function validates the provided filter pipeline and augments it with necessary
+/// auxiliary data lookups (prv_candidates, fp_hists, cross_matches, aliases) based on
+/// which fields are referenced in the filter. The resulting pipeline starts with a match stage
+/// to filter by candids, and should be populated with the actual candids before execution.
+///
+/// # Arguments
+/// * `filter_pipeline` - The user-defined filter pipeline stages
+///
+/// # Returns
+/// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
 pub async fn build_ztf_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
     permissions: &Vec<i32>,

@@ -1,5 +1,10 @@
-use crate::enrichment::models::{load_model, Model, ModelError};
-use mongodb::bson::Document;
+use crate::{
+    enrichment::{
+        models::{load_model, Model, ModelError},
+        ZtfAlertForEnrichment,
+    },
+    utils::lightcurves::AllBandsProperties,
+};
 use ndarray::{Array, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
@@ -40,45 +45,55 @@ impl BtsBotModel {
     #[instrument(skip_all, err)]
     pub fn get_metadata(
         &self,
-        alerts: &[Document],
-        alert_properties: &[Document],
+        alerts: &[ZtfAlertForEnrichment],
+        alert_properties: &[AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
-        for alert in alerts {
-            let candidate = alert.get_document("candidate")?;
+        for i in 0..alerts.len() {
+            let candidate = &alerts[i].candidate.candidate;
 
-            // TODO: handle missing sgscore and distpsnr values
-            // to use sensible defaults if missing
-            let sgscore1 = candidate.get_f64("sgscore1")? as f32;
-            let distpsnr1 = candidate.get_f64("distpsnr1")? as f32;
-            let sgscore2 = candidate.get_f64("sgscore2")? as f32;
-            let distpsnr2 = candidate.get_f64("distpsnr2")? as f32;
-
-            let fwhm = candidate.get_f64("fwhm")? as f32;
-            let magpsf = candidate.get_f64("magpsf")?; // we convert to f32 later
-            let sigmapsf = candidate.get_f64("sigmapsf")? as f32;
-            let chipsf = candidate.get_f64("chipsf")? as f32;
-            let ra = candidate.get_f64("ra")? as f32;
-            let dec = candidate.get_f64("dec")? as f32;
-            let diffmaglim = candidate.get_f64("diffmaglim")? as f32;
-            let ndethist = candidate.get_i32("ndethist")? as f32;
-            let nmtchps = candidate.get_i32("nmtchps")? as f32;
-
-            let drb = candidate.get_f64("drb")? as f32;
-            let ncovhist = candidate.get_i32("ncovhist")? as f32;
-
-            let chinr = candidate.get_f64("chinr")? as f32;
-            let sharpnr = candidate.get_f64("sharpnr")? as f32;
-            let scorr = candidate.get_f64("scorr")? as f32;
-            let sky = candidate.get_f64("sky")? as f32;
+            let drb = candidate.drb.ok_or(ModelError::MissingFeature("drb"))? as f32;
+            let diffmaglim = candidate
+                .diffmaglim
+                .ok_or(ModelError::MissingFeature("diffmaglim"))?
+                as f32;
+            let ra = candidate.ra as f32;
+            let dec = candidate.dec as f32;
+            let fwhm = candidate.fwhm.ok_or(ModelError::MissingFeature("fwhm"))? as f32;
+            let magpsf = candidate.magpsf;
+            let sigmapsf = candidate.sigmapsf;
+            let chipsf = candidate
+                .chipsf
+                .ok_or(ModelError::MissingFeature("chipsf"))? as f32;
+            let ndethist = candidate.ndethist as f32;
+            let nmtchps = candidate.nmtchps as f32;
+            let ncovhist = candidate.ncovhist as f32;
+            let chinr = candidate.chinr.ok_or(ModelError::MissingFeature("chinr"))? as f32;
+            let sharpnr = candidate
+                .sharpnr
+                .ok_or(ModelError::MissingFeature("sharpnr"))? as f32;
+            let scorr = candidate.scorr.ok_or(ModelError::MissingFeature("scorr"))? as f32;
+            let sky = candidate.sky.ok_or(ModelError::MissingFeature("sky"))? as f32;
+            let sgscore1 = candidate
+                .sgscore1
+                .ok_or(ModelError::MissingFeature("sgscore1"))? as f32;
+            let distpsnr1 = candidate
+                .distpsnr1
+                .ok_or(ModelError::MissingFeature("distpsnr1"))? as f32;
+            let sgscore2 = candidate
+                .sgscore2
+                .ok_or(ModelError::MissingFeature("sgscore2"))? as f32;
+            let distpsnr2 = candidate
+                .distpsnr2
+                .ok_or(ModelError::MissingFeature("distpsnr2"))? as f32;
 
             // alert properties already computed from lightcurve analysis
-            let peakmag = alert_properties[0].get_f64("peak_mag").unwrap();
-            let peakjd = alert_properties[0].get_f64("peak_jd").unwrap();
-            let faintestmag = alert_properties[0].get_f64("faintest_mag").unwrap();
-            let firstjd = alert_properties[0].get_f64("first_jd").unwrap();
-            let lastjd = alert_properties[0].get_f64("last_jd").unwrap();
+            let peakmag = alert_properties[i].peak_mag;
+            let peakjd = alert_properties[i].peak_jd;
+            let faintestmag = alert_properties[i].faintest_mag;
+            let firstjd = alert_properties[i].first_jd;
+            let lastjd = alert_properties[i].last_jd;
 
             let days_since_peak = (lastjd - peakjd) as f32;
             let days_to_peak = (peakjd - firstjd) as f32;

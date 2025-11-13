@@ -1,4 +1,5 @@
 use crate::{
+    alert::AlertCutout,
     conf,
     enrichment::models::ModelError,
     utils::{
@@ -11,7 +12,7 @@ use crate::{
 use std::{num::NonZero, sync::LazyLock};
 
 use futures::StreamExt;
-use mongodb::bson::{doc, document::ValueAccessError, Document};
+use mongodb::bson::{doc, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
@@ -69,6 +70,10 @@ pub enum EnrichmentWorkerError {
     CutoutAccessError(#[from] CutoutError),
     #[error("json serialization error")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("failed to deserialize from MongoDB")]
+    MongoDeserializeError(#[from] mongodb::bson::de::Error),
+    #[error("missing cutouts for candid {0}")]
+    MissingCutouts(i64),
 }
 
 #[async_trait::async_trait]
@@ -85,24 +90,21 @@ pub trait EnrichmentWorker {
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.
-/// If an alert_cutout_collection is provided, fetch cutouts from that collection as well.
 /// Return a vector of alerts as bson Documents.
 ///
 /// # Arguments
 /// * `candids` - A slice of candids to fetch alerts for.
 /// * `alert_pipeline` - A reference to a vector of bson Documents representing the aggregation pipeline.
 /// * `alert_collection` - A reference to the mongodb collection containing the alerts.
-/// * `alert_cutout_collection` - An optional reference to the mongodb collection containing the cutouts.
 ///
 /// # Returns
 /// A Result containing a vector of bson Documents representing the fetched alerts, or an EnrichmentWorkerError.
 #[instrument(skip_all, err)]
-pub async fn fetch_alerts(
+pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
     candids: &[i64], // this is a slice of candids to process
     alert_pipeline: &Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
-    alert_cutout_collection: Option<&mongodb::Collection<Document>>,
-) -> Result<Vec<Document>, EnrichmentWorkerError> {
+) -> Result<Vec<T>, EnrichmentWorkerError> {
     let mut alert_pipeline = alert_pipeline.clone();
     if let Some(first_stage) = alert_pipeline.first_mut() {
         *first_stage = doc! {
@@ -113,16 +115,12 @@ pub async fn fetch_alerts(
     }
     let mut alert_cursor = alert_collection.aggregate(alert_pipeline).await?;
 
-    let mut alerts: Vec<Document> = Vec::new();
-    let mut candid_to_idx = std::collections::HashMap::new();
-    let mut count = 0;
+    let mut alerts: Vec<T> = Vec::new();
     while let Some(result) = alert_cursor.next().await {
         match result {
             Ok(document) => {
-                alerts.push(document);
-                let candid = alerts[count].get_i64("_id")?;
-                candid_to_idx.insert(candid, count);
-                count += 1;
+                let alert: T = mongodb::bson::from_document(document)?;
+                alerts.push(alert);
             }
             _ => {
                 continue;
@@ -130,46 +128,52 @@ pub async fn fetch_alerts(
         }
     }
 
-    // next we fetch cutouts from the cutout collection, if provided
-    if let Some(alert_cutout_collection) = alert_cutout_collection {
-        let mut cutout_cursor = alert_cutout_collection
-            .find(doc! {
-                "_id": {"$in": candids}
-            })
-            .await?;
-        while let Some(result) = cutout_cursor.next().await {
-            match result {
-                Ok(cutout_doc) => {
-                    let candid = cutout_doc.get_i64("_id")?;
-                    if let Some(idx) = candid_to_idx.get(&candid) {
-                        alerts[*idx].insert(
-                            "cutoutScience",
-                            cutout_doc
-                                .get("cutoutScience")
-                                .ok_or(ValueAccessError::NotPresent)?,
-                        );
-                        alerts[*idx].insert(
-                            "cutoutTemplate",
-                            cutout_doc
-                                .get("cutoutTemplate")
-                                .ok_or(ValueAccessError::NotPresent)?,
-                        );
-                        alerts[*idx].insert(
-                            "cutoutDifference",
-                            cutout_doc
-                                .get("cutoutDifference")
-                                .ok_or(ValueAccessError::NotPresent)?,
-                        );
-                    }
-                }
-                _ => {
-                    continue;
-                }
+    Ok(alerts)
+}
+
+#[instrument(skip_all, err)]
+pub async fn fetch_alert_cutouts(
+    candids: &[i64],
+    alert_cutout_collection: &mongodb::Collection<Document>,
+) -> Result<std::collections::HashMap<i64, AlertCutout>, EnrichmentWorkerError> {
+    let filter = doc! {
+        "_id": {"$in": candids}
+    };
+    let mut cursor = alert_cutout_collection.find(filter).await?;
+
+    let mut cutouts_map: std::collections::HashMap<i64, AlertCutout> =
+        std::collections::HashMap::new();
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(document) => {
+                let candid = document.get_i64("_id")?;
+                let cutout_science = document
+                    .get_binary_generic("cutoutScience")
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default();
+                let cutout_template = document
+                    .get_binary_generic("cutoutTemplate")
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default();
+                let cutout_difference = document
+                    .get_binary_generic("cutoutDifference")
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default();
+                let alert_cutout = AlertCutout {
+                    candid,
+                    cutout_science,
+                    cutout_template,
+                    cutout_difference,
+                };
+                cutouts_map.insert(candid, alert_cutout);
+            }
+            _ => {
+                continue;
             }
         }
     }
 
-    Ok(alerts)
+    Ok(cutouts_map)
 }
 
 #[tokio::main]

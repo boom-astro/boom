@@ -137,8 +137,6 @@ pub enum FilterError {
     InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
-    #[error("unsupported survey for filter")]
-    UnsupportedSurvey(Survey),
     #[error("error during filter execution")]
     FilterExecutionError(String),
 }
@@ -251,7 +249,13 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
     to_avro_bytes(alert, schema)
 }
 
-// TODO, use the config file to get the kafka server
+/// Creates a Kafka FutureProducer with the given configuration.
+///
+/// # Arguments
+/// * `kafka_config` - A reference to the SurveyKafkaConfig containing the producer configuration.
+///
+/// # Returns
+/// * `Result<FutureProducer, FilterWorkerError>` - The created FutureProducer or a FilterWorkerError.
 pub async fn create_producer(
     kafka_config: &conf::SurveyKafkaConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
@@ -273,6 +277,16 @@ pub async fn create_producer(
     Ok(producer)
 }
 
+/// Sends an alert to Kafka after encoding it to Avro format.
+///
+/// # Arguments
+/// * `alert` - A reference to the Alert object to be sent.
+/// * `schema` - A reference to the Avro Schema used for encoding the alert.
+/// * `producer` - A reference to the Kafka FutureProducer used to send the alert.
+/// * `topic` - The Kafka topic to which the alert will be sent.
+///
+/// # Returns
+/// * `Result<(), FilterWorkerError>` - Returns Ok(()) if the alert is sent successfully, otherwise returns a FilterWorkerError.
 #[instrument(skip(alert, schema, producer), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub async fn send_alert_to_kafka(
     alert: &Alert,
@@ -295,7 +309,14 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
-#[instrument(skip_all)]
+/// Recursively checks if a given field is used in a MongoDB aggregation stage.
+///
+/// # Arguments
+/// * `stage` - A reference to a serde_json::Value representing the aggregation stage.
+/// * `field` - The field name to check for usage.
+///
+/// # Returns
+/// * `bool` - Returns true if the field is used in the stage, false otherwise.
 pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     // we consider a value is a match with field if it is:
     // - equal to the field
@@ -327,7 +348,14 @@ pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     false
 }
 
-#[instrument(skip_all)]
+/// Checks if a given field is used in any stage of a MongoDB aggregation pipeline.
+///
+/// # Arguments
+/// * `filter_pipeline` - A reference to a slice of serde_json::Value representing the aggregation pipeline.
+/// * `field` - The field name to check for usage.
+///
+/// # Returns
+/// * `Option<usize>` - Returns Some(index) of the first stage that uses the field, or None if the field is not used in any stage.
 pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) -> Option<usize> {
     for (i, stage) in filter_pipeline.iter().enumerate() {
         if uses_field_in_stage(stage, field) {
@@ -337,6 +365,13 @@ pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) 
     None
 }
 
+/// Validates a MongoDB aggregation pipeline used as a filter.
+///
+/// # Arguments
+/// * `filter_pipeline` - A reference to a slice of serde_json::Value representing the aggregation pipeline.
+///
+/// # Returns
+/// * `Result<(), FilterError>` - Returns Ok(()) if the pipeline is valid, otherwise returns a FilterError.
 #[instrument(skip_all, err)]
 pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result<(), FilterError> {
     // mongodb aggregation pipelines have project stages that can include or exclude fields,
@@ -350,6 +385,12 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // - we don't have any group, unwind, or lookup stages
     // - that the last stage is a project that includes objectId
     let nb_stages = filter_pipeline.len();
+    if nb_stages == 0 {
+        return Err(FilterError::InvalidFilterPipeline(
+            "Filter pipeline cannot be empty".to_string(),
+        ));
+    }
+    let mut nb_match_stages = 0;
     for (i, stage) in filter_pipeline.iter().enumerate() {
         if stage.get("$group").is_some()
             || stage.get("$unwind").is_some()
@@ -461,10 +502,28 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
                 ));
             }
         }
+        if stage.get("$match").is_some() {
+            nb_match_stages += 1;
+        }
+    }
+    if nb_match_stages == 0 {
+        return Err(FilterError::InvalidFilterPipeline(
+            "Filter pipeline must have at least one $match stage".to_string(),
+        ));
     }
     Ok(())
 }
 
+/// Runs the filter pipeline on the given candidate IDs.
+///
+/// # Arguments
+/// * `candids` - A vector of candidate IDs to filter.
+/// * `filter_id` - The unique identifier of the filter.
+/// * `pipeline` - The MongoDB aggregation pipeline to execute.
+/// * `alert_collection` - The MongoDB collection containing alerts.
+///
+/// # Returns
+/// * `Result<Vec<Document>, FilterError>` - A vector of documents that passed the filter or a FilterError.
 #[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
     candids: Vec<i64>,
@@ -526,6 +585,18 @@ pub struct LoadedFilter {
     pub pipeline: Vec<Document>,
 }
 
+/// Retrieves an active filter from the database.
+///
+/// # Arguments
+/// * `filter_id` - The unique identifier of the filter
+/// * `survey` - The survey this filter belongs to, from crate::utils::enums::Survey
+/// * `filter_collection` - MongoDB collection containing filters
+///
+/// # Returns
+/// The filter object if found and active
+///
+/// # Errors
+/// Returns `FilterError::FilterNotFound` if no matching active filter exists
 #[instrument(skip(filter_collection), err)]
 pub async fn get_filter(
     filter_id: &str,
@@ -549,6 +620,13 @@ pub async fn get_filter(
     Ok(filter_obj)
 }
 
+/// Extracts the active filter pipeline version from a Filter object.
+///
+/// # Arguments
+/// * `filter` - The Filter object from which to extract the active pipeline.
+///
+/// # Returns
+/// * `Result<Vec<serde_json::Value>, FilterError>` - The active filter pipeline as a vector of serde_json::Value or a FilterError.
 #[instrument(skip(filter), err)]
 pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Value>, FilterError> {
     // find the active filter version
@@ -568,6 +646,17 @@ pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Val
     Ok(filter_pipeline.to_vec())
 }
 
+/// Builds a complete filter pipeline for the given survey and permissions.
+/// The resulting pipeline is ready to be executed against a MongoDB collection,
+/// and simply needs its first $match stage to be populated with the desired candids.
+///
+/// # Arguments
+/// * `pipeline` - The base filter pipeline as a vector of serde_json::Value.
+/// * `permissions` - The permissions associated with the filter.
+/// * `survey` - The survey type, from crate::utils::enums::Survey.
+/// # Returns
+/// * `Result<Vec<Document>, FilterError>` - The constructed filter pipeline as a vector of MongoDB Documents or a FilterError.
+#[instrument(skip_all, err)]
 pub async fn build_filter_pipeline(
     pipeline: &Vec<serde_json::Value>,
     permissions: &Vec<i32>,
@@ -590,6 +679,18 @@ pub async fn build_filter_pipeline(
     Ok(pipeline)
 }
 
+/// Builds a LoadedFilter object for the given filter ID and survey.
+/// The LoadedFilter contains the filter ID, permissions, and a fully constructed
+/// filter pipeline ready for execution.
+///
+/// # Arguments
+/// * `filter_id` - The ID of the filter to load.
+/// * `survey` - The survey type, from crate::utils::enums::Survey.
+/// * `filter_collection` - The MongoDB collection containing filter documents.
+///
+/// # Returns
+/// * `Result<LoadedFilter, FilterError>` - The constructed LoadedFilter or a FilterError.
+#[instrument(skip_all, err)]
 pub async fn build_loaded_filter(
     filter_id: &str,
     survey: &Survey,
@@ -608,6 +709,17 @@ pub async fn build_loaded_filter(
     Ok(loaded)
 }
 
+/// Builds a vector of LoadedFilter objects for the specified filter IDs and survey.
+/// If no filter IDs are provided, all active filters for the survey are loaded.
+///
+/// # Arguments
+/// * `filter_ids` - An optional vector of filter IDs to load. If None, all active filters are loaded.
+/// * `survey` - The survey type, from crate::utils::enums::Survey.
+/// * `filter_collection` - The MongoDB collection containing filter documents.
+///
+/// # Returns
+/// * `Result<Vec<LoadedFilter>, FilterError>` - A vector of LoadedFilter objects or a FilterError.
+#[instrument(skip_all, err)]
 pub async fn build_loaded_filters(
     filter_ids: &Option<Vec<String>>,
     survey: &Survey,
