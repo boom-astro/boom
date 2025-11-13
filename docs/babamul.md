@@ -36,9 +36,13 @@ After activation, connect to Kafka using:
 
 ### Example (Python)
 
+This example uses the `kafka-python` package.
+
 ```python
 from kafka import KafkaConsumer
 
+# Subscribe to the babamul.none topic, which includes alerts that aren't
+# stars, aren't galaxies, and have no cross-matches
 consumer = KafkaConsumer(
     "babamul.none",
     bootstrap_servers="kafka.boom.example.com:9092",
