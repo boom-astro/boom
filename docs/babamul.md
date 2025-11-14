@@ -36,23 +36,36 @@ After activation, connect to Kafka using:
 
 ### Example (Python)
 
-This example uses the `kafka-python` package.
+This example uses the `confluent_kafka` package.
 
 ```python
-from kafka import KafkaConsumer
+from confluent_kafka import Consumer
 
 # Subscribe to the babamul.none topic, which includes alerts that aren't
 # stars, aren't galaxies, and have no cross-matches
-consumer = KafkaConsumer(
-    "babamul.none",
-    bootstrap_servers="kafka.boom.example.com:9092",
-    security_protocol="SASL_PLAINTEXT",
-    sasl_mechanism="SCRAM-SHA-512",
-    sasl_plain_username="user@example.com",
-    sasl_plain_password="your-password-here",
-    group_id="babamul-myapp"
+consumer = Consumer(
+    {
+        "bootstrap.servers": "kafka.boom.example.com:9092",
+        "security.protocol": "SASL_PLAINTEXT",
+        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.username": "user@example.com",
+        "sasl.password": "your-password-here",
+        "group.id": "babamul-myapp",
+        "auto.offset.reset": "earliest"
+    }
 )
 
-for message in consumer:
-    print(message.value)
+consumer.subscribe(["babamul.none"])
+
+try:
+    while True:
+        msg = consumer.poll(timeout=1.0)
+        if msg is None:
+            continue
+        if msg.error():
+            print(f"Consumer error: {msg.error()}")
+            continue
+        print(msg.value())
+finally:
+    consumer.close()
 ```
