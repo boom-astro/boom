@@ -507,6 +507,29 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     Ok(())
 }
 
+pub fn update_aliases_index(current: Option<usize>, new: Option<usize>) -> Option<usize> {
+    if new.is_some() {
+        if current.is_none() {
+            new
+        } else {
+            Some(current.unwrap().min(new.unwrap()))
+        }
+    } else {
+        current
+    }
+}
+
+pub fn update_aliases_index_multiple(
+    current: Option<usize>,
+    news: Vec<Option<usize>>,
+) -> Option<usize> {
+    let mut result = current;
+    for new in news {
+        result = update_aliases_index(result, new);
+    }
+    result
+}
+
 /// Runs the filter pipeline on the given candidate IDs.
 ///
 /// # Arguments
