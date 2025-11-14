@@ -12,7 +12,7 @@ use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{error, instrument, warn};
 
 // Avro schema for enriched LSST alerts sent to Babamul
-// TODO: This needs to be fully defined
+// TODO: This is just a placeholder for now and needs to be defined properly
 const ENRICHED_LSST_ALERT_SCHEMA: &str = r#"
 {
     "type": "record",
