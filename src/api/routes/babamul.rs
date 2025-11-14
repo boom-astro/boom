@@ -1,12 +1,12 @@
 use crate::api::auth::AuthProvider;
 use crate::api::email::EmailService;
 use crate::api::models::response;
+use crate::conf::get_kafka_producer_config;
 use actix_web::{post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::env;
 use std::process::Command;
 use utoipa::ToSchema;
 
@@ -206,7 +206,10 @@ fn is_valid_email(email: &str) -> bool {
 /// kafka-acls --add operations will silently succeed if the ACL already exists.
 async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), String> {
     // Determine broker
-    let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
+    let broker = match get_kafka_producer_config() {
+        Ok(config) => config.server,
+        Err(e) => return Err(format!("Failed to get Kafka config: {}", e)),
+    };
 
     // Try to find the right command names
     // Homebrew on macOS: kafka-configs, kafka-acls (no .sh)

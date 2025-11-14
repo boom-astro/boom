@@ -107,7 +107,6 @@ mod tests {
     /// - Install tools with: brew install kafka (macOS) or run against a Docker Kafka.
     #[actix_rt::test]
     async fn test_babamul_activate() {
-        std::env::set_var("KAFKA_INTERNAL_BROKER", "localhost:9092");
         load_dotenv();
         let database: Database = get_test_db().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
