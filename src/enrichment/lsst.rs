@@ -402,13 +402,13 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
         // Send to Babamul for batch processing
-        if self.babamul.is_some() {
-            let _ = self
-                .babamul
-                .as_ref()
-                .unwrap()
-                .process_alerts(enriched_alerts)
-                .await;
+        match self.babamul.as_ref() {
+            Some(babamul) => {
+                if let Err(e) = babamul.process_alerts(enriched_alerts).await {
+                    error!("Failed to process enriched alerts in Babamul: {}", e);
+                }
+            }
+            None => {}
         }
 
         Ok(processed_alerts)
