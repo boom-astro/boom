@@ -98,7 +98,6 @@ pub struct Babamul {
 impl Babamul {
     fn new(config: config::Config) -> Self {
         // Read Kafka producer config from kafka: producer in the config
-        // TODO: Do this properly
         let kafka_producer_host = config
             .get_string("kafka.producer")
             .unwrap_or_else(|_| "broker:29092".to_string());
