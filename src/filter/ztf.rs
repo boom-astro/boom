@@ -88,7 +88,7 @@ pub fn insert_ztf_aux_pipeline_if_needed(
     if *ztf_insert_aux_pipeline {
         pipeline.push(doc! {
             "$lookup": doc! {
-                "from": format!("ZTF_alerts_aux"),
+                "from": "ZTF_alerts_aux",
                 "localField": "aliases.ZTF.0",
                 "foreignField": "_id",
                 "as": "ztf_aux"
@@ -479,7 +479,7 @@ pub async fn build_ztf_filter_pipeline(
         if insert_aux_pipeline && i == insert_aux_index {
             pipeline.push(doc! {
                 "$lookup": doc! {
-                    "from": format!("ZTF_alerts_aux"),
+                    "from": "ZTF_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
