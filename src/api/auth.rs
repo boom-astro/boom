@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
-    iat: usize,
-    exp: usize,
+    pub iat: usize,
+    pub exp: usize,
 }
 
 #[derive(Clone)]
 pub struct AuthProvider {
-    encoding_key: EncodingKey,
+    pub encoding_key: EncodingKey,
     decoding_key: DecodingKey,
     validation: Validation,
     users_collection: mongodb::Collection<User>,
@@ -78,6 +78,14 @@ impl AuthProvider {
         let user_id = self.validate_token(token).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("Incorrect JWT: {}", e))
         })?;
+
+        // Check if this is a babamul user (has "babamul:" prefix)
+        if user_id.starts_with("babamul:") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Babamul users cannot access main API endpoints",
+            ));
+        }
 
         // query the user
         let user = self

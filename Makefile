@@ -1,3 +1,7 @@
+.PHONY: dev
+dev:
+	docker compose --profile api up
+
 .PHONY: api-dev
 api-dev:
 	@echo "Starting API server and watching for changes"

@@ -22,6 +22,7 @@ BOOM runs on macOS and Linux. You'll need:
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
 - If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
+- Kafka CLI tools, available with `brew install kafka`.
 
 ### Installation steps:
 
@@ -58,11 +59,23 @@ cp .env.example .env
 **Note:** Do not commit `.env` to Git or use the example values
 in production.
 
+#### Email configuration (for notifications)
+
+In order to send emails to users, e.g.,
+to send Babamul account activation codes,
+the email related environmental variables in `.env.example` must be set.
+
+If email is not configured or disabled,
+Babmul activation codes will be printed to the console logs instead,
+and users will need to contact an administrator to retrieve their activation
+code.
+
 ### Start services for local development
 
-1. Launch `Valkey`, `MongoDB`, and `Kafka` using Docker, with the provided `docker-compose.yaml` file:
+1. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode
+   using Docker, with the provided `docker-compose.yaml` file:
     ```bash
-    docker compose up -d
+    docker compose --profile api up -d
     ```
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
@@ -73,16 +86,6 @@ in production.
     ```bash
     cargo build --release
     ```
-
-### API
-
-To run the API server in development mode,
-first ensure `cargo-watch` is installed (`cargo install cargo-watch`),
-then call:
-
-```sh
-make api-dev
-```
 
 ## Running BOOM:
 

@@ -68,10 +68,16 @@ pub enum EnrichmentWorkerError {
     RunModelError(#[from] ModelError),
     #[error("could not access cutout images")]
     CutoutAccessError(#[from] CutoutError),
+    #[error("json serialization error")]
+    SerdeJson(#[from] serde_json::Error),
     #[error("failed to deserialize from MongoDB")]
     MongoDeserializeError(#[from] mongodb::bson::de::Error),
     #[error("missing cutouts for candid {0}")]
     MissingCutouts(i64),
+    #[error("serialization error: {0}")]
+    Serialization(String),
+    #[error("kafka error: {0}")]
+    Kafka(String),
 }
 
 #[async_trait::async_trait]
