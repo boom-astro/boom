@@ -8,6 +8,8 @@ use serde::Deserialize;
 use std::path::Path;
 use tracing::{debug, error, info, instrument, warn};
 
+const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
     #[error("failed to load config")]
@@ -437,6 +439,25 @@ pub fn build_kafka_config(
     SurveyKafkaConfig::from_config(conf, survey)
 }
 
+pub struct KafkaProducerConfig {
+    pub server: String, // URL of the Kafka broker
+}
+
+pub fn get_kafka_producer_config() -> Result<KafkaProducerConfig, BoomConfigError> {
+    let conf = load_raw_config(DEFAULT_CONFIG_PATH)?;
+
+    let kafka_conf = conf.get_table("kafka")?;
+
+    let producer_server = kafka_conf
+        .get("producer")
+        .and_then(|p| p.clone().into_string().ok())
+        .unwrap_or_else(|| "localhost:9092".to_string());
+
+    Ok(KafkaProducerConfig {
+        server: producer_server,
+    })
+}
+
 /// Return whether the babamul worker is enabled per config `babamul.enabled`.
 /// If the key is missing, returns false.
 pub fn babamul_enabled(conf: &Config) -> bool {
@@ -546,7 +567,7 @@ impl AppConfig {
 pub fn load_config(config_path: Option<&str>) -> AppConfig {
     load_dotenv();
 
-    let config_file = config_path.unwrap_or("config.yaml");
+    let config_file = config_path.unwrap_or(DEFAULT_CONFIG_PATH);
 
     let config = load_raw_config(config_file).unwrap();
 

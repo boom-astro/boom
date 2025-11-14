@@ -1,7 +1,8 @@
 //! Functionality for working with Kafka in the API.
 use std::collections::HashMap;
-use std::env;
 use std::process::Command;
+
+use crate::conf::get_kafka_producer_config;
 
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct KafkaAclEntry {
@@ -35,7 +36,7 @@ pub fn get_acls() -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
     }
 
     // Determine broker
-    let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
+    let broker = get_kafka_producer_config()?.server;
 
     // Try to find the right command name
     let acls_cli = if which::which("kafka-acls").is_ok() {
@@ -175,7 +176,7 @@ pub fn get_acls() -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
 
 pub fn delete_acls_for_user(user_email: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Determine broker
-    let broker = env::var("KAFKA_INTERNAL_BROKER").unwrap_or_else(|_| "broker:29092".to_string());
+    let broker = get_kafka_producer_config()?.server;
 
     // Try to find the right command name
     let acls_cli = if which::which("kafka-acls").is_ok() {
