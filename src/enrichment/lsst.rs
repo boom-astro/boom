@@ -118,7 +118,7 @@ impl Babamul {
                 .set("max.in.flight.requests.per.connection", "5")
                 .set("retries", "3")
                 .create()
-                .unwrap();
+                .expect("Failed to create Babamul Kafka producer");
 
         // Parse the Avro schema
         let avro_schema =
