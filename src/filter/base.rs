@@ -13,7 +13,7 @@ use std::{num::NonZero, sync::LazyLock};
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
 use futures::stream::StreamExt;
-use mongodb::bson::{self, doc, Document};
+use mongodb::bson::{doc, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
@@ -211,9 +211,9 @@ pub struct Alert {
 }
 
 impl Alert {
-    pub fn from_bson_document(doc: &Document) -> Result<Self, bson::de::Error> {
+    pub fn from_bson_document(doc: &Document) -> Result<Self, mongodb::bson::de::Error> {
         // from_document consumes, so clone if you only have &Document
-        bson::from_document(doc.clone())
+        mongodb::bson::from_document(doc.clone())
     }
 }
 
