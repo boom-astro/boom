@@ -33,6 +33,12 @@ async fn main() -> std::io::Result<()> {
         println!("Babamul API endpoints are DISABLED");
     }
 
+    // read the port from env var BOOM_API__PORT, default to 4000
+    let port: u16 = std::env::var("BOOM_API__PORT")
+        .unwrap_or_else(|_| "4000".to_string())
+        .parse()
+        .expect("Invalid port number");
+
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
     let babamul_doc = BabamulApiDoc::openapi();
@@ -82,7 +88,7 @@ async fn main() -> std::io::Result<()> {
         )
         .wrap(Logger::default())
     })
-    .bind(("0.0.0.0", 4000))?
+    .bind(("0.0.0.0", port))?
     .run()
     .await
 }
