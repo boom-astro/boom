@@ -210,6 +210,13 @@ pub struct Alert {
     pub cutout_difference: Vec<u8>,
 }
 
+impl Alert {
+    pub fn from_bson_document(doc: &Document) -> Result<Self, mongodb::bson::de::Error> {
+        // from_document consumes, so clone if you only have &Document
+        mongodb::bson::from_document(doc.clone())
+    }
+}
+
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
     let schema =
         Schema::parse_str(schema_str).inspect_err(|e| error!("Failed to parse schema: {}", e))?;
