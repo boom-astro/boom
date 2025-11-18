@@ -430,7 +430,6 @@ pub trait AlertConsumer: Sized {
         let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
-            // None => conf::build_kafka_config(&config, &self.survey())?,
             None => config
                 .kafka
                 .consumer
