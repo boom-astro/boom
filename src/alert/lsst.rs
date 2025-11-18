@@ -748,7 +748,14 @@ impl AlertWorker for LsstAlertWorker {
             .cloned()
             .unwrap_or_default();
 
-        let kafka_consumer_config = config.kafka.consumer.get(&Survey::Lsst).cloned().unwrap();
+        let kafka_consumer_config = config
+            .kafka
+            .consumer
+            .get(&Survey::Lsst)
+            .cloned()
+            .ok_or_else(|| AlertWorkerError::from(BoomConfigError::MissingKeyError(
+                "kafka.consumer.lsst".to_string()
+            )))?;
 
         let schema_registry_url = match kafka_consumer_config.schema_registry {
             Some(ref url) => url.as_ref(),
