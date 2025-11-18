@@ -1,6 +1,6 @@
 use boom::{
-    conf::{self, load_dotenv},
-    scheduler::{get_num_workers, ThreadPool},
+    conf::{self, load_dotenv, AppConfig},
+    scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
@@ -47,15 +47,16 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         warn!("no config file provided, using {}", default_config_path);
         default_config_path
     });
-    let config = conf::load_raw_config(&config_path).expect("could not load config file");
+    let config = AppConfig::from_path(&config_path).unwrap();
 
     // get num workers from config file
-    let n_alert = get_num_workers(&config, &args.survey, "alert")
-        .expect("could not retrieve number of alert workers");
-    let n_enrichment = get_num_workers(&config, &args.survey, "enrichment")
-        .expect("could not retrieve number of enrichment workers");
-    let n_filter = get_num_workers(&config, &args.survey, "filter")
-        .expect("could not retrieve number of filter workers");
+    let worker_config = config
+        .workers
+        .get(&args.survey)
+        .expect("could not retrieve worker config for survey");
+    let n_alert = worker_config.alert.n_workers;
+    let n_enrichment = worker_config.enrichment.n_workers;
+    let n_filter = worker_config.filter.n_workers;
 
     // initialize the indexes for the survey
     let db: mongodb::Database = conf::build_db(&config)

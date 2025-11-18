@@ -1,5 +1,5 @@
 use crate::{
-    conf::{self, SurveyKafkaConfig},
+    conf::{self, AppConfig, KafkaConsumerConfig},
     utils::{
         data::count_files_in_dir,
         o11y::{
@@ -400,8 +400,7 @@ pub trait AlertConsumer: Sized {
     fn survey(&self) -> crate::utils::enums::Survey;
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
-        let config =
-            conf::load_raw_config(config_path).inspect_err(as_error!("failed to load config"))?;
+        let config = AppConfig::from_path(config_path)?;
         let mut con = conf::build_redis(&config)
             .await
             .inspect_err(as_error!("failed to connect to redis"))?;
@@ -420,18 +419,19 @@ pub trait AlertConsumer: Sized {
         &self,
         topic: Option<String>,
         timestamp: i64,
-        kafka_config: Option<SurveyKafkaConfig>,
+        kafka_config: Option<KafkaConsumerConfig>,
         n_threads: Option<usize>,
         max_in_queue: Option<usize>,
         exit_on_eof: bool,
         config_path: &str,
     ) -> Result<(), ConsumerError> {
-        let config = conf::load_raw_config(config_path)?;
+        let config = AppConfig::from_path(config_path)?;
 
         let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
-            None => conf::build_kafka_config(&config, &self.survey())?,
+            // None => conf::build_kafka_config(&config, &self.survey())?,
+            None => config.kafka.consumer.get(&self.survey()).unwrap().clone(),
         };
 
         let n_threads = n_threads.unwrap_or(1);
@@ -529,21 +529,21 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
     Ok(())
 }
 
-#[instrument(skip(config, survey_config))]
+#[instrument(skip(config, survey_consumer_config))]
 pub async fn consumer(
     id: &str,
     topic: &str,
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
-    config: &config::Config,
-    survey_config: &SurveyKafkaConfig,
+    config: &AppConfig,
+    survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
 ) -> Result<(), ConsumerError> {
-    let server = survey_config.consumer.server.clone();
-    let group_id = survey_config.consumer.group_id.clone();
-    let username = survey_config.consumer.username.clone();
-    let password = survey_config.consumer.password.clone();
+    let server = survey_consumer_config.server.clone();
+    let group_id = survey_consumer_config.group_id.clone();
+    let username = survey_consumer_config.username.clone();
+    let password = survey_consumer_config.password.clone();
 
     let mut client_config = ClientConfig::new();
     client_config

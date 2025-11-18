@@ -3,6 +3,7 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
+use crate::conf::AppConfig;
 use crate::filter::{
     build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
     Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
@@ -320,8 +321,8 @@ impl FilterWorker for LsstFilterWorker {
         config_path: &str,
         filter_ids: Option<Vec<String>>,
     ) -> Result<Self, FilterWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db: mongodb::Database = crate::conf::build_db(&config).await?;
         let alert_collection = db.collection("LSST_alerts");
         let filter_collection = db.collection("filters");
 

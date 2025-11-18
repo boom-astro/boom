@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use crate::alert::LsstCandidate;
+use crate::conf::{build_db, AppConfig};
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
@@ -9,6 +8,7 @@ use crate::utils::lightcurves::{
 use apache_avro::{Schema, Writer};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use std::collections::HashMap;
 use tracing::{error, instrument, warn};
 
 // Avro schema for enriched LSST alerts sent to Babamul
@@ -96,18 +96,16 @@ pub struct Babamul {
 }
 
 impl Babamul {
-    fn new(config: config::Config) -> Self {
+    fn new(config: &AppConfig) -> Self {
         // Read Kafka producer config from kafka: producer in the config
-        let kafka_producer_host = config
-            .get_string("kafka.producer")
-            .unwrap_or_else(|_| "broker:29092".to_string());
+        let kafka_producer_host = &config.kafka.producer.server;
 
         // Create Kafka producer
         let kafka_producer: rdkafka::producer::FutureProducer =
             rdkafka::config::ClientConfig::new()
                 // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
                 // .set("debug", "broker,topic,msg")
-                .set("bootstrap.servers", &kafka_producer_host)
+                .set("bootstrap.servers", kafka_producer_host)
                 .set("message.timeout.ms", "5000")
                 // it's best to increase batch.size if the cluster
                 // is running on another machine. Locally, lower means less
@@ -309,8 +307,8 @@ pub struct LsstEnrichmentWorker {
 impl EnrichmentWorker for LsstEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db = build_db(&config).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
 
@@ -318,9 +316,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
         // Detect if Babamul is enabled from the config
-        let babamul_enabled = crate::conf::babamul_enabled(&config_file);
-        let babamul: Option<Babamul> = if babamul_enabled {
-            Some(Babamul::new(config_file))
+        let babamul: Option<Babamul> = if config.babamul.enabled {
+            Some(Babamul::new(&config))
         } else {
             None
         };

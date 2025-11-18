@@ -1,9 +1,9 @@
 // Database related functionality
 use crate::api::routes::users::User;
-use crate::conf::{AppConfig, AuthConfig};
+use crate::conf::{build_db, AppConfig, AuthConfig, BoomConfigError};
 
 use mongodb::bson::doc;
-use mongodb::{Client, Database};
+use mongodb::Database;
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
@@ -102,17 +102,8 @@ async fn init_api_admin_user(
     Ok(())
 }
 
-async fn db_from_config(config: AppConfig) -> Database {
-    let db_config = config.database;
-    let uri = std::env::var("MONGODB_URI").unwrap_or_else(|_| {
-        format!(
-            "mongodb://{}:{}@{}:{}",
-            db_config.username, db_config.password, db_config.host, db_config.port
-        )
-        .into()
-    });
-    let client = Client::with_uri_str(uri).await.expect("failed to connect");
-    let db = client.database(&db_config.name);
+pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+    let db = build_db(conf).await?;
 
     let users_collection: mongodb::Collection<User> = db.collection("users");
     // Create a unique index for username and id in the users collection
@@ -130,8 +121,7 @@ async fn db_from_config(config: AppConfig) -> Database {
         .expect("failed to create username index on users collection");
 
     // Only create babamul_users collection if Babamul is enabled
-    let raw_config = crate::conf::load_raw_config("config.yaml").expect("Failed to load config");
-    if crate::conf::babamul_enabled(&raw_config) {
+    if conf.babamul.enabled {
         // Create babamul_users collection with unique email index
         use crate::api::routes::babamul::BabamulUser;
         let babamul_users_collection: mongodb::Collection<BabamulUser> =
@@ -152,20 +142,13 @@ async fn db_from_config(config: AppConfig) -> Database {
     }
 
     // Initialize the API admin user if it does not exist
-    if let Err(e) = init_api_admin_user(&config.api.auth, &users_collection).await {
+    if let Err(e) = init_api_admin_user(&conf.api.auth, &users_collection).await {
         eprintln!("Failed to initialize API admin user: {}", e);
     }
-
-    db
+    Ok(db)
 }
 
-pub async fn get_db() -> Database {
-    // Read the config file
-    let config = AppConfig::from_default_path();
-    db_from_config(config).await
-}
-
-pub async fn get_test_db() -> Database {
-    let config = AppConfig::from_test_config();
-    db_from_config(config).await
+pub async fn get_test_db_api() -> Database {
+    let config = AppConfig::from_test_config().unwrap();
+    build_db_api(&config).await.unwrap()
 }

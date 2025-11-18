@@ -3,12 +3,12 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::{test, web, App};
     use boom::api::auth::get_test_auth;
-    use boom::api::db::get_test_db;
+    use boom::api::db::get_test_db_api;
     use boom::api::email::EmailService;
     use boom::api::kafka::delete_acls_for_user;
     use boom::api::routes;
     use boom::api::test_utils::read_json_response;
-    use boom::conf::load_dotenv;
+    use boom::conf::{load_dotenv, AppConfig};
     use mongodb::bson::doc;
     use mongodb::Database;
 
@@ -16,7 +16,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_babamul_signup() {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
@@ -108,13 +108,15 @@ mod tests {
     #[actix_rt::test]
     async fn test_babamul_activate() {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
+                .app_data(web::Data::new(config.kafka.producer.clone()))
                 .service(routes::babamul::post_babamul_signup)
                 .service(routes::babamul::post_babamul_activate)
                 .service(routes::babamul::post_babamul_auth),
@@ -255,20 +257,22 @@ mod tests {
             .unwrap();
 
         // Clean up: delete Kafka ACLs for the user
-        delete_acls_for_user(&test_email).unwrap();
+        delete_acls_for_user(&test_email, &config.kafka.producer.server).unwrap();
     }
 
     /// Test that invalid emails are rejected
     #[actix_rt::test]
     async fn test_babamul_signup_invalid_email() {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
+                .app_data(web::Data::new(config.kafka.producer.clone()))
                 .service(routes::babamul::post_babamul_signup),
         )
         .await;

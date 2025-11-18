@@ -30,7 +30,7 @@ api:
         std::fs::write(temp_file.path(), config_content).unwrap();
 
         // Trigger the panic (the #[should_panic] attribute will assert on message substring)
-        load_config(Some(temp_file.path().to_str().unwrap()));
+        load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
     }
 
     #[test]
@@ -60,7 +60,7 @@ api:
         std::fs::write(temp_file.path(), config_content).unwrap();
 
         // This should not panic
-        let config = load_config(Some(temp_file.path().to_str().unwrap()));
+        let config = load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
         assert_eq!(config.api.auth.token_expiration, 3600);
     }
 
@@ -91,7 +91,7 @@ api:
         std::fs::write(temp_file.path(), config_content).unwrap();
 
         // This should load successfully with the standard 7-day expiration
-        let config = load_config(Some(temp_file.path().to_str().unwrap()));
+        let config = load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
         assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
     }
 
@@ -100,7 +100,7 @@ api:
         load_dotenv();
 
         // Test loading the test config file which has actual values for secrets
-        let config = AppConfig::from_test_config();
+        let config = AppConfig::from_test_config().unwrap();
 
         // Verify the token_expiration is set to our new default
         assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds

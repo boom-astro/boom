@@ -1,4 +1,5 @@
 use crate::alert::DecamCandidate;
+use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::lightcurves::{
@@ -103,8 +104,8 @@ pub struct DecamEnrichmentWorker {
 impl EnrichmentWorker for DecamEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db: mongodb::Database = crate::conf::build_db(&config).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("DECAM_alerts");
 

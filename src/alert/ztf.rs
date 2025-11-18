@@ -3,7 +3,7 @@ use crate::{
         base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
         decam, lsst, AlertCutout,
     },
-    conf,
+    conf::{self, AppConfig},
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
@@ -702,13 +702,15 @@ impl ZtfAlertWorker {
 impl AlertWorker for ZtfAlertWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
-        let config_file =
-            conf::load_raw_config(&config_path).inspect_err(as_error!("failed to load config"))?;
+        let config = AppConfig::from_path(config_path)?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Ztf)
-            .inspect_err(as_error!("failed to load xmatch config"))?;
+        let xmatch_configs = config
+            .crossmatch
+            .get(&Survey::Ztf)
+            .cloned()
+            .unwrap_or_default();
 
-        let db: mongodb::Database = conf::build_db(&config_file)
+        let db: mongodb::Database = conf::build_db(&config)
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 

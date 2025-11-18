@@ -1,9 +1,9 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
-    conf,
-    utils::enums::Survey,
-    utils::testing::{
-        decam_alert_worker, drop_alert_from_collections, AlertRandomizer, TEST_CONFIG_FILE,
+    conf::get_test_db,
+    utils::{
+        enums::Survey,
+        testing::{decam_alert_worker, drop_alert_from_collections, AlertRandomizer},
     },
 };
 use mongodb::bson::doc;
@@ -23,8 +23,7 @@ async fn test_process_decam_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let alert_collection_name = "DECAM_alerts";
     let filter = doc! {"_id": candid};
 
