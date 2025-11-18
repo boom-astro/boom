@@ -299,9 +299,14 @@ pub struct AuthConfig {
     pub admin_email: String,
 }
 
+fn default_api_port() -> u16 {
+    4000
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct ApiConfig {
     pub auth: AuthConfig,
+    #[serde(default = "default_api_port")]
     pub port: u16,
 }
 
