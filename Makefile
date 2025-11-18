@@ -1,7 +1,11 @@
+.PHONY: dev
+dev:
+	docker compose --profile api up
+
 .PHONY: api-dev
 api-dev:
 	@echo "Starting API server and watching for changes"
-	cargo watch --watch api -x "run --package boom-api"
+	cargo watch --watch src -x "run --bin api"
 
 .PHONY: format
 format:
@@ -11,4 +15,4 @@ format:
 .PHONY: test-api
 test-api:
 	@echo "Running API tests"
-	cargo test --package boom-api
+	cargo test --test test_api

@@ -2,6 +2,7 @@
 Cargo.lock
 data/alerts
 data/schema
+data/lsst_alerts_backup*
 __pycache__
 /env
 .DS_Store

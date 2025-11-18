@@ -4,6 +4,7 @@
 # dependencies = [
 #     "pyyaml",
 #     "pandas>2",
+#     "astropy",
 # ]
 # ///
 
@@ -15,6 +16,7 @@ import uuid
 
 import pandas as pd
 import yaml
+from astropy.time import Time
 
 # First, create the config
 parser = argparse.ArgumentParser(description="Benchmark BOOM")
@@ -39,33 +41,42 @@ parser.add_argument(
 args = parser.parse_args()
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
-config["workers"]["ZTF"]["alert"]["n_workers"] = args.n_alert_workers
-config["workers"]["ZTF"]["enrichment"]["n_workers"] = args.n_enrichment_workers
-config["workers"]["ZTF"]["filter"]["n_workers"] = args.n_filter_workers
+config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
+config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
+config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["host"] = "mongo"
-config["kafka"]["consumer"]["ZTF"] = "broker:29092"
+config["database"]["password"] = "mongoadminsecret"
+config["kafka"]["consumer"]["ztf"]["server"] = "broker:29092"
+config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
 config["kafka"]["producer"] = "broker:29092"
 config["redis"]["host"] = "valkey"
+config["api"]["auth"]["secret_key"] = "1234"
+config["api"]["auth"]["admin_password"] = "adminsecret"
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
 # Reformat filter for insertion into database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:
     cats150 = json.load(f)
+
+now_jd = Time.now().jd
 for_insert = {
     "_id": str(uuid.uuid4()),
-    "catalog": "ZTF_alerts",
+    "survey": "ZTF",
+    "user_id": "benchmarking",
     "permissions": [1, 2, 3],
     "active": True,
     "active_fid": "first",
     "fv": [
         {
             "fid": "first",
-            "created_at": "2021-01-01T00:00:00",
+            "created_at": now_jd,
             "pipeline": json.dumps(cats150),
         }
     ],
+    "created_at": now_jd,
+    "updated_at": now_jd,
 }
 with open("tests/throughput/cats150.filter.json", "w") as f:
     json.dump(for_insert, f)
@@ -91,19 +102,30 @@ boom_config = (
 )
 boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
 boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
-# To calculate BOOM wall time, take first timestamp from the consumer log
-# as the start and the last timestamp of the scheduler as the end
+t1_b, t2_b = None, None
+# To calculate BOOM wall time, take:
+# - Start: timestamp of the first message received by the consumer
+# - End: last timestamp in the scheduler log
 with open(boom_consumer_log_fpath) as f:
-    line = f.readline()
-    t1_b = pd.to_datetime(
-        line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
-    )
+    lines = f.readlines()
+    for line in lines:
+        if "Consumer received first message, continuing..." in line:
+            t1_b = pd.to_datetime(
+                line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
+            )
+            break
+
+if t1_b is None:
+    raise ValueError("Could not find start time in consumer log")
 with open(boom_scheduler_log_fpath) as f:
     lines = f.readlines()
+    if len(lines) < 3:
+        raise ValueError("Scheduler log has fewer than 3 lines; cannot determine end time.")
     line = lines[-3]
     t2_b = pd.to_datetime(
         line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
     )
+
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
 

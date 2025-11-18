@@ -29,9 +29,41 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
+    - name: Create default .env file
+      run: cp .env.example .env
+    - name: Install Kafka CLI tools
+      run: |
+        KAFKA_VERSION=3.7.1
+        SCALA_VERSION=2.13
+        sudo apt-get install -y --no-install-recommends \
+            libsasl2-2 ca-certificates openjdk-17-jre-headless curl bash tar
+        sudo curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz
+        sudo tar -xzf /tmp/kafka.tgz -C /opt
+        sudo ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
+        sudo rm -f /tmp/kafka.tgz
     - name: Start services
       run: docker compose up --build -d
+    - name: Wait for Kafka ACL initialization
+      run: |
+        echo "Waiting for kafka-acl-init container to start..."
+        for i in {1..60}; do
+          if docker compose ps --status running kafka-acl-init >/dev/null 2>&1 || docker compose ps kafka-acl-init 2>&1 | grep -q kafka-acl-init; then
+            break
+          fi
+          sleep 2
+        done
+        CID=$(docker compose ps -q kafka-acl-init)
+        if [ -z "$CID" ]; then
+          echo "kafka-acl-init container not found" >&2
+          exit 1
+        fi
+        echo "Container ID: $CID. Waiting for it to exit..."
+        EXIT_CODE=$(docker wait "$CID")
+        echo "kafka-acl-init exited with code $EXIT_CODE"
+        if [ "$EXIT_CODE" != "0" ]; then
+          docker compose logs kafka-acl-init || true
+          exit 1
+        fi
+        echo "kafka-acl-init completed successfully."
     - name: Test BOOM
-      run: cargo test --release
-    - name: Test BOOM API
-      run: cargo test --release --package boom-api
+      run: PATH=/opt/kafka/bin:$PATH cargo test --release

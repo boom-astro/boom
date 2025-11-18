@@ -3,7 +3,7 @@ use mongodb::bson::doc;
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use boom::conf;
+use boom::conf::{self, load_dotenv};
 use boom::utils::enums::Survey;
 
 #[derive(Parser)]
@@ -16,6 +16,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file before anything else
+    load_dotenv();
+
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
@@ -55,7 +58,7 @@ async fn main() {
     };
 
     // insert the filter into the database
-    let config_file = match conf::load_config("config.yaml") {
+    let config_file = match conf::load_raw_config("config.yaml") {
         Ok(config) => config,
         Err(e) => {
             error!("error loading config file: {}", e);

@@ -4,6 +4,7 @@ use crate::{
         LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
+    filter::{Filter, FilterVersion},
     utils::{db::initialize_survey_indexes, enums::Survey},
 };
 use apache_avro::{
@@ -21,7 +22,7 @@ use std::io::Read;
 pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
 
 async fn test_db() -> mongodb::Database {
-    let config_file = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config_file).await.unwrap();
     db
 }
@@ -56,7 +57,7 @@ pub async fn drop_alert_collections(
     alert_cutout_collection_name: &str,
     alert_aux_collection_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     db.collection::<mongodb::bson::Document>(alert_collection_name)
         .drop()
@@ -74,7 +75,7 @@ pub async fn drop_alert_from_collections(
     candid: i64,
     stream_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let alert_collection_name = format!("{}_alerts", stream_name);
     let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
@@ -115,7 +116,7 @@ pub async fn remove_test_filter(
     filter_id: &str,
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
@@ -132,7 +133,6 @@ pub async fn insert_test_filter(
     use_prv_candidates: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let filter_id = uuid::Uuid::new_v4().to_string();
-    let catalog = format!("{}_alerts", survey);
     let pipeline = match (survey, use_prv_candidates) {
         (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
         (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
@@ -145,28 +145,27 @@ pub async fn insert_test_filter(
         }
     };
 
-    let filter_obj: mongodb::bson::Document = doc! {
-        "_id": &filter_id,
-        "catalog": catalog,
-        "permissions": [1],
-        "active": true,
-        "active_fid": "v2e0fs",
-        "fv": [
-            {
-                "fid": "v2e0fs",
-                "pipeline": pipeline,
-                "created_at": {"$date": "2020-10-21T08:39:43.693Z"}
-            }
-        ],
-        "update_annotations": true,
-        "created_at": {"$date": "2021-02-20T08:18:28.324Z"},
-        "last_modified": {"$date": "2023-05-04T23:39:07.090Z"}
+    let now = flare::Time::now().to_jd();
+    let filter_obj = Filter {
+        id: filter_id.clone(),
+        survey: survey.clone(),
+        user_id: "test_user".to_string(),
+        permissions: vec![1],
+        active: true,
+        active_fid: "v2e0fs".to_string(),
+        fv: vec![FilterVersion {
+            fid: "v2e0fs".to_string(),
+            pipeline: pipeline.to_string(),
+            created_at: now,
+        }],
+        created_at: now,
+        updated_at: now,
     };
 
-    let config_file = conf::load_config(TEST_CONFIG_FILE)?;
+    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
-        .collection::<mongodb::bson::Document>("filters")
+        .collection::<Filter>("filters")
         .insert_one(filter_obj)
         .await;
 
@@ -177,7 +176,7 @@ pub async fn empty_processed_alerts_queue(
     input_queue_name: &str,
     output_queue_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = conf::load_config("tests/config.test.yaml")?;
+    let config = conf::load_raw_config("tests/config.test.yaml")?;
     let mut con = conf::build_redis(&config).await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
     con.del::<&str, usize>("{}_temp").await.unwrap();

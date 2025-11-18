@@ -1,7 +1,8 @@
 use crate::{
     alert::{
         base::{
-            Alert, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaRegistry,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
+            SchemaRegistry,
         },
         decam, ztf,
     },
@@ -9,18 +10,18 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
-        lightcurves::{flux2mag, fluxerr2diffmaglim, SNT, ZP_AB},
+        lightcurves::{flux2mag, fluxerr2diffmaglim, Band, SNT, ZP_AB},
         o11y::logging::as_error,
-        spatial::xmatch,
+        spatial::{xmatch, Coordinates},
     },
 };
-
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::{instrument, warn};
+use std::collections::HashMap;
+use tracing::instrument;
 
 pub const STREAM_NAME: &str = "LSST";
 pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
@@ -36,12 +37,16 @@ pub const LSST_DECAM_XMATCH_RADIUS: f64 =
 
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
 
+const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
+
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
-    #[serde(rename(deserialize = "diaSourceId", serialize = "candid"))]
+    #[serde(rename = "candid")]
+    #[serde(alias = "diaSourceId")]
     pub candid: i64,
     /// Id of the visit where this diaSource was measured.
     pub visit: i64,
@@ -50,18 +55,17 @@ pub struct DiaSource {
     /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "diaObjectId")]
     #[serde(deserialize_with = "deserialize_optional_id")]
-    pub dia_object_id: Option<String>,
+    pub dia_object_id: Option<i64>,
     /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
     #[serde(rename = "ssObjectId")]
     #[serde(deserialize_with = "deserialize_optional_id")]
-    pub ss_object_id: Option<String>,
+    pub ss_object_id: Option<i64>,
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
     pub parent_dia_source_id: Option<i64>,
     /// Effective mid-visit time for this diaSource, expressed as Modified Julian Date, International Atomic Time.
-    #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jd: f64,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
     /// Right ascension coordinate of the center of this diaSource.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -179,7 +183,7 @@ pub struct DiaSource {
     /// A measure of reliability, computed using information from the source and image characterization, as well as the information on the Telescope and Camera system (e.g., ghost maps, defect maps, etc.).
     pub reliability: Option<f32>,
     /// Filter band this source was observed with.
-    pub band: Option<String>,
+    pub band: Option<Band>,
     /// Source well fit by a dipole.
     #[serde(rename = "isDipole")]
     pub is_dipole: Option<bool>,
@@ -192,12 +196,13 @@ pub struct DiaSource {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct Candidate {
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
-    #[serde(rename(serialize = "objectId"))]
+    #[serde(rename = "objectId")]
     pub object_id: String,
+    pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
     pub diffmaglim: f32,
@@ -208,22 +213,25 @@ pub struct Candidate {
     pub is_sso: bool,
 }
 
-impl TryFrom<DiaSource> for Candidate {
+impl TryFrom<DiaSource> for LsstCandidate {
     type Error = AlertError;
     fn try_from(dia_source: DiaSource) -> Result<Self, Self::Error> {
-        let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)? * 1e-9;
-        let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)? * 1e-9;
+        let jd = dia_source.midpoint_mjd_tai + 2400000.5;
+        let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
+        let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
 
-        let ap_flux = dia_source.ap_flux.ok_or(AlertError::MissingFluxAperture)? * 1e-9;
+        let ap_flux = dia_source.ap_flux.ok_or(AlertError::MissingFluxAperture)?;
         let ap_flux_err = dia_source
             .ap_flux_err
-            .ok_or(AlertError::MissingFluxAperture)?
-            * 1e-9;
+            .ok_or(AlertError::MissingFluxAperture)?;
 
-        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, ZP_AB);
-        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, ZP_AB);
+        // instead of converting all the nJy values to Jy, we just add 2.5 * log10(1e9) = 22.5
+        // to the zeropoint
 
-        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, ZP_AB);
+        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, LSST_ZP_AB_NJY);
+        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
+
+        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, is_sso is false
         // if ss_object_id is defined, is_sso is true
@@ -232,17 +240,18 @@ impl TryFrom<DiaSource> for Candidate {
             dia_source.dia_object_id.clone(),
             dia_source.ss_object_id.clone(),
         ) {
-            (Some(dia_id), None) => (dia_id, false),
-            (None, Some(ss_id)) => (format!("sso{}", ss_id), true),
+            (Some(dia_id), None) => (dia_id.to_string(), false),
+            (None, Some(ss_id)) => (format!("sso{}", ss_id.to_string()), true),
             (None, None) => return Err(AlertError::MissingObjectId),
             (Some(dia_id), Some(ss_id)) => {
                 return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
             }
         };
 
-        Ok(Candidate {
+        Ok(LsstCandidate {
             dia_source,
             object_id,
+            jd,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -260,13 +269,11 @@ impl TryFrom<DiaSource> for Candidate {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
-    #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    #[serde(deserialize_with = "deserialize_objid")]
-    pub object_id: String,
+    #[serde(rename = "diaObjectId")]
+    pub dia_object_id: i64,
     /// Processing time when validity of this diaObject starts, expressed as Modified Julian Date, International Atomic Time.
-    #[serde(rename(deserialize = "validityStartMjdTai", serialize = "validity_start_jd"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub validity_start_jd: f64,
+    #[serde(rename = "validityStartMjdTai")]
+    pub validity_start_mjd_tai: f64,
     /// Right ascension coordinate of the position of the object at time radecMjdTai.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -440,44 +447,28 @@ pub struct DiaObject {
     #[serde(rename = "y_scienceFluxMeanErr")]
     pub y_science_flux_mean_err: Option<f32>,
     /// Time of the first diaSource, expressed as Modified Julian Date, International Atomic Time.
-    #[serde(rename(deserialize = "firstDiaSourceMjdTai", serialize = "jdstarthist"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jdstarthist: f64,
+    #[serde(rename = "firstDiaSourceMjdTai")]
+    pub first_dia_source_mjd_tai: f64,
     /// Last time when non-forced DIASource was seen for this object.
-    #[serde(rename(deserialize = "lastDiaSourceMjdTai", serialize = "jdendhist"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jdendhist: f64,
+    #[serde(rename = "lastDiaSourceMjdTai")]
+    pub last_dia_source_mjd_tai: f64,
     /// Total number of DiaSources associated with this DiaObject.
-    #[serde(rename(deserialize = "nDiaSources", serialize = "ndethist"))]
+    #[serde(rename = "ndethist")]
+    #[serde(alias = "nDiaSources")]
     pub ndethist: i32,
 }
 
-// TODO: uncomment once we have nondetections in the alerts again
-// #[serde_as]
-// #[skip_serializing_none]
-// #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-// pub struct DiaNondetectionLimit {
-//     #[serde(rename = "ccdVisitId")]
-//     pub ccd_visit_id: i64,
-//     #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
-//     #[serde(deserialize_with = "deserialize_mjd")]
-//     pub jd: f64,
-//     pub band: String,
-//     #[serde(rename = "diaNoise")]
-//     pub dia_noise: f32,
-// }
-
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
     #[serde(rename = "diaForcedSourceId")]
     pub dia_forced_source_id: i64,
     /// Id of the DiaObject that this DiaForcedSource was associated with.
-    #[serde(rename(deserialize = "diaObjectId", serialize = "objectId"))]
-    #[serde(deserialize_with = "deserialize_objid")]
-    pub object_id: String,
+    #[serde(rename = "diaObjectId")]
+    pub object_id: i64,
     /// Right ascension coordinate of the position of the DiaObject at time radecMjdTai.
     pub ra: f64,
     /// Declination coordinate of the position of the DiaObject at time radecMjdTai.
@@ -493,9 +484,8 @@ pub struct DiaForcedSource {
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
     /// Effective mid-visit time for this diaForcedSource, expressed as Modified Julian Date, International Atomic Time.
-    #[serde(rename(deserialize = "midpointMjdTai", serialize = "jd"))]
-    #[serde(deserialize_with = "deserialize_mjd")]
-    pub jd: f64,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
     /// Forced photometry flux for a point source model measured on the visit image centered at the DiaObject position.
     #[serde(rename = "scienceFlux")]
     pub science_flux: Option<f32>,
@@ -503,15 +493,16 @@ pub struct DiaForcedSource {
     #[serde(rename = "scienceFluxErr")]
     pub science_flux_err: Option<f32>,
     /// Filter band this source was observed with.
-    pub band: Option<String>,
+    pub band: Option<Band>,
 }
 
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct ForcedPhot {
+pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
+    pub jd: f64,
     pub magpsf: Option<f32>,
     pub sigmapsf: Option<f32>,
     pub diffmaglim: f32,
@@ -519,27 +510,26 @@ pub struct ForcedPhot {
     pub snr: Option<f32>,
 }
 
-impl TryFrom<DiaForcedSource> for ForcedPhot {
+impl TryFrom<DiaForcedSource> for LsstForcedPhot {
     type Error = AlertError;
     fn try_from(dia_forced_source: DiaForcedSource) -> Result<Self, Self::Error> {
+        let jd = dia_forced_source.midpoint_mjd_tai + 2400000.5;
         let psf_flux_err = dia_forced_source
             .psf_flux_err
-            .ok_or(AlertError::MissingFluxPSF)?
-            * 1e-9;
+            .ok_or(AlertError::MissingFluxPSF)?;
 
         // for now, we only consider positive detections (flux positive) as detections
         // may revisit this later
         let (magpsf, sigmapsf, isdiffpos, snr) = match dia_forced_source.psf_flux {
             Some(psf_flux) => {
-                let psf_flux = psf_flux * 1e-9;
-                if (psf_flux / psf_flux_err) > SNT {
-                    let isdiffpos = psf_flux > 0.0;
-                    let (magpsf, sigmapsf) = flux2mag(psf_flux, psf_flux_err, ZP_AB);
+                let psf_flux_abs = psf_flux.abs();
+                if (psf_flux_abs / psf_flux_err) > SNT {
+                    let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
                     (
                         Some(magpsf),
                         Some(sigmapsf),
-                        Some(isdiffpos),
-                        Some(psf_flux / psf_flux_err),
+                        Some(psf_flux > 0.0),
+                        Some(psf_flux_abs / psf_flux_err),
                     )
                 } else {
                     (None, None, None, None)
@@ -548,10 +538,11 @@ impl TryFrom<DiaForcedSource> for ForcedPhot {
             _ => (None, None, None, None),
         };
 
-        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, ZP_AB);
+        let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
-        Ok(ForcedPhot {
+        Ok(LsstForcedPhot {
             dia_forced_source,
+            jd,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -563,23 +554,18 @@ impl TryFrom<DiaForcedSource> for ForcedPhot {
 
 /// Rubin Avro alert schema v7.3
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct LsstAlert {
+pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
     pub candid: i64,
     #[serde(rename(deserialize = "diaSource"))]
     #[serde(deserialize_with = "deserialize_candidate")]
-    pub candidate: Candidate,
+    pub candidate: LsstCandidate,
     #[serde(rename = "prvDiaSources")]
     #[serde(deserialize_with = "deserialize_prv_candidates")]
-    pub prv_candidates: Option<Vec<Candidate>>,
+    pub prv_candidates: Option<Vec<LsstCandidate>>,
     #[serde(rename = "prvDiaForcedSources")]
     #[serde(deserialize_with = "deserialize_prv_forced_sources")]
-    pub fp_hists: Option<Vec<ForcedPhot>>,
-    // NOTE: the prv_nondetections is missing in version 9 of the schema,
-    // and will be reintroduced in a future version
-    // #[serde(rename = "prvDiaNondetectionLimits")]
-    // #[serde(deserialize_with = "deserialize_prv_nondetections")]
-    // pub prv_nondetections: Option<Vec<NonDetection>>,
+    pub fp_hists: Option<Vec<LsstForcedPhot>>,
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
     #[serde(rename = "cutoutDifference")]
@@ -593,23 +579,13 @@ pub struct LsstAlert {
     pub cutout_template: Vec<u8>,
 }
 
-// Deserialize helper functions
-fn deserialize_objid<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // it's an i64 in the avro but we want to have it as a string
-    let objid: i64 = <i64 as Deserialize>::deserialize(deserializer)?;
-    Ok(objid.to_string())
-}
-
-fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: Deserializer<'de>,
 {
     match <Option<i64> as Deserialize>::deserialize(deserializer)? {
         Some(0) | None => Ok(None),
-        Some(i) => Ok(Some(i.to_string())),
+        Some(i) => Ok(Some(i)),
     }
 }
 
@@ -625,63 +601,75 @@ where
     }
 }
 
-fn deserialize_candidate<'de, D>(deserializer: D) -> Result<Candidate, D::Error>
+fn deserialize_candidate<'de, D>(deserializer: D) -> Result<LsstCandidate, D::Error>
 where
     D: Deserializer<'de>,
 {
     let dia_source = <DiaSource as Deserialize>::deserialize(deserializer)?;
-    Candidate::try_from(dia_source).map_err(serde::de::Error::custom)
+    LsstCandidate::try_from(dia_source).map_err(serde::de::Error::custom)
 }
 
-fn deserialize_prv_candidates<'de, D>(deserializer: D) -> Result<Option<Vec<Candidate>>, D::Error>
+fn deserialize_prv_candidates<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<LsstCandidate>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
-        .map(Candidate::try_from)
-        .collect::<Result<Vec<Candidate>, AlertError>>()
+        .map(LsstCandidate::try_from)
+        .collect::<Result<Vec<LsstCandidate>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
     Ok(Some(candidates))
 }
 
 fn deserialize_prv_forced_sources<'de, D>(
     deserializer: D,
-) -> Result<Option<Vec<ForcedPhot>>, D::Error>
+) -> Result<Option<Vec<LsstForcedPhot>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let dia_forced_sources = <Vec<DiaForcedSource> as Deserialize>::deserialize(deserializer)?;
     let forced_phots = dia_forced_sources
         .into_iter()
-        .map(ForcedPhot::try_from)
-        .collect::<Result<Vec<ForcedPhot>, AlertError>>()
+        .map(LsstForcedPhot::try_from)
+        .collect::<Result<Vec<LsstForcedPhot>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
     Ok(Some(forced_phots))
 }
 
-fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mjd = <f64 as Deserialize>::deserialize(deserializer)?;
-    Ok(mjd + 2400000.5)
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct LsstAliases {
+    #[serde(rename = "ZTF")]
+    pub ztf: Vec<String>,
+    #[serde(rename = "DECAM")]
+    pub decam: Vec<String>,
 }
 
-impl Alert for LsstAlert {
-    fn object_id(&self) -> String {
-        self.candidate.object_id.clone()
-    }
-    fn ra(&self) -> f64 {
-        self.candidate.dia_source.ra
-    }
-    fn dec(&self) -> f64 {
-        self.candidate.dia_source.dec
-    }
-    fn candid(&self) -> i64 {
-        self.candid
-    }
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LsstObject {
+    #[serde(rename = "_id")]
+    pub object_id: String,
+    pub prv_candidates: Vec<LsstCandidate>,
+    pub fp_hists: Vec<LsstForcedPhot>,
+    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub aliases: Option<LsstAliases>,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+pub struct LsstAlert {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub coordinates: Coordinates,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 pub struct LsstAlertWorker {
@@ -689,16 +677,16 @@ pub struct LsstAlertWorker {
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
-    alert_collection: mongodb::Collection<Document>,
-    alert_aux_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_collection: mongodb::Collection<LsstAlert>,
+    alert_aux_collection: mongodb::Collection<LsstObject>,
+    alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl LsstAlertWorker {
     #[instrument(skip(self), err)]
-    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<Document, AlertError> {
+    async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<LsstAliases, AlertError> {
         let ztf_matches = self
             .get_matches(
                 ra,
@@ -719,83 +707,32 @@ impl LsstAlertWorker {
             )
             .await?;
 
-        Ok(doc! {
-            "ZTF": ztf_matches,
-            "DECAM": decam_matches,
+        Ok(LsstAliases {
+            ztf: ztf_matches,
+            decam: decam_matches,
         })
     }
-
-    #[instrument(skip(self, prv_candidates_doc, fp_hist_doc, xmatches,), err)]
-    async fn insert_alert_aux(
-        &self,
-        object_id: String,
-        ra: f64,
-        dec: f64,
-        prv_candidates_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        xmatches: Document,
-        survey_matches: &Option<Document>,
+    #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
+    async fn update_aux(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates: &Vec<LsstCandidate>,
+        fp_hists: &Vec<LsstForcedPhot>,
+        survey_matches: &Option<LsstAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let alert_aux_doc = doc! {
-            "_id": object_id,
-            "prv_candidates": prv_candidates_doc,
-            "fp_hists": fp_hist_doc,
-            "cross_matches": xmatches,
-            "aliases": survey_matches,
-            "created_at": now,
-            "updated_at": now,
-            "coordinates": {
-                "radec_geojson": {
-                    "type": "Point",
-                    "coordinates": [ra - 180.0, dec],
-                },
-            },
-        };
-
+        let update_pipeline = vec![doc! {
+            "$set": {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "aliases": mongify(survey_matches),
+                "updated_at": now,
+            }
+        }];
         self.alert_aux_collection
-            .insert_one(alert_aux_doc)
-            .await
-            .map_err(|e| match *e.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => AlertError::AlertAuxExists,
-                _ => e.into(),
-            })?;
+            .update_one(doc! { "_id": object_id }, update_pipeline)
+            .await?;
         Ok(())
-    }
-
-    #[instrument(skip(self), err)]
-    async fn check_alert_aux_exists(&self, object_id: &str) -> Result<bool, AlertError> {
-        let alert_aux_exists = self
-            .alert_aux_collection
-            .count_documents(doc! { "_id": object_id })
-            .await?
-            > 0;
-        Ok(alert_aux_exists)
-    }
-
-    #[instrument(skip_all)]
-    fn format_prv_candidates_and_fp_hist(
-        &self,
-        prv_candidates: Option<Vec<Candidate>>,
-        candidate_doc: Document,
-        fp_hist: Option<Vec<ForcedPhot>>,
-    ) -> (Vec<Document>, Vec<Document>) {
-        let mut prv_candidates_doc = prv_candidates
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
-        prv_candidates_doc.push(candidate_doc);
-
-        let fp_hist_doc = fp_hist
-            .unwrap_or(vec![])
-            .into_iter()
-            .map(|x| mongify(&x))
-            .collect::<Vec<_>>();
-
-        (prv_candidates_doc, fp_hist_doc)
     }
 }
 
@@ -804,17 +741,17 @@ impl AlertWorker for LsstAlertWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
         let config_file =
-            conf::load_config(&config_path).inspect_err(as_error!("failed to load config"))?;
+            conf::load_raw_config(&config_path).inspect_err(as_error!("failed to load config"))?;
 
         let kafka_config = conf::build_kafka_config(&config_file, &Survey::Lsst)
             .inspect_err(as_error!("failed to build kafka config"))?;
 
-        let schema_registry_url = match kafka_config.schema_registry {
+        let schema_registry_url = match kafka_config.consumer.schema_registry {
             Some(ref url) => url.as_ref(),
             None => LSST_SCHEMA_REGISTRY_URL,
         };
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, STREAM_NAME)
+        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Lsst)
             .inspect_err(as_error!("failed to load xmatch config"))?;
 
         let db: mongodb::Database = conf::build_db(&config_file)
@@ -857,131 +794,47 @@ impl AlertWorker for LsstAlertWorker {
         format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
-    #[instrument(
-        skip(
-            self,
-            ra,
-            dec,
-            prv_candidates_doc,
-            _prv_nondetections_doc,
-            fp_hist_doc,
-            survey_matches
-        ),
-        err
-    )]
-    async fn insert_aux(
-        self: &mut Self,
-        object_id: &str,
-        ra: f64,
-        dec: f64,
-        prv_candidates_doc: &Vec<Document>,
-        _prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError> {
-        let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-        self.insert_alert_aux(
-            object_id.into(),
-            ra,
-            dec,
-            prv_candidates_doc,
-            fp_hist_doc,
-            xmatches,
-            survey_matches,
-            now,
-        )
-        .await?;
-        Ok(())
-    }
-
-    #[instrument(
-        skip(
-            self,
-            prv_candidates_doc,
-            _prv_nondetections_doc,
-            fp_hist_doc,
-            survey_matches
-        ),
-        err
-    )]
-    async fn update_aux(
-        self: &mut Self,
-        object_id: &str,
-        prv_candidates_doc: &Vec<Document>,
-        _prv_nondetections_doc: &Vec<Document>,
-        fp_hist_doc: &Vec<Document>,
-        survey_matches: &Option<Document>,
-        now: f64,
-    ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
-            "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", prv_candidates_doc),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", fp_hist_doc),
-                "aliases": survey_matches,
-                "updated_at": now,
-            }
-        }];
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
-            .await?;
-        Ok(())
-    }
-
     #[instrument(skip_all, err)]
     async fn process_alert(
         self: &mut Self,
         avro_bytes: &[u8],
     ) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut alert: LsstAlert = self
+        let mut avro_alert: LsstRawAvroAlert = self
             .schema_registry
             .alert_from_avro_bytes(avro_bytes)
             .await
             .inspect_err(as_error!())?;
 
-        let candid = alert.candid();
-        let object_id = alert.object_id();
-        let ra = alert.ra();
-        let dec = alert.dec();
+        let candid = avro_alert.candid;
+        let object_id = avro_alert.candidate.object_id.clone();
+        let ra = avro_alert.candidate.dia_source.ra;
+        let dec = avro_alert.candidate.dia_source.dec;
 
-        let prv_candidates = alert.prv_candidates.take();
-        let fp_hist = alert.fp_hists.take();
-
-        let candidate_doc = mongify(&alert.candidate);
+        let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
+        let fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
         let status = self
-            .format_and_insert_alert(
+            .format_and_insert_cutouts(
                 candid,
-                &object_id,
-                ra,
-                dec,
-                &candidate_doc,
-                now,
-                &self.alert_collection,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_collection,
             )
             .await
             .inspect_err(as_error!())?;
+
         if let ProcessAlertStatus::Exists(_) = status {
             return Ok(status);
         }
 
-        self.format_and_insert_cutouts(
-            candid,
-            alert.cutout_science,
-            alert.cutout_template,
-            alert.cutout_difference,
-            &self.alert_cutout_collection,
-        )
-        .await
-        .inspect_err(as_error!())?;
         let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id)
+            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
             .await
             .inspect_err(as_error!())?;
 
-        let (prv_candidates_doc, fp_hist_doc) =
-            self.format_prv_candidates_and_fp_hist(prv_candidates, candidate_doc, fp_hist);
+        prv_candidates.push(avro_alert.candidate.clone());
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -990,25 +843,24 @@ impl AlertWorker for LsstAlertWorker {
         );
 
         if !alert_aux_exists {
-            let result = self
-                .insert_aux(
-                    &object_id,
-                    ra,
-                    dec,
-                    &prv_candidates_doc,
-                    &Vec::new(),
-                    &fp_hist_doc,
-                    &survey_matches,
-                    now,
-                )
-                .await;
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let obj = LsstObject {
+                object_id: object_id.clone(),
+                prv_candidates,
+                fp_hists,
+                cross_matches: Some(xmatches),
+                aliases: survey_matches,
+                coordinates: Coordinates::new(ra, dec),
+                created_at: now,
+                updated_at: now,
+            };
+            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
                 self.update_aux(
                     &object_id,
-                    &prv_candidates_doc,
-                    &Vec::new(),
-                    &fp_hist_doc,
-                    &survey_matches,
+                    &obj.prv_candidates,
+                    &obj.fp_hists,
+                    &obj.aliases,
                     now,
                 )
                 .await
@@ -1017,17 +869,24 @@ impl AlertWorker for LsstAlertWorker {
                 result.inspect_err(as_error!())?;
             }
         } else {
-            self.update_aux(
-                &object_id,
-                &prv_candidates_doc,
-                &Vec::new(),
-                &fp_hist_doc,
-                &survey_matches,
-                now,
-            )
+            self.update_aux(&object_id, &prv_candidates, &fp_hists, &survey_matches, now)
+                .await
+                .inspect_err(as_error!())?;
+        }
+
+        let alert = LsstAlert {
+            candid,
+            object_id: object_id.clone(),
+            candidate: avro_alert.candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
-        }
 
         Ok(status)
     }
@@ -1054,18 +913,18 @@ mod tests {
         assert!(alert.is_ok());
 
         // validate the alert
-        let alert: LsstAlert = alert.unwrap();
+        let alert: LsstRawAvroAlert = alert.unwrap();
         assert_eq!(alert.candid, candid);
         assert_eq!(alert.candidate.object_id, object_id);
         assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
-        assert!((alert.candidate.dia_source.jd - 2460961.733092).abs() < 1e-6);
+        assert!((alert.candidate.jd - 2460961.733092).abs() < 1e-6);
         assert!((alert.candidate.magpsf - 23.674994).abs() < 1e-6);
         assert!((alert.candidate.sigmapsf - 0.217043).abs() < 1e-6);
         assert!((alert.candidate.diffmaglim - 23.675514).abs() < 1e-5);
         assert!(alert.candidate.snr - 5.002406 < 1e-6);
         assert_eq!(alert.candidate.isdiffpos, false);
-        assert_eq!(alert.candidate.dia_source.band.unwrap(), "r");
+        assert_eq!(alert.candidate.dia_source.band.unwrap(), Band::R);
         // TODO: check prv_candidates and forced photometry once we have alerts
         //       where they aren't empty
         // TODO: check non detections once these are available in the schema

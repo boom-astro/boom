@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-use std::{collections::HashMap, sync::LazyLock};
+use std::sync::LazyLock;
 
 use indicatif::ProgressBar;
 use opentelemetry::{metrics::Counter, KeyValue};
@@ -18,9 +18,10 @@ use rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer},
-    error::KafkaError,
+    error::{KafkaError, KafkaResult},
     message::Message,
     producer::{FutureProducer, FutureRecord, Producer},
+    TopicPartitionList,
 };
 use redis::AsyncCommands;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -38,42 +39,32 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 const MAX_RETRIES_PRODUCER: usize = 6;
-const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(15);
-
-#[derive(Debug)]
-struct Metadata(HashMap<String, Vec<i32>>);
-
-impl Metadata {
-    fn topics(&self) -> impl Iterator<Item = &str> {
-        self.0.keys().map(String::as_str)
-    }
-
-    fn partition_ids(&self, topic: &str) -> Option<&[i32]> {
-        self.0.get(topic).map(Vec::as_slice)
-    }
-}
+const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(30);
 
 // rdkafka's Metadata type provides *references* to MetadataTopic and
 // MetadataPartition values, neither of which implement Clone. We use a custom
 // Metadata type to capture the topic and partition information from the rdkafka
 // types, which can then can be returned to the caller.
 #[instrument(skip_all, err)]
-fn get_metadata(client: &BaseConsumer) -> Result<Metadata, KafkaError> {
-    let cluster_metadata = client.fetch_metadata(None, KAFKA_TIMEOUT_SECS)?;
-    let inner = cluster_metadata
+fn get_partition_ids(
+    client: &BaseConsumer,
+    topic_name: &str,
+) -> Result<Option<Vec<i32>>, KafkaError> {
+    let cluster_metadata = client.fetch_metadata(Some(topic_name), KAFKA_TIMEOUT_SECS)?;
+    let topic = match cluster_metadata
         .topics()
         .iter()
-        .map(|metadata_topic| {
-            let name = metadata_topic.name().to_string();
-            let partition_ids = metadata_topic
-                .partitions()
-                .iter()
-                .map(|metadata_partition| metadata_partition.id())
-                .collect::<Vec<_>>();
-            (name, partition_ids)
-        })
-        .collect::<HashMap<_, _>>();
-    Ok(Metadata(inner))
+        .find(|metadata_topic| metadata_topic.name() == topic_name)
+    {
+        Some(topic) => topic,
+        None => return Ok(None),
+    };
+    let partition_ids = topic
+        .partitions()
+        .iter()
+        .map(|metadata_partition| metadata_partition.id())
+        .collect::<Vec<_>>();
+    Ok(Some(partition_ids))
 }
 
 // check that the topic exists and return the number of partitions
@@ -105,48 +96,8 @@ pub fn check_kafka_topic_partitions(
     let consumer: BaseConsumer = client_config
         .create()
         .inspect_err(as_error!("failed to create consumer"))?;
-    let metadata = get_metadata(&consumer)?;
-    debug!(
-        "Existing topics: {}",
-        metadata.topics().collect::<Vec<_>>().join(", ")
-    );
-    Ok(metadata.partition_ids(topic_name).map(|ids| ids.len()))
-}
-
-#[instrument(skip_all, err)]
-pub fn assign_partitions_to_consumers(
-    topic_name: &str,
-    nb_consumers: usize,
-    kafka_config: &SurveyKafkaConfig,
-    group_id: &str,
-    username: Option<String>,
-    password: Option<String>,
-) -> Result<Vec<Vec<i32>>, ConsumerError> {
-    // call check_kafka_topic_partitions to ensure the topic exists (it returns the number of partitions)
-    let nb_partitions = loop {
-        if let Some(nb_partitions) = check_kafka_topic_partitions(
-            &kafka_config.consumer,
-            &topic_name,
-            group_id,
-            username.clone(),
-            password.clone(),
-        )
-        .inspect_err(as_error!("failed to check existing topic partitions"))?
-        {
-            break nb_partitions;
-        }
-        info!("Topic {} does not exist yet, retrying...", &topic_name);
-        std::thread::sleep(core::time::Duration::from_secs(5));
-    };
-
-    let nb_consumers = nb_consumers.clone().min(nb_partitions);
-
-    let mut partitions = vec![vec![]; nb_consumers];
-    for i in 0..nb_partitions {
-        partitions[i % nb_consumers].push(i as i32);
-    }
-
-    Ok(partitions)
+    let partition_ids = get_partition_ids(&consumer, topic_name)?;
+    Ok(partition_ids.map(|ids| ids.len()))
 }
 
 #[instrument(skip_all, err)]
@@ -220,33 +171,36 @@ pub fn count_messages(
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
-    let metadata = get_metadata(&consumer)?;
-    if let Some(partition_ids) = metadata.partition_ids(topic_name) {
-        debug!(?topic_name, "topic found");
-        let total_messages =
-            partition_ids
-                .iter()
-                .try_fold(0u32, |total_messages, &partition_id| {
-                    consumer
-                        .fetch_watermarks(topic_name, partition_id, KAFKA_TIMEOUT_SECS)
-                        .map(|(low, high)| {
-                            let count = high - low;
-                            debug!(
-                                ?topic_name,
-                                ?partition_id,
-                                ?low,
-                                ?high,
-                                ?count,
-                                "watermarks"
-                            );
-                            total_messages + count as u32
-                        })
-                })?;
-        debug!(?topic_name, ?total_messages);
-        Ok(Some(total_messages))
-    } else {
-        debug!(?topic_name, "topic not found");
-        Ok(None)
+    match get_partition_ids(&consumer, topic_name) {
+        Ok(Some(partition_ids)) => {
+            debug!(?topic_name, "topic found");
+            let total_messages =
+                partition_ids
+                    .iter()
+                    .try_fold(0u32, |total_messages, &partition_id| {
+                        consumer
+                            .fetch_watermarks(topic_name, partition_id, KAFKA_TIMEOUT_SECS)
+                            .map(|(low, high)| {
+                                let count = high - low;
+                                debug!(
+                                    ?topic_name,
+                                    ?partition_id,
+                                    ?low,
+                                    ?high,
+                                    ?count,
+                                    "watermarks"
+                                );
+                                total_messages + count as u32
+                            })
+                    })?;
+            debug!(?topic_name, ?total_messages);
+            Ok(Some(total_messages))
+        }
+        Ok(None) => {
+            debug!(?topic_name, "topic not found");
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -443,70 +397,59 @@ pub enum ConsumerError {
 pub trait AlertConsumer: Sized {
     fn topic_name(&self, timestamp: i64) -> String;
     fn output_queue(&self) -> String;
-    fn username(&self) -> Option<String> {
-        None
-    }
-    fn password(&self) -> Option<String> {
-        None
-    }
     fn survey(&self) -> crate::utils::enums::Survey;
+    #[instrument(skip(self))]
+    async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
+        let config =
+            conf::load_raw_config(config_path).inspect_err(as_error!("failed to load config"))?;
+        let mut con = conf::build_redis(&config)
+            .await
+            .inspect_err(as_error!("failed to connect to redis"))?;
+        let _: () = con
+            .del(&self.output_queue())
+            .await
+            .inspect_err(as_error!("failed to delete queue"))?;
+        info!(
+            "Cleared redis queue {} for Kafka consumer",
+            self.output_queue()
+        );
+        Ok(())
+    }
     #[instrument(skip(self))]
     async fn consume(
         &self,
+        topic: Option<String>,
         timestamp: i64,
-        config_path: &str,
-        exit_on_eof: bool,
+        kafka_config: Option<SurveyKafkaConfig>,
         n_threads: Option<usize>,
         max_in_queue: Option<usize>,
-        group_id: Option<String>,
-        topic: Option<String>,
+        exit_on_eof: bool,
+        config_path: &str,
     ) -> Result<(), ConsumerError> {
-        let config = conf::load_config(config_path)?;
-        let kafka_config = conf::build_kafka_config(&config, &self.survey())?;
+        let config = conf::load_raw_config(config_path)?;
+
+        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
+        let kafka_config = match kafka_config {
+            Some(cfg) => cfg,
+            None => conf::build_kafka_config(&config, &self.survey())?,
+        };
 
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
-        let group_id = group_id.unwrap_or_else(|| {
-            format!(
-                "boom_{}_consumer_group",
-                self.survey().to_string().to_lowercase()
-            )
-        });
-
-        let username = self.username();
-        let password = self.password();
-
-        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
-        let partitions = assign_partitions_to_consumers(
-            &topic,
-            n_threads,
-            &kafka_config,
-            &group_id,
-            username,
-            password,
-        )?;
 
         let mut handles = vec![];
         for i in 0..n_threads {
             let topic = topic.clone();
-            let partitions = partitions[i].clone();
-            let group_id = group_id.clone();
-            let username = self.username();
-            let password = self.password();
             let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
             let handle = tokio::spawn(async move {
-                let result = consume_partitions(
+                let result = consumer(
                     &i.to_string(),
                     &topic,
-                    &group_id,
-                    partitions,
                     &output_queue,
                     max_in_queue,
                     timestamp,
-                    &username,
-                    &password,
                     &config,
                     &kafka_config,
                     exit_on_eof,
@@ -527,43 +470,92 @@ pub trait AlertConsumer: Sized {
 
         Ok(())
     }
-    #[instrument(skip(self))]
-    async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
-        let config =
-            conf::load_config(config_path).inspect_err(as_error!("failed to load config"))?;
-        let mut con = conf::build_redis(&config)
-            .await
-            .inspect_err(as_error!("failed to connect to redis"))?;
-        let _: () = con
-            .del(&self.output_queue())
-            .await
-            .inspect_err(as_error!("failed to delete queue"))?;
-        info!("Cleared redis queue for Kafka consumer");
-        Ok(())
-    }
 }
 
-#[instrument(skip(username, password, config, survey_config))]
-pub async fn consume_partitions(
+fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<()> {
+    // Get current assignment
+    let assignment = consumer.assignment()?;
+
+    // Create a new TopicPartitionList with offsets to look up
+    let mut tpl_with_timestamps = TopicPartitionList::new();
+
+    for elem in assignment.elements() {
+        tpl_with_timestamps.add_partition_offset(
+            elem.topic(),
+            elem.partition(),
+            rdkafka::Offset::Offset(timestamp_ms), // Use timestamp as offset for lookup, in ms
+        )?;
+    }
+
+    // Query offsets for the given timestamp
+    let offsets = consumer.offsets_for_times(tpl_with_timestamps, KAFKA_TIMEOUT_SECS)?;
+
+    // Seek to the resolved offsets
+    for elem in offsets.elements() {
+        debug!(
+            "Seeking partition {} to offset for timestamp {}",
+            elem.partition(),
+            timestamp_ms
+        );
+        if let rdkafka::Offset::Offset(offset) = elem.offset() {
+            consumer.seek(
+                elem.topic(),
+                elem.partition(),
+                rdkafka::Offset::Offset(offset),
+                KAFKA_TIMEOUT_SECS,
+            )?;
+            debug!(
+                "Seeked partition {} to offset {} for timestamp {}",
+                elem.partition(),
+                offset,
+                timestamp_ms
+            );
+        } else {
+            debug!(
+                "Seeking partition {} to end as no offset found for timestamp {}",
+                elem.partition(),
+                timestamp_ms
+            );
+            // If we didn't find an offset for the timestamp, seek to the end
+            consumer.seek(
+                elem.topic(),
+                elem.partition(),
+                rdkafka::Offset::End,
+                KAFKA_TIMEOUT_SECS,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+#[instrument(skip(config, survey_config))]
+pub async fn consumer(
     id: &str,
     topic: &str,
-    group_id: &str,
-    partitions: Vec<i32>,
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
-    username: &Option<String>,
-    password: &Option<String>,
     config: &config::Config,
     survey_config: &SurveyKafkaConfig,
     exit_on_eof: bool,
 ) -> Result<(), ConsumerError> {
+    let server = survey_config.consumer.server.clone();
+    let group_id = survey_config.consumer.group_id.clone();
+    let username = survey_config.consumer.username.clone();
+    let password = survey_config.consumer.password.clone();
+
     let mut client_config = ClientConfig::new();
     client_config
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "consumer,cgrp,topic,fetch")
-        .set("bootstrap.servers", &survey_config.consumer)
-        .set("group.id", group_id);
+        .set("bootstrap.servers", &server)
+        .set("group.id", &group_id)
+        .set("auto.offset.reset", "earliest")
+        // Important: disable automatic offset storage so offsets
+        // can be manually controlled during the seek operation
+        .set("enable.auto.commit", "true")
+        .set("enable.auto.offset.store", "false");
 
     if let (Some(username), Some(password)) = (username, password) {
         client_config
@@ -579,27 +571,35 @@ pub async fn consume_partitions(
         .create()
         .inspect_err(as_error!("failed to create consumer"))?;
 
-    let mut timestamps = rdkafka::TopicPartitionList::new();
-    let offset = rdkafka::Offset::Offset(timestamp);
-    for i in &partitions {
-        timestamps
-            .add_partition(topic, *i)
-            .set_offset(offset)
-            .inspect_err(as_error!("failed to add partition"))?
-    }
-    let tpl = consumer
-        .offsets_for_times(timestamps, KAFKA_TIMEOUT_SECS)
-        .inspect_err(as_error!("failed to fetch offsets"))?;
-
+    // Subscribe to topic(s) - broker will handle partition assignment
     consumer
-        .assign(&tpl)
-        .inspect_err(as_error!("failed to assign topic partition list"))?;
+        .subscribe(&[topic])
+        .inspect_err(as_error!("failed to subscribe to topic"))?;
 
-    let mut con = conf::build_redis(&config)
-        .await
-        .inspect_err(as_error!("failed to connect to redis"))?;
+    // Wait for initial assignment
+    debug!("Waiting for partition assignment...");
 
-    let mut total = 0;
+    // Poll once to trigger rebalance and get assignment
+    loop {
+        match consumer.poll(KAFKA_TIMEOUT_SECS) {
+            Some(Ok(_msg)) => {
+                debug!("Received initial message, seeking to timestamp...");
+                // Now seek all assigned partitions to the target timestamp
+                seek_to_timestamp(&consumer, timestamp * 1000)?;
+                break;
+            }
+            Some(Err(e)) => {
+                error!("Error during initial poll: {:?}", e);
+                // sleep and retry
+                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+            }
+            None => {
+                debug!("No message received yet, polling again...");
+                // sleep and retry
+                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
 
     // OTel attributes informed by https://opentelemetry.io/docs/specs/semconv/messaging/kafka/
     let consumer_attrs = [
@@ -631,9 +631,18 @@ pub async fn consume_partitions(
             KeyValue::new("reason", "kafka_send"),
         ])
         .collect();
+
+    let mut con = conf::build_redis(&config)
+        .await
+        .inspect_err(as_error!("failed to connect to redis"))?;
+
+    let mut total = 0;
     // start timer
     let start = std::time::Instant::now();
-    // Poll one message at a time.
+
+    debug!("Starting Kafka consumer loop...");
+
+    // Process the rest normally
     loop {
         if max_in_queue > 0 && total % 1000 == 0 {
             loop {
@@ -652,7 +661,7 @@ pub async fn consume_partitions(
                 break;
             }
         }
-        match consumer.poll(tokio::time::Duration::from_secs(5)) {
+        match consumer.poll(KAFKA_TIMEOUT_SECS) {
             Some(Ok(message)) => {
                 let payload = message.payload().unwrap_or_default();
                 con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
@@ -672,6 +681,9 @@ pub async fn consume_partitions(
                         start.elapsed()
                     );
                 }
+                if total == 1 {
+                    info!("Consumer received first message, continuing...");
+                }
             }
             Some(Err(e)) => {
                 error!("Error while consuming from Kafka, retrying: {}", e);
@@ -680,7 +692,7 @@ pub async fn consume_partitions(
                 continue;
             }
             None => {
-                trace!("No message available");
+                debug!("No message available");
                 if exit_on_eof {
                     info!("No more messages, exiting consumer {}", id);
                     break;

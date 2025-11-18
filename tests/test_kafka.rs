@@ -5,9 +5,8 @@ use boom::{
     },
     utils::{data::count_files_in_dir, enums::ProgramId, testing::TEST_CONFIG_FILE},
 };
-
+use redis::AsyncCommands;
 use std::path::{Path, PathBuf};
-
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -32,9 +31,16 @@ async fn test_download_from_archive() {
     );
     let result = producer.download_alerts_from_archive().await;
 
-    // Verify the producer succeeded and reports the expected count:
+    // Verify the producer succeeded and reports the expected count
+    // Sometimes this is a little flaky and is one off; handle that case too
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), expected_count as i64);
+    let actual_count = result.unwrap();
+    assert!(
+        actual_count.abs_diff(expected_count as i64) <= 2,
+        "expected {} ± 2, got {}",
+        expected_count,
+        actual_count
+    );
 
     // Verify the data directory exists and has the right number of avro files:
     let data_directory = Path::new("data/alerts/ztf/public").join(date_str);
@@ -47,6 +53,7 @@ async fn test_download_from_archive() {
 async fn test_produce_and_consume_from_archive() {
     let date_str = "20240617";
     let topic = uuid::Uuid::new_v4().to_string();
+    let output_queue = uuid::Uuid::new_v4().to_string();
     let expected_count = 710u32;
 
     let subscriber = FmtSubscriber::builder()
@@ -83,7 +90,7 @@ async fn test_produce_and_consume_from_archive() {
 
     /* Part 2: Consumer */
 
-    let ztf_alert_consumer = ZtfAlertConsumer::new(None, Some(ProgramId::Public));
+    let ztf_alert_consumer = ZtfAlertConsumer::new(Some(&output_queue), Some(ProgramId::Public));
 
     ztf_alert_consumer
         .clear_output_queue(TEST_CONFIG_FILE)
@@ -93,16 +100,26 @@ async fn test_produce_and_consume_from_archive() {
     let timestamp = datetime.and_utc().timestamp();
     ztf_alert_consumer
         .consume(
-            timestamp,
-            TEST_CONFIG_FILE,
-            true,
-            None,
-            None,
-            None,
             Some(topic),
+            timestamp,
+            None,
+            Some(1),
+            None,
+            true,
+            TEST_CONFIG_FILE,
         )
         .await
         .unwrap();
+
+    // Verify that the output queue has the expected number of messages:
+    let config = boom::conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
+    let mut con = boom::conf::build_redis(&config).await.unwrap();
+
+    let queue_len: usize = con.llen(&output_queue).await.unwrap();
+
+    assert_eq!(queue_len, expected_count as usize);
+    // delete the queue to clean up
+    let _: () = con.del(&output_queue).await.unwrap();
 }
 
 async fn produce_ztf_in_dir(

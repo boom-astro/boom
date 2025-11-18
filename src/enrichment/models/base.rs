@@ -1,5 +1,7 @@
-use crate::utils::fits::{prepare_triplet, CutoutError};
-use mongodb::bson::Document;
+use crate::{
+    alert::AlertCutout,
+    utils::fits::{prepare_triplet, CutoutError},
+};
 use ndarray::{Array, Array2, Axis, Dim};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use tracing::instrument;
@@ -18,6 +20,8 @@ pub enum ModelError {
     ModelOutputToVecError,
     #[error("error converting array to tensor")]
     TensorConversionError,
+    #[error("missing feature in alert")]
+    MissingFeature(&'static str),
 }
 
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
@@ -44,10 +48,14 @@ pub trait Model {
     where
         Self: Sized;
     #[instrument(skip_all, err)]
-    fn get_triplet(&self, alerts: &[Document]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        let mut triplets = Array::zeros((alerts.len(), 63, 63, 3));
-        for i in 0..alerts.len() {
-            let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
+    fn get_triplet(
+        &self,
+        alert_cutouts: &[&AlertCutout],
+    ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
+        let mut triplets = Array::zeros((alert_cutouts.len(), 63, 63, 3));
+        for i in 0..alert_cutouts.len() {
+            let (cutout_science, cutout_template, cutout_difference) =
+                prepare_triplet(alert_cutouts[i])?;
             for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
                 .iter()
                 .enumerate()

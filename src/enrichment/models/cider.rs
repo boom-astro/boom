@@ -1,7 +1,8 @@
+use crate::alert::AlertCutout;
 use crate::enrichment::models::{load_model, Model, ModelError};
+use crate::enrichment::ZtfAlertForEnrichment;
 use crate::utils::fits::prepare_triplet;
-use crate::utils::lightcurves::PhotometryMag;
-use mongodb::bson::Document;
+use crate::utils::lightcurves::{AllBandsProperties, Band, PhotometryMag};
 use ndarray::{Array, Array2, Array3, ArrayBase, Dim, OwnedRepr};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
@@ -25,48 +26,58 @@ impl CiderImagesModel {
     #[instrument(skip_all, err)]
     pub fn get_metadata(
         &self,
-        alerts: &[Document],
-        alert_properties: &[&Document],
+        alerts: &[ZtfAlertForEnrichment],
+        alert_properties: &[&AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
-        for alert in alerts {
-            let candidate = alert.get_document("candidate")?;
+        for i in 0..alerts.len() {
+            let candidate = &alerts[i].candidate.candidate;
 
             // TODO: handle missing sgscore and distpsnr values
             // to use sensible defaults if missing
-            let sgscore1 = candidate.get_f64("sgscore1")? as f32;
-            let distpsnr1 = candidate.get_f64("distpsnr1")? as f32;
-            let sgscore2 = candidate.get_f64("sgscore2")? as f32;
-            let distpsnr2 = candidate.get_f64("distpsnr2")? as f32;
+            let diffmaglim = candidate
+                .diffmaglim
+                .ok_or(ModelError::MissingFeature("diffmaglim"))?
+                as f32;
+            let ra = candidate.ra as f32;
+            let dec = candidate.dec as f32;
+            let magpsf = candidate.magpsf;
+            let sigmapsf = candidate.sigmapsf;
+            let ndethist = candidate.ndethist as f32;
+            let nmtchps = candidate.nmtchps as f32;
+            let ncovhist = candidate.ncovhist as f32;
+            let chinr = candidate.chinr.ok_or(ModelError::MissingFeature("chinr"))? as f32;
+            let sharpnr = candidate
+                .sharpnr
+                .ok_or(ModelError::MissingFeature("sharpnr"))? as f32;
+            let scorr = candidate.scorr.ok_or(ModelError::MissingFeature("scorr"))? as f32;
+            let sky = candidate.sky.ok_or(ModelError::MissingFeature("sky"))? as f32;
+            let sgscore1 = candidate
+                .sgscore1
+                .ok_or(ModelError::MissingFeature("sgscore1"))? as f32;
+            let distpsnr1 = candidate
+                .distpsnr1
+                .ok_or(ModelError::MissingFeature("distpsnr1"))? as f32;
+            let sgscore2 = candidate
+                .sgscore2
+                .ok_or(ModelError::MissingFeature("sgscore2"))? as f32;
+            let distpsnr2 = candidate
+                .distpsnr2
+                .ok_or(ModelError::MissingFeature("distpsnr2"))? as f32;
 
-            let magpsf = candidate.get_f64("magpsf")?; // we convert to f32 later
-            let sigmapsf = candidate.get_f64("sigmapsf")? as f32;
-            let ra = candidate.get_f64("ra")? as f32;
-            let dec = candidate.get_f64("dec")? as f32;
-            let diffmaglim = candidate.get_f64("diffmaglim")? as f32;
-            let ndethist = candidate.get_i32("ndethist")? as f32;
-            let nmtchps = candidate.get_i32("nmtchps")? as f32;
-            let ncovhist = candidate.get_i32("ncovhist")? as f32;
+            // Specific to CIDER model
+            let classtar = candidate
+                .classtar
+                .ok_or(ModelError::MissingFeature("classtar"))? as f32;
+            let fid = candidate.fid as f32;
 
-            let chinr = candidate.get_f64("chinr")? as f32;
-            let sharpnr = candidate.get_f64("sharpnr")? as f32;
-            let scorr = candidate.get_f64("scorr")? as f32;
-            let sky = candidate.get_f64("sky")? as f32;
-            let classtar = candidate.get_f64("classtar")? as f32;
-            let band = candidate.get_str("band")?;
-            let filter_id = match band {
-                "g" => 1,
-                "r" => 2,
-                "i" => 3,
-                _ => 0, // default value if field is missing or has other value
-            };
             // alert properties already computed from lightcurve analysis
-            let peakmag_so_far = alert_properties[0].get_f64("peak_mag").unwrap();
-            let peakjd = alert_properties[0].get_f64("peak_jd").unwrap();
-            let maxmag_so_far = alert_properties[0].get_f64("faintest_mag").unwrap();
-            let firstjd = alert_properties[0].get_f64("first_jd").unwrap();
-            let lastjd = alert_properties[0].get_f64("last_jd").unwrap();
+            let peakmag = alert_properties[i].peak_mag;
+            let peakjd = alert_properties[i].peak_jd;
+            let faintestmag = alert_properties[i].faintest_mag;
+            let firstjd = alert_properties[i].first_jd;
+            let lastjd = alert_properties[i].last_jd;
 
             let days_since_peak = (lastjd - peakjd) as f32;
             let days_to_peak = (peakjd - firstjd) as f32;
@@ -90,15 +101,15 @@ impl CiderImagesModel {
                 (ncovhist - 1144.9) / 1141.27,
                 (sigmapsf - 0.996) / 0.0448,
                 (chinr - 3.257) / 21.5,
-                (magpsf as f32 - 18.64) / 0.936,
+                (magpsf - 18.64) / 0.936,
                 (nnondet - 1126.0) / 1140.0,
                 (classtar - 0.95) / 0.08,
-                (filter_id as f32 - 1.62) / 0.57,
+                (fid - 1.62) / 0.57,
                 (days_since_peak - 359.59) / 627.91,
                 (days_to_peak - 90.93) / 327.51,
                 (age - 450.5) / 734.29,
-                (peakmag_so_far as f32 - 17.945) / 0.896,
-                (maxmag_so_far as f32 - 20.37) / 0.6325,
+                (peakmag - 17.945) / 0.896,
+                (faintestmag - 20.37) / 0.6325,
             ];
 
             features_batch.extend(alert_features);
@@ -111,11 +122,12 @@ impl CiderImagesModel {
     #[instrument(skip_all, err)]
     pub fn get_triplet(
         &self,
-        alerts: &[Document],
+        alert_cutouts: &[&AlertCutout],
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        let mut triplets = Array::zeros((alerts.len(), 3, 49, 49));
-        for i in 0..alerts.len() {
-            let (cutout_science, cutout_template, cutout_difference) = prepare_triplet(&alerts[i])?;
+        let mut triplets = Array::zeros((alert_cutouts.len(), 3, 49, 49));
+        for i in 0..alert_cutouts.len() {
+            let (cutout_science, cutout_template, cutout_difference) =
+                prepare_triplet(&alert_cutouts[i])?;
             for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
                 .iter()
                 .enumerate()
@@ -206,7 +218,7 @@ impl CiderPhotometryModel {
         sorted_photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
         let mut result = Vec::new();
 
-        let mut bands: std::collections::HashMap<String, Vec<PhotometryMag>> =
+        let mut bands: std::collections::HashMap<Band, Vec<PhotometryMag>> =
             std::collections::HashMap::new();
         for point in sorted_photometry {
             bands
@@ -256,19 +268,23 @@ impl CiderPhotometryModel {
             dt.push(diff_dt as f32);
             delta_t.push(diff_delta_t as f32);
             log_fluxes.push(point.mag.max(1e-6).log10() as f32);
-            sigma_fluxes.push(point.mag_err / (point.mag * 2.302585) as f32);
-            if point.band == "g" {
-                tail1.push(1.0);
-                tail2.push(0.0);
-                tail3.push(0.0);
-            } else if point.band == "r" {
-                tail1.push(0.0);
-                tail2.push(1.0);
-                tail3.push(0.0);
-            } else {
-                tail1.push(0.0);
-                tail2.push(0.0);
-                tail3.push(1.0);
+            sigma_fluxes.push(point.mag_err / (point.mag * std::f32::consts::LN_10) as f32);
+            match point.band {
+                Band::G => {
+                    tail1.push(1.0);
+                    tail2.push(0.0);
+                    tail3.push(0.0);
+                }
+                Band::R => {
+                    tail1.push(0.0);
+                    tail2.push(1.0);
+                    tail3.push(0.0);
+                }
+                _ => {
+                    tail1.push(0.0);
+                    tail2.push(0.0);
+                    tail3.push(1.0);
+                }
             }
         }
         // normalizing constants

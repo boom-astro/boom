@@ -1,11 +1,14 @@
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
-use config::{Config, Value};
 // TODO: we do not want to get in the habit of making 3rd party types part of
 // our public API. It's almost always asking for trouble.
-use config::File;
+use config::{Config, File, Value};
+use dotenvy;
+use serde::Deserialize;
 use std::path::Path;
-use tracing::{error, instrument};
+use tracing::{debug, error, info, instrument, warn};
+
+const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
@@ -17,21 +20,60 @@ pub enum BoomConfigError {
     ConnectRedisError(#[from] redis::RedisError),
     #[error("could not find config file")]
     ConfigFileNotFound,
-    #[error("missing key in config")]
-    MissingKeyError,
+    #[error("missing key in config: {0}")]
+    MissingKeyError(String),
+}
+
+/// Load environment variables from a .env file if it exists.
+/// This function should be called early in the application startup,
+/// typically before any configuration loading.
+///
+/// The function looks for .env files in this order:
+/// 1. .env in the current working directory
+/// 2. .env in the parent directory (useful when running from subdirs)
+/// 3. If none found, continues without error (env vars may be set by system)
+pub fn load_dotenv() {
+    // Try current directory first
+    if std::path::Path::new(".env").exists() {
+        match dotenvy::dotenv() {
+            Ok(_) => info!("Loaded environment variables from .env file"),
+            Err(e) => warn!("Found .env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // Try parent directory (useful when running from subdirectories like api/)
+    if std::path::Path::new("../.env").exists() {
+        match dotenvy::from_path("../.env") {
+            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
+        }
+        return;
+    }
+
+    // No .env file found - this is fine, environment variables may be set by the system
+    debug!("No .env file found, using system environment variables only");
 }
 
 #[instrument(err)]
-pub fn load_config(filepath: &str) -> Result<Config, BoomConfigError> {
+pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
     let path = Path::new(filepath);
 
     if !path.exists() {
         return Err(BoomConfigError::ConfigFileNotFound);
     }
 
+    load_dotenv();
+
     let conf = Config::builder()
-        .add_source(File::with_name(filepath))
+        .add_source(File::from(path))
+        .add_source(
+            config::Environment::with_prefix("boom")
+                .prefix_separator("_")
+                .separator("__"),
+        )
         .build()?;
+
     Ok(conf)
 }
 
@@ -217,19 +259,19 @@ impl CatalogXmatchConfig {
 
         let catalog = hashmap_xmatch
             .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
             .clone()
             .into_string()?;
 
         let radius = hashmap_xmatch
             .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
             .clone()
             .into_float()?;
 
         let projection = hashmap_xmatch
             .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError)?
+            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
             .clone()
             .into_table()?;
 
@@ -290,11 +332,14 @@ impl CatalogXmatchConfig {
 #[instrument(skip(conf), err)]
 pub fn build_xmatch_configs(
     conf: &Config,
-    stream_name: &str,
+    survey_name: &Survey,
 ) -> Result<Vec<CatalogXmatchConfig>, BoomConfigError> {
     let crossmatches = conf.get_table("crossmatch")?;
 
-    let crossmatches_stream = match crossmatches.get(stream_name).cloned() {
+    let crossmatches_stream = match crossmatches
+        .get(&survey_name.to_string().to_lowercase())
+        .cloned()
+    {
         Some(x) => x,
         None => {
             return Ok(Vec::new());
@@ -311,10 +356,18 @@ pub fn build_xmatch_configs(
 }
 
 #[derive(Debug, Clone)]
-pub struct SurveyKafkaConfig {
-    pub consumer: String, // URL of the Kafka broker for the consumer (alert worker input)
-    pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
+pub struct KafkaConsumerConfig {
+    pub server: String,                  // URL of the Kafka broker
+    pub group_id: String,                // Consumer group ID
     pub schema_registry: Option<String>, // URL of the schema registry (if any)
+    pub username: Option<String>,        // Username for authentication (if any)
+    pub password: Option<String>,        // Password for authentication (if any)
+}
+
+#[derive(Debug, Clone)]
+pub struct SurveyKafkaConfig {
+    pub consumer: KafkaConsumerConfig, // Configuration for the Kafka consumer (filter worker input)
+    pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
 }
 
 impl SurveyKafkaConfig {
@@ -327,33 +380,54 @@ impl SurveyKafkaConfig {
         // kafka section has a consumer and producer key
         // consumer has a key per survey, producer is global
 
-        let consumer = kafka_conf
+        let consumer_config = kafka_conf
             .get("consumer")
             .cloned()
             .unwrap_or_default()
             .into_table()?
-            .get(&survey.to_string())
+            .get(&survey.to_string().to_lowercase())
+            .cloned()
+            .unwrap_or_default()
+            .into_table()?;
+
+        let consumer_server = consumer_config
+            .get("server")
             .and_then(|c| c.clone().into_string().ok())
-            .unwrap_or_else(|| "localhost:9092".to_string());
+            .ok_or(BoomConfigError::MissingKeyError("server".to_string()))?;
+
+        // the schema registry is optional
+        let consumer_schema_registry = consumer_config
+            .get("schema_registry")
+            .and_then(|c| c.clone().into_string().ok());
+
+        let consumer_username = consumer_config
+            .get("username")
+            .and_then(|c| c.clone().into_string().ok());
+
+        let consumer_password = consumer_config
+            .get("password")
+            .and_then(|c| c.clone().into_string().ok());
+
+        // group_id defaults to boom-<survey>-consumer-group
+        let consumer_group_id = consumer_config
+            .get("group_id")
+            .and_then(|c| c.clone().into_string().ok())
+            .ok_or(BoomConfigError::MissingKeyError("group_id".to_string()))?;
+
+        let consumer = KafkaConsumerConfig {
+            server: consumer_server,
+            group_id: consumer_group_id,
+            schema_registry: consumer_schema_registry.clone(),
+            username: consumer_username,
+            password: consumer_password,
+        };
 
         let producer = kafka_conf
             .get("producer")
             .and_then(|p| p.clone().into_string().ok())
             .unwrap_or_else(|| "localhost:9092".to_string());
 
-        let schema_registry = kafka_conf
-            .get("schema_registry")
-            .cloned()
-            .unwrap_or_default()
-            .into_table()?
-            .get(&survey.to_string())
-            .and_then(|sr| sr.clone().into_string().ok());
-
-        Ok(SurveyKafkaConfig {
-            consumer,
-            producer,
-            schema_registry,
-        })
+        Ok(SurveyKafkaConfig { consumer, producer })
     }
 }
 
@@ -363,4 +437,157 @@ pub fn build_kafka_config(
     survey: &Survey,
 ) -> Result<SurveyKafkaConfig, BoomConfigError> {
     SurveyKafkaConfig::from_config(conf, survey)
+}
+
+pub struct KafkaProducerConfig {
+    pub server: String, // URL of the Kafka broker
+}
+
+pub fn get_kafka_producer_config() -> Result<KafkaProducerConfig, BoomConfigError> {
+    let conf = load_raw_config(DEFAULT_CONFIG_PATH)?;
+
+    let kafka_conf = conf.get_table("kafka")?;
+
+    let producer_server = kafka_conf
+        .get("producer")
+        .and_then(|p| p.clone().into_string().ok())
+        .unwrap_or_else(|| "localhost:9092".to_string());
+
+    Ok(KafkaProducerConfig {
+        server: producer_server,
+    })
+}
+
+/// Return whether the babamul worker is enabled per config `babamul.enabled`.
+/// If the key is missing, returns false.
+pub fn babamul_enabled(conf: &Config) -> bool {
+    // try to read the `babamul` table first; if missing, default to false
+    match conf.get_table("babamul") {
+        Ok(table) => match table.get("enabled") {
+            Some(v) => v.clone().into_bool().unwrap_or(false),
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AuthConfig {
+    pub secret_key: String,
+    pub token_expiration: usize, // in seconds
+    pub admin_username: String,
+    pub admin_password: String,
+    pub admin_email: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ApiConfig {
+    pub auth: AuthConfig,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct DatabaseConfig {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub max_pool_size: u32,
+    pub replica_set: Option<String>,
+    pub srv: bool,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AppConfig {
+    pub api: ApiConfig,
+    pub database: DatabaseConfig,
+}
+
+impl AppConfig {
+    pub fn from_default_path() -> Self {
+        load_config(None)
+    }
+
+    pub fn from_path(config_path: &str) -> Self {
+        load_config(Some(config_path))
+    }
+
+    pub fn from_test_config() -> Self {
+        // Find the workspace root by looking for Cargo.toml with tests/ directory
+        let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
+        let test_config_path = loop {
+            let tests_dir = current_dir.join("tests");
+            let test_config = tests_dir.join("config.test.yaml");
+
+            // Check if we found the workspace root (has tests dir with config file)
+            if test_config.exists() {
+                break test_config;
+            }
+
+            // Move up to parent directory
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent.to_path_buf();
+            } else {
+                panic!("Could not find workspace root with tests/config.test.yaml");
+            }
+        };
+
+        load_config(Some(test_config_path.to_str().expect("Invalid path")))
+    }
+
+    /// Validate that all required secrets are present
+    fn validate_secrets(&self) -> Result<(), String> {
+        if self.database.password.is_empty() {
+            return Err(
+                "Database password must be set via BOOM_DATABASE__PASSWORD environment variable"
+                    .to_string(),
+            );
+        }
+
+        if self.api.auth.secret_key.is_empty() {
+            return Err(
+                "API secret key must be set via BOOM_API__AUTH__SECRET_KEY environment variable"
+                    .to_string(),
+            );
+        }
+
+        if self.api.auth.admin_password.is_empty() {
+            return Err("Admin password must be set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable".to_string());
+        }
+
+        // Validate token expiration
+        if self.api.auth.token_expiration <= 0 {
+            return Err("Token expiration must be greater than 0 for security reasons".to_string());
+        }
+
+        Ok(())
+    }
+}
+
+pub fn load_config(config_path: Option<&str>) -> AppConfig {
+    load_dotenv();
+
+    let config_file = config_path.unwrap_or(DEFAULT_CONFIG_PATH);
+
+    let config = load_raw_config(config_file).unwrap();
+
+    let app_config: AppConfig = config
+        .try_deserialize()
+        .expect("Failed to deserialize configuration");
+
+    // Validate that required secrets are present
+    if let Err(e) = app_config.validate_secrets() {
+        panic!("{}", e);
+    }
+
+    info!("Configuration loaded successfully");
+    debug!("Database host: {}", app_config.database.host);
+    debug!("Database name: {}", app_config.database.name);
+    debug!("Admin username: {}", app_config.api.auth.admin_username);
+    debug!(
+        "Token expiration: {} seconds",
+        app_config.api.auth.token_expiration
+    );
+
+    app_config
 }

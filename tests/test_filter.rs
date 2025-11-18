@@ -1,8 +1,10 @@
 use boom::{
     conf,
-    filter::{uses_field_in_filter, validate_filter_pipeline, Filter, ZtfFilter},
-    utils::enums::Survey,
-    utils::testing::{insert_test_filter, remove_test_filter, TEST_CONFIG_FILE},
+    filter::{build_loaded_filter, uses_field_in_filter, validate_filter_pipeline},
+    utils::{
+        enums::Survey,
+        testing::{insert_test_filter, remove_test_filter, TEST_CONFIG_FILE},
+    },
 };
 use mongodb::bson::{doc, Document};
 
@@ -120,12 +122,12 @@ async fn test_validate_filter_pipeline() {
 
 #[tokio::test]
 async fn test_build_filter() {
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
+    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_collection = db.collection("filters");
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
-    let filter_result = ZtfFilter::build(&filter_id, &filter_collection).await;
+    let filter_result = build_loaded_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
 
     let filter = filter_result.unwrap();
@@ -160,20 +162,21 @@ async fn test_build_filter() {
 
 #[tokio::test]
 async fn test_filter_found() {
-    let config = conf::load_config("tests/config.test.yaml").unwrap();
+    let config = conf::load_raw_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
     let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build(&filter_id, &filter_collection).await;
+    let filter_result = build_loaded_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(filter_result.is_ok());
 }
 
 #[tokio::test]
 async fn test_no_filter_found() {
-    let config = conf::load_config("tests/config.test.yaml").unwrap();
+    let config = conf::load_raw_config("tests/config.test.yaml").unwrap();
     let db = conf::build_db(&config).await.unwrap();
     let filter_collection = db.collection("filters");
-    let filter_result = ZtfFilter::build("thisdoesntexist", &filter_collection).await;
+    let filter_result =
+        build_loaded_filter("thisdoesnotexist", &Survey::Ztf, &filter_collection).await;
     assert!(filter_result.is_err());
 }
