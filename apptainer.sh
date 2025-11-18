@@ -102,10 +102,8 @@ if [ "$1" == "stop" ]; then
       apptainer instance stop "boom_$3"
       exit 0
     fi
-    apptainer instance stop "boom"
     apptainer instance stop "boom_lsst"
     apptainer instance stop "boom_ztf"
-    apptainer instance stop "boom_decam"
   elif stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
@@ -157,7 +155,7 @@ fi
 # 5. Run benchmark
 # -----------------------------
 if [ "$1" == "benchmark" ]; then
-  pip install pandas pyyaml
+  pip install pandas pyyaml astropy
   python3 "$BOOM_DIR/tests/throughput/apptainer_run.py"
   exit 0
 fi

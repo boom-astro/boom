@@ -1,4 +1,4 @@
-"""Script to benchmark BOOM. requires: Python 3.8+, pandas>2, pyyaml"""
+"""Script to benchmark BOOM. requires: Python 3.8+, pyyaml, pandas>2, astropy"""
 import argparse
 import json
 import os
@@ -7,6 +7,7 @@ import uuid
 
 import pandas as pd
 import yaml
+from astropy.time import Time
 
 # First, create the config
 parser = argparse.ArgumentParser(description="Benchmark BOOM with Apptainer.")
@@ -49,19 +50,25 @@ with open("tests/throughput/config.yaml", "w") as f:
 # Reformat filter for insertion into the database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:
     cats150 = json.load(f)
+
+now_jd = Time.now().jd
 for_insert = {
     "_id": str(uuid.uuid4()),
-    "catalog": "ZTF_alerts",
+    "survey": "ZTF",
+    "user_id": "benchmarking",
     "permissions": [1, 2, 3],
     "active": True,
     "active_fid": "first",
     "fv": [
         {
             "fid": "first",
-            "created_at": "2021-01-01T00:00:00",
+            "created_at": now_jd,
             "pipeline": json.dumps(cats150),
         }
     ],
+
+    "created_at": now_jd,
+    "updated_at": now_jd,
 }
 with open("tests/throughput/cats150.filter.json", "w") as f:
     json.dump(for_insert, f)
