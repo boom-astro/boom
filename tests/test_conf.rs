@@ -1,4 +1,4 @@
-use boom::conf::{self, build_db, load_config, load_dotenv, AppConfig};
+use boom::conf::{self, build_db, build_redis, load_config, load_dotenv, AppConfig};
 use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
@@ -15,16 +15,40 @@ fn test_load_raw_config() {
     assert_eq!(hello, "world");
 }
 
-#[tokio::test]
-async fn test_build_db() {
+#[test]
+fn test_load_kafka_config() {
     let config = AppConfig::from_test_config().unwrap();
-    let db = build_db(&config).await.unwrap();
-    // try a simple query to just validate that the connection works
-    let _collections = db.list_collection_names().await.unwrap();
+
+    let ztf_kafka_consumer_config = config
+        .kafka
+        .consumer
+        .get(&boom::utils::enums::Survey::Ztf)
+        .cloned()
+        .unwrap();
+    // the values here are likely overwrote by env vars, so we can't assert on them
+    // but, we can at least check that they are non-empty
+    assert!(ztf_kafka_consumer_config.server.len() > 0);
+    assert!(ztf_kafka_consumer_config.group_id.len() > 0);
+
+    let kafka_producer_config = &config.kafka.producer;
+    assert!(kafka_producer_config.server.len() > 0);
 }
 
 #[test]
-fn test_load_xmatch_configs() {
+fn test_load_workers_config() {
+    let config = AppConfig::from_test_config().unwrap();
+
+    let ztf_worker_config = config.workers.get(&boom::utils::enums::Survey::Ztf);
+    assert!(ztf_worker_config.is_some());
+    let ztf_worker_config = ztf_worker_config.unwrap();
+    assert_eq!(ztf_worker_config.alert.n_workers, 1);
+    assert_eq!(ztf_worker_config.enrichment.n_workers, 1);
+    assert_eq!(ztf_worker_config.filter.n_workers, 1);
+    assert_eq!(ztf_worker_config.command_interval, 500);
+}
+
+#[test]
+fn test_load_xmatch_config() {
     let config = AppConfig::from_test_config().unwrap();
 
     let crossmatch_config_ztf = config
@@ -64,21 +88,21 @@ fn test_token_expiration_validation_fails_with_zero() {
     // Create a temporary config file with token_expiration: 0
     let config_content = r#"
 database:
-host: localhost
-port: 27017
-name: test_db
-max_pool_size: 200
-replica_set: null
-username: test
-password: test123
-srv: false
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 api:
-auth:
-secret_key: "test_secret"
-token_expiration: 0
-admin_username: admin
-admin_password: test123
-admin_email: admin@test.com
+    auth:
+        secret_key: "test_secret"
+        token_expiration: 0
+        admin_username: admin
+        admin_password: test123
+        admin_email: admin@test.com
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -94,21 +118,21 @@ fn test_token_expiration_validation_passes_with_valid_value() {
     // This should work fine with a valid token_expiration
     let config_content = r#"
 database:
-host: localhost
-port: 27017
-name: test_db
-max_pool_size: 200
-replica_set: null
-username: test
-password: test123
-srv: false
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 api:
-auth:
-secret_key: "test_secret"
-token_expiration: 3600
-admin_username: admin
-admin_password: test123
-admin_email: admin@test.com
+    auth:
+        secret_key: "test_secret"
+        token_expiration: 3600
+        admin_username: admin
+        admin_password: test123
+        admin_email: admin@test.com
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -125,21 +149,21 @@ fn test_token_expiration_with_standard_value() {
     // Test that the standard token_expiration value (7 days) works correctly
     let config_content = r#"
 database:
-host: localhost
-port: 27017
-name: test_db
-max_pool_size: 200
-replica_set: null
-username: test
-password: test123
-srv: false
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 api:
-auth:
-secret_key: "test_secret"
-token_expiration: 604800
-admin_username: admin
-admin_password: test123
-admin_email: admin@test.com
+    auth:
+        secret_key: "test_secret"
+        token_expiration: 604800
+        admin_username: admin
+        admin_password: test123
+        admin_email: admin@test.com
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -163,4 +187,20 @@ fn test_load_config_from_default_path() {
     assert!(!config.api.auth.secret_key.is_empty());
     assert!(!config.api.auth.admin_password.is_empty());
     assert!(!config.database.password.is_empty());
+}
+
+#[tokio::test]
+async fn test_build_db() {
+    let config = AppConfig::from_test_config().unwrap();
+    let db = build_db(&config).await.unwrap();
+    // try a simple query to just validate that the connection works
+    let _collections = db.list_collection_names().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_build_redis() {
+    let config = AppConfig::from_test_config().unwrap();
+    let mut conn = build_redis(&config).await.unwrap();
+    let pong: String = redis::cmd("PING").query_async(&mut conn).await.unwrap();
+    assert_eq!(pong, "PONG");
 }
