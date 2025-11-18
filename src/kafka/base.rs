@@ -1,5 +1,5 @@
 use crate::{
-    conf::{self, AppConfig, KafkaConsumerConfig},
+    conf::{self, AppConfig, BoomConfigError, KafkaConsumerConfig},
     utils::{
         data::count_files_in_dir,
         o11y::{
@@ -436,9 +436,12 @@ pub trait AlertConsumer: Sized {
                 .consumer
                 .get(&self.survey())
                 .cloned()
-                .ok_or_else(|| ConsumerError::from(BoomConfigError::MissingKeyError(
-                    format!("kafka.consumer.{}", self.survey().to_string().to_lowercase())
-                )))?,
+                .ok_or_else(|| {
+                    ConsumerError::from(BoomConfigError::MissingKeyError(format!(
+                        "kafka.consumer.{}",
+                        self.survey().to_string().to_lowercase()
+                    )))
+                })?,
         };
 
         let n_threads = n_threads.unwrap_or(1);

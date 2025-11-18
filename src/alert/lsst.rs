@@ -6,7 +6,7 @@ use crate::{
         },
         decam, ztf,
     },
-    conf::{self, AppConfig},
+    conf::{self, AppConfig, BoomConfigError},
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
@@ -753,9 +753,11 @@ impl AlertWorker for LsstAlertWorker {
             .consumer
             .get(&Survey::Lsst)
             .cloned()
-            .ok_or_else(|| AlertWorkerError::from(BoomConfigError::MissingKeyError(
-                "kafka.consumer.lsst".to_string()
-            )))?;
+            .ok_or_else(|| {
+                AlertWorkerError::from(BoomConfigError::MissingKeyError(
+                    "kafka.consumer.lsst".to_string(),
+                ))
+            })?;
 
         let schema_registry_url = match kafka_consumer_config.schema_registry {
             Some(ref url) => url.as_ref(),
