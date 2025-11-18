@@ -1,10 +1,10 @@
-use boom::conf::{self, AppConfig};
+use boom::conf::{build_db, AppConfig};
 use boom::utils::spatial;
 
 #[tokio::test]
 async fn test_xmatch() {
     let config = AppConfig::from_test_config().unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = build_db(&config).await.unwrap();
 
     let catalog_xmatch_configs = config
         .crossmatch

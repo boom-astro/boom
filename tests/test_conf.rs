@@ -1,4 +1,4 @@
-use boom::conf::{self, AppConfig};
+use boom::conf::{self, build_db, load_config, load_dotenv, AppConfig};
 use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
@@ -18,7 +18,7 @@ fn test_load_raw_config() {
 #[tokio::test]
 async fn test_build_db() {
     let config = AppConfig::from_test_config().unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = build_db(&config).await.unwrap();
     // try a simple query to just validate that the connection works
     let _collections = db.list_collection_names().await.unwrap();
 }
@@ -54,4 +54,113 @@ fn test_load_xmatch_configs() {
         projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(),
         1
     );
+}
+
+#[test]
+#[should_panic(expected = "Token expiration must be greater than 0")]
+fn test_token_expiration_validation_fails_with_zero() {
+    load_dotenv();
+
+    // Create a temporary config file with token_expiration: 0
+    let config_content = r#"
+database:
+host: localhost
+port: 27017
+name: test_db
+max_pool_size: 200
+replica_set: null
+username: test
+password: test123
+srv: false
+api:
+auth:
+secret_key: "test_secret"
+token_expiration: 0
+admin_username: admin
+admin_password: test123
+admin_email: admin@test.com
+"#;
+    let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+    std::fs::write(temp_file.path(), config_content).unwrap();
+
+    // Trigger the panic (the #[should_panic] attribute will assert on message substring)
+    load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
+}
+
+#[test]
+fn test_token_expiration_validation_passes_with_valid_value() {
+    load_dotenv();
+
+    // This should work fine with a valid token_expiration
+    let config_content = r#"
+database:
+host: localhost
+port: 27017
+name: test_db
+max_pool_size: 200
+replica_set: null
+username: test
+password: test123
+srv: false
+api:
+auth:
+secret_key: "test_secret"
+token_expiration: 3600
+admin_username: admin
+admin_password: test123
+admin_email: admin@test.com
+"#;
+    let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+    std::fs::write(temp_file.path(), config_content).unwrap();
+
+    // This should not panic
+    let config = load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
+    assert_eq!(config.api.auth.token_expiration, 3600);
+}
+
+#[test]
+fn test_token_expiration_with_standard_value() {
+    load_dotenv();
+
+    // Test that the standard token_expiration value (7 days) works correctly
+    let config_content = r#"
+database:
+host: localhost
+port: 27017
+name: test_db
+max_pool_size: 200
+replica_set: null
+username: test
+password: test123
+srv: false
+api:
+auth:
+secret_key: "test_secret"
+token_expiration: 604800
+admin_username: admin
+admin_password: test123
+admin_email: admin@test.com
+"#;
+    let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+    std::fs::write(temp_file.path(), config_content).unwrap();
+
+    // This should load successfully with the standard 7-day expiration
+    let config = load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
+    assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
+}
+
+#[test]
+fn test_load_config_from_default_path() {
+    load_dotenv();
+
+    // Test loading the test config file which has actual values for secrets
+    let config = AppConfig::from_test_config().unwrap();
+
+    // Verify the token_expiration is set to our new default
+    assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
+
+    // Verify other expected values
+    assert!(!config.api.auth.secret_key.is_empty());
+    assert!(!config.api.auth.admin_password.is_empty());
+    assert!(!config.database.password.is_empty());
 }
