@@ -431,7 +431,14 @@ pub trait AlertConsumer: Sized {
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
             // None => conf::build_kafka_config(&config, &self.survey())?,
-            None => config.kafka.consumer.get(&self.survey()).unwrap().clone(),
+            None => config
+                .kafka
+                .consumer
+                .get(&self.survey())
+                .cloned()
+                .ok_or_else(|| ConsumerError::from(BoomConfigError::MissingKeyError(
+                    format!("kafka.consumer.{}", self.survey().to_string().to_lowercase())
+                )))?,
         };
 
         let n_threads = n_threads.unwrap_or(1);
