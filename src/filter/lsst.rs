@@ -4,13 +4,21 @@ use std::collections::HashMap;
 use tracing::{info, instrument};
 
 use crate::filter::{
-    get_filter_object, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, Origin,
-    Photometry,
+    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
+    Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
+    Origin, Photometry,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;
 
+/// Builds LSST Alert objects from the provided filter results and alert collection.
+///
+/// # Arguments
+/// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
+/// * `alert_collection` - The MongoDB collection containing LSST alert documents.
+///
+/// # Returns
+/// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
 pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
@@ -118,8 +126,8 @@ pub async fn build_lsst_alerts(
             };
             let jd = doc.get_f64("jd")?;
             // flux may be None in forced photometry
-            let flux = doc.get_f64("psfFlux").map(|f| f * 1e-9).ok(); // from nJy to Jy
-            let flux_err = doc.get_f64("psfFluxErr")? * 1e-9; // from nJy to Jy
+            let flux = doc.get_f64("psfFlux").ok(); // in nJy
+            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
             let ra = doc.get_f64("ra").ok(); // optional, might not be present
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
@@ -176,176 +184,176 @@ pub async fn build_lsst_alerts(
     Ok(alerts_output)
 }
 
-pub struct LsstFilter {
-    id: String,
-    pipeline: Vec<Document>,
-}
+/// Builds a MongoDB aggregation pipeline for LSST filter execution.
+///
+/// This function validates the provided filter pipeline and augments it with necessary
+/// auxiliary data lookups (prv_candidates, fp_hists, cross_matches, aliases) based on
+/// which fields are referenced in the filter. The resulting pipeline starts with a match stage
+/// to filter by candids, and should be populated with the actual candids before execution.
+///
+/// # Arguments
+/// * `filter_pipeline` - The user-defined filter pipeline stages
+///
+/// # Returns
+/// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
+pub async fn build_lsst_filter_pipeline(
+    filter_pipeline: &Vec<serde_json::Value>,
+) -> Result<Vec<Document>, FilterError> {
+    // validate filter
+    validate_filter_pipeline(&filter_pipeline)?;
 
-#[async_trait::async_trait]
-impl Filter for LsstFilter {
-    #[instrument(skip(filter_collection), err)]
-    async fn build(
-        filter_id: &str,
-        filter_collection: &mongodb::Collection<mongodb::bson::Document>,
-    ) -> Result<Self, FilterError> {
-        // get filter object
-        let filter_obj = get_filter_object(filter_id, "LSST_alerts", filter_collection).await?;
+    let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
+    let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
+    let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+    let mut use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
-        // filter prefix (with permissions)
-        let mut pipeline = vec![
-            doc! {
-                "$match": doc! {
-                    "_id": doc! {
-                        "$in": [] // candids will be inserted here
-                    }
+    // check if other survey's data is used, in which case we do want to bring in aliases
+    let use_ztf_prv_candidates_index =
+        uses_field_in_filter(filter_pipeline, "ZTF.prv_candidates");
+    let use_ztf_fp_hists_index = uses_field_in_filter(filter_pipeline, "ZTF.fp_hists");
+
+    if use_ztf_prv_candidates_index.is_some() {
+        if use_aliases_index.is_none() {
+            use_aliases_index = use_ztf_prv_candidates_index;
+        } else {
+            use_aliases_index = Some(
+                use_aliases_index
+                    .unwrap()
+                    .min(use_ztf_prv_candidates_index.unwrap()),
+            );
+        }
+    }
+    if use_ztf_fp_hists_index.is_some() {
+        if use_aliases_index.is_none() {
+            use_aliases_index = use_ztf_fp_hists_index;
+        } else {
+            use_aliases_index = Some(
+                use_aliases_index
+                    .unwrap()
+                    .min(use_ztf_fp_hists_index.unwrap()),
+            );
+        }
+    }
+
+    let mut aux_add_fields = doc! {};
+
+    if use_prv_candidates_index.is_some() {
+        // insert it in aux addFields stage
+        aux_add_fields.insert(
+            "prv_candidates".to_string(),
+            fetch_timeseries_op("aux.prv_candidates", "candidate.jd", 365, None),
+        );
+    }
+    if use_fp_hists_index.is_some() {
+        aux_add_fields.insert(
+            "fp_hists".to_string(),
+            fetch_timeseries_op("aux.fp_hists", "candidate.jd", 365, None),
+        );
+    }
+    if use_cross_matches_index.is_some() {
+        aux_add_fields.insert(
+            "cross_matches".to_string(),
+            get_array_element("aux.cross_matches"),
+        );
+    }
+    if use_aliases_index.is_some() {
+        aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
+    }
+
+    let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
+        || use_fp_hists_index.is_some()
+        || use_cross_matches_index.is_some()
+        || use_aliases_index.is_some();
+
+    let mut insert_aux_index = usize::MAX;
+    if let Some(index) = use_prv_candidates_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+    if let Some(index) = use_fp_hists_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+    if let Some(index) = use_cross_matches_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+    if let Some(index) = use_aliases_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+
+    // same for ZTF
+    let mut ztf_aux_add_fields = doc! {};
+    if use_ztf_prv_candidates_index.is_some() {
+        ztf_aux_add_fields.insert(
+            "ZTF.prv_candidates".to_string(),
+            fetch_timeseries_op("ztf_aux.prv_candidates", "candidate.jd", 365, None),
+        );
+    }
+    if use_ztf_fp_hists_index.is_some() {
+        ztf_aux_add_fields.insert(
+            "ZTF.fp_hists".to_string(),
+            fetch_timeseries_op("ztf_aux.fp_hists", "candidate.jd", 365, None),
+        );
+    }
+
+    let mut ztf_insert_aux_index = usize::MAX;
+    if let Some(index) = use_ztf_prv_candidates_index {
+        ztf_insert_aux_index = ztf_insert_aux_index.min(index);
+    }
+    if let Some(index) = use_ztf_fp_hists_index {
+        ztf_insert_aux_index = ztf_insert_aux_index.min(index);
+    }
+    let mut ztf_insert_aux_pipeline = ztf_insert_aux_index != usize::MAX;
+
+    // some sanity checks
+    if insert_aux_index == usize::MAX && insert_aux_pipeline {
+        return Err(FilterError::InvalidFilterPipeline(
+            "could not determine where to insert aux pipeline".to_string(),
+        ));
+    }
+
+    // filter prefix (with permissions)
+    let mut pipeline = vec![
+        doc! {
+            "$match": doc! {
+                "_id": doc! {
+                    "$in": [] // candids will be inserted here
                 }
-            },
-            doc! {
-                "$project": doc! {
-                    "objectId": 1,
-                    "candidate": 1,
-                    "properties": 1,
-                    "coordinates": 1,
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "properties": 1,
+                "coordinates": 1,
+            }
+        },
+    ];
+
+    // now we loop over the base_pipeline and insert stages from the filter_pipeline
+    // and when i = insert_index, we insert the aux_pipeline before the stage
+    for i in 0..filter_pipeline.len() {
+        let x = mongodb::bson::to_document(&filter_pipeline[i])?;
+
+        if insert_aux_pipeline && i == insert_aux_index {
+            pipeline.push(doc! {
+                "$lookup": doc! {
+                    "from": format!("LSST_alerts_aux"),
+                    "localField": "objectId",
+                    "foreignField": "_id",
+                    "as": "aux"
                 }
-            },
-        ];
-
-        let mut aux_add_fields = doc! {};
-
-        // get filter pipeline as str and convert to Vec<Bson>
-        let filter_pipeline = filter_obj
-            .get("pipeline")
-            .ok_or(FilterError::FilterPipelineError)?
-            .as_str()
-            .ok_or(FilterError::FilterPipelineError)?;
-
-        let filter_pipeline = serde_json::from_str::<serde_json::Value>(filter_pipeline)?;
-        let filter_pipeline = filter_pipeline
-            .as_array()
-            .ok_or(FilterError::InvalidFilterPipeline)?;
-
-        // validate filter
-        validate_filter_pipeline(&filter_pipeline)?;
-
-        let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
-        let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
-        let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
-        let mut use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
-
-        // check if other survey's data is used, in which case we do want to bring in aliases
-        let use_ztf_prv_candidates_index =
-            uses_field_in_filter(filter_pipeline, "ZTF.prv_candidates");
-        let use_ztf_fp_hists_index = uses_field_in_filter(filter_pipeline, "ZTF.fp_hists");
-
-        if use_ztf_prv_candidates_index.is_some() {
-            if use_aliases_index.is_none() {
-                use_aliases_index = use_ztf_prv_candidates_index;
-            } else {
-                use_aliases_index = Some(
-                    use_aliases_index
-                        .unwrap()
-                        .min(use_ztf_prv_candidates_index.unwrap()),
-                );
-            }
-        }
-        if use_ztf_fp_hists_index.is_some() {
-            if use_aliases_index.is_none() {
-                use_aliases_index = use_ztf_fp_hists_index;
-            } else {
-                use_aliases_index = Some(
-                    use_aliases_index
-                        .unwrap()
-                        .min(use_ztf_fp_hists_index.unwrap()),
-                );
-            }
+            });
+            pipeline.push(doc! {
+                "$addFields": &aux_add_fields
+            });
+            pipeline.push(doc! {
+                "$unset": "aux"
+            });
+            insert_aux_pipeline = false; // only insert once
         }
 
-        if use_prv_candidates_index.is_some() {
-            // insert it in aux addFields stage
-            aux_add_fields.insert(
-                "prv_candidates".to_string(),
-                fetch_timeseries_op("aux.prv_candidates", "candidate.jd", 365, None),
-            );
-        }
-        if use_fp_hists_index.is_some() {
-            aux_add_fields.insert(
-                "fp_hists".to_string(),
-                fetch_timeseries_op("aux.fp_hists", "candidate.jd", 365, None),
-            );
-        }
-        if use_cross_matches_index.is_some() {
-            aux_add_fields.insert(
-                "cross_matches".to_string(),
-                get_array_element("aux.cross_matches"),
-            );
-        }
-        if use_aliases_index.is_some() {
-            aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
-        }
-
-        let mut insert_aux_index = usize::MAX;
-        if let Some(index) = use_prv_candidates_index {
-            insert_aux_index = insert_aux_index.min(index);
-        }
-        if let Some(index) = use_fp_hists_index {
-            insert_aux_index = insert_aux_index.min(index);
-        }
-        if let Some(index) = use_cross_matches_index {
-            insert_aux_index = insert_aux_index.min(index);
-        }
-        if let Some(index) = use_aliases_index {
-            insert_aux_index = insert_aux_index.min(index);
-        }
-        let mut insert_aux_pipeline = insert_aux_index != usize::MAX;
-
-        // same for ZTF
-        let mut ztf_aux_add_fields = doc! {};
-        if use_ztf_prv_candidates_index.is_some() {
-            ztf_aux_add_fields.insert(
-                "ZTF.prv_candidates".to_string(),
-                fetch_timeseries_op("ztf_aux.prv_candidates", "candidate.jd", 365, None),
-            );
-        }
-        if use_ztf_fp_hists_index.is_some() {
-            ztf_aux_add_fields.insert(
-                "ZTF.fp_hists".to_string(),
-                fetch_timeseries_op("ztf_aux.fp_hists", "candidate.jd", 365, None),
-            );
-        }
-
-        let mut ztf_insert_aux_index = usize::MAX;
-        if let Some(index) = use_ztf_prv_candidates_index {
-            ztf_insert_aux_index = ztf_insert_aux_index.min(index);
-        }
-        if let Some(index) = use_ztf_fp_hists_index {
-            ztf_insert_aux_index = ztf_insert_aux_index.min(index);
-        }
-        let mut ztf_insert_aux_pipeline = ztf_insert_aux_index != usize::MAX;
-
-        // now we loop over the base_pipeline and insert stages
-        for i in 0..filter_pipeline.len() {
-            let x = mongodb::bson::to_document(&filter_pipeline[i])?;
-
-            if insert_aux_pipeline && i == insert_aux_index {
-                pipeline.push(doc! {
-                    "$lookup": doc! {
-                        "from": format!("LSST_alerts_aux"),
-                        "localField": "objectId",
-                        "foreignField": "_id",
-                        "as": "aux"
-                    }
-                });
-                pipeline.push(doc! {
-                    "$addFields": &aux_add_fields
-                });
-                pipeline.push(doc! {
-                    "$unset": "aux"
-                });
-                insert_aux_pipeline = false; // only insert once
-            }
-
-            if ztf_insert_aux_pipeline {
-                pipeline.push(doc! {
+        if ztf_insert_aux_pipeline {
+            pipeline.push(doc! {
                     "$lookup": doc! {
                         "from": format!("ZTF_alerts_aux"),
                         "localField": "aliases.ZTF.0",
@@ -353,33 +361,26 @@ impl Filter for LsstFilter {
                         "as": "ztf_aux"
                     }
                 });
-                pipeline.push(doc! {
+            pipeline.push(doc! {
                     "$addFields": &ztf_aux_add_fields
                 });
-                pipeline.push(doc! {
+            pipeline.push(doc! {
                     "$unset": "ztf_aux"
                 });
-                ztf_insert_aux_pipeline = false; // only insert once
-            }
-
-            // push the current stage
-            pipeline.push(x);
+            ztf_insert_aux_pipeline = false; // only insert once
         }
 
-        let filter = LsstFilter {
-            id: filter_id.to_string(),
-            pipeline: pipeline,
-        };
-
-        Ok(filter)
+        // push the current stage
+        pipeline.push(x);
     }
+    Ok(pipeline)
 }
 
 pub struct LsstFilterWorker {
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
     input_queue: String,
     output_topic: String,
-    filters: Vec<LsstFilter>,
+    filters: Vec<LoadedFilter>,
 }
 
 #[async_trait::async_trait]
@@ -397,33 +398,7 @@ impl FilterWorker for LsstFilterWorker {
         let input_queue = "LSST_alerts_filter_queue".to_string();
         let output_topic = "LSST_alerts_results".to_string();
 
-        let all_filter_ids: Vec<String> = filter_collection
-            .distinct("_id", doc! {"active": true, "catalog": "LSST_alerts"})
-            .await?
-            .into_iter()
-            .map(|x| {
-                x.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or(FilterError::InvalidFilterId)
-            })
-            .collect::<Result<Vec<String>, FilterError>>()?;
-
-        let mut filters: Vec<LsstFilter> = Vec::new();
-        if let Some(filter_ids) = filter_ids {
-            // if filter_ids are provided, we only build those filters
-            for filter_id in filter_ids {
-                if all_filter_ids.contains(&filter_id) {
-                    filters.push(LsstFilter::build(&filter_id, &filter_collection).await?);
-                } else {
-                    return Err(FilterWorkerError::FilterNotFound);
-                }
-            }
-        } else {
-            // if no filter_ids are provided, we build all active filters
-            for filter_id in all_filter_ids {
-                filters.push(LsstFilter::build(&filter_id, &filter_collection).await?);
-            }
-        }
+        let filters = build_loaded_filters(&filter_ids, &Survey::Lsst, &filter_collection).await?;
 
         Ok(LsstFilterWorker {
             alert_collection,

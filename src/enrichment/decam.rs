@@ -1,6 +1,9 @@
+use crate::alert::DecamCandidate;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::fetch_timeseries_op;
-use crate::utils::lightcurves::{analyze_photometry, parse_photometry, prepare_photometry};
+use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::utils::lightcurves::{
+    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -30,11 +33,22 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "prv_candidates": fetch_timeseries_op(
+                    "aux.prv_candidates",
+                    "candidate.jd",
+                    365,
+                    None
+                ),
                 "fp_hists": fetch_timeseries_op(
                     "aux.fp_hists",
                     "candidate.jd",
                     365,
-                    None
+                    Some(vec![doc! {
+                        "$gte": [
+                            "$$x.snr",
+                            3.0
+                        ]
+                    }]),
                 )
             }
         },
@@ -42,13 +56,39 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "prv_candidates.jd": 1,
+                "prv_candidates.magpsf": 1,
+                "prv_candidates.sigmapsf": 1,
+                "prv_candidates.band": 1,
                 "fp_hists.jd": 1,
-                "fp_hists.magap": 1,
-                "fp_hists.sigmagap": 1,
+                "fp_hists.magpsf": 1,
+                "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
             }
         },
     ]
+}
+
+/// DECAM alert structure used to deserialize alerts
+/// from the database, used by the enrichment worker
+/// to compute features and ML scores
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DecamAlertForEnrichment {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
+}
+
+/// DECAM alert properties computed during enrichment
+/// and inserted back into the alert document
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DecamAlertProperties {
+    pub stationary: bool,
+    pub photstats: PerBandProperties,
 }
 
 pub struct DecamEnrichmentWorker {
@@ -92,10 +132,9 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
     async fn process_alerts(
         &mut self,
         candids: &[i64],
-        _con: Option<&mut redis::aio::MultiplexedConnection>,
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts =
-            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection, None).await?;
+        let alerts: Vec<DecamAlertForEnrichment> =
+            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -114,24 +153,20 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         for i in 0..alerts.len() {
-            let candid = alerts[i].get_i64("_id")?;
+            let candid = alerts[i].candid;
 
             let properties = self.get_alert_properties(&alerts[i]).await?;
 
-            let find_document = doc! {
-                "_id": candid
-            };
-
             let update_alert_document = doc! {
                 "$set": {
-                    "properties": properties,
+                    "properties": mongify(&properties),
                 }
             };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(find_document)
+                    .filter(doc! {"_id": candid})
                     .update(update_alert_document)
                     .build(),
             );
@@ -149,23 +184,20 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 impl DecamEnrichmentWorker {
     async fn get_alert_properties(
         &self,
-        alert: &Document,
-    ) -> Result<Document, EnrichmentWorkerError> {
-        // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = alert.get_document("candidate")?;
+        alert: &DecamAlertForEnrichment,
+    ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
+        let prv_candidates = alert.prv_candidates.clone();
+        let fp_hists = alert.fp_hists.clone();
 
-        let jd = candidate.get_f64("jd")?;
-
-        let fp_hists = alert.get_array("fp_hists")?;
-        let mut lightcurve = parse_photometry(fp_hists, "jd", "magap", "sigmagap", "band", jd);
+        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
+        let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
-        let properties = doc! {
-            "stationary": stationary,
-            "photstats": photstats,
-        };
-        Ok(properties)
+        Ok(DecamAlertProperties {
+            stationary,
+            photstats,
+        })
     }
 }

@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use crate::{conf, utils::o11y::logging::as_error};
 
-use flare::spatial::great_circle_distance;
+use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
+use serde::{Deserialize, Serialize};
 use tracing::{instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
@@ -19,6 +22,33 @@ pub enum XmatchError {
     NullDistanceMaxNear,
     #[error("failed to convert the bson data into a document")]
     AsDocumentError,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+pub struct GeoJsonPoint {
+    r#type: String,
+    coordinates: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+pub struct Coordinates {
+    radec_geojson: GeoJsonPoint,
+    l: f64,
+    b: f64,
+}
+
+impl Coordinates {
+    pub fn new(ra: f64, dec: f64) -> Self {
+        let (l, b) = radec2lb(ra, dec);
+        Coordinates {
+            radec_geojson: GeoJsonPoint {
+                r#type: "Point".to_string(),
+                coordinates: vec![ra - 180.0, dec],
+            },
+            l,
+            b,
+        }
+    }
 }
 
 fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
@@ -118,11 +148,11 @@ pub async fn xmatch(
     dec: f64,
     xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
     db: &mongodb::Database,
-) -> Result<mongodb::bson::Document, XmatchError> {
+) -> Result<HashMap<String, Vec<mongodb::bson::Document>>, XmatchError> {
     // TODO, make the xmatch config a hashmap for faster access
     // while looping over the xmatch results of the batched queries
     if xmatch_configs.len() == 0 {
-        return Ok(doc! {});
+        return Ok(HashMap::new());
     }
     let ra_geojson = ra - 180.0;
     let dec_geojson = dec;
@@ -148,11 +178,11 @@ pub async fn xmatch(
         .await
         .inspect_err(as_error!("failed to aggregate"))?;
 
-    let mut xmatch_docs = doc! {};
-    // pre add the catalogs + empty vec to the xmatch_docs
+    let mut xmatch_results = HashMap::new();
+    // pre add the catalogs + empty vec to the xmatch_results
     // this allows us to have a consistent output structure
     for xmatch_config in xmatch_configs.iter() {
-        xmatch_docs.insert(&xmatch_config.catalog, mongodb::bson::Bson::Array(vec![]));
+        xmatch_results.insert(xmatch_config.catalog.clone(), vec![]);
     }
 
     while let Some(result) = cursor.next().await {
@@ -170,7 +200,10 @@ pub async fn xmatch(
             .expect("this should never panic, the doc was derived from the catalogs");
 
         if !xmatch_config.use_distance {
-            xmatch_docs.insert(catalog, matches);
+            xmatch_results
+                .get_mut(catalog)
+                .unwrap()
+                .extend(matches.iter().filter_map(|m| m.as_document().cloned()));
         } else {
             let distance_key = xmatch_config
                 .distance_key
@@ -233,9 +266,12 @@ pub async fn xmatch(
                     matches_filtered.push(xmatch_doc);
                 }
             }
-            xmatch_docs.insert(&xmatch_config.catalog, matches_filtered);
+            xmatch_results
+                .get_mut(catalog)
+                .unwrap()
+                .extend(matches_filtered);
         }
     }
 
-    Ok(xmatch_docs)
+    Ok(xmatch_results)
 }

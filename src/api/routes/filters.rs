@@ -1,4 +1,6 @@
 use crate::api::{models::response, routes::users::User};
+use crate::filter::{build_filter_pipeline, Filter, FilterError, FilterVersion};
+use crate::utils::enums::Survey;
 
 use actix_web::{get, patch, post, web, HttpResponse};
 use flare::Time;
@@ -12,33 +14,12 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-pub struct FilterVersion {
-    fid: String,
-    pipeline: String,
-    created_at: f64,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
-pub struct Filter {
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub permissions: Vec<i32>,
-    pub user_id: String,
-    pub catalog: String,
-    pub active: bool,
-    pub active_fid: String,
-    pub fv: Vec<FilterVersion>,
-    pub created_at: f64,
-    pub updated_at: f64,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
 pub struct FilterPublic {
     #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub permissions: Vec<i32>,
     pub user_id: String,
-    pub catalog: String,
+    pub survey: Survey,
     pub active: bool,
     pub active_fid: String,
     pub fv: Vec<FilterVersion>,
@@ -52,7 +33,7 @@ impl From<Filter> for FilterPublic {
             id: filter.id,
             permissions: filter.permissions,
             user_id: filter.user_id,
-            catalog: filter.catalog,
+            survey: filter.survey,
             active: filter.active,
             active_fid: filter.active_fid,
             fv: filter.fv,
@@ -62,100 +43,64 @@ impl From<Filter> for FilterPublic {
     }
 }
 
-fn build_test_pipeline(
-    filter_catalog: String,
-    filter_perms: Vec<i32>,
-    mut filter_pipeline: Vec<Document>,
-) -> Vec<Document> {
-    let mut out_pipeline = vec![
-        doc! {
-            "$match": doc! {
-                // during filter::run proper candis are inserted here
-            }
-        },
-        doc! {
-            "$lookup": doc! {
-                "from": format!("{}_aux", filter_catalog),
-                "localField": "objectId",
-                "foreignField": "_id",
-                "as": "aux"
-            }
-        },
-        doc! {
-            "$project": doc! {
-                "objectId": 1,
-                "candidate": 1,
-                "classifications": 1,
-                "coordinates": 1,
-                "cross_matches": doc! {
-                    "$arrayElemAt": [
-                        "$aux.cross_matches",
-                        0
-                    ]
-                },
-                "prv_candidates": doc! {
-                    "$filter": doc! {
-                        "input": doc! {
-                            "$arrayElemAt": [
-                                "$aux.prv_candidates",
-                                0
-                            ]
-                        },
-                        "as": "x",
-                        "cond": doc! {
-                            "$and": [
-                                {
-                                    "$in": [
-                                        "$$x.programid",
-                                        &filter_perms
-                                    ]
-                                },
-                                { // maximum 1 year of past data
-                                    "$lt": [
-                                        {
-                                            "$subtract": [
-                                                "$candidate.jd",
-                                                "$$x.jd"
-                                            ]
-                                        },
-                                        365
-                                    ]
-                                },
-                                { // only datapoints up to (and including) current alert
-                                    "$lte": [
-                                        "$$x.jd",
-                                        "$candidate.jd"
-                                    ]
-                                }
-
-                            ]
-                        }
-                    }
-                },
-            }
-        },
-    ];
-    out_pipeline.append(&mut filter_pipeline);
-    return out_pipeline;
-}
-
-// tests the functionality of a filter by running it on alerts in database
 async fn run_test_pipeline(
     db: web::Data<Database>,
-    catalog: String,
-    pipeline: Vec<mongodb::bson::Document>,
-) -> Result<(), mongodb::error::Error> {
+    catalog: &Survey,
+    mut pipeline: Vec<mongodb::bson::Document>,
+) -> Result<(), FilterError> {
     let collection: Collection<mongodb::bson::Document> =
         db.collection(format!("{}_alerts", catalog).as_str());
-    let result = collection.aggregate(pipeline).await;
-    match result {
-        Ok(_) => {
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(e);
+    // get the latest candid from the alerts collection
+    let result = collection
+        .find_one(doc! {})
+        .projection(doc! { "_id": 1 })
+        .sort(doc! { "candidate.jd": -1 })
+        .await?;
+    let candid = match result {
+        Some(doc) => match doc.get_i64("_id").ok() {
+            Some(id) => Some(id),
+            None => {
+                return Err(FilterError::FilterExecutionError(
+                    "Document missing _id field or _id is not an i64. Could not determine latest candid.".to_string(),
+                ));
+            }
+        },
+        None => None,
+    };
+    if candid.is_some() {
+        match pipeline.get_mut(0) {
+            Some(first_stage) => {
+                if first_stage.get("$match").is_none() {
+                    return Err(FilterError::InvalidFilterPipeline(
+                        "first stage of pipeline must be a $match stage".to_string(),
+                    ));
+                }
+                first_stage.insert("$match", doc! { "_id": candid.as_ref().unwrap() });
+            }
+            None => {
+                return Err(FilterError::InvalidFilterPipeline(
+                    "pipeline must have at least one stage".to_string(),
+                ));
+            }
         }
     }
+    match collection.aggregate(pipeline).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(FilterError::FilterExecutionError(format!(
+            "failed to run test filter on alert with candid {:?}: {}",
+            candid, e
+        ))),
+    }
+}
+
+async fn build_and_test_filter_version(
+    db: web::Data<Database>,
+    survey: &Survey,
+    pipeline: &Vec<serde_json::Value>,
+    permissions: &Vec<i32>,
+) -> Result<(), FilterError> {
+    let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
+    run_test_pipeline(db, survey, test_pipeline).await
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
@@ -203,26 +148,12 @@ pub async fn post_filter_version(
         return response::forbidden("only the filter owner or an admin can modify a filter");
     }
 
-    let catalog = filter.catalog.clone();
+    let survey = filter.survey;
     let permissions = filter.permissions.clone();
-    // Create test version of filter and test it
-    // Convert pipeline from JSON to an array of Documents
-    let pipeline = body.pipeline.clone();
-    let pipeline: Vec<mongodb::bson::Document> = pipeline
-        .into_iter()
-        .map(|v| {
-            mongodb::bson::to_document(&v).map_err(|e| {
-                response::bad_request(&format!(
-                    "Failed to convert new filter version to a valid BSON Document: {}",
-                    e
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let test_pipeline = build_test_pipeline(catalog.to_string(), permissions, pipeline.clone());
+    let new_pipeline = body.pipeline.clone();
 
-    match run_test_pipeline(db.clone(), catalog.to_string(), test_pipeline).await {
+    // Test the filter to ensure it works
+    match build_and_test_filter_version(db.clone(), &survey, &new_pipeline, &permissions).await {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -233,12 +164,11 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
-    let new_pipeline_json: String = serde_json::to_string(&pipeline).unwrap();
     let mut update_doc = doc! {
         "$push": {
             "fv": {
                 "fid": &new_pipeline_id,
-                "pipeline": new_pipeline_json,
+                "pipeline": serde_json::to_string(&new_pipeline).unwrap(),
                 "created_at": Time::now().to_jd(),
             }
         },
@@ -272,7 +202,7 @@ pub async fn post_filter_version(
 pub struct FilterPost {
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: Vec<i32>,
-    pub catalog: String,
+    pub survey: Survey,
 }
 
 /// Create a new filter
@@ -296,30 +226,12 @@ pub async fn post_filter(
     let current_user = current_user.unwrap();
     let body = body.clone();
 
-    let catalog = body.catalog;
+    let survey = body.survey;
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    // Test filter received from user
-    // Create production version of filter
-    let pipeline_bson: Vec<Document> = pipeline
-        .clone()
-        .into_iter()
-        .map(|v| {
-            mongodb::bson::to_document(&v).map_err(|e| {
-                response::bad_request(&format!(
-                    "Failed to convert pipeline step to BSON Document: {}",
-                    e
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let test_pipeline =
-        build_test_pipeline(catalog.clone(), permissions.clone(), pipeline_bson.clone());
-
     // Test the filter to ensure it works
-    match run_test_pipeline(db.clone(), catalog.clone(), test_pipeline).await {
+    match build_and_test_filter_version(db.clone(), &survey, &pipeline, &permissions).await {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -334,11 +246,11 @@ pub async fn post_filter(
     let filter_version: String = uuid::Uuid::new_v4().to_string();
     let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
-    let pipeline_json = serde_json::to_string(&pipeline_bson).unwrap();
+    let pipeline_json = serde_json::to_string(&pipeline).unwrap();
     let now = Time::now().to_jd();
     let filter = Filter {
         permissions,
-        catalog,
+        survey,
         id: filter_id,
         user_id: current_user.id.clone(),
         active: true,
@@ -536,4 +448,141 @@ pub async fn get_filter(
             return response::internal_error(&format!("failed to query filter: {}", e));
         }
     }
+}
+
+#[derive(serde::Deserialize, Clone, ToSchema)]
+pub struct FilterTestRequest {
+    pub pipeline: Vec<serde_json::Value>,
+    pub permissions: Vec<i32>,
+    pub survey: Survey,
+    pub start_jd: Option<f64>,
+    pub end_jd: Option<f64>,
+    #[schema(max_items = 1000)]
+    pub object_ids: Option<Vec<String>>,
+    #[schema(max_items = 100000)]
+    pub candids: Option<Vec<String>>,
+}
+
+/// Test a filter pipeline
+#[utoipa::path(
+    post,
+    path = "/filters/test",
+    request_body = FilterTestRequest,
+    responses(
+        (status = 200, description = "Filter test executed successfully", body = Vec::<serde_json::Value>),
+        (status = 400, description = "Invalid filter submitted"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[post("/filters/test")]
+pub async fn post_filter_test(
+    db: web::Data<Database>,
+    body: web::Json<FilterTestRequest>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let _current_user = current_user.unwrap();
+    let body = body.clone();
+    let survey = body.survey;
+    let permissions = body.permissions;
+    let pipeline = body.pipeline;
+
+    // the first stage of test_pipeline is a match stage, we can overwrite it based on the test criteria
+    let mut match_stage = Document::new();
+
+    if let (Some(start_jd), Some(end_jd)) = (body.start_jd, body.end_jd) {
+        if end_jd <= start_jd {
+            return response::bad_request("end_jd cannot be less than or equal to start_jd");
+        }
+        if end_jd - start_jd > 7.0 {
+            return response::bad_request("JD window for filter test cannot exceed 7.0 JD");
+        }
+        match_stage.insert("candidate.jd", doc! { "$gte": start_jd, "$lte": end_jd });
+    }
+
+    let obj_ids: Vec<String> = body
+        .object_ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if obj_ids.len() > 1000 {
+        return response::bad_request("maximum of 1000 object_ids allowed for filter test");
+    }
+    if !obj_ids.is_empty() {
+        match_stage.insert("objectId", doc! { "$in": obj_ids });
+    }
+
+    let candid_ids: Vec<String> = body
+        .candids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if candid_ids.len() > 100000 {
+        return response::bad_request("maximum of 100000 candids allowed for filter test");
+    }
+    if !candid_ids.is_empty() {
+        let candids_i64: Vec<i64> = candid_ids
+            .iter()
+            .filter_map(|id| id.parse::<i64>().ok())
+            .collect();
+        match_stage.insert("_id", doc! { "$in": candids_i64 });
+    }
+
+    if match_stage.is_empty() {
+        return response::bad_request(
+            "at least one of (start_jd and end_jd), object_ids, or candid_ids must be provided",
+        );
+    }
+
+    let mut test_pipeline = match build_filter_pipeline(&pipeline, &permissions, &survey).await {
+        Ok(p) => p,
+        Err(e) => {
+            return response::bad_request(&format!(
+                "Invalid filter submitted, filter build failed with error: {}",
+                e
+            ));
+        }
+    };
+    match test_pipeline.get(0) {
+        Some(first_stage) => {
+            if first_stage.get("$match").is_none() {
+                return response::bad_request("first stage of pipeline must be a $match stage");
+            }
+        }
+        None => {
+            return response::bad_request("pipeline must have at least one stage");
+        }
+    }
+    test_pipeline[0].insert("$match", match_stage);
+
+    let collection: Collection<mongodb::bson::Document> =
+        db.collection(format!("{}_alerts", survey).as_str());
+    let mut cursor = match collection.aggregate(test_pipeline).await {
+        Ok(c) => c,
+        Err(e) => {
+            return response::bad_request(&format!(
+                "Invalid filter submitted, filter test failed with error: {}",
+                e
+            ))
+        }
+    };
+
+    let mut results = Vec::new();
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(doc) => results.push(doc),
+            Err(e) => {
+                return response::internal_error(&format!(
+                    "error retrieving test filter results: {}",
+                    e
+                ));
+            }
+        }
+    }
+    response::ok(
+        "filter test executed successfully",
+        serde_json::to_value(results).unwrap(),
+    )
 }

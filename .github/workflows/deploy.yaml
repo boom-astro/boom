@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to deploy (tag, branch, or commit SHA)'
+        description: "Version to deploy (tag, branch, or commit SHA)"
         required: true
-        default: 'main'
+        default: "main"
         type: string
 
 jobs:
@@ -23,6 +23,7 @@ jobs:
     env:
       ENVIRONMENT: production
       DOMAIN: ${{ vars.DOMAIN }}
+      BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_USERNAME: ${{ vars.BOOM_API__AUTH__ADMIN_USERNAME }}
@@ -39,8 +40,8 @@ jobs:
         with:
           ref: ${{ github.event.inputs.version || github.ref }}
       - run: >
-          docker compose --profile prod --profile babamul
+          docker compose --profile prod
           -f docker-compose.yaml build
       - run: >
-          docker compose --profile prod --profile babamul
+          docker compose --profile prod
           -f docker-compose.yaml up -d

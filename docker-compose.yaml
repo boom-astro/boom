@@ -10,6 +10,18 @@ networks:
     external: true
 
 services:
+  # Autoheal will monitor containers with autoheal=true label
+  # and restart any that are unhealthy or exit with a non-zero status
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: always
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - boom
   mongo:
     image: mongo:8.0
     hostname: mongo
@@ -80,15 +92,18 @@ services:
       - kafka_data:/var/lib/kafka/data
       - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
     healthcheck:
-      # Robust readiness: ensure controller quorum responds and broker APIs are available, with explicit timeouts
+      # Match wait_for_kafka checks: cluster-id, metadata quorum, configs API, and ACLs
       test: ["CMD-SHELL", "set -euo pipefail; \
-        timeout 8s /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server broker:29092 describe --status >/dev/null 2>&1 && \
-        timeout 6s /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server broker:29092 >/dev/null 2>&1"]
+        timeout 5s /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:29092 >/dev/null 2>&1 && \
+        timeout 5s /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server broker:29092 describe --status >/dev/null 2>&1 && \
+        timeout 5s /opt/kafka/bin/kafka-configs.sh --bootstrap-server broker:29092 --entity-type users --describe >/dev/null 2>&1 && \
+        timeout 5s /opt/kafka/bin/kafka-acls.sh --bootstrap-server broker:29092 --list >/dev/null 2>&1"]
       interval: 10s
-      timeout: 10s
+      timeout: 25s
       retries: 6
       start_period: 30s
     labels:
+      - autoheal=true
       - traefik.enable=true
       - traefik.docker.network=traefik-public
       - traefik.constraint-label=traefik-public
@@ -128,13 +143,15 @@ services:
       # Optional overrides (these have defaults in config.yaml)
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
     networks:
       - boom
       - traefik-public
-    profiles:
-      - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+    profiles:
+      - prod
+      - api
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
@@ -208,12 +225,14 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
     networks:
       - boom
     profiles:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models
     command:
       - /app/scheduler
       - ztf
@@ -229,35 +248,17 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
     networks:
       - boom
     profiles:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models
     command:
       - /app/scheduler
       - lsst
-  babamul-worker:
-    image: boom-astro/boom:latest
-    hostname: babamul-worker
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      # Required secrets - must be set in environment
-      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
-      # Optional overrides
-      BOOM_DATABASE__HOST: mongo
-      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
-    networks:
-      - boom
-    profiles:
-      - babamul
-    volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
-    command:
-      - /app/babamul-worker
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     volumes:

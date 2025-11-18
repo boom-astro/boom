@@ -4,6 +4,7 @@ use crate::{
         LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
+    filter::{Filter, FilterVersion},
     utils::{db::initialize_survey_indexes, enums::Survey},
 };
 use apache_avro::{
@@ -134,7 +135,6 @@ pub async fn insert_test_filter(
     use_lsst_prv_candidates: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let filter_id = uuid::Uuid::new_v4().to_string();
-    let catalog = format!("{}_alerts", survey);
     let pipeline = match (survey, use_prv_candidates, use_lsst_prv_candidates) {
         (Survey::Ztf, true, false) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
         (Survey::Ztf, false, false) => ZTF_TEST_PIPELINE,
@@ -148,28 +148,27 @@ pub async fn insert_test_filter(
         }
     };
 
-    let filter_obj: mongodb::bson::Document = doc! {
-        "_id": &filter_id,
-        "catalog": catalog,
-        "permissions": [1],
-        "active": true,
-        "active_fid": "v2e0fs",
-        "fv": [
-            {
-                "fid": "v2e0fs",
-                "pipeline": pipeline,
-                "created_at": {"$date": "2020-10-21T08:39:43.693Z"}
-            }
-        ],
-        "update_annotations": true,
-        "created_at": {"$date": "2021-02-20T08:18:28.324Z"},
-        "last_modified": {"$date": "2023-05-04T23:39:07.090Z"}
+    let now = flare::Time::now().to_jd();
+    let filter_obj = Filter {
+        id: filter_id.clone(),
+        survey: survey.clone(),
+        user_id: "test_user".to_string(),
+        permissions: vec![1],
+        active: true,
+        active_fid: "v2e0fs".to_string(),
+        fv: vec![FilterVersion {
+            fid: "v2e0fs".to_string(),
+            pipeline: pipeline.to_string(),
+            created_at: now,
+        }],
+        created_at: now,
+        updated_at: now,
     };
 
     let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
     let db = conf::build_db(&config_file).await?;
     let _ = db
-        .collection::<mongodb::bson::Document>("filters")
+        .collection::<Filter>("filters")
         .insert_one(filter_obj)
         .await;
 

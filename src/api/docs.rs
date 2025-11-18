@@ -22,16 +22,37 @@ impl Modify for SecurityAddon {
     }
 }
 
+struct BabamulSecurityAddon;
+
+impl Modify for BabamulSecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if openapi.components.is_none() {
+            openapi.components = Some(Components::new());
+        }
+
+        openapi.components.as_mut().unwrap().add_security_scheme(
+            "babamul_jwt_token",
+            SecurityScheme::OAuth2(OAuth2::new([Flow::Password(Password::new(
+                "/babamul/auth",
+                Scopes::default(),
+            ))])),
+        );
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "BOOM API",
         version = "0.1.0",
-        description = "An HTTP REST interface to BOOM."
+        description = "An HTTP REST interface to BOOM.\n\n\
+        **Note**: For the public Babamul API, see the separate documentation at `/babamul/docs`."
     ),
     paths(
         routes::info::get_health,
         routes::info::get_db_info,
+        routes::kafka::get_kafka_acls,
+        routes::kafka::delete_kafka_acls_for_user,
         routes::users::post_user,
         routes::users::get_users,
         routes::users::delete_user,
@@ -45,6 +66,7 @@ impl Modify for SecurityAddon {
         routes::filters::get_filters,
         routes::filters::get_filter,
         routes::filters::post_filter_version,
+        routes::filters::post_filter_test,
         routes::queries::count::post_count_query,
         routes::queries::count::post_estimated_count_query,
         routes::queries::find::post_find_query,
@@ -57,3 +79,22 @@ impl Modify for SecurityAddon {
     modifiers(&SecurityAddon)
 )]
 pub struct ApiDoc;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "BOOM's Babamul API",
+        version = "0.1.0",
+        description = "The Public REST API for Babamul."
+    ),
+    paths(
+        routes::babamul::post_babamul_signup,
+        routes::babamul::post_babamul_activate,
+        routes::babamul::post_babamul_auth,
+    ),
+    security(
+        ("babamul_jwt_token" = [])
+    ),
+    modifiers(&BabamulSecurityAddon)
+)]
+pub struct BabamulApiDoc;
