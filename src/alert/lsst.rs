@@ -744,7 +744,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let xmatch_configs = config
             .crossmatch
-            .get(&Survey::Ztf)
+            .get(&Survey::Lsst)
             .cloned()
             .unwrap_or_default();
 
