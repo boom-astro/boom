@@ -20,25 +20,6 @@ impl Model for BtsBotModel {
             model: load_model(&path)?,
         })
     }
-
-    #[instrument(skip_all, err)]
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError> {
-        let model_inputs = inputs! {
-            "triplet" => TensorRef::from_array_view(image_features)?,
-            "metadata" => TensorRef::from_array_view(metadata_features)?,
-        };
-
-        let outputs = self.model.run(model_inputs)?;
-
-        match outputs["fc_out"].try_extract_tensor::<f32>() {
-            Ok((_, scores)) => Ok(scores.to_vec()),
-            Err(_) => Err(ModelError::ModelOutputToVecError),
-        }
-    }
 }
 
 impl BtsBotModel {
@@ -46,7 +27,7 @@ impl BtsBotModel {
     pub fn get_metadata(
         &self,
         alerts: &[ZtfAlertForEnrichment],
-        alert_properties: &[AllBandsProperties],
+        alert_properties: &[&AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
@@ -134,5 +115,24 @@ impl BtsBotModel {
 
         let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)?;
         Ok(features_array)
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn predict(
+        &mut self,
+        metadata_features: &Array<f32, Dim<[usize; 2]>>,
+        image_features: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<Vec<f32>, ModelError> {
+        let model_inputs = inputs! {
+            "triplet" => TensorRef::from_array_view(image_features)?,
+            "metadata" => TensorRef::from_array_view(metadata_features)?,
+        };
+
+        let outputs = self.model.run(model_inputs)?;
+
+        match outputs["fc_out"].try_extract_tensor::<f32>() {
+            Ok((_, scores)) => Ok(scores.to_vec()),
+            Err(_) => Err(ModelError::ModelOutputToVecError),
+        }
     }
 }

@@ -17,25 +17,6 @@ impl Model for AcaiModel {
             model: load_model(&path)?,
         })
     }
-
-    #[instrument(skip_all, err)]
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError> {
-        let model_inputs = inputs! {
-            "features" =>  TensorRef::from_array_view(metadata_features)?,
-            "triplets" => TensorRef::from_array_view(image_features)?,
-        };
-
-        let outputs = self.model.run(model_inputs)?;
-
-        match outputs["score"].try_extract_tensor::<f32>() {
-            Ok((_, scores)) => Ok(scores.to_vec()),
-            Err(_) => Err(ModelError::ModelOutputToVecError),
-        }
-    }
 }
 
 impl AcaiModel {
@@ -137,5 +118,24 @@ impl AcaiModel {
 
         let features_array = Array::from_shape_vec((alerts.len(), 25), features_batch)?;
         Ok(features_array)
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn predict(
+        &mut self,
+        metadata_features: &Array<f32, Dim<[usize; 2]>>,
+        image_features: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<Vec<f32>, ModelError> {
+        let model_inputs = inputs! {
+            "features" =>  TensorRef::from_array_view(metadata_features)?,
+            "triplets" => TensorRef::from_array_view(image_features)?,
+        };
+
+        let outputs = self.model.run(model_inputs)?;
+
+        match outputs["score"].try_extract_tensor::<f32>() {
+            Ok((_, scores)) => Ok(scores.to_vec()),
+            Err(_) => Err(ModelError::ModelOutputToVecError),
+        }
     }
 }
