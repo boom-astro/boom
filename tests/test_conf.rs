@@ -1,4 +1,5 @@
 use boom::conf::{self, build_db, build_redis, load_config, load_dotenv, AppConfig};
+use boom::utils::spatial::CrossmatchCatalog;
 use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
@@ -58,24 +59,25 @@ fn test_load_xmatch_config() {
         .unwrap_or_default();
     assert!(crossmatch_config_ztf.len() > 0);
     for crossmatch in crossmatch_config_ztf.iter() {
-        assert!(crossmatch.catalog.len() > 0);
+        assert!(crossmatch.collection_name.len() > 0);
         assert!(crossmatch.radius > 0.0);
         assert!(crossmatch.projection.len() > 0);
     }
 
     let first = &crossmatch_config_ztf[0];
-    assert_eq!(first.catalog, "PS1_DR1");
+    assert_eq!(first.catalog, CrossmatchCatalog::PanSTARRS);
+    assert_eq!(first.collection_name, "PS1_DR1".to_string());
     assert_eq!(first.radius, 2.0 * std::f64::consts::PI / 180.0 / 3600.0);
-    assert_eq!(first.use_distance, false);
     assert_eq!(first.distance_key, None);
     assert_eq!(first.distance_max, None);
     assert_eq!(first.distance_max_near, None);
     let projection = &first.projection;
+    println!("projection: {:?}", projection);
     // test reading a few of the expected fields
-    assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(projection.get("gMeanPSFMag").unwrap().as_i64().unwrap(), 1);
+    assert_eq!(projection.get("_id").unwrap().as_i32().unwrap(), 1);
+    assert_eq!(projection.get("gMeanPSFMag").unwrap().as_i32().unwrap(), 1);
     assert_eq!(
-        projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(),
+        projection.get("gMeanPSFMagErr").unwrap().as_i32().unwrap(),
         1
     );
 }

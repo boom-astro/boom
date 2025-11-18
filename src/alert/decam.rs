@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::{
     alert::{
         base::{
@@ -13,7 +11,7 @@ use crate::{
         enums::Survey,
         lightcurves::Band,
         o11y::logging::as_error,
-        spatial::{xmatch, Coordinates},
+        spatial::{xmatch, Coordinates, Xmatches},
     },
 };
 use constcat::concat;
@@ -38,7 +36,7 @@ pub const DECAM_LSST_XMATCH_RADIUS: f64 =
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct FpHist {
     pub mjd: f64,
     pub forcediffimflux: f64,
@@ -110,7 +108,7 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DecamForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
@@ -157,13 +155,13 @@ pub struct DecamAliases {
     pub lsst: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DecamObject {
     #[serde(rename = "_id")]
     pub object_id: String,
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
-    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub cross_matches: Option<Xmatches>,
     pub aliases: Option<DecamAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,

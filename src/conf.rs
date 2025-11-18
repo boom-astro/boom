@@ -1,9 +1,14 @@
-use crate::utils::{enums::Survey, o11y::logging::as_error};
+use crate::utils::{
+    enums::Survey,
+    o11y::logging::as_error,
+    spatial::{CrossmatchCatalog, Gaia, Milliquas, PanSTARRS, Projectable, NED},
+};
 use config::{Config, File, Value};
 use dotenvy;
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::Deserialize;
+use std::str::FromStr;
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, error, info, instrument, warn};
 
@@ -145,33 +150,38 @@ pub async fn build_redis(
 
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
-    pub catalog: String,                     // name of the collection in the database
-    pub radius: f64,                         // radius in radians
-    pub projection: mongodb::bson::Document, // projection to apply to the catalog
-    pub use_distance: bool,                  // whether to use the distance field in the crossmatch
-    pub distance_key: Option<String>,        // name of the field to use for distance
-    pub distance_max: Option<f64>,           // maximum distance in kpc
-    pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
+    pub catalog: CrossmatchCatalog, // name of the collection in the database
+    pub collection_name: String,    // name of the collection in the database
+    pub radius: f64,                // radius in radians
+    pub distance_key: Option<String>, // name of the field to use for distance
+    pub distance_max: Option<f64>,  // maximum distance in kpc
+    pub distance_max_near: Option<f64>, // maximum distance in arcsec for nearby objects
+    pub projection: mongodb::bson::Document, // projection to use for the crossmatch
 }
 
 impl CatalogXmatchConfig {
     pub fn new(
-        catalog: &str,
+        catalog: &CrossmatchCatalog,
+        collection_name: &str,
         radius: f64,
-        projection: mongodb::bson::Document,
-        use_distance: bool,
         distance_key: Option<String>,
         distance_max: Option<f64>,
         distance_max_near: Option<f64>,
     ) -> CatalogXmatchConfig {
+        let projection = match catalog {
+            CrossmatchCatalog::PanSTARRS => PanSTARRS::projection(),
+            CrossmatchCatalog::Gaia => Gaia::projection(),
+            CrossmatchCatalog::Milliquas => Milliquas::projection(),
+            CrossmatchCatalog::NED => NED::projection(),
+        };
         CatalogXmatchConfig {
-            catalog: catalog.to_string(),
+            catalog: catalog.clone(),
+            collection_name: collection_name.to_string(),
             radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
-            projection,
-            use_distance,
             distance_key,
             distance_max,
             distance_max_near,
+            projection,
         }
     }
 
@@ -180,9 +190,19 @@ impl CatalogXmatchConfig {
     pub fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
 
-        let catalog = hashmap_xmatch
+        let catalog_str = hashmap_xmatch
             .get("catalog")
             .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
+            .clone()
+            .into_string()?;
+
+        let catalog = CrossmatchCatalog::from_str(&catalog_str).map_err(|e| {
+            BoomConfigError::InvalidSecretError(format!("invalid catalog name: {:?}", e))
+        })?;
+
+        let collection_name = hashmap_xmatch
+            .get("collection")
+            .ok_or(BoomConfigError::MissingKeyError("collection".to_string()))?
             .clone()
             .into_string()?;
 
@@ -191,17 +211,6 @@ impl CatalogXmatchConfig {
             .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
             .clone()
             .into_float()?;
-
-        let projection = hashmap_xmatch
-            .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
-            .clone()
-            .into_table()?;
-
-        let use_distance = match hashmap_xmatch.get("use_distance") {
-            Some(use_distance) => use_distance.clone().into_bool()?,
-            None => false,
-        };
 
         let distance_key = match hashmap_xmatch.get("distance_key") {
             Some(distance_key) => Some(distance_key.clone().into_string()?),
@@ -218,33 +227,24 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
-        // projection is a hashmap, we need to convert it to a Document
-        let mut projection_doc = mongodb::bson::Document::new();
-        for (key, value) in projection.iter() {
-            let key = key.as_str();
-            let value = value.clone().into_int()?;
-            projection_doc.insert(key, value);
-        }
-
-        if use_distance {
+        if catalog == CrossmatchCatalog::NED {
             if distance_key.is_none() {
-                panic!("must provide a distance_key if use_distance is true");
+                panic!("must provide a distance_key if catalog is NED");
             }
 
             if distance_max.is_none() {
-                panic!("must provide a distance_max if use_distance is true");
+                panic!("must provide a distance_max if catalog is NED");
             }
 
             if distance_max_near.is_none() {
-                panic!("must provide a distance_max_near if use_distance is true");
+                panic!("must provide a distance_max_near if catalog is NED");
             }
         }
 
         Ok(CatalogXmatchConfig::new(
             &catalog,
+            &collection_name,
             radius,
-            projection_doc,
-            use_distance,
             distance_key,
             distance_max,
             distance_max_near,

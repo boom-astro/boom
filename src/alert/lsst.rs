@@ -12,7 +12,7 @@ use crate::{
         enums::Survey,
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, SNT, ZP_AB},
         o11y::logging::as_error,
-        spatial::{xmatch, Coordinates},
+        spatial::{xmatch, Coordinates, Xmatches},
     },
 };
 use constcat::concat;
@@ -20,7 +20,6 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
 use tracing::instrument;
 
 pub const STREAM_NAME: &str = "LSST";
@@ -266,7 +265,7 @@ impl TryFrom<DiaSource> for LsstCandidate {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
     #[serde(rename = "diaObjectId")]
@@ -460,7 +459,7 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
@@ -498,7 +497,7 @@ pub struct DiaForcedSource {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
@@ -647,13 +646,13 @@ pub struct LsstAliases {
     pub decam: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstObject {
     #[serde(rename = "_id")]
     pub object_id: String,
     pub prv_candidates: Vec<LsstCandidate>,
     pub fp_hists: Vec<LsstForcedPhot>,
-    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub cross_matches: Option<Xmatches>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,

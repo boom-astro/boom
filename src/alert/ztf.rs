@@ -9,7 +9,7 @@ use crate::{
         enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
         o11y::logging::as_error,
-        spatial::{xmatch, Coordinates},
+        spatial::{xmatch, Coordinates, Xmatches},
     },
 };
 use constcat::concat;
@@ -17,7 +17,6 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
 use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "ZTF";
@@ -591,7 +590,7 @@ pub struct ZtfObject {
     #[serde(default)]
     pub prv_nondetections: Vec<ZtfPrvCandidate>,
     pub fp_hists: Vec<ZtfForcedPhot>,
-    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub cross_matches: Option<Xmatches>,
     pub aliases: Option<ZtfAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
