@@ -7,8 +7,8 @@ use apache_avro::{Schema, Writer};
 use std::collections::HashMap;
 use tracing::error;
 
-// Avro schema for enriched LSST alerts sent to Babamul
-// TODO: This is just a placeholder for now and needs to be defined properly
+// Avro schemas for enriched LSST and ZTF alerts sent to Babamul
+// TODO: These are just placeholders for now and need to be defined properly
 const ENRICHED_LSST_ALERT_SCHEMA: &str = r#"
 {
     "type": "record",
@@ -258,8 +258,19 @@ impl Babamul {
         // In the future, we will determine the topic based on the alert properties
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
 
+        // Determine if this alert is worth sending to Babamul
+        let min_reliability = 0.5;
+        let sso = false;
+
         // Iterate over the alerts
         for alert in alerts {
+            if alert.candidate.candidate.drb.unwrap_or(0.0) < min_reliability
+                || alert.properties.rock == sso
+            {
+                // Skip this alert, it doesn't meet the criteria
+                continue;
+            }
+
             // Determine which topic this alert should go to
             // Is it a star, galaxy, or none, and does it have an LSST crossmatch?
             // TODO: Get this implemented
