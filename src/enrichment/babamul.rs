@@ -411,3 +411,101 @@ impl Babamul {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enriched_lsst_avro_schema_contains_expected_fields() {
+        let schema = avro_schema_from_type::<EnrichedLsstAlert>("EnrichedLsstAlert");
+        let s = serde_json::to_string(&schema).expect("serialize schema to json");
+        // basic fields
+        assert!(s.contains("candid"), "schema missing candid: {}", s);
+        assert!(s.contains("objectId"), "schema missing objectId: {}", s);
+
+        // Parse JSON and inspect fields
+        let v: serde_json::Value = serde_json::from_str(&s).expect("parse schema json");
+        let fields = v
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .expect("fields array");
+
+        // properties field should exist and currently is serialized as a string
+        let props = fields
+            .iter()
+            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("properties"))
+            .expect("properties field missing");
+        let props_type = &props["type"];
+        let props_is_string = props_type.is_string() && props_type.as_str() == Some("string");
+        let props_is_union_with_string =
+            props_type.is_array() && props_type.as_array().unwrap().iter().any(|v| v == "string");
+        assert!(
+            props_is_string || props_is_union_with_string,
+            "properties is not string-ish in schema: {}",
+            s
+        );
+
+        // prv_candidates should be represented (array)
+        let prv = fields
+            .iter()
+            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("prv_candidates"))
+            .expect("prv_candidates missing");
+        let prv_type = &prv["type"];
+        let prv_is_array = (prv_type.is_object()
+            && prv_type.get("type").and_then(|t| t.as_str()) == Some("array"))
+            || (prv_type.is_array()
+                && prv_type
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("array")));
+        assert!(prv_is_array, "prv_candidates not an array in schema: {}", s);
+    }
+
+    #[test]
+    fn enriched_ztf_avro_schema_contains_expected_fields() {
+        let schema = avro_schema_from_type::<EnrichedZtfAlert>("EnrichedZtfAlert");
+        let s = serde_json::to_string(&schema).expect("serialize schema to json");
+        // basic fields
+        assert!(s.contains("candid"), "schema missing candid: {}", s);
+        assert!(s.contains("objectId"), "schema missing objectId: {}", s);
+
+        let v: serde_json::Value = serde_json::from_str(&s).expect("parse schema json");
+        let fields = v
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .expect("fields array");
+
+        // properties field should exist and currently is serialized as a string
+        let props = fields
+            .iter()
+            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("properties"))
+            .expect("properties field missing");
+        let props_type = &props["type"];
+        let props_is_string = props_type.is_string() && props_type.as_str() == Some("string");
+        let props_is_union_with_string =
+            props_type.is_array() && props_type.as_array().unwrap().iter().any(|v| v == "string");
+        assert!(
+            props_is_string || props_is_union_with_string,
+            "properties is not string-ish in schema: {}",
+            s
+        );
+
+        // prv_candidates should be represented (array)
+        let prv = fields
+            .iter()
+            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("prv_candidates"))
+            .expect("prv_candidates missing");
+        let prv_type = &prv["type"];
+        let prv_is_array = (prv_type.is_object()
+            && prv_type.get("type").and_then(|t| t.as_str()) == Some("array"))
+            || (prv_type.is_array()
+                && prv_type
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("array")));
+        assert!(prv_is_array, "prv_candidates not an array in schema: {}", s);
+    }
+}
