@@ -101,6 +101,35 @@ pub struct ZtfAlertProperties {
     pub photstats: PerBandProperties,
 }
 
+/// Enriched ZTF alert (i.e., one with properties)
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct EnrichedZtfAlert {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
+    pub properties: ZtfAlertProperties,
+}
+
+impl EnrichedZtfAlert {
+    pub fn from_alert_and_properties(
+        alert: ZtfAlertForEnrichment,
+        properties: ZtfAlertProperties,
+    ) -> Self {
+        EnrichedZtfAlert {
+            candid: alert.candid,
+            object_id: alert.object_id,
+            candidate: alert.candidate,
+            prv_candidates: alert.prv_candidates,
+            fp_hists: alert.fp_hists,
+            properties,
+        }
+    }
+}
+
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
