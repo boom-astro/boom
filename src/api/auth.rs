@@ -94,9 +94,10 @@ impl AuthProvider {
             .find_one(doc! {"_id": &user_id})
             .await
             .map_err(|e| {
-                eprintln!(
+                tracing::error!(
                     "Database query failed when looking for user id {}: {}",
-                    user_id, e
+                    user_id,
+                    e
                 );
                 std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -284,7 +285,7 @@ pub async fn babamul_auth_middleware(
                             ));
                         }
                         Err(e) => {
-                            eprintln!("Database error fetching babamul user: {}", e);
+                            tracing::error!("Database error fetching babamul user: {}", e);
                             return Err(actix_web::error::ErrorInternalServerError(
                                 "Database error",
                             ));

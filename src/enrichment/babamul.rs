@@ -192,7 +192,7 @@ impl Babamul {
 
         // Now iterate over topic, alerts vectors to send them to Kafka
         for (topic_name, alerts) in alerts_by_topic {
-            println!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
             // Convert all alerts to Avro format first (to avoid lifetime issues)
             let mut payloads = Vec::new();
@@ -260,7 +260,7 @@ impl Babamul {
 
         // Now iterate over topic, alerts vectors to send them to Kafka
         for (topic_name, alerts) in alerts_by_topic {
-            println!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
             // Convert all alerts to Avro format first (to avoid lifetime issues)
             let mut payloads = Vec::new();
