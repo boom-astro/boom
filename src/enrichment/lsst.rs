@@ -231,7 +231,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // Send to Babamul for batch processing
         match self.babamul.as_ref() {
             Some(babamul) => {
-                if let Err(e) = babamul.process_alerts(enriched_alerts).await {
+                if let Err(e) = babamul.process_lsst_alerts(enriched_alerts).await {
                     error!("Failed to process enriched alerts in Babamul: {}", e);
                 }
             }

@@ -23,9 +23,25 @@ const ENRICHED_LSST_ALERT_SCHEMA: &str = r#"
 }
 "#;
 
+const ENRICHED_ZTF_ALERT_SCHEMA: &str = r#"
+{
+    "type": "record",
+    "name": "EnrichedZtfAlert",
+    "fields": [
+        {"name": "candid", "type": "long"},
+        {"name": "objectId", "type": "string"},
+        {"name": "candidate", "type": "string"},
+        {"name": "prv_candidates", "type": "string"},
+        {"name": "fp_hists", "type": "string"},
+        {"name": "properties", "type": "string"}
+    ]
+}
+"#;
+
 pub struct Babamul {
     kafka_producer: rdkafka::producer::FutureProducer,
-    avro_schema: Schema,
+    lsst_avro_schema: Schema,
+    ztf_avro_schema: Schema,
 }
 
 impl Babamul {
@@ -53,18 +69,24 @@ impl Babamul {
                 .create()
                 .expect("Failed to create Babamul Kafka producer");
 
-        // Parse the Avro schema
-        let avro_schema =
+        // Parse the Avro schemas
+        let lsst_avro_schema =
             Schema::parse_str(ENRICHED_LSST_ALERT_SCHEMA).expect("Failed to parse Avro schema");
+        let ztf_avro_schema =
+            Schema::parse_str(ENRICHED_ZTF_ALERT_SCHEMA).expect("Failed to parse Avro schema");
 
         Babamul {
             kafka_producer,
-            avro_schema,
+            lsst_avro_schema,
+            ztf_avro_schema,
         }
     }
 
     /// Convert an enriched LSST alert to Avro bytes
-    fn to_avro_bytes(&self, alert: &EnrichedLsstAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
+    fn lsst_alert_to_avro_bytes(
+        &self,
+        alert: &EnrichedLsstAlert,
+    ) -> Result<Vec<u8>, EnrichmentWorkerError> {
         // Serialize complex fields to JSON strings for the Avro schema
         let candidate_json = serde_json::to_string(&alert.candidate)
             .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
@@ -85,8 +107,11 @@ impl Babamul {
             "properties": properties_json,
         });
 
-        let mut writer =
-            Writer::with_codec(&self.avro_schema, Vec::new(), apache_avro::Codec::Snappy);
+        let mut writer = Writer::with_codec(
+            &self.lsst_avro_schema,
+            Vec::new(),
+            apache_avro::Codec::Snappy,
+        );
         writer
             .append_ser(avro_record)
             .inspect_err(|e| {
@@ -104,7 +129,7 @@ impl Babamul {
         Ok(encoded)
     }
 
-    pub async fn process_alerts(
+    pub async fn process_lsst_alerts(
         &self,
         alerts: Vec<EnrichedLsstAlert>,
     ) -> Result<(), EnrichmentWorkerError> {
@@ -146,7 +171,7 @@ impl Babamul {
             // Convert all alerts to Avro format first (to avoid lifetime issues)
             let mut payloads = Vec::new();
             for alert in &alerts {
-                let payload = self.to_avro_bytes(alert)?;
+                let payload = self.lsst_alert_to_avro_bytes(alert)?;
                 payloads.push(payload);
             }
 
