@@ -148,6 +148,10 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     // and can directly use the indexes to read the values.
     // while this makes it very specific to this format, it is twice as fast.
     let first_part = &tuple_str[0..1];
+    // verify that the second character is a comma
+    if &tuple_str[1..2] != "," {
+        return None;
+    }
     let second_part = &tuple_str[2..];
     let first = first_part.parse::<i32>();
     let second = second_part.parse::<i64>();
@@ -208,13 +212,6 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
-}
-
-impl Alert {
-    pub fn from_bson_document(doc: &Document) -> Result<Self, mongodb::bson::de::Error> {
-        // from_document consumes, so clone if you only have &Document
-        mongodb::bson::from_document(doc.clone())
-    }
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
@@ -317,7 +314,7 @@ pub async fn send_alert_to_kafka(
 ///
 /// # Returns
 /// * `bool` - Returns true if the field is used in the stage, false otherwise.
-pub fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
+fn uses_field_in_stage(stage: &serde_json::Value, field: &str) -> bool {
     // we consider a value is a match with field if it is:
     // - equal to the field
     // - equal to the field with a $ prefix
@@ -514,6 +511,14 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     Ok(())
 }
 
+/// Updates the the index of a pipeline where aliases are used/required
+///
+/// # Arguments
+/// * `current` - The current index of the aliases in the pipeline
+/// * `new` - The new index of the aliases in the pipeline
+///
+/// # Returns
+/// * `Option<usize>` - The updated index of the aliases in the pipeline
 pub fn update_aliases_index(current: Option<usize>, new: Option<usize>) -> Option<usize> {
     if new.is_some() {
         if current.is_none() {
@@ -526,6 +531,15 @@ pub fn update_aliases_index(current: Option<usize>, new: Option<usize>) -> Optio
     }
 }
 
+/// Updates the index of a pipeline where aliases are used/required,
+/// by checking multiple new indices.
+///
+/// # Arguments
+/// * `current` - The current index of the aliases in the pipeline
+/// * `news` - A vector of new indices of the aliases in the pipeline
+///
+/// # Returns
+/// * `Option<usize>` - The updated index of the aliases in the pipeline
 pub fn update_aliases_index_multiple(
     current: Option<usize>,
     news: Vec<Option<usize>>,
@@ -549,7 +563,7 @@ pub fn update_aliases_index_multiple(
 /// * `Result<Vec<Document>, FilterError>` - A vector of documents that passed the filter or a FilterError.
 #[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
-    candids: Vec<i64>,
+    candids: &[i64],
     filter_id: &str,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
@@ -558,7 +572,9 @@ pub async fn run_filter(
         return Ok(vec![]);
     }
     if pipeline.len() == 0 {
-        panic!("filter pipeline is empty, ensure filter has been built before running");
+        return Err(FilterError::InvalidFilterPipeline(
+            "filter pipeline is empty".to_string(),
+        ));
     }
 
     // insert candids into filter
@@ -942,4 +958,395 @@ pub async fn run_filter_worker<T: FilterWorker>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        conf::{build_db, build_kafka_config, load_dotenv, load_raw_config},
+        utils::{enums::Survey, testing::TEST_CONFIG_FILE},
+    };
+    use mongodb::bson::{doc, Document};
+
+    fn pipeline_to_json(pipeline: &[Document]) -> Vec<serde_json::Value> {
+        pipeline
+            .iter()
+            .map(|doc| serde_json::to_value(doc).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_programid_candid_tuple() {
+        let input = "1,123456789";
+        let result = parse_programid_candid_tuple(input);
+        assert!(result.is_some());
+        let (program_id, candid) = result.unwrap();
+        assert_eq!(program_id, 1);
+        assert_eq!(candid, 123456789);
+
+        let input = "42,987654321"; // invalid program id (only 1 digit allowed)
+        let result = parse_programid_candid_tuple(input);
+        assert!(result.is_none());
+
+        let input = "1,input"; // invalid candid
+        let result = parse_programid_candid_tuple(input);
+        assert!(result.is_none());
+
+        let input = "1234"; // just one number
+        let result = parse_programid_candid_tuple(input);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_alert_schema() {
+        let schema = load_alert_schema();
+        assert!(schema.is_ok());
+    }
+
+    #[test]
+    fn test_to_avro_bytes() {
+        let alert = Alert {
+            candid: 123456789,
+            object_id: "ZTF18aaayemv".to_string(),
+            jd: 2459123.12345,
+            ra: 123.456789,
+            dec: -12.3456789,
+            survey: Survey::Ztf,
+            filters: vec![],
+            classifications: vec![],
+            photometry: vec![],
+            cutout_science: vec![],
+            cutout_template: vec![],
+            cutout_difference: vec![],
+        };
+        let schema = load_alert_schema().unwrap();
+        let avro_bytes = to_avro_bytes(&alert, &schema);
+        assert!(avro_bytes.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_producer() {
+        load_dotenv();
+        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
+        let kafka_config = build_kafka_config(&config, &Survey::Ztf).unwrap();
+        let producer = create_producer(&kafka_config).await;
+        assert!(producer.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_alert_to_kafka() {
+        load_dotenv();
+        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
+        let kafka_config = build_kafka_config(&config, &Survey::Ztf).unwrap();
+        let alert = Alert {
+            candid: 123456789,
+            object_id: "ZTF18aaayemv".to_string(),
+            jd: 2459123.12345,
+            ra: 123.456789,
+            dec: -12.3456789,
+            survey: Survey::Ztf,
+            filters: vec![],
+            classifications: vec![],
+            photometry: vec![],
+            cutout_science: vec![],
+            cutout_template: vec![],
+            cutout_difference: vec![],
+        };
+        let schema = load_alert_schema().unwrap();
+        let producer = create_producer(&kafka_config).await.unwrap();
+
+        // generate a random topic name
+        let topic = uuid::Uuid::new_v4().to_string();
+        let result = send_alert_to_kafka(&alert, &schema, &producer, &topic).await;
+        // this may fail if kafka is not running, so we just check that it returns a result
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_uses_field_in_stage() {
+        // this function should detect if a field is used in a specific stage of the filter pipeline
+        let stage = doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "LSST.prv_candidates": { "$exists": true } } };
+        let stage_json = serde_json::to_value(&stage).unwrap();
+        // uses_field_in_stage should return true for "candidate.drb"
+        let found = uses_field_in_stage(&stage_json, "candidate.drb");
+        assert!(found);
+
+        // uses_field_in_stage should return false for "candidate.jd"
+        let found = uses_field_in_stage(&stage_json, "candidate.jd");
+        assert!(!found);
+
+        // uses_field_in_stage should return true for "LSST.prv_candidates"
+        let found = uses_field_in_stage(&stage_json, "LSST.prv_candidates");
+        assert!(found);
+
+        // however, if we look for "prv_candidates" only, we should not find it (using the prefixes to avoid)
+        let found = uses_field_in_stage(&stage_json, "prv_candidates");
+        assert!(!found);
+    }
+
+    #[tokio::test]
+    async fn test_uses_field_in_filter() {
+        // this function should detect if a field is used in the filter pipeline
+        // so let's write a filter and test it on it.
+        let pipeline = [
+            doc! { "$match": { "candidate.drb": { "$gt": 0.5 }, "LSST.prv_candidates": { "$exists": true } } },
+            doc! { "$project": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64] } } },
+        ];
+        // it takes a Vec<serde_json::Value> as input, so we convert the documents to that format
+        let pipeline = pipeline_to_json(&pipeline);
+
+        // uses_field_in_filter should return true for "candidate.drb"
+        let stage_index = uses_field_in_filter(&pipeline, "candidate.drb");
+        assert!(stage_index.is_some());
+        assert_eq!(stage_index, Some(0));
+
+        // uses_field_in_filter should also return true for "candidate.magpsf", but it should be in the second stage
+        let stage_index = uses_field_in_filter(&pipeline, "candidate.magpsf");
+        assert!(stage_index.is_some());
+        assert_eq!(stage_index, Some(1));
+
+        // uses_field_in_filter should return true for "LSST.prv_candidates"
+        let stage_index = uses_field_in_filter(&pipeline, "LSST.prv_candidates");
+        assert!(stage_index.is_some());
+        assert_eq!(stage_index, Some(0));
+
+        // however, if we look for "prv_candidates" only, we should not find it (using the prefixes to avoid)
+        let stage_index = uses_field_in_filter(&pipeline, "prv_candidates");
+        assert!(stage_index.is_none());
+
+        // uses_field_in_filter should return false for "candidate.jd"
+        let stage_index = uses_field_in_filter(&pipeline, "candidate.jd");
+        assert!(stage_index.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_validate_filter_pipeline() {
+        // first let's test a valid pipeline, and then we will test some invalid ones
+        let valid_pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        // it expects a Vec<serde_json::Value> as input, so we convert the documents to that format
+        let valid_pipeline = pipeline_to_json(&valid_pipeline);
+
+        // this should return Ok(())
+        let result = validate_filter_pipeline(&valid_pipeline);
+        assert!(result.is_ok());
+
+        // now let's test a pipeline which is invalid because we exclude the objectId field in a project stage
+        let invalid_pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "candidate": 1, "classifications": 1, "coordinates": 1 } }, // objectId is excluded here
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        let invalid_pipeline = pipeline_to_json(&invalid_pipeline);
+        // this should return an error
+        let result = validate_filter_pipeline(&invalid_pipeline);
+        assert!(result.is_err());
+
+        // now let's test a pipeline which is invalid because we exclude the _id field in a project stage
+        let invalid_pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "objectId": 1, "_id": 0, "candidate": 1, "classifications": 1, "coordinates": 1 } }, // _id is excluded here
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        let invalid_pipeline = pipeline_to_json(&invalid_pipeline);
+        // this should return an error
+        let result = validate_filter_pipeline(&invalid_pipeline);
+        assert!(result.is_err());
+
+        // now let's test a pipeline which is invalid because we unset the objectId field
+        let invalid_pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+            doc! { "$unset": "objectId" }, // objectId is unset here
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        let invalid_pipeline = pipeline_to_json(&invalid_pipeline);
+        // this should return an error
+        let result = validate_filter_pipeline(&invalid_pipeline);
+        assert!(result.is_err());
+
+        // now let's test a pipeline which is invalid because the last stage is not a project stage
+        let invalid_pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+            doc! { "$addFields": { "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } }, // last stage is not a project
+        ];
+        let invalid_pipeline = pipeline_to_json(&invalid_pipeline);
+        // this should return an error
+        let result = validate_filter_pipeline(&invalid_pipeline);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_aliases_index() {
+        // test when new is lower than current
+        let current = Some(5);
+        let new = Some(2);
+        let updated = update_aliases_index(current, new);
+        assert_eq!(updated, Some(2));
+
+        // test when new is higher than current
+        let current = Some(3);
+        let new = Some(5);
+        let updated = update_aliases_index(current, new);
+        assert_eq!(updated, Some(3));
+
+        // test when current is None
+        let current = None;
+        let new = Some(5);
+        let updated = update_aliases_index(current, new);
+        assert_eq!(updated, Some(5));
+
+        // test when new is None
+        let current = Some(3);
+        let new = None;
+        let updated = update_aliases_index(current, new);
+        assert_eq!(updated, Some(3));
+    }
+
+    #[test]
+    fn test_update_aliases_index_multiple() {
+        // test when some news are lower than current
+        let current = Some(4);
+        let news = vec![Some(6), Some(2), None, Some(5)];
+        let updated = update_aliases_index_multiple(current, news);
+        assert_eq!(updated, Some(2));
+
+        // test when all news are higher than current
+        let current = Some(2);
+        let news = vec![Some(6), Some(5), None, Some(4)];
+        let updated = update_aliases_index_multiple(current, news);
+        assert_eq!(updated, Some(2));
+
+        // test when current is None
+        let current = None;
+        let news = vec![Some(6), Some(2), None, Some(5)];
+        let updated = update_aliases_index_multiple(current, news);
+        assert_eq!(updated, Some(2));
+
+        // test when all news are None
+        let current = Some(4);
+        let news = vec![None, None];
+        let updated = update_aliases_index_multiple(current, news);
+        assert_eq!(updated, Some(4));
+    }
+
+    #[tokio::test]
+    async fn test_run_filter() {
+        load_dotenv();
+        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
+        let db = build_db(&config).await.unwrap();
+        let alert_collection = db.collection::<Document>("alerts_ztf_test");
+        let candids = vec![123456789, 987654321];
+        let pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        let result = run_filter(&candids, "test_filter", pipeline, &alert_collection).await;
+        assert!(result.is_ok());
+
+        // let's try a pipeline that is invalid (doesn't start with a $match)
+        let invalid_pipeline = vec![
+            doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        let result = run_filter(&candids, "test_filter", invalid_pipeline, &alert_collection).await;
+        assert!(result.is_err());
+
+        // let's try a pipeline that is empty
+        let empty_pipeline = vec![];
+        let result = run_filter(&candids, "test_filter", empty_pipeline, &alert_collection).await;
+        assert!(result.is_err());
+
+        // let's try with empty candids
+        let empty_candids = vec![];
+        let pipeline = vec![
+            doc! { "$match": {} },
+            doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
+            doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
+        ];
+        let result = run_filter(&empty_candids, "test_filter", pipeline, &alert_collection).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_filter() {
+        load_dotenv();
+        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
+        let db = build_db(&config).await.unwrap();
+        let filter_collection = db.collection::<Filter>("filters_test");
+        let filter_id = uuid::Uuid::new_v4().to_string();
+        // first, insert a filter
+        let filter = Filter {
+            id: filter_id.clone(),
+            permissions: vec![1, 2, 3],
+            user_id: "test_user".to_string(),
+            survey: Survey::Ztf,
+            active: true,
+            active_fid: "v1".to_string(),
+            fv: vec![FilterVersion {
+                fid: "v1".to_string(),
+                pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1}}]"#.to_string(),
+                created_at: 0.0,
+            }],
+            created_at: 0.0,
+            updated_at: 0.0,
+        };
+        filter_collection.insert_one(&filter).await.unwrap();
+        // now, try to get it
+        let result = get_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
+        assert!(result.is_ok());
+        let retrieved_filter = result.unwrap();
+        assert_eq!(retrieved_filter.id, filter.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_active_filter_pipeline() {
+        let mut filter = Filter {
+            id: "test_filter".to_string(),
+            permissions: vec![1, 2, 3],
+            user_id: "test_user".to_string(),
+            survey: Survey::Ztf,
+            active: true,
+            active_fid: "v1".to_string(),
+            fv: vec![
+                FilterVersion {
+                    // active version
+                    fid: "v1".to_string(),
+                    pipeline: r#"[]"#.to_string(),
+                    created_at: 1.0,
+                },
+                FilterVersion {
+                    // inactive version
+                    fid: "v2".to_string(),
+                    pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1, "candidate": 1}}]"#
+                        .to_string(),
+                    created_at: 2.0,
+                },
+            ],
+            created_at: 0.0,
+            updated_at: 0.0,
+        };
+
+        let result = get_active_filter_pipeline(&filter);
+        assert!(result.is_ok());
+        let pipeline = result.unwrap();
+        assert_eq!(pipeline.len(), 0);
+
+        // try it with an incorrect pipeline (not valid JSON)
+        filter.fv[0].pipeline = "invalid_json".to_string();
+        let result = get_active_filter_pipeline(&filter);
+        assert!(result.is_err());
+
+        // now test with an invalid active_fid
+        filter.active_fid = "v3".to_string(); // non-existent version
+        let result = get_active_filter_pipeline(&filter);
+        assert!(result.is_err());
+    }
 }

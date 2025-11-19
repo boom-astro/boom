@@ -465,7 +465,7 @@ impl FilterWorker for LsstFilterWorker {
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
         for filter in &self.filters {
             let out_documents = run_filter(
-                candids.clone(),
+                &candids,
                 &filter.id,
                 filter.pipeline.clone(),
                 &self.alert_collection,
