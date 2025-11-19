@@ -302,7 +302,6 @@ pub struct LsstEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<mongodb::bson::Document>,
-    alert_cutout_collection: mongodb::Collection<mongodb::bson::Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
 }
@@ -315,7 +314,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
-        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
@@ -333,7 +331,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_cutout_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
         })
