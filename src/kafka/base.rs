@@ -383,7 +383,7 @@ pub trait AlertProducer {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsumerError {
-    #[error("error from boom::conf")]
+    #[error("error from boom::conf ({0})")]
     Config(#[from] conf::BoomConfigError),
     #[error("error from rdkafka")]
     Kafka(#[from] rdkafka::error::KafkaError),

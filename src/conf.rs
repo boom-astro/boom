@@ -377,14 +377,17 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    #[instrument(err)]
     pub fn from_default_path() -> Result<Self, BoomConfigError> {
         load_config(None)
     }
 
+    #[instrument(err)]
     pub fn from_path(config_path: &str) -> Result<Self, BoomConfigError> {
         load_config(Some(config_path))
     }
 
+    #[instrument(err)]
     pub fn from_test_config() -> Result<Self, BoomConfigError> {
         // Find the workspace root by looking for Cargo.toml with tests/ directory
         let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
@@ -436,15 +439,18 @@ impl AppConfig {
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
         build_db(self).await
     }
 
+    #[instrument(skip_all, err)]
     pub async fn build_redis(&self) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
         build_redis(self).await
     }
 }
 
+#[instrument(err)]
 pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigError> {
     load_dotenv();
 
