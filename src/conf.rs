@@ -11,7 +11,7 @@ const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
-    #[error("failed to load config")]
+    #[error("failed to load config ({0})")]
     InvalidConfigError(#[from] config::ConfigError),
     #[error("failed to connect to database using config")]
     ConnectMongoError(#[from] mongodb::error::Error),
