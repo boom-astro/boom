@@ -5,40 +5,185 @@ use crate::enrichment::lsst::EnrichedLsstAlert;
 use crate::enrichment::ztf::EnrichedZtfAlert;
 use crate::enrichment::EnrichmentWorkerError;
 use apache_avro::{Schema, Writer};
-use std::collections::HashMap;
+use schemars::schema_for;
+use serde_json::Value as JsonValue;
+use std::collections::{BTreeMap, HashMap};
 use tracing::error;
 
-// Avro schemas for enriched LSST and ZTF alerts sent to Babamul
-// TODO: These are just placeholders for now and need to be defined properly
-const ENRICHED_LSST_ALERT_SCHEMA: &str = r#"
-{
-    "type": "record",
-    "name": "EnrichedLsstAlert",
-    "fields": [
-        {"name": "candid", "type": "long"},
-        {"name": "objectId", "type": "string"},
-        {"name": "candidate", "type": "string"},
-        {"name": "prv_candidates", "type": "string"},
-        {"name": "fp_hists", "type": "string"},
-        {"name": "properties", "type": "string"}
-    ]
-}
-"#;
+// Generate a small Avro schema from a Rust type inspected via `schemars`.
+// We only include the fields used by Babamul (the fields that are put into
+// the Avro record). Complex nested Rust types (objects/arrays) are mapped
+// to Avro `string` since we serialize those nested values as JSON strings
+// when producing the Avro payload.
+// Convert a schemars JSON Schema node to an Avro JSON type.
+fn json_schema_node_to_avro(
+    node: &JsonValue,
+    definitions: Option<&JsonValue>,
+    name_hint: &str,
+    seen_defs: &mut BTreeMap<String, JsonValue>,
+) -> JsonValue {
+    // Handle $ref
+    if let Some(r) = node.get("$ref").and_then(|v| v.as_str()) {
+        if let Some(def_name) = r.split('/').last() {
+            if let Some(defs) = definitions {
+                if let Some(def_node) = defs.get(def_name) {
+                    if let Some(existing) = seen_defs.get(def_name) {
+                        return existing.clone();
+                    }
+                    let rec = json_schema_node_to_avro(def_node, definitions, def_name, seen_defs);
+                    seen_defs.insert(def_name.to_string(), rec.clone());
+                    return rec;
+                }
+            }
+        }
+        return serde_json::json!("string");
+    }
 
-const ENRICHED_ZTF_ALERT_SCHEMA: &str = r#"
-{
-    "type": "record",
-    "name": "EnrichedZtfAlert",
-    "fields": [
-        {"name": "candid", "type": "long"},
-        {"name": "objectId", "type": "string"},
-        {"name": "candidate", "type": "string"},
-        {"name": "prv_candidates", "type": "string"},
-        {"name": "fp_hists", "type": "string"},
-        {"name": "properties", "type": "string"}
-    ]
+    // Handle anyOf / oneOf
+    if let Some(any_of) = node.get("anyOf").or_else(|| node.get("oneOf")) {
+        if let Some(arr) = any_of.as_array() {
+            let mut sub_types: Vec<JsonValue> = Vec::new();
+            let mut has_null = false;
+            for variant in arr {
+                if variant == &JsonValue::String("null".to_string())
+                    || variant.get("type") == Some(&JsonValue::String("null".to_string()))
+                {
+                    has_null = true;
+                    continue;
+                }
+                let t = json_schema_node_to_avro(variant, definitions, name_hint, seen_defs);
+                sub_types.push(t);
+            }
+            if sub_types.len() == 1 && has_null {
+                return serde_json::json!(["null", sub_types[0].clone()]);
+            }
+            return serde_json::json!("string");
+        }
+    }
+
+    if let Some(t) = node.get("type") {
+        let res = match t {
+            JsonValue::String(s) => match s.as_str() {
+                "integer" => serde_json::json!("long"),
+                "number" => serde_json::json!("double"),
+                "string" => serde_json::json!("string"),
+                "boolean" => serde_json::json!("boolean"),
+                "array" => {
+                    let items = node.get("items").unwrap_or(&JsonValue::Null);
+                    let items_avro =
+                        json_schema_node_to_avro(items, definitions, name_hint, seen_defs);
+                    serde_json::json!({"type": "array", "items": items_avro})
+                }
+                "object" => {
+                    let rec_name = name_hint.to_string();
+                    let mut fields: Vec<JsonValue> = Vec::new();
+                    if let Some(props) = node.get("properties").and_then(|p| p.as_object()) {
+                        let mut required: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        if let Some(req) = node.get("required").and_then(|r| r.as_array()) {
+                            for rn in req {
+                                if let Some(s) = rn.as_str() {
+                                    required.insert(s.to_string());
+                                }
+                            }
+                        }
+                        for (k, v) in props.iter() {
+                            let child_name_hint = format!("{}_{}", rec_name, k);
+                            let mut child_avro = json_schema_node_to_avro(
+                                v,
+                                definitions,
+                                &child_name_hint,
+                                seen_defs,
+                            );
+                            if !required.contains(k) {
+                                child_avro = serde_json::json!(["null", child_avro]);
+                            }
+                            fields.push(serde_json::json!({"name": k, "type": child_avro}));
+                        }
+                    }
+                    serde_json::json!({"type": "record", "name": rec_name, "fields": fields})
+                }
+                _ => serde_json::json!("string"),
+            },
+            JsonValue::Array(arr) => {
+                let mut has_null = false;
+                let mut primary: Option<&JsonValue> = None;
+                for elem in arr {
+                    if elem == &JsonValue::String("null".to_string()) {
+                        has_null = true;
+                    } else {
+                        primary = Some(elem);
+                    }
+                }
+                if let Some(p) = primary {
+                    let mut av = json_schema_node_to_avro(p, definitions, name_hint, seen_defs);
+                    if has_null {
+                        av = serde_json::json!(["null", av]);
+                    }
+                    av
+                } else {
+                    serde_json::json!("string")
+                }
+            }
+            _ => serde_json::json!("string"),
+        };
+        return res;
+    }
+
+    serde_json::json!("string")
 }
-"#;
+
+fn avro_schema_from_type<T: schemars::JsonSchema>(record_name: &str) -> Schema {
+    let root = schema_for!(T);
+    let root_json = serde_json::to_value(&root).unwrap_or(JsonValue::Null);
+    let schema_node = root_json.get("schema").unwrap_or(&root_json);
+    let definitions = root_json.get("definitions");
+    let props = schema_node.get("properties").and_then(|p| p.as_object());
+
+    let field_names = vec![
+        ("candid", "candid"),
+        ("object_id", "objectId"),
+        ("candidate", "candidate"),
+        ("prv_candidates", "prv_candidates"),
+        ("fp_hists", "fp_hists"),
+        ("properties", "properties"),
+    ];
+
+    let mut fields: Vec<JsonValue> = Vec::new();
+    let mut seen_defs: BTreeMap<String, JsonValue> = BTreeMap::new();
+
+    for (rust_name, avro_name) in field_names {
+        let node = props
+            .and_then(|m| m.get(rust_name))
+            .cloned()
+            .unwrap_or(JsonValue::Null);
+        let child_hint = format!("{}_{}", record_name, rust_name);
+        let mut avro_type =
+            json_schema_node_to_avro(&node, definitions, &child_hint, &mut seen_defs);
+
+        let is_required = schema_node
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.iter().any(|v| v.as_str() == Some(rust_name)))
+            .unwrap_or(false);
+        if !is_required {
+            if !(avro_type.is_array() && avro_type.as_array().unwrap().iter().any(|v| v == "null"))
+            {
+                avro_type = serde_json::json!(["null", avro_type]);
+            }
+        }
+
+        fields.push(serde_json::json!({"name": avro_name, "type": avro_type}));
+    }
+
+    let avro_obj = serde_json::json!({
+        "type": "record",
+        "name": record_name,
+        "fields": fields,
+    });
+
+    Schema::parse_str(&avro_obj.to_string()).expect("Failed to parse generated Avro schema")
+}
 
 pub enum EnrichedAlert<'a> {
     Lsst(&'a EnrichedLsstAlert),
@@ -76,11 +221,10 @@ impl Babamul {
                 .create()
                 .expect("Failed to create Babamul Kafka producer");
 
-        // Parse the Avro schemas
-        let lsst_avro_schema =
-            Schema::parse_str(ENRICHED_LSST_ALERT_SCHEMA).expect("Failed to parse Avro schema");
-        let ztf_avro_schema =
-            Schema::parse_str(ENRICHED_ZTF_ALERT_SCHEMA).expect("Failed to parse Avro schema");
+        // Generate the Avro schemas for enriched alerts from the Rust types
+        // using schemars; this will include nested record and array types.
+        let lsst_avro_schema = avro_schema_from_type::<EnrichedLsstAlert>("EnrichedLsstAlert");
+        let ztf_avro_schema = avro_schema_from_type::<EnrichedZtfAlert>("EnrichedZtfAlert");
 
         Babamul {
             kafka_producer,

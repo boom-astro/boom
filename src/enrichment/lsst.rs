@@ -87,7 +87,7 @@ pub struct LsstAlertForEnrichment {
 
 /// LSST alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
@@ -95,7 +95,7 @@ pub struct LsstAlertProperties {
 }
 
 /// LSST with propertied (i.e., it's enriched)
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct EnrichedLsstAlert {
     #[serde(rename = "_id")]
     pub candid: i64,

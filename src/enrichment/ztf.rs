@@ -93,7 +93,7 @@ pub struct ZtfAlertForEnrichment {
 
 /// ZTF alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
@@ -103,7 +103,7 @@ pub struct ZtfAlertProperties {
 }
 
 /// Enriched ZTF alert (i.e., one with properties)
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct EnrichedZtfAlert {
     #[serde(rename = "_id")]
     pub candid: i64,
