@@ -89,6 +89,46 @@ impl Babamul {
         }
     }
 
+    async fn send_alerts_by_topic<T, F>(
+        &self,
+        alerts_by_topic: HashMap<String, Vec<T>>,
+        to_enriched: F,
+    ) -> Result<(), EnrichmentWorkerError>
+    where
+        for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
+    {
+        for (topic_name, alerts) in alerts_by_topic {
+            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+
+            // Convert alerts to Avro payloads
+            let mut payloads = Vec::new();
+            for alert in &alerts {
+                let payload = self.alert_to_avro_bytes(to_enriched(alert))?;
+                payloads.push(payload);
+            }
+
+            // Send all messages to Kafka without awaiting immediately (allow batching)
+            let mut send_futures = Vec::new();
+            for payload in &payloads {
+                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
+                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
+                let future = self
+                    .kafka_producer
+                    .send(record, std::time::Duration::from_secs(5));
+                send_futures.push(future);
+            }
+
+            // Await all sends and map errors
+            for send_result in send_futures {
+                send_result.await.map_err(|(e, _)| {
+                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn alert_to_avro_bytes(&self, alert: EnrichedAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
         let (
             schema,
@@ -190,41 +230,9 @@ impl Babamul {
                 .push(alert);
         }
 
-        // Now iterate over topic, alerts vectors to send them to Kafka
-        for (topic_name, alerts) in alerts_by_topic {
-            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
-
-            // Convert all alerts to Avro format first (to avoid lifetime issues)
-            let mut payloads = Vec::new();
-            for alert in &alerts {
-                let payload = self.alert_to_avro_bytes(EnrichedAlert::Lsst(alert))?;
-                payloads.push(payload);
-            }
-
-            // Send all messages to Kafka without awaiting (allows batching)
-            let mut send_futures = Vec::new();
-            for payload in &payloads {
-                // Create Kafka record
-                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
-
-                // Send to Kafka (non-blocking) and collect the future
-                let future = self
-                    .kafka_producer
-                    .send(record, std::time::Duration::from_secs(5));
-                send_futures.push(future);
-            }
-
-            // Now await all the sends
-            // This allows Kafka to batch them efficiently based on batch.size and linger.ms settings
-            for send_result in send_futures {
-                send_result.await.map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
-                })?;
-            }
-        }
-
-        Ok(())
+        // Send all grouped alerts using shared helper
+        self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Lsst(a))
+            .await
     }
 
     pub async fn process_ztf_alerts(
@@ -258,40 +266,8 @@ impl Babamul {
                 .push(alert);
         }
 
-        // Now iterate over topic, alerts vectors to send them to Kafka
-        for (topic_name, alerts) in alerts_by_topic {
-            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
-
-            // Convert all alerts to Avro format first (to avoid lifetime issues)
-            let mut payloads = Vec::new();
-            for alert in &alerts {
-                let payload = self.alert_to_avro_bytes(EnrichedAlert::Ztf(alert))?;
-                payloads.push(payload);
-            }
-
-            // Send all messages to Kafka without awaiting (allows batching)
-            let mut send_futures = Vec::new();
-            for payload in &payloads {
-                // Create Kafka record
-                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
-
-                // Send to Kafka (non-blocking) and collect the future
-                let future = self
-                    .kafka_producer
-                    .send(record, std::time::Duration::from_secs(5));
-                send_futures.push(future);
-            }
-
-            // Now await all the sends
-            // This allows Kafka to batch them efficiently based on batch.size and linger.ms settings
-            for send_result in send_futures {
-                send_result.await.map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
-                })?;
-            }
-        }
-
-        Ok(())
+        // Send all grouped alerts using shared helper
+        self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Ztf(a))
+            .await
     }
 }
