@@ -299,13 +299,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
         // Send to Babamul for batch processing
-        match self.babamul.as_ref() {
-            Some(babamul) => {
-                if let Err(e) = babamul.process_ztf_alerts(enriched_alerts).await {
-                    tracing::error!("Failed to process enriched alerts in Babamul: {}", e);
-                }
+        if let Some(babamul) = self.babamul.as_ref() {
+            if let Err(e) = babamul.process_ztf_alerts(enriched_alerts).await {
+                tracing::error!("Failed to process enriched alerts in Babamul: {}", e);
             }
-            None => {}
         }
 
         Ok(processed_alerts)
