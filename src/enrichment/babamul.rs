@@ -259,14 +259,11 @@ impl Babamul {
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
-        let min_reliability = 0.5;
         let sso = false;
 
         // Iterate over the alerts
         for alert in alerts {
-            if alert.candidate.candidate.drb.unwrap_or(0.0) < min_reliability
-                || alert.properties.rock == sso
-            {
+            if alert.properties.rock == sso {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
             }
