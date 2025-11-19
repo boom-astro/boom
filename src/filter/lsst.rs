@@ -322,7 +322,7 @@ impl FilterWorker for LsstFilterWorker {
         filter_ids: Option<Vec<String>>,
     ) -> Result<Self, FilterWorkerError> {
         let config = AppConfig::from_path(config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config).await?;
+        let db: mongodb::Database = config.build_db().await?;
         let alert_collection = db.collection("LSST_alerts");
         let filter_collection = db.collection("filters");
 

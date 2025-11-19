@@ -682,7 +682,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let temp_queue_name = format!("{}_temp", input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
-    let mut con = conf::build_redis(&config)
+    let mut con = config
+        .build_redis()
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
 

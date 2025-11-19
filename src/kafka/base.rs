@@ -401,7 +401,8 @@ pub trait AlertConsumer: Sized {
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
-        let mut con = conf::build_redis(&config)
+        let mut con = config
+            .build_redis()
             .await
             .inspect_err(as_error!("failed to connect to redis"))?;
         let _: () = con
@@ -641,7 +642,8 @@ pub async fn consumer(
         ])
         .collect();
 
-    let mut con = conf::build_redis(&config)
+    let mut con = config
+        .build_redis()
         .await
         .inspect_err(as_error!("failed to connect to redis"))?;
 

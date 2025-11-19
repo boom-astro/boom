@@ -52,7 +52,7 @@ pub async fn drop_alert_collections(
     alert_aux_collection_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
-    let db = conf::build_db(&config).await?;
+    let db = config.build_db().await?;
     db.collection::<mongodb::bson::Document>(alert_collection_name)
         .drop()
         .await?;
@@ -70,7 +70,7 @@ pub async fn drop_alert_from_collections(
     stream_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
-    let db = conf::build_db(&config).await?;
+    let db = config.build_db().await?;
     let alert_collection_name = format!("{}_alerts", stream_name);
     let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
     let alert_aux_collection_name = format!("{}_alerts_aux", stream_name);
@@ -111,7 +111,7 @@ pub async fn remove_test_filter(
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
-    let db = conf::build_db(&config).await?;
+    let db = config.build_db().await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
         .delete_many(doc! {"_id": filter_id, "catalog": &format!("{}_alerts", survey)})
@@ -157,7 +157,7 @@ pub async fn insert_test_filter(
     };
 
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
-    let db = conf::build_db(&config).await?;
+    let db = config.build_db().await?;
     let _ = db
         .collection::<Filter>("filters")
         .insert_one(filter_obj)
@@ -171,7 +171,7 @@ pub async fn empty_processed_alerts_queue(
     output_queue_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
-    let mut con = conf::build_redis(&config).await?;
+    let mut con = config.build_redis().await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
     con.del::<&str, usize>("{}_temp").await.unwrap();
     con.del::<&str, usize>(output_queue_name).await.unwrap();

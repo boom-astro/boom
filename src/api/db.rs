@@ -1,6 +1,6 @@
 // Database related functionality
 use crate::api::routes::users::User;
-use crate::conf::{build_db, AppConfig, AuthConfig, BoomConfigError};
+use crate::conf::{AppConfig, AuthConfig, BoomConfigError};
 
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -103,7 +103,7 @@ async fn init_api_admin_user(
 }
 
 pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let db = build_db(conf).await?;
+    let db = conf.build_db().await?;
 
     let users_collection: mongodb::Collection<User> = db.collection("users");
     // Create a unique index for username and id in the users collection

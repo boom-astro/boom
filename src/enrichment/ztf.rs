@@ -122,7 +122,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config).await?;
+        let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
         let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");

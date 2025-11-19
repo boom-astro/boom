@@ -4,7 +4,7 @@ use boom::api::auth::{auth_middleware, get_auth};
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
-use boom::conf::{build_db, load_dotenv, AppConfig};
+use boom::conf::{load_dotenv, AppConfig};
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -13,7 +13,7 @@ async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
     let config = AppConfig::from_default_path().unwrap();
-    let database = build_db(&config).await.unwrap();
+    let database = config.build_db().await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
 
     // Initialize email service

@@ -1,5 +1,5 @@
 use crate::alert::LsstCandidate;
-use crate::conf::{build_db, AppConfig};
+use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
@@ -308,7 +308,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
-        let db = build_db(&config).await?;
+        let db = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
 

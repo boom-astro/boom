@@ -256,7 +256,8 @@ impl AlertWorker for DecamAlertWorker {
             .cloned()
             .unwrap_or_default();
 
-        let db: mongodb::Database = conf::build_db(&config)
+        let db: mongodb::Database = config
+            .build_db()
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 

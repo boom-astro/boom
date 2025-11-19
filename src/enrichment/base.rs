@@ -191,7 +191,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let mut enrichment_worker = T::new(config_path).await?;
 
     let config = AppConfig::from_path(config_path)?;
-    let mut con = conf::build_redis(&config).await?;
+    let mut con = config.build_redis().await?;
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();

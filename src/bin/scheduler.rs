@@ -1,5 +1,5 @@
 use boom::{
-    conf::{self, load_dotenv, AppConfig},
+    conf::{load_dotenv, AppConfig},
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -59,7 +59,8 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let n_filter = worker_config.filter.n_workers;
 
     // initialize the indexes for the survey
-    let db: mongodb::Database = conf::build_db(&config)
+    let db: mongodb::Database = config
+        .build_db()
         .await
         .expect("could not create mongodb client");
     initialize_survey_indexes(&args.survey, &db)

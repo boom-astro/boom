@@ -1,4 +1,4 @@
-use boom::conf::{self, build_db, build_redis, load_config, load_dotenv, AppConfig};
+use boom::conf::{self, load_config, load_dotenv, AppConfig};
 use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
@@ -192,7 +192,7 @@ fn test_load_config_from_default_path() {
 #[tokio::test]
 async fn test_build_db() {
     let config = AppConfig::from_test_config().unwrap();
-    let db = build_db(&config).await.unwrap();
+    let db = config.build_db().await.unwrap();
     // try a simple query to just validate that the connection works
     let _collections = db.list_collection_names().await.unwrap();
 }
@@ -200,7 +200,7 @@ async fn test_build_db() {
 #[tokio::test]
 async fn test_build_redis() {
     let config = AppConfig::from_test_config().unwrap();
-    let mut conn = build_redis(&config).await.unwrap();
+    let mut conn = config.build_redis().await.unwrap();
     let pong: String = redis::cmd("PING").query_async(&mut conn).await.unwrap();
     assert_eq!(pong, "PONG");
 }

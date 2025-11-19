@@ -113,7 +113,7 @@ async fn test_produce_and_consume_from_archive() {
 
     // Verify that the output queue has the expected number of messages:
     let config = boom::conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
-    let mut con = boom::conf::build_redis(&config).await.unwrap();
+    let mut con = config.build_redis().await.unwrap();
 
     let queue_len: usize = con.llen(&output_queue).await.unwrap();
 

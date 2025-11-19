@@ -819,7 +819,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     }
 
     // in a never ending loop, loop over the queues
-    let mut con = conf::build_redis(&config).await?;
+    let mut con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();

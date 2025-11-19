@@ -79,7 +79,7 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 }
 
 #[instrument(skip_all, err)]
-pub async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
     let db_conf = &conf.database;
 
     let prefix = match db_conf.srv {
@@ -124,7 +124,7 @@ pub async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigE
 }
 
 #[instrument(skip_all, err)]
-pub async fn build_redis(
+async fn build_redis(
     conf: &AppConfig,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
     let host = &conf.redis.host;
@@ -177,7 +177,7 @@ impl CatalogXmatchConfig {
 
     // based on the code in the main function, create a from_config function
     #[instrument(skip_all, err)]
-    pub fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
+    fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
 
         let catalog = hashmap_xmatch
@@ -435,6 +435,14 @@ impl AppConfig {
 
         Ok(())
     }
+
+    pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
+        build_db(self).await
+    }
+
+    pub async fn build_redis(&self) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+        build_redis(self).await
+    }
 }
 
 pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigError> {
@@ -467,5 +475,5 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
 pub async fn get_test_db() -> Database {
     let config = AppConfig::from_test_config().expect("Failed to load test config");
-    build_db(&config).await.unwrap()
+    config.build_db().await.unwrap()
 }

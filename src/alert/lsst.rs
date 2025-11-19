@@ -764,7 +764,8 @@ impl AlertWorker for LsstAlertWorker {
             None => LSST_SCHEMA_REGISTRY_URL,
         };
 
-        let db: mongodb::Database = conf::build_db(&config)
+        let db: mongodb::Database = config
+            .build_db()
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 
