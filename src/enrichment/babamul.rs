@@ -1,4 +1,5 @@
-//! Babamul is an optional component of ZTF and LSST enrichment pipelines.
+//! Babamul is an optional component of ZTF and LSST enrichment pipelines,
+//! which sends enriched alerts to various Kafka topics for public consumption.
 
 use crate::enrichment::lsst::EnrichedLsstAlert;
 use crate::enrichment::ztf::EnrichedZtfAlert;
