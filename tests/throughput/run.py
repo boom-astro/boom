@@ -53,6 +53,7 @@ config["kafka"]["producer"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
+config["babamul"]["enabled"] = True
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
