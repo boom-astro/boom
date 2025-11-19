@@ -222,7 +222,7 @@ impl Babamul {
             // TODO: Get this implemented
             // For now, all LSST alerts go to "babamul.none"
             let category: String = "none".to_string();
-            let topic_name = format!("babamul.{}", category);
+            let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
@@ -255,7 +255,7 @@ impl Babamul {
             // TODO: Get this implemented
             // For now, all ZTF alerts go to "babamul.none"
             let category: String = "none".to_string();
-            let topic_name = format!("babamul.{}", category);
+            let topic_name = format!("babamul.ztf.{}", category);
             alerts_by_topic
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
