@@ -1,6 +1,7 @@
 //! Babamul is an optional component of ZTF and LSST enrichment pipelines.
 
 use crate::enrichment::lsst::EnrichedLsstAlert;
+use crate::enrichment::ztf::EnrichedZtfAlert;
 use crate::enrichment::EnrichmentWorkerError;
 use apache_avro::{Schema, Writer};
 use std::collections::HashMap;
@@ -129,6 +130,53 @@ impl Babamul {
         Ok(encoded)
     }
 
+    /// Convert an enriched ZTF alert to Avro bytes
+    fn ztf_alert_to_avro_bytes(
+        &self,
+        alert: &EnrichedZtfAlert,
+    ) -> Result<Vec<u8>, EnrichmentWorkerError> {
+        // Serialize complex fields to JSON strings for the Avro schema
+        let candidate_json = serde_json::to_string(&alert.candidate)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+        let prv_candidates_json = serde_json::to_string(&alert.prv_candidates)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+        let fp_hists_json = serde_json::to_string(&alert.fp_hists)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+        let properties_json = serde_json::to_string(&alert.properties)
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+
+        // Create a simplified structure for Avro encoding
+        let avro_record = serde_json::json!({
+            "candid": alert.candid,
+            "objectId": alert.object_id,
+            "candidate": candidate_json,
+            "prv_candidates": prv_candidates_json,
+            "fp_hists": fp_hists_json,
+            "properties": properties_json,
+        });
+
+        let mut writer = Writer::with_codec(
+            &self.ztf_avro_schema,
+            Vec::new(),
+            apache_avro::Codec::Snappy,
+        );
+        writer
+            .append_ser(avro_record)
+            .inspect_err(|e| {
+                error!("Failed to serialize alert to Avro: {}", e);
+            })
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+
+        let encoded = writer
+            .into_inner()
+            .inspect_err(|e| {
+                error!("Failed to finalize Avro writer: {}", e);
+            })
+            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+
+        Ok(encoded)
+    }
+
     pub async fn process_lsst_alerts(
         &self,
         alerts: Vec<EnrichedLsstAlert>,
@@ -172,6 +220,66 @@ impl Babamul {
             let mut payloads = Vec::new();
             for alert in &alerts {
                 let payload = self.lsst_alert_to_avro_bytes(alert)?;
+                payloads.push(payload);
+            }
+
+            // Send all messages to Kafka without awaiting (allows batching)
+            let mut send_futures = Vec::new();
+            for payload in &payloads {
+                // Create Kafka record
+                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
+                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
+
+                // Send to Kafka (non-blocking) and collect the future
+                let future = self
+                    .kafka_producer
+                    .send(record, std::time::Duration::from_secs(5));
+                send_futures.push(future);
+            }
+
+            // Now await all the sends
+            // This allows Kafka to batch them efficiently based on batch.size and linger.ms settings
+            for send_result in send_futures {
+                send_result.await.map_err(|(e, _)| {
+                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn process_ztf_alerts(
+        &self,
+        alerts: Vec<EnrichedZtfAlert>,
+    ) -> Result<(), EnrichmentWorkerError> {
+        // Create a hash map for alerts to send to each topic
+        // For now, we will just send all alerts to "babamul.none"
+        // In the future, we will determine the topic based on the alert properties
+        let mut alerts_by_topic: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
+
+        // Iterate over the alerts
+        for alert in alerts {
+            // Determine which topic this alert should go to
+            // Is it a star, galaxy, or none, and does it have an LSST crossmatch?
+            // TODO: Get this implemented
+            // For now, all ZTF alerts go to "babamul.none"
+            let category: String = "none".to_string();
+            let topic_name = format!("babamul.{}", category);
+            alerts_by_topic
+                .entry(topic_name)
+                .or_insert_with(Vec::new)
+                .push(alert);
+        }
+
+        // Now iterate over topic, alerts vectors to send them to Kafka
+        for (topic_name, alerts) in alerts_by_topic {
+            println!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+
+            // Convert all alerts to Avro format first (to avoid lifetime issues)
+            let mut payloads = Vec::new();
+            for alert in &alerts {
+                let payload = self.ztf_alert_to_avro_bytes(alert)?;
                 payloads.push(payload);
             }
 
