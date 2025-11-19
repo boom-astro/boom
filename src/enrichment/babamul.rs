@@ -39,6 +39,11 @@ const ENRICHED_ZTF_ALERT_SCHEMA: &str = r#"
 }
 "#;
 
+pub enum EnrichedAlert<'a> {
+    Lsst(&'a EnrichedLsstAlert),
+    Ztf(&'a EnrichedZtfAlert),
+}
+
 pub struct Babamul {
     kafka_producer: rdkafka::producer::FutureProducer,
     lsst_avro_schema: Schema,
@@ -83,83 +88,55 @@ impl Babamul {
         }
     }
 
-    /// Convert an enriched LSST alert to Avro bytes
-    fn lsst_alert_to_avro_bytes(
-        &self,
-        alert: &EnrichedLsstAlert,
-    ) -> Result<Vec<u8>, EnrichmentWorkerError> {
-        // Serialize complex fields to JSON strings for the Avro schema
-        let candidate_json = serde_json::to_string(&alert.candidate)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let prv_candidates_json = serde_json::to_string(&alert.prv_candidates)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let fp_hists_json = serde_json::to_string(&alert.fp_hists)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let properties_json = serde_json::to_string(&alert.properties)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+    fn alert_to_avro_bytes(&self, alert: EnrichedAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
+        let (
+            schema,
+            candid,
+            object_id,
+            candidate_json,
+            prv_candidates_json,
+            fp_hists_json,
+            properties_json,
+        ) = match alert {
+            EnrichedAlert::Lsst(alert) => (
+                &self.lsst_avro_schema,
+                alert.candid,
+                &alert.object_id,
+                serde_json::to_string(&alert.candidate)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+                serde_json::to_string(&alert.prv_candidates)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+                serde_json::to_string(&alert.fp_hists)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+                serde_json::to_string(&alert.properties)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+            ),
+            EnrichedAlert::Ztf(alert) => (
+                &self.ztf_avro_schema,
+                alert.candid,
+                &alert.object_id,
+                serde_json::to_string(&alert.candidate)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+                serde_json::to_string(&alert.prv_candidates)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+                serde_json::to_string(&alert.fp_hists)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+                serde_json::to_string(&alert.properties)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?,
+            ),
+        };
 
         // Create a simplified structure for Avro encoding
         let avro_record = serde_json::json!({
-            "candid": alert.candid,
-            "objectId": alert.object_id,
+            "candid": candid,
+            "objectId": object_id,
             "candidate": candidate_json,
             "prv_candidates": prv_candidates_json,
             "fp_hists": fp_hists_json,
             "properties": properties_json,
         });
 
-        let mut writer = Writer::with_codec(
-            &self.lsst_avro_schema,
-            Vec::new(),
-            apache_avro::Codec::Snappy,
-        );
-        writer
-            .append_ser(avro_record)
-            .inspect_err(|e| {
-                error!("Failed to serialize alert to Avro: {}", e);
-            })
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-
-        let encoded = writer
-            .into_inner()
-            .inspect_err(|e| {
-                error!("Failed to finalize Avro writer: {}", e);
-            })
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-
-        Ok(encoded)
-    }
-
-    /// Convert an enriched ZTF alert to Avro bytes
-    fn ztf_alert_to_avro_bytes(
-        &self,
-        alert: &EnrichedZtfAlert,
-    ) -> Result<Vec<u8>, EnrichmentWorkerError> {
-        // Serialize complex fields to JSON strings for the Avro schema
-        let candidate_json = serde_json::to_string(&alert.candidate)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let prv_candidates_json = serde_json::to_string(&alert.prv_candidates)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let fp_hists_json = serde_json::to_string(&alert.fp_hists)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let properties_json = serde_json::to_string(&alert.properties)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-
-        // Create a simplified structure for Avro encoding
-        let avro_record = serde_json::json!({
-            "candid": alert.candid,
-            "objectId": alert.object_id,
-            "candidate": candidate_json,
-            "prv_candidates": prv_candidates_json,
-            "fp_hists": fp_hists_json,
-            "properties": properties_json,
-        });
-
-        let mut writer = Writer::with_codec(
-            &self.ztf_avro_schema,
-            Vec::new(),
-            apache_avro::Codec::Snappy,
-        );
+        let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
         writer
             .append_ser(avro_record)
             .inspect_err(|e| {
@@ -219,7 +196,7 @@ impl Babamul {
             // Convert all alerts to Avro format first (to avoid lifetime issues)
             let mut payloads = Vec::new();
             for alert in &alerts {
-                let payload = self.lsst_alert_to_avro_bytes(alert)?;
+                let payload = self.alert_to_avro_bytes(EnrichedAlert::Lsst(alert))?;
                 payloads.push(payload);
             }
 
@@ -287,7 +264,7 @@ impl Babamul {
             // Convert all alerts to Avro format first (to avoid lifetime issues)
             let mut payloads = Vec::new();
             for alert in &alerts {
-                let payload = self.ztf_alert_to_avro_bytes(alert)?;
+                let payload = self.alert_to_avro_bytes(EnrichedAlert::Ztf(alert))?;
                 payloads.push(payload);
             }
 
