@@ -1,3 +1,4 @@
+mod babamul;
 mod base;
 mod decam;
 mod lsst;
