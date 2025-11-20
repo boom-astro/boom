@@ -10,12 +10,27 @@ use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap};
 use tracing::error;
 
-// Generate a small Avro schema from a Rust type inspected via `schemars`.
-// We only include the fields used by Babamul (the fields that are put into
-// the Avro record). Complex nested Rust types (objects/arrays) are mapped
-// to Avro `string` since we serialize those nested values as JSON strings
-// when producing the Avro payload.
-// Convert a schemars JSON Schema node to an Avro JSON type.
+// Convert a schemars JSON Schema node (a `serde_json::Value`) into an
+// Avro-type representation also expressed as a `serde_json::Value`.
+//
+// This function:
+// - Resolves `$ref` references against the provided `definitions` map.
+// - Handles `anyOf`/`oneOf` patterns (used for nullable unions) by
+//   producing Avro unions where appropriate.
+// - Converts primitive JSON Schema types to Avro primitive types
+//   (e.g. `integer` -> `long`, `number` -> `double`, `string` -> `string`).
+// - Converts `array` schemas into Avro arrays and `object` schemas into
+//   Avro `record` values with `fields` entries.
+//
+// The returned JSON value is one of:
+// - a string with a primitive Avro type (e.g. "string"),
+// - an object describing a complex Avro type (e.g. {"type":"array", "items": ...} or
+//   {"type":"record", "name": "...", "fields": [...] }), or
+// - a JSON array representing an Avro union (e.g. ["null", "string"]).
+//
+// Note: callers may wrap the returned value in a union (e.g. ["null", <type>])
+// to express optional fields; this function attempts to return the most
+// direct Avro type for a given JSON Schema node.
 fn json_schema_node_to_avro(
     node: &JsonValue,
     definitions: Option<&JsonValue>,
@@ -133,6 +148,36 @@ fn json_schema_node_to_avro(
     serde_json::json!("string")
 }
 
+// Build a compact Avro `record` Schema for the given Rust type `T` using
+// schemars' JSON Schema output as a guide.
+//
+// Notes on intent and behavior:
+// - We only include the subset of fields that Babamul uses when producing
+//   Avro payloads (see the `field_names` table below). This keeps the
+//   generated Avro schemas small and stable for downstream consumers.
+// - The `field_names` value is a Vec of `(rust_field_name, avro_field_name)`
+//   tuples. The left-hand element is the name used by `schemars`/`serde`
+//   when producing the JSON Schema for the Rust type (usually the Rust
+//   struct field name or a `serde(rename = "...")` override). The
+//   right-hand element is the desired field name that will appear in the
+//   generated Avro schema. We use this mapping so we can control casing
+//   (e.g. `object_id` -> `objectId`) and remain compatible with existing
+//   downstream naming expectations.
+// - The generated Avro record's `name` is `record_name` (passed by the
+//   caller) and each Avro field's `name` is taken from the RHS of the
+//   tuple above. The Avro types are derived from the schemars JSON Schema
+//   nodes via `json_schema_node_to_avro` (see that function for rules).
+// - Important compatibility detail: complex nested Rust types (objects,
+//   arrays, nested structs) are currently mapped to Avro `string` (or a
+//   union containing `string`) because Babamul's producer serializes those
+//   nested values to JSON strings when building the Avro payload. If you
+//   later change the producer to emit fully nested Avro records/arrays,
+//   update both this generator and `alert_to_avro_bytes` to keep the
+//   Avro schema and payload shapes in sync.
+// - This function does not attempt to mirror the Rust struct 1:1; it
+//   creates a compact schema tailored to what Babamul places in the
+//   Avro message. The field names in the output will be exactly the
+//   `avro_field_name` values provided here (including casing).
 fn avro_schema_from_type<T: schemars::JsonSchema>(record_name: &str) -> Schema {
     let root = schema_for!(T);
     let root_json = serde_json::to_value(&root).unwrap_or(JsonValue::Null);
@@ -140,8 +185,15 @@ fn avro_schema_from_type<T: schemars::JsonSchema>(record_name: &str) -> Schema {
     let definitions = root_json.get("definitions");
     let props = schema_node.get("properties").and_then(|p| p.as_object());
 
+    // Mapping of the schemars/serde (Rust) field name -> desired Avro
+    // output field name. Adjust entries here if you need to include more
+    // fields or change the Avro-side naming. The left side must match the
+    // property key produced by schemars for the Rust type (often the Rust
+    // field name), and the right side is the exact name that will appear
+    // in the Avro schema (case-sensitive).
     let field_names = vec![
         ("candid", "candid"),
+        // object_id in Rust maps to camelCase "objectId" in Avro
         ("object_id", "objectId"),
         ("candidate", "candidate"),
         ("prv_candidates", "prv_candidates"),
