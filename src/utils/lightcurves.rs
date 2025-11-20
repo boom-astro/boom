@@ -1,3 +1,4 @@
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -27,7 +28,9 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
     10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema, AvroSchema,
+)]
 pub enum Band {
     #[serde(rename = "g")]
     G,
@@ -43,7 +46,7 @@ pub enum Band {
     U,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct PhotometryMag {
     #[serde(alias = "jd")]
     pub time: f64,
@@ -56,7 +59,7 @@ pub struct PhotometryMag {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct BandRateProperties {
     pub rate: f32,
     pub r_squared: f32,
@@ -65,7 +68,7 @@ pub struct BandRateProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct BandProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
@@ -76,7 +79,7 @@ pub struct BandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
@@ -88,7 +91,7 @@ pub struct PerBandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct AllBandsProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,

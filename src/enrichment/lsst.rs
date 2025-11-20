@@ -5,6 +5,7 @@ use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{error, instrument, warn};
@@ -87,7 +88,7 @@ pub struct LsstAlertForEnrichment {
 
 /// LSST alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
@@ -95,7 +96,7 @@ pub struct LsstAlertProperties {
 }
 
 /// LSST with propertied (i.e., it's enriched)
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct EnrichedLsstAlert {
     #[serde(rename = "_id")]
     pub candid: i64,

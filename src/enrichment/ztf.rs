@@ -11,6 +11,7 @@ use crate::{
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -93,7 +94,7 @@ pub struct ZtfAlertForEnrichment {
 
 /// ZTF alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
@@ -103,7 +104,7 @@ pub struct ZtfAlertProperties {
 }
 
 /// Enriched ZTF alert (i.e., one with properties)
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct EnrichedZtfAlert {
     #[serde(rename = "_id")]
     pub candid: i64,
