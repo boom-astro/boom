@@ -46,7 +46,7 @@ pub enum Band {
     U,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema, AvroSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct PhotometryMag {
     #[serde(alias = "jd")]
     pub time: f64,
@@ -59,7 +59,7 @@ pub struct PhotometryMag {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
 pub struct BandRateProperties {
     pub rate: f32,
     pub r_squared: f32,
@@ -68,7 +68,7 @@ pub struct BandRateProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
 pub struct BandProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
@@ -79,7 +79,7 @@ pub struct BandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
@@ -91,7 +91,7 @@ pub struct PerBandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
 pub struct AllBandsProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
