@@ -5,6 +5,7 @@
 #     "pyyaml",
 #     "pandas>2",
 #     "astropy",
+#     "confluent-kafka",
 # ]
 # ///
 
@@ -17,6 +18,7 @@ import uuid
 import pandas as pd
 import yaml
 from astropy.time import Time
+from confluent_kafka import Consumer, KafkaException
 
 # First, create the config
 parser = argparse.ArgumentParser(description="Benchmark BOOM")
@@ -121,7 +123,9 @@ if t1_b is None:
 with open(boom_scheduler_log_fpath) as f:
     lines = f.readlines()
     if len(lines) < 3:
-        raise ValueError("Scheduler log has fewer than 3 lines; cannot determine end time.")
+        raise ValueError(
+            "Scheduler log has fewer than 3 lines; cannot determine end time."
+        )
     line = lines[-3]
     t2_b = pd.to_datetime(
         line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
@@ -134,3 +138,26 @@ print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
 os.makedirs(logs_dir, exist_ok=True)
 with open(os.path.join(logs_dir, "wall_time.txt"), "w") as f:
     f.write(f"{wall_time_s:.1f}\n")
+
+# Now let's check that we can read all of the alerts from the babamul.ztf.none
+# Kafka topic
+consumer_conf = {
+    "bootstrap.servers": "localhost:29092",
+    "group.id": "throughput-benchmarking-verify",
+    "auto.offset.reset": "earliest",
+}
+consumer = Consumer(consumer_conf)
+topic = "babamul.ztf.none"
+consumer.subscribe([topic])
+n_alerts = 0
+try:
+    while True:
+        msg = consumer.poll(timeout=1.0)
+        if msg is None:
+            break
+        if msg.error():
+            raise KafkaException(msg.error())
+        n_alerts += 1
+finally:
+    consumer.close()
+print(f"Read {n_alerts} alerts from topic {topic}")
