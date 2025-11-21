@@ -142,7 +142,7 @@ with open(os.path.join(logs_dir, "wall_time.txt"), "w") as f:
 # Now let's check that we can read all of the alerts from the babamul.ztf.none
 # Kafka topic
 consumer_conf = {
-    "bootstrap.servers": "localhost:29092",
+    "bootstrap.servers": "localhost:9092",
     "group.id": "throughput-benchmarking-verify",
     "auto.offset.reset": "earliest",
 }
