@@ -142,10 +142,10 @@ pub enum FilterError {
 }
 
 pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
-    // We know that we have the programid first, followed by a comma, and then the candid.
-    // the programid is always a single digit (0-9) and the candid is a larger number.
-    // so we don't know to look for the comma to split the string.
-    // and can directly use the indexes to read the values.
+    // We know that we have the programid first, followed by a comma, and then the candid
+    // the programid is always a single digit (0-9) and the candid is a larger number
+    // so we don't need to look for the comma to split the string.
+    // We can directly use the indexes to read the values
     // while this makes it very specific to this format, it is twice as fast.
     let first_part = &tuple_str[0..1];
     let second_part = &tuple_str[2..];
