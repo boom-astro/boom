@@ -24,7 +24,7 @@ const ZTF_ZP: f64 = 23.9;
 #[instrument(skip_all, err)]
 pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
-    alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
@@ -408,7 +408,7 @@ pub async fn build_ztf_filter_pipeline(
 }
 
 pub struct ZtfFilterWorker {
-    alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: mongodb::Collection<Document>,
     input_queue: String,
     output_topic: String,
     filters: Vec<LoadedFilter>,

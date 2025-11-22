@@ -794,7 +794,7 @@ pub trait FilterWorker {
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
-    fn survey() -> crate::utils::enums::Survey;
+    fn survey() -> Survey;
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 

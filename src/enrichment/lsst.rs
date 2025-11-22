@@ -300,7 +300,7 @@ pub struct LsstEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
-    alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
 }
