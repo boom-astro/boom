@@ -518,7 +518,6 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
 ///
 /// # Arguments
 /// * `candids` - A vector of candidate IDs to filter.
-/// * `filter_id` - The unique identifier of the filter.
 /// * `pipeline` - The MongoDB aggregation pipeline to execute.
 /// * `alert_collection` - The MongoDB collection containing alerts.
 ///
@@ -527,7 +526,6 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
 #[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
     candids: Vec<i64>,
-    filter_id: &str,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {

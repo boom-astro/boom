@@ -505,7 +505,6 @@ impl FilterWorker for ZtfFilterWorker {
 
                 let out_documents = run_filter(
                     candids.clone(),
-                    &filter.id,
                     filter.pipeline.clone(),
                     &self.alert_collection,
                 )
