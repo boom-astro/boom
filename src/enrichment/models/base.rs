@@ -58,7 +58,7 @@ pub trait Model {
                 .iter()
                 .enumerate()
             {
-                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j as usize]);
+                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
                 let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
                 slice.assign(&cutout_array);
             }
