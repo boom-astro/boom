@@ -1,7 +1,6 @@
 use crate::api::auth::AuthProvider;
 use crate::api::email::EmailService;
 use crate::api::models::response;
-use crate::conf::get_kafka_producer_config;
 use actix_web::{post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -204,13 +203,11 @@ fn is_valid_email(email: &str) -> bool {
 /// Create Kafka SCRAM user and ACLs to allow babamul user to read from babamul.* topics
 /// This function is idempotent - it can be called multiple times safely.
 /// kafka-acls --add operations will silently succeed if the ACL already exists.
-async fn create_kafka_user_and_acls(email: &str, password: &str) -> Result<(), String> {
-    // Determine broker
-    let broker = match get_kafka_producer_config() {
-        Ok(config) => config.server,
-        Err(e) => return Err(format!("Failed to get Kafka config: {}", e)),
-    };
-
+async fn create_kafka_user_and_acls(
+    email: &str,
+    password: &str,
+    broker: &str,
+) -> Result<(), String> {
     // Try to find the right command names
     // Homebrew on macOS: kafka-configs, kafka-acls (no .sh)
     // Docker container: kafka-configs.sh, kafka-acls.sh (with .sh)
@@ -372,6 +369,7 @@ pub struct BabamulActivateResponse {
 pub async fn post_babamul_activate(
     db: web::Data<Database>,
     body: web::Json<BabamulActivatePost>,
+    kafka_producer_config: web::Data<crate::conf::KafkaProducerConfig>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
     let activation_code = body.activation_code.trim();
@@ -412,7 +410,13 @@ pub async fn post_babamul_activate(
                     // CRITICAL: Create Kafka SCRAM user and ACLs BEFORE marking user as activated
                     // This ensures we don't activate a user who can't access Kafka
                     // The Kafka operations are idempotent, so retries are safe
-                    if let Err(e) = create_kafka_user_and_acls(&user.email, &password).await {
+                    if let Err(e) = create_kafka_user_and_acls(
+                        &user.email,
+                        &password,
+                        &kafka_producer_config.server,
+                    )
+                    .await
+                    {
                         eprintln!("Failed to create Kafka user/ACLs for {}: {}", user.email, e);
                         return response::internal_error(
                             "Failed to configure Kafka access. Please try again or contact support.",

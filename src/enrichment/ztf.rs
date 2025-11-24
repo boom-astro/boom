@@ -1,3 +1,4 @@
+use crate::conf::AppConfig;
 use crate::enrichment::babamul::Babamul;
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
@@ -152,8 +153,8 @@ pub struct ZtfEnrichmentWorker {
 impl EnrichmentWorker for ZtfEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
         let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
@@ -172,9 +173,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
 
         // Detect if Babamul is enabled from the config
-        let babamul_enabled = crate::conf::babamul_enabled(&config_file);
-        let babamul: Option<Babamul> = if babamul_enabled {
-            Some(Babamul::new(config_file))
+        let babamul: Option<Babamul> = if config.babamul.enabled {
+            Some(Babamul::new(&config))
         } else {
             None
         };

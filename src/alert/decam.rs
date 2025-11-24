@@ -7,7 +7,7 @@ use crate::{
         },
         lsst, ztf,
     },
-    conf,
+    conf::{self, AppConfig},
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
@@ -248,11 +248,18 @@ impl DecamAlertWorker {
 #[async_trait::async_trait]
 impl AlertWorker for DecamAlertWorker {
     async fn new(config_path: &str) -> Result<DecamAlertWorker, AlertWorkerError> {
-        let config_file = conf::load_raw_config(&config_path)?;
+        let config = AppConfig::from_path(config_path)?;
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Decam)?;
+        let xmatch_configs = config
+            .crossmatch
+            .get(&Survey::Decam)
+            .cloned()
+            .unwrap_or_default();
 
-        let db: mongodb::Database = conf::build_db(&config_file).await?;
+        let db: mongodb::Database = config
+            .build_db()
+            .await
+            .inspect_err(as_error!("failed to create mongo client"))?;
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);

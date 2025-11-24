@@ -1,6 +1,7 @@
 //! Babamul is an optional component of ZTF and LSST enrichment pipelines,
 //! which sends enriched alerts to various Kafka topics for public consumption.
 
+use crate::conf::AppConfig;
 use crate::enrichment::lsst::EnrichedLsstAlert;
 use crate::enrichment::ztf::EnrichedZtfAlert;
 use crate::enrichment::EnrichmentWorkerError;
@@ -26,11 +27,9 @@ pub struct Babamul {
 }
 
 impl Babamul {
-    pub fn new(config: config::Config) -> Self {
+    pub fn new(config: &AppConfig) -> Self {
         // Read Kafka producer config from kafka: producer in the config
-        let kafka_producer_host = config
-            .get_string("kafka.producer")
-            .unwrap_or_else(|_| "broker:29092".to_string());
+        let kafka_producer_host = config.kafka.producer.server.clone();
 
         // Create Kafka producer
         let kafka_producer: rdkafka::producer::FutureProducer =

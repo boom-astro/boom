@@ -1,4 +1,5 @@
 use crate::alert::LsstCandidate;
+use crate::conf::AppConfig;
 use crate::enrichment::babamul::Babamul;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
@@ -137,8 +138,8 @@ pub struct LsstEnrichmentWorker {
 impl EnrichmentWorker for LsstEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
 
@@ -146,9 +147,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
         // Detect if Babamul is enabled from the config
-        let babamul_enabled = crate::conf::babamul_enabled(&config_file);
-        let babamul: Option<Babamul> = if babamul_enabled {
-            Some(Babamul::new(config_file))
+        let babamul: Option<Babamul> = if config.babamul.enabled {
+            Some(Babamul::new(&config))
         } else {
             None
         };

@@ -5,7 +5,7 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
     use boom::api::auth::{auth_middleware, get_test_auth};
-    use boom::api::db::get_test_db;
+    use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
@@ -16,7 +16,7 @@ mod tests {
     async fn create_admin_token(database: &Database) -> String {
         load_dotenv();
         let auth_app_data = get_test_auth(database).await.unwrap();
-        let auth_config = AppConfig::from_test_config().api.auth;
+        let auth_config = AppConfig::from_test_config().unwrap().api.auth;
         let (token, _) = auth_app_data
             .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
             .await
@@ -36,7 +36,7 @@ mod tests {
     /// Helper function to create a test filter and return its ID and token
     async fn create_test_filter() -> (String, String, Database) {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let token = create_admin_token(&database).await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
@@ -75,7 +75,7 @@ mod tests {
     // let's make a helper function that takes a filter_id, GETs the filter and returns it
     async fn get_test_filter(filter_id: &str, token: &str) -> serde_json::Value {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
@@ -112,7 +112,7 @@ mod tests {
         new_version: &serde_json::Value,
     ) -> String {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
@@ -169,7 +169,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_get_filters() {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let token = create_admin_token(&database).await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
