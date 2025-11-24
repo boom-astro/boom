@@ -43,6 +43,13 @@ struct Cli {
     boom_uri: String,
     #[arg(
         long,
+        help = "Boom MongoDB database name (should use write-enabled credentials).",
+        env = "BOOM_MONGODB_NAME",
+        default_value = "boom_test_import"
+    )]
+    boom_db_name: Option<String>,
+    #[arg(
+        long,
         help = "Whether to retrieve object IDs from Kowalski (defaults to false)."
     )]
     retrieve_obj_ids: Option<bool>,
@@ -230,10 +237,10 @@ async fn get_kowalski_collections(
     )
 }
 
-async fn get_boom_obj_collection(boom_uri: &str) -> Collection<ZtfObject> {
+async fn get_boom_obj_collection(boom_uri: &str, boom_db_name: &str) -> Collection<ZtfObject> {
     let boom_client = Client::with_uri_str(boom_uri).await.unwrap();
     let boom_collection: Collection<ZtfObject> = boom_client
-        .database("boom_test_import")
+        .database(boom_db_name)
         .collection("ZTF_alerts_aux");
     // create indexes if they do not exist
     boom_collection
@@ -429,11 +436,11 @@ async fn worker(
     batch_size: usize,
     kowalski_uri: &str,
     boom_uri: &str,
+    boom_db_name: &str,
 ) -> Result<usize> {
     let (kowalski_alert_collection, kowalski_obj_collection, _) =
         get_kowalski_collections(kowalski_uri).await;
-    let boom_obj_collection = get_boom_obj_collection(boom_uri).await;
-
+    let boom_obj_collection = get_boom_obj_collection(boom_uri, boom_db_name).await;
     let mut obj_ids = Vec::with_capacity(batch_size);
     let mut total_processed = 0;
 
@@ -477,6 +484,7 @@ async fn main() {
     let batch_size = args.batch_size.unwrap_or(100);
     let kowalski_uri = args.kowalski_uri;
     let boom_uri = args.boom_uri;
+    let boom_db_name = args.boom_db_name.unwrap_or("boom_test_import".to_string());
     let retrieve_obj_ids = args.retrieve_obj_ids.unwrap_or(false);
 
     let obj_ids_file = "kowalski_obj_ids_shuffled.txt".to_string();
@@ -513,8 +521,16 @@ async fn main() {
         let batch_size = batch_size;
         let kowalski_uri = kowalski_uri.clone();
         let boom_uri = boom_uri.clone();
+        let boom_db_name = boom_db_name.to_string();
         let worker_handle = tokio::spawn(async move {
-            worker(worker_receiver, batch_size, &kowalski_uri, &boom_uri).await
+            worker(
+                worker_receiver,
+                batch_size,
+                &kowalski_uri,
+                &boom_uri,
+                &boom_db_name,
+            )
+            .await
         });
         workers.push(worker_handle);
     }
