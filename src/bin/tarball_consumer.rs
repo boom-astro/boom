@@ -5,11 +5,12 @@ use boom::utils::{
 };
 use clap::Parser;
 use flate2::read::GzDecoder;
+use indicatif::ProgressBar;
 use redis::AsyncCommands;
 use std::fs::File;
 use std::io::Read;
 use tar::Archive;
-use tracing::{debug, info};
+use tracing::info;
 
 #[derive(Parser)]
 struct Cli {
@@ -37,6 +38,10 @@ struct Cli {
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
     deployment_env: String,
+
+    /// Show loading bar (requires counting files in tarball, which can be slow)
+    #[arg(long)]
+    show_loading_bar: bool,
 }
 
 async fn check_max_in_queue(
@@ -64,21 +69,9 @@ async fn check_max_in_queue(
     Ok(())
 }
 
-async fn process_tarball(
-    path: &str,
-    survey: &Survey,
-    max_in_queue: usize,
-    config: &AppConfig,
-) -> Result<usize, anyhow::Error> {
-    let output_queue = format!("{}_alerts_packets_queue", survey.to_string().to_uppercase());
-
-    let mut con = config
-        .build_redis()
-        .await
-        .expect("Failed to connect to Redis");
-
-    check_max_in_queue(&mut con, &output_queue, max_in_queue).await?;
-
+// write a function that counts the number of .avro files in a tar.gz file and returns that number, without extracting them to disk
+// or reading the contents of the .avro files into memory
+async fn count_files_in_tarball(path: &str, extension: &str) -> Result<usize, anyhow::Error> {
     // Open the tar.gz file
     let file = File::open(path)?;
 
@@ -91,6 +84,71 @@ async fn process_tarball(
     let mut total = 0;
     // Iterate over entries in the tarball
     for entry in archive.entries()? {
+        let entry = entry?;
+
+        // Get the file path within the tarball
+        let path = entry.path()?;
+
+        // Check if it's an .avro file
+        if path.extension().and_then(|s| s.to_str()) == Some(extension) {
+            total += 1;
+        }
+    }
+
+    Ok(total)
+}
+
+async fn process_tarball(
+    path: &str,
+    survey: &Survey,
+    max_in_queue: usize,
+    clear: bool,
+    show_loading_bar: bool,
+    config: &AppConfig,
+) -> Result<usize, anyhow::Error> {
+    let output_queue = format!("{}_alerts_packets_queue", survey.to_string().to_uppercase());
+
+    let mut con = config
+        .build_redis()
+        .await
+        .expect("Failed to connect to Redis");
+
+    if clear {
+        let _: () = con
+            .del::<&str, ()>(&output_queue)
+            .await
+            .inspect_err(as_error!("failed to clear output queue"))?;
+        info!("Cleared Redis queue: {}", output_queue);
+    }
+
+    check_max_in_queue(&mut con, &output_queue, max_in_queue).await?;
+
+    let progress_bar = match show_loading_bar {
+        true => {
+            info!("Counting files in tarball... (this may take a while, only done if loading bar is shown)");
+            let total_files = count_files_in_tarball(path, "avro")
+                .await
+                .expect("Failed to count files in tarball");
+            Some(ProgressBar::new(total_files as u64)
+                .with_message(format!("Pushing alerts to Redis queue: {}", output_queue))
+                .with_style(indicatif::ProgressStyle::default_bar()
+                    .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {human_pos}/{human_len} ({eta})")?)).unwrap()
+        }
+        false => ProgressBar::hidden(),
+    };
+
+    // Open the tar.gz file
+    let file = File::open(path)?;
+
+    // Create a gzip decoder
+    let decoder = GzDecoder::new(file);
+
+    // Create a tar archive reader
+    let mut archive = Archive::new(decoder);
+
+    let mut count = 0;
+    // Iterate over entries in the tarball
+    for entry in archive.entries()? {
         let mut entry = entry?;
 
         // Get the file path within the tarball
@@ -98,8 +156,6 @@ async fn process_tarball(
 
         // Check if it's an .avro file
         if path.extension().and_then(|s| s.to_str()) == Some("avro") {
-            debug!("Processing: {:?}", path);
-
             // Read the file contents as bytes
             let mut buffer = Vec::new();
             entry.read_to_end(&mut buffer)?;
@@ -112,16 +168,19 @@ async fn process_tarball(
                     log_error!(error, "failed to push message to queue");
                 })?;
 
-            total += 1;
+            count += 1;
+            progress_bar.inc(1);
 
-            if total % 1000 == 0 {
-                info!("Submitted {} alerts to Redis queue", total);
+            if count % 1000 == 0 {
+                if !show_loading_bar {
+                    info!("Pushed {} alerts to Redis queue: {}", count, output_queue);
+                }
                 check_max_in_queue(&mut con, &output_queue, max_in_queue).await?;
             }
         }
     }
 
-    Ok(total)
+    Ok(count)
 }
 
 #[tokio::main]
@@ -135,6 +194,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let survey = args.survey;
     let config = boom::conf::load_config(Some(&args.config)).expect("Failed to load config");
-    process_tarball(&args.path, &survey, args.max_in_queue, &config).await?;
+    process_tarball(
+        &args.path,
+        &survey,
+        args.max_in_queue,
+        args.clear,
+        args.show_loading_bar,
+        &config,
+    )
+    .await?;
     Ok(())
 }
