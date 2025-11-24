@@ -8,6 +8,8 @@ networks:
   traefik-public:
     # Allow setting it to false for testing and local development
     external: true
+  default:
+    driver: bridge
 
 services:
   # Autoheal will monitor containers with autoheal=true label
