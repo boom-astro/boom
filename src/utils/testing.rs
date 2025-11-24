@@ -21,15 +21,9 @@ use std::io::Read;
 
 pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
 
-async fn test_db() -> mongodb::Database {
-    let config_file = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config_file).await.unwrap();
-    db
-}
-
 pub async fn ztf_alert_worker() -> ZtfAlertWorker {
     // initialize the ZTF indexes
-    initialize_survey_indexes(&Survey::Ztf, &test_db().await)
+    initialize_survey_indexes(&Survey::Ztf, &conf::get_test_db().await)
         .await
         .unwrap();
     ZtfAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
@@ -37,7 +31,7 @@ pub async fn ztf_alert_worker() -> ZtfAlertWorker {
 
 pub async fn lsst_alert_worker() -> LsstAlertWorker {
     // initialize the ZTF indexes
-    initialize_survey_indexes(&Survey::Lsst, &test_db().await)
+    initialize_survey_indexes(&Survey::Lsst, &conf::get_test_db().await)
         .await
         .unwrap();
     LsstAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
@@ -45,7 +39,7 @@ pub async fn lsst_alert_worker() -> LsstAlertWorker {
 
 pub async fn decam_alert_worker() -> DecamAlertWorker {
     // initialize the ZTF indexes
-    initialize_survey_indexes(&Survey::Decam, &test_db().await)
+    initialize_survey_indexes(&Survey::Decam, &conf::get_test_db().await)
         .await
         .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
@@ -57,8 +51,8 @@ pub async fn drop_alert_collections(
     alert_cutout_collection_name: &str,
     alert_aux_collection_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
+    let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
+    let db = config.build_db().await?;
     db.collection::<mongodb::bson::Document>(alert_collection_name)
         .drop()
         .await?;
@@ -75,8 +69,8 @@ pub async fn drop_alert_from_collections(
     candid: i64,
     stream_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
+    let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
+    let db = config.build_db().await?;
     let alert_collection_name = format!("{}_alerts", stream_name);
     let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
     let alert_aux_collection_name = format!("{}_alerts_aux", stream_name);
@@ -116,8 +110,8 @@ pub async fn remove_test_filter(
     filter_id: &str,
     survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
+    let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
+    let db = config.build_db().await?;
     let _ = db
         .collection::<mongodb::bson::Document>("filters")
         .delete_many(doc! {"_id": filter_id, "catalog": &format!("{}_alerts", survey)})
@@ -151,8 +145,8 @@ pub async fn insert_custom_test_filter(
         updated_at: now,
     };
 
-    let config_file = conf::load_raw_config(TEST_CONFIG_FILE)?;
-    let db = conf::build_db(&config_file).await?;
+    let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
+    let db = config.build_db().await?;
     let _ = db
         .collection::<Filter>("filters")
         .insert_one(filter_obj)
@@ -186,8 +180,8 @@ pub async fn empty_processed_alerts_queue(
     input_queue_name: &str,
     output_queue_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = conf::load_raw_config("tests/config.test.yaml")?;
-    let mut con = conf::build_redis(&config).await?;
+    let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
+    let mut con = config.build_redis().await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
     con.del::<&str, usize>("{}_temp").await.unwrap();
     con.del::<&str, usize>(output_queue_name).await.unwrap();

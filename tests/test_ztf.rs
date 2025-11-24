@@ -3,7 +3,7 @@ use boom::{
         AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
         ZTF_LSST_XMATCH_RADIUS,
     },
-    conf,
+    conf::get_test_db,
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
     utils::{
@@ -30,8 +30,7 @@ async fn test_process_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
 
@@ -89,8 +88,7 @@ async fn test_process_ztf_alert() {
 
 #[tokio::test]
 async fn test_process_ztf_alert_xmatch() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
 
     // ZTF setup: the dec should be *below* the LSST dec limit:
     let mut alert_worker = ztf_alert_worker().await;
@@ -320,8 +318,7 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(alert, &format!("1,{}", candid));
 
     // check that the alert was inserted in the DB, and ML scores added later
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let alert_collection_name = "ZTF_alerts";
     let filter = doc! {"_id": candid};
     let alert = db

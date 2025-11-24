@@ -3,6 +3,7 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
+use crate::conf::AppConfig;
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
     parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
@@ -519,8 +520,8 @@ impl FilterWorker for ZtfFilterWorker {
         config_path: &str,
         filter_ids: Option<Vec<String>>,
     ) -> Result<Self, FilterWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db: mongodb::Database = config.build_db().await?;
         let alert_collection = db.collection("ZTF_alerts");
         let filter_collection = db.collection("filters");
 

@@ -1,6 +1,6 @@
 use crate::{
     alert::AlertCutout,
-    conf,
+    conf::{self, AppConfig},
     enrichment::models::ModelError,
     utils::{
         fits::CutoutError,
@@ -190,8 +190,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     debug!(?config_path);
     let mut enrichment_worker = T::new(config_path).await?;
 
-    let config = conf::load_raw_config(config_path)?;
-    let mut con = conf::build_redis(&config).await?;
+    let config = AppConfig::from_path(config_path)?;
+    let mut con = config.build_redis().await?;
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();

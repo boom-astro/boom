@@ -1,3 +1,4 @@
+use crate::conf::AppConfig;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
@@ -672,8 +673,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     worker_id: Uuid,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
-    let config =
-        conf::load_raw_config(config_path).inspect_err(as_error!("failed to load config"))?; // BoomConfigError
+    let config = AppConfig::from_path(config_path)?;
 
     let mut alert_processor = T::new(config_path).await?;
     let stream_name = alert_processor.stream_name();
@@ -682,7 +682,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let temp_queue_name = format!("{}_temp", input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
-    let mut con = conf::build_redis(&config)
+    let mut con = config
+        .build_redis()
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
 
