@@ -1,21 +1,12 @@
-use boom::conf;
+use boom::conf::{self, load_config, load_dotenv, AppConfig};
 use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[test]
-fn test_load_config() {
+fn test_load_raw_config() {
     let config = conf::load_raw_config(TEST_CONFIG_FILE);
     assert!(config.is_ok());
 
     let config = config.unwrap();
-
-    let crossmatches = config.get_table("crossmatch").unwrap();
-    // check that ZTF is one of the keys
-    assert!(crossmatches.get("ztf").is_some());
-    let crossmatches_ztf = crossmatches.get("ztf").clone().cloned();
-    assert!(crossmatches_ztf.is_some());
-    let crossmatches_ztf = crossmatches_ztf.unwrap().clone().into_array().unwrap();
-    // check that the crossmatch for ZTF is an array
-    assert_eq!(crossmatches_ztf.len(), 4);
 
     let hello = config.get_string("hello");
     assert!(hello.is_ok());
@@ -25,28 +16,60 @@ fn test_load_config() {
 }
 
 #[test]
-fn test_build_xmatch_configs() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
+fn test_load_kafka_config() {
+    let config = AppConfig::from_test_config().unwrap();
 
-    let crossmatches = config.get_table("crossmatch").unwrap();
-    let crossmatches_ztf = crossmatches.get("ztf").cloned().unwrap();
-    let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
-    assert!(crossmatches_ztf.len() > 0);
+    let ztf_kafka_consumer_config = config
+        .kafka
+        .consumer
+        .get(&boom::utils::enums::Survey::Ztf)
+        .cloned()
+        .unwrap();
+    // the values here are likely overwrote by env vars, so we can't assert on them
+    // but, we can at least check that they are non-empty
+    assert!(ztf_kafka_consumer_config.server.len() > 0);
+    assert!(ztf_kafka_consumer_config.group_id.len() > 0);
 
-    let catalog_xmatch_configs =
-        conf::build_xmatch_configs(&config, &boom::utils::enums::Survey::Ztf).unwrap();
+    let kafka_producer_config = &config.kafka.producer;
+    assert!(kafka_producer_config.server.len() > 0);
+}
 
-    assert_eq!(catalog_xmatch_configs.len(), 4);
+#[test]
+fn test_load_workers_config() {
+    let config = AppConfig::from_test_config().unwrap();
 
-    let first = &catalog_xmatch_configs[0];
-    // verify that its a CatalogXmatchConfig
+    let ztf_worker_config = config.workers.get(&boom::utils::enums::Survey::Ztf);
+    assert!(ztf_worker_config.is_some());
+    let ztf_worker_config = ztf_worker_config.unwrap();
+    assert_eq!(ztf_worker_config.alert.n_workers, 1);
+    assert_eq!(ztf_worker_config.enrichment.n_workers, 1);
+    assert_eq!(ztf_worker_config.filter.n_workers, 1);
+    assert_eq!(ztf_worker_config.command_interval, 500);
+}
+
+#[test]
+fn test_load_xmatch_config() {
+    let config = AppConfig::from_test_config().unwrap();
+
+    let crossmatch_config_ztf = config
+        .crossmatch
+        .get(&boom::utils::enums::Survey::Ztf)
+        .cloned()
+        .unwrap_or_default();
+    assert!(crossmatch_config_ztf.len() > 0);
+    for crossmatch in crossmatch_config_ztf.iter() {
+        assert!(crossmatch.catalog.len() > 0);
+        assert!(crossmatch.radius > 0.0);
+        assert!(crossmatch.projection.len() > 0);
+    }
+
+    let first = &crossmatch_config_ztf[0];
     assert_eq!(first.catalog, "PS1_DR1");
     assert_eq!(first.radius, 2.0 * std::f64::consts::PI / 180.0 / 3600.0);
     assert_eq!(first.use_distance, false);
     assert_eq!(first.distance_key, None);
     assert_eq!(first.distance_max, None);
     assert_eq!(first.distance_max_near, None);
-
     let projection = &first.projection;
     // test reading a few of the expected fields
     assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 1);
@@ -57,56 +80,127 @@ fn test_build_xmatch_configs() {
     );
 }
 
+#[test]
+#[should_panic(expected = "Token expiration must be greater than 0")]
+fn test_token_expiration_validation_fails_with_zero() {
+    load_dotenv();
+
+    // Create a temporary config file with token_expiration: 0
+    let config_content = r#"
+database:
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
+api:
+    auth:
+        secret_key: "test_secret"
+        token_expiration: 0
+        admin_username: admin
+        admin_password: test123
+        admin_email: admin@test.com
+"#;
+    let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+    std::fs::write(temp_file.path(), config_content).unwrap();
+
+    // Trigger the panic (the #[should_panic] attribute will assert on message substring)
+    load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
+}
+
+#[test]
+fn test_token_expiration_validation_passes_with_valid_value() {
+    load_dotenv();
+
+    // This should work fine with a valid token_expiration
+    let config_content = r#"
+database:
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
+api:
+    auth:
+        secret_key: "test_secret"
+        token_expiration: 3600
+        admin_username: admin
+        admin_password: test123
+        admin_email: admin@test.com
+"#;
+    let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+    std::fs::write(temp_file.path(), config_content).unwrap();
+
+    // This should not panic
+    let config = load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
+    assert_eq!(config.api.auth.token_expiration, 3600);
+}
+
+#[test]
+fn test_token_expiration_with_standard_value() {
+    load_dotenv();
+
+    // Test that the standard token_expiration value (7 days) works correctly
+    let config_content = r#"
+database:
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
+api:
+    auth:
+        secret_key: "test_secret"
+        token_expiration: 604800
+        admin_username: admin
+        admin_password: test123
+        admin_email: admin@test.com
+"#;
+    let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
+    std::fs::write(temp_file.path(), config_content).unwrap();
+
+    // This should load successfully with the standard 7-day expiration
+    let config = load_config(Some(temp_file.path().to_str().unwrap())).unwrap();
+    assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
+}
+
+#[test]
+fn test_load_config_from_default_path() {
+    load_dotenv();
+
+    // Test loading the test config file which has actual values for secrets
+    let config = AppConfig::from_test_config().unwrap();
+
+    // Verify the token_expiration is set to our new default
+    assert_eq!(config.api.auth.token_expiration, 604800); // 7 days in seconds
+
+    // Verify other expected values
+    assert!(!config.api.auth.secret_key.is_empty());
+    assert!(!config.api.auth.admin_password.is_empty());
+    assert!(!config.database.password.is_empty());
+}
+
 #[tokio::test]
 async fn test_build_db() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
-
+    let config = AppConfig::from_test_config().unwrap();
+    let db = config.build_db().await.unwrap();
     // try a simple query to just validate that the connection works
     let _collections = db.list_collection_names().await.unwrap();
 }
 
-#[test]
-fn test_catalogxmatchconfig() {
-    let ps1_projection = mongodb::bson::doc! {
-        "_id": 1,
-        "gMeanPSFMag": 1,
-        "gMeanPSFMagErr": 1
-    };
-    let xmatch_config = conf::CatalogXmatchConfig {
-        catalog: "PS1_DR1".to_string(),
-        radius: 2.0 * std::f64::consts::PI / 180.0 / 3600.0,
-        use_distance: false,
-        distance_key: None,
-        distance_max: None,
-        distance_max_near: None,
-        projection: ps1_projection.clone(),
-    };
-
-    assert_eq!(xmatch_config.catalog, "PS1_DR1");
-    assert_eq!(
-        xmatch_config.radius,
-        2.0 * std::f64::consts::PI / 180.0 / 3600.0
-    );
-    assert_eq!(xmatch_config.use_distance, false);
-    assert_eq!(xmatch_config.distance_key, None);
-    assert_eq!(xmatch_config.distance_max, None);
-    assert_eq!(xmatch_config.distance_max_near, None);
-
-    let projection = xmatch_config.projection;
-    assert_eq!(projection, ps1_projection);
-
-    // validate the from_config method
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let crossmatches = config.get_table("crossmatch").unwrap();
-    let crossmatches_ztf = crossmatches.get("ztf").cloned().unwrap();
-    let crossmatches_ztf = crossmatches_ztf.into_array().unwrap();
-    assert!(crossmatches_ztf.len() > 0);
-
-    for crossmatch in crossmatches_ztf {
-        let catalog_xmatch_config = conf::CatalogXmatchConfig::from_config(crossmatch).unwrap();
-        assert!(catalog_xmatch_config.catalog.len() > 0);
-        assert!(catalog_xmatch_config.radius > 0.0);
-        assert!(catalog_xmatch_config.projection.len() > 0);
-    }
+#[tokio::test]
+async fn test_build_redis() {
+    let config = AppConfig::from_test_config().unwrap();
+    let mut conn = config.build_redis().await.unwrap();
+    let pong: String = redis::cmd("PING").query_async(&mut conn).await.unwrap();
+    assert_eq!(pong, "PONG");
 }

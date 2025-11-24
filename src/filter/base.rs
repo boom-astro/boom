@@ -1,5 +1,5 @@
 use crate::{
-    conf,
+    conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
     utils::{
         enums::Survey,
@@ -252,17 +252,17 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
 /// Creates a Kafka FutureProducer with the given configuration.
 ///
 /// # Arguments
-/// * `kafka_config` - A reference to the SurveyKafkaConfig containing the producer configuration.
+/// * `kafka_producer_config` - A reference to the KafkaProducerConfig containing the configuration parameters.
 ///
 /// # Returns
 /// * `Result<FutureProducer, FilterWorkerError>` - The created FutureProducer or a FilterWorkerError.
 pub async fn create_producer(
-    kafka_config: &conf::SurveyKafkaConfig,
+    kafka_producer_config: &conf::KafkaProducerConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
     let producer: FutureProducer = ClientConfig::new()
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "broker,topic,msg")
-        .set("bootstrap.servers", &kafka_config.producer)
+        .set("bootstrap.servers", &kafka_producer_config.server)
         .set("message.timeout.ms", "5000")
         // it's best to increase batch.size if the cluster
         // is running on another machine. Locally, lower means less
@@ -781,6 +781,8 @@ pub enum FilterWorkerError {
     AlertNotFound,
     #[error("filter not found")]
     FilterNotFound,
+    #[error("kafka config missing for survey: {0}")]
+    KafkaConfigMissing(crate::utils::enums::Survey),
 }
 
 #[async_trait::async_trait]
@@ -807,9 +809,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
 
-    let config = conf::load_raw_config(config_path)?;
-    let kafka_config = conf::build_kafka_config(&config, &T::survey())
-        .inspect_err(|e| error!("Failed to build Kafka config: {}", e))?;
+    let config = AppConfig::from_path(config_path)?;
 
     let mut filter_worker = T::new(config_path, None).await?;
 
@@ -819,12 +819,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
     }
 
     // in a never ending loop, loop over the queues
-    let mut con = conf::build_redis(&config).await?;
+    let mut con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
 
-    let producer = create_producer(&kafka_config).await?;
+    let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
 
     let command_interval: usize = 500;
