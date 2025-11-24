@@ -492,6 +492,7 @@ version = "0.1.0"
 dependencies = [
  "actix-rt",
  "actix-web",
+ "anyhow",
  "apache-avro",
  "async-trait",
  "base64 0.22.1",
@@ -503,6 +504,7 @@ dependencies = [
  "dotenvy",
  "env_logger",
  "flare",
+ "flate2",
  "futures",
  "indicatif",
  "jsonwebtoken",
@@ -522,6 +524,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "tar",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
