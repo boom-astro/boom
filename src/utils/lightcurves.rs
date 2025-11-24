@@ -27,7 +27,9 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
     10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema, Ord, PartialOrd,
+)]
 pub enum Band {
     #[serde(rename = "g")]
     G,

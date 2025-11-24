@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 actix-rt = "2.11.0"
 actix-web = "4.11.0"
+anyhow = "1.0.100"
 apache-avro = { version = "0.20.0", features = ["snappy"] }
+async-channel = "2.5.0"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bcrypt = "0.17.1"
