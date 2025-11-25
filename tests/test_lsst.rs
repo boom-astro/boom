@@ -1,6 +1,6 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus, LSST_ZTF_XMATCH_RADIUS, ZTF_DEC_RANGE},
-    conf,
+    conf::get_test_db,
     enrichment::{EnrichmentWorker, LsstEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::{
@@ -27,8 +27,7 @@ async fn test_process_lsst_alert() {
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
     // let's query the database to check if the alert was inserted
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let alert_collection_name = "LSST_alerts";
     let filter = doc! {"_id": candid};
 
@@ -88,8 +87,7 @@ async fn test_process_lsst_alert() {
 
 #[tokio::test]
 async fn test_process_lsst_alert_xmatch() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
 
     let mut alert_worker = lsst_alert_worker().await;
     let lsst_alert_randomizer =
@@ -136,9 +134,6 @@ async fn test_process_lsst_alert_xmatch() {
 async fn test_enrich_lsst_alert() {
     let mut alert_worker = lsst_alert_worker().await;
 
-    let config = conf::load_config(TEST_CONFIG_FILE).unwrap();
-    let mut con = conf::build_redis(&config).await.unwrap();
-
     // we only randomize the candid and object_id here, since the ra/dec
     // are features of the models and would change the results
     let (candid, _, _, _, bytes_content) = AlertRandomizer::new(Survey::Lsst)
@@ -151,7 +146,7 @@ async fn test_enrich_lsst_alert() {
 
     let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = enrichment_worker
-        .process_alerts(&[candid], Some(&mut con))
+        .process_alerts(&[candid])
         .await;
     assert!(result.is_ok());
 
@@ -163,8 +158,7 @@ async fn test_enrich_lsst_alert() {
     assert_eq!(alert, &format!("{}", candid));
 
     // check that the alert was inserted in the DB, and ML scores added later
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let alert_collection_name = "LSST_alerts";
     let filter = doc! {"_id": candid};
     let alert = db

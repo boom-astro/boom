@@ -2,8 +2,6 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use crate::conf::get_kafka_producer_config;
-
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct KafkaAclEntry {
     principal: String,
@@ -15,7 +13,7 @@ pub struct KafkaAclEntry {
     pattern_type: String,
 }
 
-pub fn get_acls() -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
+pub fn get_acls(broker: &str) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
     fn parse_keyvals(segment: &str) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for part in segment.split(',') {
@@ -34,9 +32,6 @@ pub fn get_acls() -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
         }
         map
     }
-
-    // Determine broker
-    let broker = get_kafka_producer_config()?.server;
 
     // Try to find the right command name
     let acls_cli = if which::which("kafka-acls").is_ok() {
@@ -174,10 +169,10 @@ pub fn get_acls() -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
     }
 }
 
-pub fn delete_acls_for_user(user_email: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Determine broker
-    let broker = get_kafka_producer_config()?.server;
-
+pub fn delete_acls_for_user(
+    user_email: &str,
+    broker: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Try to find the right command name
     let acls_cli = if which::which("kafka-acls").is_ok() {
         "kafka-acls"
@@ -186,7 +181,7 @@ pub fn delete_acls_for_user(user_email: &str) -> Result<(), Box<dyn std::error::
     };
 
     // Fetch all ACLs and filter for ones matching the user
-    let acls = get_acls()?;
+    let acls = get_acls(broker)?;
     let user_acls: Vec<KafkaAclEntry> = acls
         .into_iter()
         .filter(|entry| entry.principal == format!("User:{}", user_email))

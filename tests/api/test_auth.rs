@@ -4,7 +4,7 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
     use boom::api::auth::{auth_middleware, get_test_auth};
-    use boom::api::db::get_test_db;
+    use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::read_json_response;
     use boom::conf::{load_dotenv, AppConfig};
@@ -22,7 +22,7 @@ mod tests {
         load_dotenv();
 
         // Set up the database, which will create the admin user
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
@@ -35,7 +35,7 @@ mod tests {
         // On initialization of the db connection, an admin user for the API
         // should be created if it does not exist yet, and updated if it does
         // but the password and/or email have changed.
-        let auth_config = AppConfig::from_test_config().api.auth;
+        let auth_config = AppConfig::from_test_config().unwrap().api.auth;
         let admin_username = auth_config.admin_username.clone();
         let admin_password = auth_config.admin_password.clone();
 
@@ -110,9 +110,9 @@ mod tests {
         load_dotenv();
 
         // Now set up the database, which will create the admin user
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
-        let auth_config = AppConfig::from_test_config().api.auth;
+        let auth_config = AppConfig::from_test_config().unwrap().api.auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

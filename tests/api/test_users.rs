@@ -4,7 +4,7 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
     use boom::api::auth::{auth_middleware, get_test_auth};
-    use boom::api::db::get_test_db;
+    use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::read_json_response;
     use boom::conf::{load_dotenv, AppConfig};
@@ -14,7 +14,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_get_users() {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
 
         let app = test::init_service(
             App::new()
@@ -35,9 +35,9 @@ mod tests {
     #[actix_rt::test]
     async fn test_post_and_delete_user() {
         load_dotenv();
-        let database: Database = get_test_db().await;
+        let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
-        let auth_config = AppConfig::from_test_config().api.auth;
+        let auth_config = AppConfig::from_test_config().unwrap().api.auth;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))

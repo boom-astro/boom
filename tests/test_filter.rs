@@ -1,9 +1,9 @@
 use boom::{
-    conf,
+    conf::get_test_db,
     filter::{build_loaded_filter, uses_field_in_filter, validate_filter_pipeline},
     utils::{
         enums::Survey,
-        testing::{insert_test_filter, remove_test_filter, TEST_CONFIG_FILE},
+        testing::{insert_test_filter, remove_test_filter},
     },
 };
 use mongodb::bson::{doc, Document};
@@ -122,8 +122,7 @@ async fn test_validate_filter_pipeline() {
 
 #[tokio::test]
 async fn test_build_filter() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let filter_collection = db.collection("filters");
 
     let filter_id = insert_test_filter(&Survey::Ztf, true, true).await.unwrap();
@@ -181,9 +180,8 @@ async fn test_build_filter() {
 
 #[tokio::test]
 async fn test_filter_found() {
-    let config = conf::load_raw_config("tests/config.test.yaml").unwrap();
-    let db = conf::build_db(&config).await.unwrap();
-    let filter_id = insert_test_filter(&Survey::Ztf, true, false).await.unwrap();
+    let db = get_test_db().await;
+    let filter_id = insert_test_filter(&Survey::Ztf, true, true).await.unwrap();
     let filter_collection = db.collection("filters");
     let filter_result = build_loaded_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
@@ -192,8 +190,7 @@ async fn test_filter_found() {
 
 #[tokio::test]
 async fn test_no_filter_found() {
-    let config = conf::load_raw_config("tests/config.test.yaml").unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let filter_collection = db.collection("filters");
     let filter_result =
         build_loaded_filter("thisdoesnotexist", &Survey::Ztf, &filter_collection).await;

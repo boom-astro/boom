@@ -1,14 +1,16 @@
-use boom::conf;
+use boom::conf::AppConfig;
 use boom::utils::spatial;
-use boom::utils::testing::TEST_CONFIG_FILE;
 
 #[tokio::test]
 async fn test_xmatch() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let config = AppConfig::from_test_config().unwrap();
+    let db = config.build_db().await.unwrap();
 
-    let catalog_xmatch_configs =
-        conf::build_xmatch_configs(&config, &boom::utils::enums::Survey::Ztf).unwrap();
+    let catalog_xmatch_configs = config
+        .crossmatch
+        .get(&boom::utils::enums::Survey::Ztf)
+        .cloned()
+        .unwrap();
     assert_eq!(catalog_xmatch_configs.len(), 4);
 
     let ra = 323.233462;

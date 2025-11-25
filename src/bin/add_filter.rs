@@ -3,7 +3,7 @@ use mongodb::bson::doc;
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use boom::conf::{self, load_dotenv};
+use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::enums::Survey;
 
 #[derive(Parser)]
@@ -58,15 +58,9 @@ async fn main() {
     };
 
     // insert the filter into the database
-    let config_file = match conf::load_raw_config("config.yaml") {
-        Ok(config) => config,
-        Err(e) => {
-            error!("error loading config file: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let config = AppConfig::from_default_path().unwrap();
 
-    let db = match conf::build_db(&config_file).await {
+    let db = match config.build_db().await {
         Ok(db) => db,
         Err(e) => {
             error!("error building db: {}", e);
