@@ -964,7 +964,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 mod tests {
     use super::*;
     use crate::{
-        conf::{build_db, build_kafka_config, load_dotenv, load_raw_config},
+        conf::{get_test_db, load_config, load_dotenv},
         utils::{enums::Survey, testing::TEST_CONFIG_FILE},
     };
     use mongodb::bson::{doc, Document};
@@ -1028,17 +1028,16 @@ mod tests {
     #[tokio::test]
     async fn test_create_producer() {
         load_dotenv();
-        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
-        let kafka_config = build_kafka_config(&config, &Survey::Ztf).unwrap();
-        let producer = create_producer(&kafka_config).await;
+        let config = load_config(Some(TEST_CONFIG_FILE)).unwrap();
+        let producer = create_producer(&config.kafka.producer).await;
         assert!(producer.is_ok());
     }
 
     #[tokio::test]
     async fn test_send_alert_to_kafka() {
         load_dotenv();
-        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
-        let kafka_config = build_kafka_config(&config, &Survey::Ztf).unwrap();
+        let config = load_config(Some(TEST_CONFIG_FILE)).unwrap();
+        let producer = create_producer(&config.kafka.producer).await.unwrap();
         let alert = Alert {
             candid: 123456789,
             object_id: "ZTF18aaayemv".to_string(),
@@ -1054,8 +1053,6 @@ mod tests {
             cutout_difference: vec![],
         };
         let schema = load_alert_schema().unwrap();
-        let producer = create_producer(&kafka_config).await.unwrap();
-
         // generate a random topic name
         let topic = uuid::Uuid::new_v4().to_string();
         let result = send_alert_to_kafka(&alert, &schema, &producer, &topic).await;
@@ -1238,8 +1235,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_filter() {
         load_dotenv();
-        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
-        let db = build_db(&config).await.unwrap();
+        let db = get_test_db().await;
         let alert_collection = db.collection::<Document>("alerts_ztf_test");
         let candids = vec![123456789, 987654321];
         let pipeline = vec![
@@ -1278,8 +1274,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_filter() {
         load_dotenv();
-        let config = load_raw_config(TEST_CONFIG_FILE).unwrap();
-        let db = build_db(&config).await.unwrap();
+        let db = get_test_db().await;
         let filter_collection = db.collection::<Filter>("filters_test");
         let filter_id = uuid::Uuid::new_v4().to_string();
         // first, insert a filter
