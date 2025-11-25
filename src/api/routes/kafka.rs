@@ -16,12 +16,15 @@ use std::str;
     tags=["Kafka"]
 )]
 #[get("/kafka/acls")]
-pub async fn get_kafka_acls(current_user: web::ReqData<User>) -> HttpResponse {
+pub async fn get_kafka_acls(
+    current_user: web::ReqData<User>,
+    kafka_producer_config: web::Data<crate::conf::KafkaProducerConfig>,
+) -> HttpResponse {
     // Only admins can access this endpoint
     if !current_user.is_admin {
         return response::forbidden("Access denied: Admins only");
     }
-    match crate::api::kafka::get_acls() {
+    match crate::api::kafka::get_acls(&kafka_producer_config.server) {
         Ok(entries) => response::ok(
             "Kafka ACLs retrieved successfully",
             serde_json::to_value(entries).unwrap(),
@@ -43,6 +46,7 @@ pub async fn get_kafka_acls(current_user: web::ReqData<User>) -> HttpResponse {
 pub async fn delete_kafka_acls_for_user(
     user_email: web::Path<String>,
     current_user: web::ReqData<User>,
+    kafka_producer_config: web::Data<crate::conf::KafkaProducerConfig>,
 ) -> HttpResponse {
     // Only admins can access this endpoint
     if !current_user.is_admin {
@@ -52,7 +56,7 @@ pub async fn delete_kafka_acls_for_user(
     let user_email = user_email.into_inner();
 
     // Call the function to delete ACLs for the user
-    match delete_acls_for_user(&user_email) {
+    match delete_acls_for_user(&user_email, &kafka_producer_config.server) {
         Ok(_) => response::ok(
             "Kafka ACLs deleted successfully",
             serde_json::json!({ "user": user_email }),

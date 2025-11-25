@@ -1,3 +1,4 @@
+use crate::conf::AppConfig;
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
@@ -120,8 +121,8 @@ pub struct ZtfEnrichmentWorker {
 impl EnrichmentWorker for ZtfEnrichmentWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
-        let config_file = crate::conf::load_raw_config(&config_path)?;
-        let db: mongodb::Database = crate::conf::build_db(&config_file).await?;
+        let config = AppConfig::from_path(config_path)?;
+        let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
         let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");

@@ -1,11 +1,10 @@
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom::api::auth::{auth_middleware, get_auth};
-use boom::api::db::get_db;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
-use boom::conf::{babamul_enabled, load_dotenv, load_raw_config};
+use boom::conf::{load_dotenv, AppConfig};
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -13,9 +12,9 @@ use utoipa_scalar::{Scalar, Servable};
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
-
-    let database = get_db().await;
-    let auth = get_auth(&database).await.unwrap();
+    let config = AppConfig::from_default_path().unwrap();
+    let database = config.build_db().await.unwrap();
+    let auth = get_auth(&config, &database).await.unwrap();
 
     // Initialize email service
     let email_service = EmailService::new();
@@ -23,10 +22,7 @@ async fn main() -> std::io::Result<()> {
     // Initialize logging
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
-    // Load config to check if Babamul is enabled
-    let config = load_raw_config("config.yaml").expect("Failed to load config");
-    let babamul_is_enabled = babamul_enabled(&config);
-
+    let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         println!("Babamul API endpoints are ENABLED");
     } else {
@@ -48,7 +44,9 @@ async fn main() -> std::io::Result<()> {
 
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {
+            let kafka_producer_config = config.kafka.producer.clone();
             app = app
+                .app_data(web::Data::new(kafka_producer_config.clone()))
                 .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
                 .service(routes::babamul::post_babamul_signup)
                 .service(routes::babamul::post_babamul_activate)
@@ -82,7 +80,7 @@ async fn main() -> std::io::Result<()> {
         )
         .wrap(Logger::default())
     })
-    .bind(("0.0.0.0", 4000))?
+    .bind(("0.0.0.0", config.api.port))?
     .run()
     .await
 }

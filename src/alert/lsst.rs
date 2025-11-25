@@ -6,7 +6,7 @@ use crate::{
         },
         decam, ztf,
     },
-    conf,
+    conf::{self, AppConfig, BoomConfigError},
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
@@ -740,21 +740,32 @@ impl LsstAlertWorker {
 impl AlertWorker for LsstAlertWorker {
     #[instrument(err)]
     async fn new(config_path: &str) -> Result<LsstAlertWorker, AlertWorkerError> {
-        let config_file =
-            conf::load_raw_config(&config_path).inspect_err(as_error!("failed to load config"))?;
+        let config = AppConfig::from_path(config_path)?;
 
-        let kafka_config = conf::build_kafka_config(&config_file, &Survey::Lsst)
-            .inspect_err(as_error!("failed to build kafka config"))?;
+        let xmatch_configs = config
+            .crossmatch
+            .get(&Survey::Lsst)
+            .cloned()
+            .unwrap_or_default();
 
-        let schema_registry_url = match kafka_config.consumer.schema_registry {
+        let kafka_consumer_config = config
+            .kafka
+            .consumer
+            .get(&Survey::Lsst)
+            .cloned()
+            .ok_or_else(|| {
+                AlertWorkerError::from(BoomConfigError::MissingKeyError(
+                    "kafka.consumer.lsst".to_string(),
+                ))
+            })?;
+
+        let schema_registry_url = match kafka_consumer_config.schema_registry {
             Some(ref url) => url.as_ref(),
             None => LSST_SCHEMA_REGISTRY_URL,
         };
 
-        let xmatch_configs = conf::build_xmatch_configs(&config_file, &Survey::Lsst)
-            .inspect_err(as_error!("failed to load xmatch config"))?;
-
-        let db: mongodb::Database = conf::build_db(&config_file)
+        let db: mongodb::Database = config
+            .build_db()
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 

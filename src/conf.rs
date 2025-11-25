@@ -1,18 +1,17 @@
 use crate::utils::{enums::Survey, o11y::logging::as_error};
-
-// TODO: we do not want to get in the habit of making 3rd party types part of
-// our public API. It's almost always asking for trouble.
 use config::{Config, File, Value};
 use dotenvy;
+use mongodb::bson::doc;
+use mongodb::Database;
 use serde::Deserialize;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 use tracing::{debug, error, info, instrument, warn};
 
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
-    #[error("failed to load config")]
+    #[error("failed to load config ({0})")]
     InvalidConfigError(#[from] config::ConfigError),
     #[error("failed to connect to database using config")]
     ConnectMongoError(#[from] mongodb::error::Error),
@@ -22,6 +21,8 @@ pub enum BoomConfigError {
     ConfigFileNotFound,
     #[error("missing key in config: {0}")]
     MissingKeyError(String),
+    #[error("failed to deserialize config: {0}")]
+    InvalidSecretError(String),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -78,98 +79,31 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 }
 
 #[instrument(skip_all, err)]
-pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigError> {
-    let db_conf = conf.get_table("database")?;
+async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+    let db_conf = &conf.database;
 
-    let host = match db_conf.get("host") {
-        Some(host) => host.clone().into_string()?,
-        None => "localhost".to_string(),
-    };
-
-    let port = match db_conf.get("port") {
-        Some(port) => port.clone().into_int()? as u16,
-        None => 27017,
-    };
-
-    let name = match db_conf.get("name") {
-        Some(name) => name.clone().into_string()?,
-        None => "boom".to_string(),
-    };
-
-    let max_pool_size = match db_conf.get("max_pool_size") {
-        Some(max_pool_size) => Some(max_pool_size.clone().into_int()? as u32),
-        None => None,
-    };
-
-    let replica_set = match db_conf.get("replica_set") {
-        Some(replica_set) => {
-            if replica_set.clone().into_string().is_ok() {
-                Some(replica_set.clone().into_string()?)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
-
-    let username = match db_conf.get("username") {
-        Some(username) => {
-            if username.clone().into_string().is_ok() {
-                Some(username.clone().into_string()?)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
-
-    let password = match db_conf.get("password") {
-        Some(password) => {
-            if password.clone().into_string().is_ok() {
-                Some(password.clone().into_string()?)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
-
-    // verify that if username or password is set, both are set
-    if username.is_some() && password.is_none() {
-        panic!("username is set but password is not set");
-    }
-
-    if password.is_some() && username.is_none() {
-        panic!("password is set but username is not set");
-    }
-
-    let use_srv = match db_conf.get("srv") {
-        Some(srv) => srv.clone().into_bool()?,
-        None => false,
-    };
-
-    let prefix = match use_srv {
+    let prefix = match db_conf.srv {
         true => "mongodb+srv://",
         false => "mongodb://",
     };
 
     let mut uri = prefix.to_string();
 
-    let using_auth = username.is_some() && password.is_some();
+    let using_auth = !db_conf.username.is_empty() && !db_conf.password.is_empty();
 
     if using_auth {
-        uri.push_str(&username.unwrap());
+        uri.push_str(&db_conf.username);
         uri.push_str(":");
-        uri.push_str(&password.unwrap());
+        uri.push_str(&db_conf.password);
         uri.push_str("@");
     }
 
-    uri.push_str(&host);
+    uri.push_str(&db_conf.host);
     uri.push_str(":");
-    uri.push_str(&port.to_string());
+    uri.push_str(&db_conf.port.to_string());
 
     uri.push_str("/");
-    uri.push_str(&name);
+    uri.push_str(&db_conf.name);
 
     uri.push_str("?directConnection=true");
 
@@ -177,35 +111,24 @@ pub async fn build_db(conf: &Config) -> Result<mongodb::Database, BoomConfigErro
         uri.push_str(&format!("&authSource=admin"));
     }
 
-    if let Some(replica_set) = replica_set {
+    if let Some(replica_set) = &db_conf.replica_set {
         uri.push_str(&format!("&replicaSet={}", replica_set));
     }
 
-    if let Some(max_pool_size) = max_pool_size {
-        uri.push_str(&format!("&maxPoolSize={}", max_pool_size));
-    }
+    uri.push_str(&format!("&maxPoolSize={}", db_conf.max_pool_size));
 
     let client_mongo = mongodb::Client::with_uri_str(&uri).await?;
-    let db = client_mongo.database(&name);
+    let db = client_mongo.database(&db_conf.name);
 
     Ok(db)
 }
 
 #[instrument(skip_all, err)]
-pub async fn build_redis(
-    conf: &Config,
+async fn build_redis(
+    conf: &AppConfig,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
-    let redis_conf = conf.get_table("redis")?;
-
-    let host = match redis_conf.get("host") {
-        Some(host) => host.clone().into_string()?,
-        None => "localhost".to_string(),
-    };
-
-    let port = match redis_conf.get("port") {
-        Some(port) => port.clone().into_int()? as u16,
-        None => 6379,
-    };
+    let host = &conf.redis.host;
+    let port = conf.redis.port;
 
     let uri = format!("redis://{}:{}/", host, port);
 
@@ -220,7 +143,7 @@ pub async fn build_redis(
     Ok(con)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
     pub catalog: String,                     // name of the collection in the database
     pub radius: f64,                         // radius in radians
@@ -254,7 +177,7 @@ impl CatalogXmatchConfig {
 
     // based on the code in the main function, create a from_config function
     #[instrument(skip_all, err)]
-    pub fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
+    fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
 
         let catalog = hashmap_xmatch
@@ -329,149 +252,45 @@ impl CatalogXmatchConfig {
     }
 }
 
-#[instrument(skip(conf), err)]
-pub fn build_xmatch_configs(
-    conf: &Config,
-    survey_name: &Survey,
-) -> Result<Vec<CatalogXmatchConfig>, BoomConfigError> {
-    let crossmatches = conf.get_table("crossmatch")?;
-
-    let crossmatches_stream = match crossmatches
-        .get(&survey_name.to_string().to_lowercase())
-        .cloned()
+// implement Deserialize for CatalogXmatchConfig
+impl<'de> Deserialize<'de> for CatalogXmatchConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
     {
-        Some(x) => x,
-        None => {
-            return Ok(Vec::new());
-        }
-    };
-    let mut catalog_xmatch_configs = Vec::new();
-
-    for crossmatch in crossmatches_stream.into_array()? {
-        let catalog_xmatch_config = CatalogXmatchConfig::from_config(crossmatch)?;
-        catalog_xmatch_configs.push(catalog_xmatch_config);
+        let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+        CatalogXmatchConfig::from_config(v).map_err(serde::de::Error::custom)
     }
-
-    Ok(catalog_xmatch_configs)
 }
 
-#[derive(Debug, Clone)]
+fn default_kafka_server() -> String {
+    "localhost:9092".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct KafkaConsumerConfig {
-    pub server: String,                  // URL of the Kafka broker
+    #[serde(default = "default_kafka_server")]
+    pub server: String, // URL of the Kafka broker
     pub group_id: String,                // Consumer group ID
     pub schema_registry: Option<String>, // URL of the schema registry (if any)
     pub username: Option<String>,        // Username for authentication (if any)
     pub password: Option<String>,        // Password for authentication (if any)
 }
 
-#[derive(Debug, Clone)]
-pub struct SurveyKafkaConfig {
-    pub consumer: KafkaConsumerConfig, // Configuration for the Kafka consumer (filter worker input)
-    pub producer: String, // URL of the Kafka broker for the producer (filter worker output)
-}
-
-impl SurveyKafkaConfig {
-    pub fn from_config(
-        conf: &Config,
-        survey: &Survey,
-    ) -> Result<SurveyKafkaConfig, BoomConfigError> {
-        let kafka_conf = conf.get_table("kafka")?;
-
-        // kafka section has a consumer and producer key
-        // consumer has a key per survey, producer is global
-
-        let consumer_config = kafka_conf
-            .get("consumer")
-            .cloned()
-            .unwrap_or_default()
-            .into_table()?
-            .get(&survey.to_string().to_lowercase())
-            .cloned()
-            .unwrap_or_default()
-            .into_table()?;
-
-        let consumer_server = consumer_config
-            .get("server")
-            .and_then(|c| c.clone().into_string().ok())
-            .ok_or(BoomConfigError::MissingKeyError("server".to_string()))?;
-
-        // the schema registry is optional
-        let consumer_schema_registry = consumer_config
-            .get("schema_registry")
-            .and_then(|c| c.clone().into_string().ok());
-
-        let consumer_username = consumer_config
-            .get("username")
-            .and_then(|c| c.clone().into_string().ok());
-
-        let consumer_password = consumer_config
-            .get("password")
-            .and_then(|c| c.clone().into_string().ok());
-
-        // group_id defaults to boom-<survey>-consumer-group
-        let consumer_group_id = consumer_config
-            .get("group_id")
-            .and_then(|c| c.clone().into_string().ok())
-            .ok_or(BoomConfigError::MissingKeyError("group_id".to_string()))?;
-
-        let consumer = KafkaConsumerConfig {
-            server: consumer_server,
-            group_id: consumer_group_id,
-            schema_registry: consumer_schema_registry.clone(),
-            username: consumer_username,
-            password: consumer_password,
-        };
-
-        let producer = kafka_conf
-            .get("producer")
-            .and_then(|p| p.clone().into_string().ok())
-            .unwrap_or_else(|| "localhost:9092".to_string());
-
-        Ok(SurveyKafkaConfig { consumer, producer })
-    }
-}
-
-#[instrument(skip_all, err)]
-pub fn build_kafka_config(
-    conf: &Config,
-    survey: &Survey,
-) -> Result<SurveyKafkaConfig, BoomConfigError> {
-    SurveyKafkaConfig::from_config(conf, survey)
-}
-
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct KafkaProducerConfig {
+    #[serde(default = "default_kafka_server")]
     pub server: String, // URL of the Kafka broker
 }
 
-pub fn get_kafka_producer_config() -> Result<KafkaProducerConfig, BoomConfigError> {
-    let conf = load_raw_config(DEFAULT_CONFIG_PATH)?;
-
-    let kafka_conf = conf.get_table("kafka")?;
-
-    let producer_server = kafka_conf
-        .get("producer")
-        .and_then(|p| p.clone().into_string().ok())
-        .unwrap_or_else(|| "localhost:9092".to_string());
-
-    Ok(KafkaProducerConfig {
-        server: producer_server,
-    })
+#[derive(Debug, Clone, Deserialize)]
+pub struct KafkaConfig {
+    pub consumer: HashMap<Survey, KafkaConsumerConfig>,
+    #[serde(default)]
+    pub producer: KafkaProducerConfig,
 }
 
-/// Return whether the babamul worker is enabled per config `babamul.enabled`.
-/// If the key is missing, returns false.
-pub fn babamul_enabled(conf: &Config) -> bool {
-    // try to read the `babamul` table first; if missing, default to false
-    match conf.get_table("babamul") {
-        Ok(table) => match table.get("enabled") {
-            Some(v) => v.clone().into_bool().unwrap_or(false),
-            None => false,
-        },
-        Err(_) => false,
-    }
-}
-
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AuthConfig {
     pub secret_key: String,
     pub token_expiration: usize, // in seconds
@@ -480,12 +299,18 @@ pub struct AuthConfig {
     pub admin_email: String,
 }
 
-#[derive(Deserialize, Debug)]
-pub struct ApiConfig {
-    pub auth: AuthConfig,
+fn default_api_port() -> u16 {
+    4000
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct ApiConfig {
+    pub auth: AuthConfig,
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct DatabaseConfig {
     pub name: String,
     pub host: String,
@@ -497,22 +322,73 @@ pub struct DatabaseConfig {
     pub srv: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct RedisConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for RedisConfig {
+    fn default() -> Self {
+        RedisConfig {
+            host: "localhost".to_string(),
+            port: 6379,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct BabamulConfig {
+    pub enabled: bool,
+}
+
+impl Default for BabamulConfig {
+    fn default() -> Self {
+        BabamulConfig { enabled: false }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct WorkerConfig {
+    pub n_workers: usize,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SurveyWorkerConfig {
+    pub command_interval: u64,
+    pub alert: WorkerConfig,
+    pub enrichment: WorkerConfig,
+    pub filter: WorkerConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub redis: RedisConfig,
+    #[serde(default)]
+    pub babamul: BabamulConfig,
+    pub kafka: KafkaConfig,
+    #[serde(default)]
+    pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
+    #[serde(default)]
+    pub workers: HashMap<Survey, SurveyWorkerConfig>,
 }
 
 impl AppConfig {
-    pub fn from_default_path() -> Self {
+    #[instrument(err)]
+    pub fn from_default_path() -> Result<Self, BoomConfigError> {
         load_config(None)
     }
 
-    pub fn from_path(config_path: &str) -> Self {
+    #[instrument(err)]
+    pub fn from_path(config_path: &str) -> Result<Self, BoomConfigError> {
         load_config(Some(config_path))
     }
 
-    pub fn from_test_config() -> Self {
+    #[instrument(err)]
+    pub fn from_test_config() -> Result<Self, BoomConfigError> {
         // Find the workspace root by looking for Cargo.toml with tests/ directory
         let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
         let test_config_path = loop {
@@ -562,32 +438,48 @@ impl AppConfig {
 
         Ok(())
     }
+
+    #[instrument(skip_all, err)]
+    pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
+        build_db(self).await
+    }
+
+    #[instrument(skip_all, err)]
+    pub async fn build_redis(&self) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+        build_redis(self).await
+    }
 }
 
-pub fn load_config(config_path: Option<&str>) -> AppConfig {
+#[instrument(err)]
+pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigError> {
     load_dotenv();
 
     let config_file = config_path.unwrap_or(DEFAULT_CONFIG_PATH);
 
-    let config = load_raw_config(config_file).unwrap();
+    let config = load_raw_config(config_file)?;
 
-    let app_config: AppConfig = config
-        .try_deserialize()
-        .expect("Failed to deserialize configuration");
+    let app_config: AppConfig = config.try_deserialize()?;
 
     // Validate that required secrets are present
     if let Err(e) = app_config.validate_secrets() {
-        panic!("{}", e);
+        return Err(BoomConfigError::InvalidSecretError(e));
     }
 
     info!("Configuration loaded successfully");
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
     debug!("Admin username: {}", app_config.api.auth.admin_username);
+    debug!("Admin email: {}", app_config.api.auth.admin_email);
+    debug!("API port: {}", app_config.api.port);
     debug!(
         "Token expiration: {} seconds",
         app_config.api.auth.token_expiration
     );
 
-    app_config
+    Ok(app_config)
+}
+
+pub async fn get_test_db() -> Database {
+    let config = AppConfig::from_test_config().expect("Failed to load test config");
+    config.build_db().await.unwrap()
 }

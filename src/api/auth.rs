@@ -1,11 +1,12 @@
 use crate::api::routes::users::User;
-use crate::conf::{AppConfig, AuthConfig};
+use crate::conf::AppConfig;
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
 use actix_web::{web, Error, HttpMessage};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use mongodb::bson::doc;
+use mongodb::Database;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,11 +26,12 @@ pub struct AuthProvider {
 }
 
 impl AuthProvider {
-    pub async fn new(config: &AuthConfig, db: &mongodb::Database) -> Result<Self, std::io::Error> {
-        let encoding_key = EncodingKey::from_secret(config.secret_key.as_bytes());
-        let decoding_key = DecodingKey::from_secret(config.secret_key.as_bytes());
+    pub async fn new(config: &AppConfig, db: &Database) -> Result<Self, std::io::Error> {
+        let auth_config = &config.api.auth;
+        let encoding_key = EncodingKey::from_secret(auth_config.secret_key.as_bytes());
+        let decoding_key = DecodingKey::from_secret(auth_config.secret_key.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.validate_exp = config.token_expiration > 0; // Set to true if tokens should expire
+        validation.validate_exp = auth_config.token_expiration > 0; // Set to true if tokens should expire
 
         let users_collection: mongodb::Collection<User> = db.collection("users");
 
@@ -38,7 +40,7 @@ impl AuthProvider {
             decoding_key,
             validation,
             users_collection,
-            token_expiration: config.token_expiration,
+            token_expiration: auth_config.token_expiration,
         })
     }
 
@@ -153,19 +155,16 @@ impl AuthProvider {
     }
 }
 
-pub async fn get_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_default_path();
-    AuthProvider::new(&config.api.auth, db).await
+pub async fn get_auth(
+    app_config: &AppConfig,
+    db: &Database,
+) -> Result<AuthProvider, std::io::Error> {
+    AuthProvider::new(&app_config, &db).await
 }
 
-pub async fn get_default_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_default_path();
-    AuthProvider::new(&config.api.auth, db).await
-}
-
-pub async fn get_test_auth(db: &mongodb::Database) -> Result<AuthProvider, std::io::Error> {
-    let config = AppConfig::from_test_config();
-    AuthProvider::new(&config.api.auth, db).await
+pub async fn get_test_auth(db: &Database) -> Result<AuthProvider, std::io::Error> {
+    let app_config = AppConfig::from_test_config().unwrap();
+    AuthProvider::new(&app_config, &db).await
 }
 
 pub async fn auth_middleware(
