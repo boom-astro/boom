@@ -564,7 +564,6 @@ pub async fn consumer(
         .set("auto.offset.reset", "earliest")
         // Important: disable automatic offset storage so offsets
         // can be manually controlled during the seek operation
-        .set("enable.auto.commit", "true")
         .set("enable.auto.offset.store", "false");
 
     if let (Some(username), Some(password)) = (username, password) {
