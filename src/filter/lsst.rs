@@ -5,12 +5,101 @@ use tracing::{info, instrument};
 
 use crate::conf::AppConfig;
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
+    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
+    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline, Alert,
     Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
     Origin, Photometry,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::enums::Survey;
+
+/// For a filter running on another survey (e.g., ZTF), determine if we need to
+/// fetch LSST auxiliary data (prv_candidates, fp_hists) based on the fields
+/// used in the filter pipeline.
+///
+/// # Arguments
+/// * `use_aliases_index` - Current index of the aliases lookup stage, if any.
+/// * `filter_pipeline` - The user-defined filter pipeline stages.
+///
+/// Returns
+/// * `Option<usize>` - Updated index of the aliases lookup stage, if any.
+/// * `bool` - Whether to insert the LSST auxiliary data lookup pipeline.
+/// * `Document` - The fields to add to the alert documents.
+pub fn build_lsst_aux_data(
+    use_aliases_index: Option<usize>,
+    filter_pipeline: &Vec<serde_json::Value>,
+) -> (Option<usize>, bool, Document) {
+    let use_lsst_prv_candidates_index =
+        uses_field_in_filter(filter_pipeline, "LSST.prv_candidates");
+    let use_lsst_fp_hists_index = uses_field_in_filter(filter_pipeline, "LSST.fp_hists");
+
+    let mut lsst_aux_add_fields = doc! {
+        "lsst_aux": mongodb::bson::Bson::Null,
+    };
+    if use_lsst_prv_candidates_index.is_some() {
+        lsst_aux_add_fields.insert(
+            "LSST.prv_candidates".to_string(),
+            fetch_timeseries_op("lsst_aux.prv_candidates", "candidate.jd", 365, None),
+        );
+    }
+    if use_lsst_fp_hists_index.is_some() {
+        lsst_aux_add_fields.insert(
+            "LSST.fp_hists".to_string(),
+            fetch_timeseries_op("lsst_aux.fp_hists", "candidate.jd", 365, None),
+        );
+    }
+
+    let mut lsst_insert_aux_index = usize::MAX;
+    if let Some(index) = use_lsst_prv_candidates_index {
+        lsst_insert_aux_index = lsst_insert_aux_index.min(index);
+    }
+    if let Some(index) = use_lsst_fp_hists_index {
+        lsst_insert_aux_index = lsst_insert_aux_index.min(index);
+    }
+    let lsst_insert_aux_pipeline = lsst_insert_aux_index != usize::MAX;
+
+    let updated_use_aliases_index = update_aliases_index_multiple(
+        use_aliases_index,
+        vec![use_lsst_prv_candidates_index, use_lsst_fp_hists_index],
+    );
+
+    (
+        updated_use_aliases_index,
+        lsst_insert_aux_pipeline,
+        lsst_aux_add_fields,
+    )
+}
+
+/// Inserts the LSST auxiliary data lookup pipeline into the provided pipeline
+/// if needed.
+///
+/// # Arguments
+/// * `pipeline` - The MongoDB aggregation pipeline to modify.
+/// * `lsst_insert_aux_pipeline` - Whether to insert the LSST auxiliary data lookup pipeline.
+/// * `lsst_aux_add_fields` - The fields to add to the alert documents.
+///
+/// Returns
+/// * `()` - The function modifies the pipeline in place.
+pub fn insert_lsst_aux_pipeline_if_needed(
+    pipeline: &mut Vec<Document>,
+    lsst_insert_aux_pipeline: &mut bool,
+    lsst_aux_add_fields: &Document,
+) {
+    if *lsst_insert_aux_pipeline {
+        pipeline.push(doc! {
+            "$lookup": doc! {
+                "from": "LSST_alerts_aux",
+                "localField": "aliases.LSST.0",
+                "foreignField": "_id",
+                "as": "lsst_aux"
+            }
+        });
+        pipeline.push(doc! {
+            "$addFields": lsst_aux_add_fields
+        });
+        *lsst_insert_aux_pipeline = false; // only insert once
+    }
+}
 
 /// Builds LSST Alert objects from the provided filter results and alert collection.
 ///
@@ -236,7 +325,13 @@ pub async fn build_lsst_filter_pipeline(
         }
     }
 
-    let mut aux_add_fields = doc! {};
+    // ZTF data products
+    let (use_aliases_index, mut ztf_insert_aux_pipeline, ztf_aux_add_fields) =
+        build_ztf_aux_data(use_aliases_index, filter_pipeline);
+
+    let mut aux_add_fields = doc! {
+        "aux": mongodb::bson::Bson::Null,
+    };
 
     if use_prv_candidates_index.is_some() {
         // insert it in aux addFields stage
@@ -338,7 +433,7 @@ pub async fn build_lsst_filter_pipeline(
         if insert_aux_pipeline && i == insert_aux_index {
             pipeline.push(doc! {
                 "$lookup": doc! {
-                    "from": format!("LSST_alerts_aux"),
+                    "from": "LSST_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -347,10 +442,13 @@ pub async fn build_lsst_filter_pipeline(
             pipeline.push(doc! {
                 "$addFields": &aux_add_fields
             });
-            pipeline.push(doc! {
-                "$unset": "aux"
-            });
             insert_aux_pipeline = false; // only insert once
+
+            insert_ztf_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut ztf_insert_aux_pipeline,
+                &ztf_aux_add_fields,
+            );
         }
 
         if ztf_insert_aux_pipeline {
@@ -438,7 +536,7 @@ impl FilterWorker for LsstFilterWorker {
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
         for filter in &self.filters {
             let out_documents = run_filter(
-                candids.clone(),
+                &candids,
                 &filter.id,
                 filter.pipeline.clone(),
                 &self.alert_collection,

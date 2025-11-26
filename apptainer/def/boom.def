@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: rust:1.87-slim-bookworm
+From: rust:1.91.1-slim-trixie
 
 %environment
     export PATH=/app:$PATH
