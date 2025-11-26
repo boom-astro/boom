@@ -583,6 +583,8 @@ pub struct ZtfAliases {
     pub decam: Vec<String>,
 }
 
+#[serde_as]
+#[skip_serializing_none]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ZtfObject {
     #[serde(rename = "_id")]
