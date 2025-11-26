@@ -65,7 +65,9 @@ for_insert = {
     "_id": str(uuid.uuid4()),
     "survey": "ZTF",
     "user_id": "benchmarking",
-    "permissions": [1, 2, 3],
+    "permissions": {
+        "ZTF": [1, 2, 3]
+    },
     "active": True,
     "active_fid": "first",
     "fv": [
