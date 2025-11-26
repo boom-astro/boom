@@ -13,6 +13,7 @@ use crate::{
 };
 
 use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
+use std::cmp::min;
 
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
 use mongodb::{
@@ -691,6 +692,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut command_check_countdown = command_interval;
     let mut count = 0;
 
+    let mut sleep_backoff_secs: u64 = 1;
+    let max_backoff_secs: u64 = 64;
+
     let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let active_attrs = [worker_id_attr.clone()];
@@ -734,9 +738,12 @@ pub async fn run_alert_worker<T: AlertWorker>(
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
-            Ok(Some(bytes)) => bytes,
+            Ok(Some(bytes)) => {
+                sleep_backoff_secs = 1;   
+                bytes
+            }
             Ok(None) => {
-                info!("queue is empty");
+                debug!(stream = %stream_name, worker.id = %worker_id.to_string(), "queue is empty");
                 ACTIVE.add(-1, &active_attrs);
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 command_check_countdown = 0;
@@ -746,6 +753,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
                 log_error!(e, "failed to retrieve avro bytes");
                 ACTIVE.add(-1, &active_attrs);
                 ALERT_PROCESSED.add(1, &input_error_attrs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(sleep_backoff_secs)).await;
+                sleep_backoff_secs = min(sleep_backoff_secs.saturating_mul(2), max_backoff_secs);
                 continue;
             }
         };
