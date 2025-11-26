@@ -1,6 +1,6 @@
 use boom::{
     conf::get_test_db,
-    filter::{build_loaded_filter, uses_field_in_filter, validate_filter_pipeline},
+    filter::build_loaded_filter,
     utils::{
         enums::Survey,
         testing::{insert_custom_test_filter, insert_test_filter, remove_test_filter},
@@ -10,8 +10,7 @@ use mongodb::bson::{doc, Document};
 
 #[tokio::test]
 async fn test_build_filter() {
-    let config = conf::load_raw_config(TEST_CONFIG_FILE).unwrap();
-    let db = conf::build_db(&config).await.unwrap();
+    let db = get_test_db().await;
     let filter_collection = db.collection("filters");
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
