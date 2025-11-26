@@ -1,5 +1,6 @@
 use crate::api::{models::response, routes::users::User};
 use crate::filter::{build_filter_pipeline, Filter, FilterError, FilterVersion};
+use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 
 use actix_web::{get, patch, post, web, HttpResponse};
@@ -9,6 +10,7 @@ use mongodb::{
     bson::{doc, Document},
     Collection, Database,
 };
+use std::collections::HashMap;
 use std::vec;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -17,7 +19,7 @@ use uuid::Uuid;
 pub struct FilterPublic {
     #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
     pub active: bool,
@@ -97,7 +99,7 @@ async fn build_and_test_filter_version(
     db: web::Data<Database>,
     survey: &Survey,
     pipeline: &Vec<serde_json::Value>,
-    permissions: &Vec<i32>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<(), FilterError> {
     let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
     run_test_pipeline(db, survey, test_pipeline).await
@@ -201,7 +203,7 @@ pub async fn post_filter_version(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterPost {
     pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
 }
 
@@ -228,6 +230,9 @@ pub async fn post_filter(
 
     let survey = body.survey;
     let permissions = body.permissions;
+    if permissions.get(&survey).is_none() {
+        return response::bad_request("permissions must include the survey being filtered");
+    }
     let pipeline = body.pipeline;
 
     // Test the filter to ensure it works
@@ -284,7 +289,7 @@ pub async fn post_filter(
 struct FilterPatch {
     active: Option<bool>,
     active_fid: Option<String>,
-    permissions: Option<Vec<i32>>,
+    permissions: Option<HashMap<Survey, Vec<i32>>>,
 }
 /// Update a filter's metadata
 #[utoipa::path(
@@ -340,7 +345,10 @@ pub async fn patch_filter(
         update_doc.insert("active_fid", active_fid);
     }
     if let Some(permissions) = body.permissions.clone() {
-        update_doc.insert("permissions", permissions);
+        if permissions.get(&filter.survey).is_none() {
+            return response::bad_request("permissions must include the filter's survey");
+        }
+        update_doc.insert("permissions", mongify(&permissions));
     }
     if update_doc.is_empty() {
         return response::bad_request("no valid fields to update");
@@ -453,7 +461,7 @@ pub async fn get_filter(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
     pub end_jd: Option<f64>,
@@ -485,6 +493,9 @@ pub async fn post_filter_test(
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
+    if permissions.get(&survey).is_none() {
+        return response::bad_request("permissions must include the survey being tested");
+    }
     let pipeline = body.pipeline;
 
     // the first stage of test_pipeline is a match stage, we can overwrite it based on the test criteria

@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-use std::{num::NonZero, sync::LazyLock};
+use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
@@ -608,7 +608,7 @@ pub struct FilterVersion {
 pub struct Filter {
     #[serde(rename = "_id")]
     pub id: String,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
     pub active: bool,
@@ -620,7 +620,8 @@ pub struct Filter {
 
 pub struct LoadedFilter {
     pub id: String,
-    pub permissions: Vec<i32>,
+    // pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
 }
 
@@ -698,7 +699,7 @@ pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Val
 #[instrument(skip_all, err)]
 pub async fn build_filter_pipeline(
     pipeline: &Vec<serde_json::Value>,
-    permissions: &Vec<i32>,
+    permissions: &HashMap<Survey, Vec<i32>>,
     survey: &Survey,
 ) -> Result<Vec<Document>, FilterError> {
     let pipeline = match survey {
@@ -1278,9 +1279,11 @@ mod tests {
         let filter_collection = db.collection::<Filter>("filters_test");
         let filter_id = uuid::Uuid::new_v4().to_string();
         // first, insert a filter
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let filter = Filter {
             id: filter_id.clone(),
-            permissions: vec![1, 2, 3],
+            permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
             active: true,
@@ -1303,9 +1306,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_active_filter_pipeline() {
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let mut filter = Filter {
             id: "test_filter".to_string(),
-            permissions: vec![1, 2, 3],
+            permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
             active: true,

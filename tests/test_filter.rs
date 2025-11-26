@@ -44,7 +44,10 @@ async fn test_build_filter() {
         doc! { "$project": { "objectId": 1_i64, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
     ];
     assert_eq!(pipeline, filter.pipeline);
-    assert_eq!(vec![1], filter.permissions);
+    // assert_eq!(vec![1], filter.permissions);
+    let mut expected_permissions = std::collections::HashMap::new();
+    expected_permissions.insert(Survey::Ztf, vec![1]);
+    assert_eq!(expected_permissions, filter.permissions);
 }
 
 #[tokio::test]
@@ -140,7 +143,10 @@ async fn test_build_multisurvey_filter() {
         } } },
     ];
     assert_eq!(pipeline, filter.pipeline);
-    assert_eq!(vec![1], filter.permissions);
+    // assert_eq!(vec![1], filter.permissions);
+    let mut expected_permissions = std::collections::HashMap::new();
+    expected_permissions.insert(Survey::Ztf, vec![1]);
+    assert_eq!(expected_permissions, filter.permissions);
 }
 
 #[tokio::test]

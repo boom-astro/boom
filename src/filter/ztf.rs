@@ -344,7 +344,7 @@ pub async fn build_ztf_alerts(
 /// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
 pub async fn build_ztf_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
-    permissions: &Vec<i32>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<Vec<Document>, FilterError> {
     // validate filter
     validate_filter_pipeline(&filter_pipeline)?;
@@ -363,6 +363,15 @@ pub async fn build_ztf_filter_pipeline(
         "aux": mongodb::bson::Bson::Null,
     };
 
+    let ztf_permissions = match permissions.get(&Survey::Ztf) {
+        Some(perms) => perms,
+        None => {
+            return Err(FilterError::InvalidFilterPipeline(
+                "No ZTF permissions found for the filter".to_string(),
+            ))
+        }
+    };
+
     if use_prv_candidates_index.is_some() {
         // insert it in aux addFields stage
         aux_add_fields.insert(
@@ -374,7 +383,7 @@ pub async fn build_ztf_filter_pipeline(
                 Some(vec![doc! {
                     "$in": [
                         "$$x.programid",
-                        &permissions
+                        &ztf_permissions
                     ]
                 }]),
             ),
@@ -390,7 +399,7 @@ pub async fn build_ztf_filter_pipeline(
                 Some(vec![doc! {
                     "$in": [
                         "$$x.programid",
-                        &permissions
+                        &ztf_permissions
                     ]
                 }]),
             ),
@@ -406,7 +415,7 @@ pub async fn build_ztf_filter_pipeline(
                 Some(vec![doc! {
                     "$in": [
                         "$$x.programid",
-                        &permissions
+                        &ztf_permissions
                     ]
                 }]),
             ),
@@ -536,7 +545,11 @@ impl FilterWorker for ZtfFilterWorker {
         // permissions as values
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
-            for permission in &filter.permissions {
+            let ztf_permissions = match filter.permissions.get(&Survey::Ztf) {
+                Some(perms) => perms,
+                None => continue, // no ZTF permissions for this filter
+            };
+            for permission in ztf_permissions {
                 let entry = filters_by_permission
                     .entry(*permission)
                     .or_insert(Vec::new());
