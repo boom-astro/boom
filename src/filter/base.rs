@@ -55,6 +55,9 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+// Surveys that require permissions to be defined in filters
+pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
+
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
 const ALERT_SCHEMA: &str = r#"

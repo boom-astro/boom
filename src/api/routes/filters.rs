@@ -1,5 +1,7 @@
 use crate::api::{models::response, routes::users::User};
-use crate::filter::{build_filter_pipeline, Filter, FilterError, FilterVersion};
+use crate::filter::{
+    build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 
@@ -230,8 +232,11 @@ pub async fn post_filter(
 
     let survey = body.survey;
     let permissions = body.permissions;
-    if permissions.get(&survey).is_none() {
-        return response::bad_request("permissions must include the survey being filtered");
+    if permissions.get(&survey).is_none() && SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+        return response::bad_request(&format!(
+            "Filters running on survey {:?} must have permissions defined for that survey",
+            survey
+        ));
     }
     let pipeline = body.pipeline;
 
@@ -345,8 +350,13 @@ pub async fn patch_filter(
         update_doc.insert("active_fid", active_fid);
     }
     if let Some(permissions) = body.permissions.clone() {
-        if permissions.get(&filter.survey).is_none() {
-            return response::bad_request("permissions must include the filter's survey");
+        if permissions.get(&filter.survey).is_none()
+            && SURVEYS_REQUIRING_PERMISSIONS.contains(&filter.survey)
+        {
+            return response::bad_request(&format!(
+                "Filters running on survey {:?} must have permissions defined for that survey",
+                filter.survey
+            ));
         }
         update_doc.insert("permissions", mongify(&permissions));
     }
@@ -493,8 +503,11 @@ pub async fn post_filter_test(
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
-    if permissions.get(&survey).is_none() {
-        return response::bad_request("permissions must include the survey being tested");
+    if permissions.get(&survey).is_none() && SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+        return response::bad_request(&format!(
+            "Filters running on survey {:?} must have permissions defined for that survey",
+            survey
+        ));
     }
     let pipeline = body.pipeline;
 
