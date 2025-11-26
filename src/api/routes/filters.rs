@@ -21,6 +21,8 @@ use uuid::Uuid;
 pub struct FilterPublic {
     #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
+    pub name: String,
+    pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
@@ -35,6 +37,8 @@ impl From<Filter> for FilterPublic {
     fn from(filter: Filter) -> Self {
         Self {
             id: filter.id,
+            name: filter.name,
+            description: filter.description,
             permissions: filter.permissions,
             user_id: filter.user_id,
             survey: filter.survey,
@@ -110,6 +114,7 @@ async fn build_and_test_filter_version(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterVersionPost {
     pipeline: Vec<serde_json::Value>,
+    changelog: Option<String>,
     set_as_active: Option<bool>,
 }
 
@@ -168,13 +173,17 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
+    let mut fv_update = doc! {
+        "fid": &new_pipeline_id,
+        "pipeline": serde_json::to_string(&new_pipeline).unwrap(),
+        "created_at": Time::now().to_jd(),
+    };
+    if let Some(changelog) = body.changelog.clone() {
+        fv_update.insert("changelog", changelog);
+    }
     let mut update_doc = doc! {
         "$push": {
-            "fv": {
-                "fid": &new_pipeline_id,
-                "pipeline": serde_json::to_string(&new_pipeline).unwrap(),
-                "created_at": Time::now().to_jd(),
-            }
+            "fv": fv_update
         },
     };
     if body.set_as_active.unwrap_or(true) {
@@ -204,6 +213,8 @@ pub async fn post_filter_version(
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterPost {
+    pub name: String,
+    pub description: Option<String>,
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
@@ -259,6 +270,8 @@ pub async fn post_filter(
     let pipeline_json = serde_json::to_string(&pipeline).unwrap();
     let now = Time::now().to_jd();
     let filter = Filter {
+        name: body.name,
+        description: body.description,
         permissions,
         survey,
         id: filter_id,
@@ -268,6 +281,7 @@ pub async fn post_filter(
         fv: vec![FilterVersion {
             fid: filter_version,
             pipeline: pipeline_json,
+            changelog: None,
             created_at: now,
         }],
         created_at: now,
@@ -292,6 +306,8 @@ pub async fn post_filter(
 // we want a PATCH, that let's a user change fields like active, active_fid, permissions
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterPatch {
+    name: Option<String>,
+    description: Option<String>,
     active: Option<bool>,
     active_fid: Option<String>,
     permissions: Option<HashMap<Survey, Vec<i32>>>,
@@ -336,7 +352,16 @@ pub async fn patch_filter(
     }
 
     let mut update_doc = Document::new();
-
+    if let Some(name) = body.name.clone() {
+        if !name.is_empty() {
+            update_doc.insert("name", name);
+        }
+    }
+    if let Some(description) = body.description.clone() {
+        if !description.is_empty() {
+            update_doc.insert("description", description);
+        }
+    }
     if let Some(active) = body.active {
         update_doc.insert("active", active);
     }

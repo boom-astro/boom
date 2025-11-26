@@ -78,6 +78,7 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "FilterResults",
                 "fields": [
                     {"name": "filter_id", "type": "string"},
+                    {"name": "filter_name", "type": "string"},
                     {"name": "passed_at", "type": "double"},
                     {"name": "annotations", "type": "string"}
                 ]
@@ -193,6 +194,7 @@ pub struct Classification {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResults {
     pub filter_id: String,
+    pub filter_name: String,
     pub passed_at: f64, // timestamp in seconds
     pub annotations: String,
 }
@@ -604,6 +606,7 @@ pub async fn run_filter(
 pub struct FilterVersion {
     pub fid: String,
     pub pipeline: String,
+    pub changelog: Option<String>,
     pub created_at: f64,
 }
 
@@ -611,6 +614,8 @@ pub struct FilterVersion {
 pub struct Filter {
     #[serde(rename = "_id")]
     pub id: String,
+    pub name: String,
+    pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
@@ -623,7 +628,7 @@ pub struct Filter {
 
 pub struct LoadedFilter {
     pub id: String,
-    // pub permissions: Vec<i32>,
+    pub name: String,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
 }
@@ -746,6 +751,7 @@ pub async fn build_loaded_filter(
 
     let loaded = LoadedFilter {
         id: filter.id.clone(),
+        name: filter.name.clone(),
         pipeline: pipeline,
         permissions: filter.permissions,
     };
@@ -1281,11 +1287,14 @@ mod tests {
         let db = get_test_db().await;
         let filter_collection = db.collection::<Filter>("filters_test");
         let filter_id = uuid::Uuid::new_v4().to_string();
+        let filter_name = format!("test_filter_{}", &filter_id[..8]);
         // first, insert a filter
         let mut permissions = HashMap::new();
         permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let filter = Filter {
             id: filter_id.clone(),
+            name: filter_name.clone(),
+            description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
@@ -1294,6 +1303,7 @@ mod tests {
             fv: vec![FilterVersion {
                 fid: "v1".to_string(),
                 pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1}}]"#.to_string(),
+                changelog: None,
                 created_at: 0.0,
             }],
             created_at: 0.0,
@@ -1313,6 +1323,8 @@ mod tests {
         permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let mut filter = Filter {
             id: "test_filter".to_string(),
+            name: "test_filter".to_string(),
+            description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
@@ -1323,6 +1335,7 @@ mod tests {
                     // active version
                     fid: "v1".to_string(),
                     pipeline: r#"[]"#.to_string(),
+                    changelog: None,
                     created_at: 1.0,
                 },
                 FilterVersion {
@@ -1330,6 +1343,7 @@ mod tests {
                     fid: "v2".to_string(),
                     pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1, "candidate": 1}}]"#
                         .to_string(),
+                    changelog: None,
                     created_at: 2.0,
                 },
             ],
