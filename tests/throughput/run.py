@@ -63,7 +63,7 @@ with open("tests/throughput/cats150.pipeline.json", "r") as f:
 now_jd = Time.now().jd
 for_insert = {
     "_id": "replaced-in-mongo-init-script",
-    "name": "cats150-replacted-in-mongo-init-script",
+    "name": "cats150-replaced-in-mongo-init-script",
     "survey": "ZTF",
     "user_id": "benchmarking",
     "permissions": {
