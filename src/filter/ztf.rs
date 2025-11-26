@@ -562,14 +562,17 @@ impl FilterWorker for ZtfFilterWorker {
         let filters = build_loaded_filters(&filter_ids, &Survey::Ztf, &filter_collection).await?;
 
         // Create a hashmap of filters per programid (permissions)
-        // basically we'll have the 4 programid (from 0 to 3) as keys
-        // and the ids of the filters that have that programid in their
-        // permissions as values
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
             let ztf_permissions = match filter.permissions.get(&Survey::Ztf) {
                 Some(perms) => perms,
-                None => continue, // no ZTF permissions for this filter
+                None => {
+                    warn!(
+                        "Filter {} running on ZTF alerts has no ZTF permissions set, skipping",
+                        filter.id
+                    );
+                    continue;
+                }
             };
             for permission in ztf_permissions {
                 let entry = filters_by_permission
@@ -671,6 +674,7 @@ impl FilterWorker for ZtfFilterWorker {
                             .inspect_err(as_error!("Failed to serialize annotations"))?;
                     let filter_result = FilterResults {
                         filter_id: filter.id.clone(),
+                        filter_name: filter.name.clone(),
                         passed_at: now_ts,
                         annotations,
                     };

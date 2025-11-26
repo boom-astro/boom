@@ -127,12 +127,14 @@ pub async fn insert_custom_test_filter(
     pipeline_str: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let filter_id = uuid::Uuid::new_v4().to_string();
+    let filter_name = format!("test_filter_{}", &filter_id[..8]);
 
     let now = flare::Time::now().to_jd();
     let mut permissions = std::collections::HashMap::new();
     permissions.insert(survey.clone(), vec![1]);
     let filter_obj = Filter {
         id: filter_id.clone(),
+        name: filter_name,
         survey: survey.clone(),
         user_id: "test_user".to_string(),
         permissions,

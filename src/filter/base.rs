@@ -193,6 +193,7 @@ pub struct Classification {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResults {
     pub filter_id: String,
+    pub filter_name: String,
     pub passed_at: f64, // timestamp in seconds
     pub annotations: String,
 }
@@ -611,6 +612,7 @@ pub struct FilterVersion {
 pub struct Filter {
     #[serde(rename = "_id")]
     pub id: String,
+    pub name: String,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
@@ -623,7 +625,7 @@ pub struct Filter {
 
 pub struct LoadedFilter {
     pub id: String,
-    // pub permissions: Vec<i32>,
+    pub name: String,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
 }
@@ -746,6 +748,7 @@ pub async fn build_loaded_filter(
 
     let loaded = LoadedFilter {
         id: filter.id.clone(),
+        name: filter.name.clone(),
         pipeline: pipeline,
         permissions: filter.permissions,
     };
@@ -1281,11 +1284,13 @@ mod tests {
         let db = get_test_db().await;
         let filter_collection = db.collection::<Filter>("filters_test");
         let filter_id = uuid::Uuid::new_v4().to_string();
+        let filter_name = format!("test_filter_{}", &filter_id[..8]);
         // first, insert a filter
         let mut permissions = HashMap::new();
         permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let filter = Filter {
             id: filter_id.clone(),
+            name: filter_name.clone(),
             permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
@@ -1313,6 +1318,7 @@ mod tests {
         permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let mut filter = Filter {
             id: "test_filter".to_string(),
+            name: "test_filter".to_string(),
             permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
