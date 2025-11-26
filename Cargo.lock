@@ -302,10 +302,11 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "apache-avro"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a033b4ced7c585199fb78ef50fca7fe2f444369ec48080c5fd072efa1a03cc7"
+checksum = "36fa98bc79671c7981272d91a8753a928ff6a1cd8e4f20a44c45bd5d313840bf"
 dependencies = [
+ "apache-avro-derive",
  "bigdecimal",
  "bon",
  "crc32fast",
@@ -324,6 +325,19 @@ dependencies = [
  "strum_macros",
  "thiserror 2.0.17",
  "uuid",
+]
+
+[[package]]
+name = "apache-avro-derive"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a5f1d2499ae9ad7eda0d283bac50140ec75b4d07784124b36dfa21d0b3649cf"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
 ]
 
 [[package]]
@@ -493,6 +507,7 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "apache-avro",
+ "apache-avro-derive",
  "async-trait",
  "base64 0.22.1",
  "bcrypt",

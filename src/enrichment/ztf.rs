@@ -1,4 +1,5 @@
 use crate::conf::AppConfig;
+use crate::enrichment::babamul::Babamul;
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
@@ -11,6 +12,7 @@ use crate::{
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -80,7 +82,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
 /// ZTF alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ZtfAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
@@ -93,13 +95,42 @@ pub struct ZtfAlertForEnrichment {
 
 /// ZTF alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
+}
+
+/// Enriched ZTF alert (i.e., one with properties)
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
+pub struct EnrichedZtfAlert {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
+    pub properties: ZtfAlertProperties,
+}
+
+impl EnrichedZtfAlert {
+    pub fn from_alert_and_properties(
+        alert: ZtfAlertForEnrichment,
+        properties: ZtfAlertProperties,
+    ) -> Self {
+        EnrichedZtfAlert {
+            candid: alert.candid,
+            object_id: alert.object_id,
+            candidate: alert.candidate,
+            prv_candidates: alert.prv_candidates,
+            fp_hists: alert.fp_hists,
+            properties,
+        }
+    }
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -115,6 +146,7 @@ pub struct ZtfEnrichmentWorker {
     acai_o_model: AcaiModel,
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
+    babamul: Option<Babamul>,
 }
 
 #[async_trait::async_trait]
@@ -140,6 +172,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // we load the btsbot model (different architecture, and input/output then ACAI)
         let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
 
+        // Detect if Babamul is enabled from the config
+        let babamul: Option<Babamul> = if config.babamul.enabled {
+            Some(Babamul::new(&config))
+        } else {
+            None
+        };
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -153,6 +192,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_o_model,
             acai_b_model,
             btsbot_model,
+            babamul,
         })
     }
 
@@ -198,6 +238,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
+        let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
         for i in 0..alerts.len() {
             let candid = alerts[i].candid;
             let cutouts = candid_to_cutouts
@@ -247,9 +288,23 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             updates.push(update);
             processed_alerts.push(format!("{},{}", programid, candid));
+
+            // If Babamul is enabled, add the enriched alert to the batch
+            if self.babamul.is_some() {
+                let enriched_alert =
+                    EnrichedZtfAlert::from_alert_and_properties(alerts[i].clone(), properties);
+                enriched_alerts.push(enriched_alert);
+            }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // Send to Babamul for batch processing
+        if let Some(babamul) = self.babamul.as_ref() {
+            if let Err(e) = babamul.process_ztf_alerts(enriched_alerts).await {
+                tracing::error!("Failed to process enriched alerts in Babamul: {}", e);
+            }
+        }
 
         Ok(processed_alerts)
     }

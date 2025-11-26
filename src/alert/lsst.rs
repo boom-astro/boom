@@ -15,6 +15,7 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
+use apache_avro_derive::AvroSchema;
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -41,7 +42,9 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema, AvroSchema,
+)]
 #[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
@@ -196,7 +199,7 @@ pub struct DiaSource {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
