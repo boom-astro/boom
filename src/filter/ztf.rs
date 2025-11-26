@@ -5,7 +5,8 @@ use tracing::{info, instrument, warn};
 
 use crate::conf::AppConfig;
 use crate::filter::{
-    build_loaded_filters, parse_programid_candid_tuple, run_filter, uses_field_in_filter,
+    build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
+    parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
     validate_filter_pipeline, Alert, Classification, FilterError, FilterResults, FilterWorker,
     FilterWorkerError, LoadedFilter, Origin, Photometry,
 };
@@ -13,6 +14,93 @@ use crate::utils::db::{fetch_timeseries_op, get_array_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 const ZTF_ZP: f64 = 23.9;
+
+/// For a filter running on another survey (e.g., LSST), determine if we need to
+/// fetch ZTF auxiliary data (prv_candidates, fp_hists) based on the fields
+/// used in the filter pipeline.
+///
+/// # Arguments
+/// * `use_aliases_index` - Current index of the aliases lookup stage, if any.
+/// * `filter_pipeline` - The user-defined filter pipeline stages.
+///
+/// Returns
+/// * `Option<usize>` - Updated index of the aliases lookup stage, if any.
+/// * `bool` - Whether to insert the ZTF auxiliary data lookup pipeline.
+/// * `Document` - The fields to add to the alert documents.
+pub fn build_ztf_aux_data(
+    use_aliases_index: Option<usize>,
+    filter_pipeline: &Vec<serde_json::Value>,
+) -> (Option<usize>, bool, Document) {
+    let use_ztf_prv_candidates_index = uses_field_in_filter(filter_pipeline, "ZTF.prv_candidates");
+    let use_ztf_fp_hists_index = uses_field_in_filter(filter_pipeline, "ZTF.fp_hists");
+
+    let mut ztf_aux_add_fields = doc! {
+        "ztf_aux": mongodb::bson::Bson::Null,
+    };
+    if use_ztf_prv_candidates_index.is_some() {
+        ztf_aux_add_fields.insert(
+            "ZTF.prv_candidates".to_string(),
+            fetch_timeseries_op("ztf_aux.prv_candidates", "candidate.jd", 365, None),
+        );
+    }
+    if use_ztf_fp_hists_index.is_some() {
+        ztf_aux_add_fields.insert(
+            "ZTF.fp_hists".to_string(),
+            fetch_timeseries_op("ztf_aux.fp_hists", "candidate.jd", 365, None),
+        );
+    }
+
+    let mut ztf_insert_aux_index = usize::MAX;
+    if let Some(index) = use_ztf_prv_candidates_index {
+        ztf_insert_aux_index = ztf_insert_aux_index.min(index);
+    }
+    if let Some(index) = use_ztf_fp_hists_index {
+        ztf_insert_aux_index = ztf_insert_aux_index.min(index);
+    }
+    let ztf_insert_aux_pipeline = ztf_insert_aux_index != usize::MAX;
+
+    let updated_use_aliases_index = update_aliases_index_multiple(
+        use_aliases_index,
+        vec![use_ztf_prv_candidates_index, use_ztf_fp_hists_index],
+    );
+
+    (
+        updated_use_aliases_index,
+        ztf_insert_aux_pipeline,
+        ztf_aux_add_fields,
+    )
+}
+
+/// Inserts the ZTF auxiliary data lookup pipeline into the provided pipeline
+/// if needed.
+///
+/// # Arguments
+/// * `pipeline` - The MongoDB aggregation pipeline to modify.
+/// * `ztf_insert_aux_pipeline` - Whether to insert the ZTF auxiliary data lookup pipeline.
+/// * `ztf_aux_add_fields` - The fields to add to the alert documents.
+///
+/// Returns
+/// * `()` - The function modifies the pipeline in place.
+pub fn insert_ztf_aux_pipeline_if_needed(
+    pipeline: &mut Vec<Document>,
+    ztf_insert_aux_pipeline: &mut bool,
+    ztf_aux_add_fields: &Document,
+) {
+    if *ztf_insert_aux_pipeline {
+        pipeline.push(doc! {
+            "$lookup": doc! {
+                "from": "ZTF_alerts_aux",
+                "localField": "aliases.ZTF.0",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        });
+        pipeline.push(doc! {
+            "$addFields": ztf_aux_add_fields
+        });
+        *ztf_insert_aux_pipeline = false; // only insert once
+    }
+}
 
 /// Builds ZTF Alert objects from the provided filter results and alert collection.
 ///
@@ -267,7 +355,13 @@ pub async fn build_ztf_filter_pipeline(
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
-    let mut aux_add_fields = doc! {};
+    // LSST data products
+    let (use_aliases_index, mut lsst_insert_aux_pipeline, lsst_aux_add_fields) =
+        build_lsst_aux_data(use_aliases_index, filter_pipeline);
+
+    let mut aux_add_fields = doc! {
+        "aux": mongodb::bson::Bson::Null,
+    };
 
     if use_prv_candidates_index.is_some() {
         // insert it in aux addFields stage
@@ -386,7 +480,7 @@ pub async fn build_ztf_filter_pipeline(
         if insert_aux_pipeline && i == insert_aux_index {
             pipeline.push(doc! {
                 "$lookup": doc! {
-                    "from": format!("ZTF_alerts_aux"),
+                    "from": "ZTF_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -395,10 +489,13 @@ pub async fn build_ztf_filter_pipeline(
             pipeline.push(doc! {
                 "$addFields": &aux_add_fields
             });
-            pipeline.push(doc! {
-                "$unset": "aux"
-            });
             insert_aux_pipeline = false; // only insert once
+
+            insert_lsst_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut lsst_insert_aux_pipeline,
+                &lsst_aux_add_fields,
+            );
         }
 
         // push the current stage
@@ -505,7 +602,7 @@ impl FilterWorker for ZtfFilterWorker {
                 }
 
                 let out_documents = run_filter(
-                    candids.clone(),
+                    &candids,
                     filter.pipeline.clone(),
                     &self.alert_collection,
                 )
