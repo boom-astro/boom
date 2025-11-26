@@ -30,6 +30,7 @@ const ZTF_ZP: f64 = 23.9;
 pub fn build_ztf_aux_data(
     use_aliases_index: Option<usize>,
     filter_pipeline: &Vec<serde_json::Value>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> (Option<usize>, bool, Document) {
     let use_ztf_prv_candidates_index = uses_field_in_filter(filter_pipeline, "ZTF.prv_candidates");
     let use_ztf_fp_hists_index = uses_field_in_filter(filter_pipeline, "ZTF.fp_hists");
@@ -37,16 +38,37 @@ pub fn build_ztf_aux_data(
     let mut ztf_aux_add_fields = doc! {
         "ztf_aux": mongodb::bson::Bson::Null,
     };
+
+    let ztf_permissions = match permissions.get(&Survey::Ztf) {
+        Some(perms) => perms,
+        None => &vec![1],
+    };
+    let permissions_check = Some(vec![doc! {
+        "$in": [
+            "$$x.programid",
+            &ztf_permissions
+        ]
+    }]);
     if use_ztf_prv_candidates_index.is_some() {
         ztf_aux_add_fields.insert(
             "ZTF.prv_candidates".to_string(),
-            fetch_timeseries_op("ztf_aux.prv_candidates", "candidate.jd", 365, None),
+            fetch_timeseries_op(
+                "ztf_aux.prv_candidates",
+                "candidate.jd",
+                365,
+                permissions_check.clone(),
+            ),
         );
     }
     if use_ztf_fp_hists_index.is_some() {
         ztf_aux_add_fields.insert(
             "ZTF.fp_hists".to_string(),
-            fetch_timeseries_op("ztf_aux.fp_hists", "candidate.jd", 365, None),
+            fetch_timeseries_op(
+                "ztf_aux.fp_hists",
+                "candidate.jd",
+                365,
+                permissions_check.clone(),
+            ),
         );
     }
 

@@ -709,7 +709,7 @@ pub async fn build_filter_pipeline(
             }
             build_ztf_filter_pipeline(pipeline, permissions).await?
         }
-        Survey::Lsst => build_lsst_filter_pipeline(pipeline).await?,
+        Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         _ => {
             return Err(FilterError::InvalidFilterPipeline(
                 "Unsupported survey for filter pipeline".to_string(),
