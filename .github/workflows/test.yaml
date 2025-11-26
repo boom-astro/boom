@@ -33,7 +33,7 @@ jobs:
       run: |
         KAFKA_VERSION=4.1.1
         SCALA_VERSION=2.13
-        sudo apt-get install -y --no-install-recommends \
+        sudo apt-get update && sudo apt-get install -y --no-install-recommends \
             libsasl2-2 ca-certificates openjdk-21-jre-headless curl bash tar
         sudo curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz
         sudo tar -xzf /tmp/kafka.tgz -C /opt
