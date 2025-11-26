@@ -605,6 +605,7 @@ pub async fn run_filter(
 pub struct FilterVersion {
     pub fid: String,
     pub pipeline: String,
+    pub changelog: Option<String>,
     pub created_at: f64,
 }
 
@@ -613,6 +614,7 @@ pub struct Filter {
     #[serde(rename = "_id")]
     pub id: String,
     pub name: String,
+    pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
@@ -1291,6 +1293,7 @@ mod tests {
         let filter = Filter {
             id: filter_id.clone(),
             name: filter_name.clone(),
+            description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
@@ -1299,6 +1302,7 @@ mod tests {
             fv: vec![FilterVersion {
                 fid: "v1".to_string(),
                 pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1}}]"#.to_string(),
+                changelog: None,
                 created_at: 0.0,
             }],
             created_at: 0.0,
@@ -1319,6 +1323,7 @@ mod tests {
         let mut filter = Filter {
             id: "test_filter".to_string(),
             name: "test_filter".to_string(),
+            description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
@@ -1329,6 +1334,7 @@ mod tests {
                     // active version
                     fid: "v1".to_string(),
                     pipeline: r#"[]"#.to_string(),
+                    changelog: None,
                     created_at: 1.0,
                 },
                 FilterVersion {
@@ -1336,6 +1342,7 @@ mod tests {
                     fid: "v2".to_string(),
                     pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1, "candidate": 1}}]"#
                         .to_string(),
+                    changelog: None,
                     created_at: 2.0,
                 },
             ],
