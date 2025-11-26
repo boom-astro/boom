@@ -78,6 +78,7 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "FilterResults",
                 "fields": [
                     {"name": "filter_id", "type": "string"},
+                    {"name": "filter_name", "type": "string"},
                     {"name": "passed_at", "type": "double"},
                     {"name": "annotations", "type": "string"}
                 ]
