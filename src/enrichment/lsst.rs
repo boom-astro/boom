@@ -85,7 +85,6 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
-                "fp_hists.snr": 1,
             }
         },
     ]

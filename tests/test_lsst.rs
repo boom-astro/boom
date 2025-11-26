@@ -145,9 +145,7 @@ async fn test_enrich_lsst_alert() {
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
-    let result = enrichment_worker
-        .process_alerts(&[candid])
-        .await;
+    let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok());
 
     // the result should be a vec of String, for ZTF with the format
@@ -194,9 +192,7 @@ async fn test_filter_lsst_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let filter_id = insert_test_filter(&Survey::Lsst, true, false)
-        .await
-        .unwrap();
+    let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
 
     let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await

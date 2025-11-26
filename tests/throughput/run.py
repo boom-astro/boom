@@ -54,7 +54,7 @@ config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
 with open("tests/throughput/config.yaml", "w") as f:
-    yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+    yaml.safe_dump(config, f, default_flow_style=False)
 
 # Reformat filter for insertion into database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:

@@ -72,7 +72,6 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
-                "fp_hists.snr": 1,
             }
         },
     ]
@@ -212,7 +211,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, all_bands_properties, programid, lightcurve) =
+            let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alerts[i]).await?;
 
             // Now, prepare inputs for ML models and run inference
@@ -228,19 +227,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let metadata_btsbot = self
                 .btsbot_model
                 .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
+            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
             let metadata_cider = self
                 .ciderimages_model
                 .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
             let triplet_cider = self.ciderimages_model.get_triplet(&[cutouts])?;
-            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
             let cider_img_scores = self
                 .ciderimages_model
                 .predict(&metadata_cider, &triplet_cider)?;
 
             let (photometry_data_array, photometry_mask) =
-                self.ciderphotometry_model.photometry_inputs(lightcurve)?;
-
+                self.ciderphotometry_model.photometry_inputs(_lightcurve)?;
             let cider_photo_scores = self
                 .ciderphotometry_model
                 .predict(&photometry_data_array, &photometry_mask)?;
