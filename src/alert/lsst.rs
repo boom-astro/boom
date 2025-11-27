@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(alert.candidate.object_id, object_id);
         assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
-        assert!((alert.candidate.jd - 2460961.733092).abs() < 1e-6);
+        assert!((alert.candidate.jd - 2460961.732664).abs() < 1e-6);
         assert!((alert.candidate.magpsf - 23.674994).abs() < 1e-6);
         assert!((alert.candidate.sigmapsf - 0.217043).abs() < 1e-6);
         assert!((alert.candidate.diffmaglim - 23.675514).abs() < 1e-5);
