@@ -17,6 +17,7 @@ use crate::{
 };
 use constcat::concat;
 use flare::Time;
+use hifitime::Epoch;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -216,7 +217,7 @@ pub struct LsstCandidate {
 impl TryFrom<DiaSource> for LsstCandidate {
     type Error = AlertError;
     fn try_from(dia_source: DiaSource) -> Result<Self, Self::Error> {
-        let jd = dia_source.midpoint_mjd_tai + 2400000.5;
+        let jd = Epoch::from_mjd_tai(dia_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
         let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
 
@@ -513,7 +514,7 @@ pub struct LsstForcedPhot {
 impl TryFrom<DiaForcedSource> for LsstForcedPhot {
     type Error = AlertError;
     fn try_from(dia_forced_source: DiaForcedSource) -> Result<Self, Self::Error> {
-        let jd = dia_forced_source.midpoint_mjd_tai + 2400000.5;
+        let jd = Epoch::from_mjd_tai(dia_forced_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux_err = dia_forced_source
             .psf_flux_err
             .ok_or(AlertError::MissingFluxPSF)?;
