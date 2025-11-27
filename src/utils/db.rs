@@ -79,8 +79,8 @@ pub async fn initialize_survey_indexes(
 pub fn update_timeseries_op(
     array_field: &str,
     time_field: &str,
-    value: &Vec<mongodb::bson::Document>,
-) -> mongodb::bson::Document {
+    value: &Vec<Document>,
+) -> Document {
     doc! {
         "$sortArray": {
             "input": {

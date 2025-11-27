@@ -142,10 +142,10 @@ pub enum FilterError {
 }
 
 pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
-    // We know that we have the programid first, followed by a comma, and then the candid.
-    // the programid is always a single digit (0-9) and the candid is a larger number.
-    // so we don't know to look for the comma to split the string.
-    // and can directly use the indexes to read the values.
+    // We know that we have the programid first, followed by a comma, and then the candid
+    // the programid is always a single digit (0-9) and the candid is a larger number
+    // so we don't need to look for the comma to split the string.
+    // We can directly use the indexes to read the values
     // while this makes it very specific to this format, it is twice as fast.
     let first_part = &tuple_str[0..1];
     // verify that the second character is a comma
@@ -555,7 +555,7 @@ pub fn update_aliases_index_multiple(
 ///
 /// # Arguments
 /// * `candids` - A vector of candidate IDs to filter.
-/// * `filter_id` - The unique identifier of the filter.
+/// * `_filter_id` - The unique identifier of the filter, only used for logging.
 /// * `pipeline` - The MongoDB aggregation pipeline to execute.
 /// * `alert_collection` - The MongoDB collection containing alerts.
 ///
@@ -564,7 +564,7 @@ pub fn update_aliases_index_multiple(
 #[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
     candids: &[i64],
-    filter_id: &str,
+    _filter_id: &str,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {
@@ -835,7 +835,7 @@ pub trait FilterWorker {
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
-    fn survey() -> crate::utils::enums::Survey;
+    fn survey() -> Survey;
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
