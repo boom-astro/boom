@@ -26,7 +26,10 @@ pub enum ModelError {
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
-    let use_gpu = env::var("USE_GPU").map(|v| v == "true").unwrap_or(true);
+    let use_gpu = env::var("USE_GPU")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        == "true";
     // Only attempt to load CUDA/CoreML when USE_GPU=true
     if use_gpu {
         // if CUDA or Apple's CoreML aren't available,
