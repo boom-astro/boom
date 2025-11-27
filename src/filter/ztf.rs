@@ -601,8 +601,13 @@ impl FilterWorker for ZtfFilterWorker {
                     continue;
                 }
 
-                let out_documents =
-                    run_filter(&candids, filter.pipeline.clone(), &self.alert_collection).await?;
+                let out_documents = run_filter(
+                    &candids,
+                    &filter.id,
+                    filter.pipeline.clone(),
+                    &self.alert_collection,
+                )
+                .await?;
 
                 info!(
                     "{}/{} ZTF alerts with programid {} passed filter {}",

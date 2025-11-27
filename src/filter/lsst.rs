@@ -465,8 +465,13 @@ impl FilterWorker for LsstFilterWorker {
         // run the filters
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
         for filter in &self.filters {
-            let out_documents =
-                run_filter(&candids, filter.pipeline.clone(), &self.alert_collection).await?;
+            let out_documents = run_filter(
+                &candids,
+                &filter.id,
+                filter.pipeline.clone(),
+                &self.alert_collection,
+            )
+            .await?;
 
             // if the array is empty, continue
             if out_documents.is_empty() {

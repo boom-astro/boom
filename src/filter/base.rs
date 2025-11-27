@@ -555,6 +555,7 @@ pub fn update_aliases_index_multiple(
 ///
 /// # Arguments
 /// * `candids` - A vector of candidate IDs to filter.
+/// * `_filter_id` - The unique identifier of the filter, only used for logging.
 /// * `pipeline` - The MongoDB aggregation pipeline to execute.
 /// * `alert_collection` - The MongoDB collection containing alerts.
 ///
@@ -563,6 +564,7 @@ pub fn update_aliases_index_multiple(
 #[instrument(skip(candids, pipeline, alert_collection), err)]
 pub async fn run_filter(
     candids: &[i64],
+    _filter_id: &str,
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {
@@ -1241,7 +1243,7 @@ mod tests {
             doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
             doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
         ];
-        let result = run_filter(&candids, pipeline, &alert_collection).await;
+        let result = run_filter(&candids, "test_filter", pipeline, &alert_collection).await;
         assert!(result.is_ok());
 
         // let's try a pipeline that is invalid (doesn't start with a $match)
@@ -1249,12 +1251,12 @@ mod tests {
             doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
             doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
         ];
-        let result = run_filter(&candids, invalid_pipeline, &alert_collection).await;
+        let result = run_filter(&candids, "test_filter", invalid_pipeline, &alert_collection).await;
         assert!(result.is_err());
 
         // let's try a pipeline that is empty
         let empty_pipeline = vec![];
-        let result = run_filter(&candids, empty_pipeline, &alert_collection).await;
+        let result = run_filter(&candids, "test_filter", empty_pipeline, &alert_collection).await;
         assert!(result.is_err());
 
         // let's try with empty candids
@@ -1264,7 +1266,7 @@ mod tests {
             doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "coordinates": 1 } },
             doc! { "$project": { "objectId": 1, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
         ];
-        let result = run_filter(&empty_candids, pipeline, &alert_collection).await;
+        let result = run_filter(&empty_candids, "test_filter", pipeline, &alert_collection).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
     }
