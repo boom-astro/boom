@@ -39,10 +39,12 @@ pub fn build_ztf_aux_data(
         "ztf_aux": mongodb::bson::Bson::Null,
     };
 
-    let ztf_permissions = match permissions.get(&Survey::Ztf) {
-        Some(perms) => perms,
-        None => &vec![1],
-    };
+    static DEFAULT_ZTF_PERMS: &[i32] = &[1];
+    let ztf_permissions: &[i32] = permissions
+        .get(&Survey::Ztf)
+        .map(|v| &v[..])
+        .unwrap_or(DEFAULT_ZTF_PERMS);
+
     let permissions_check = Some(vec![doc! {
         "$in": [
             "$$x.programid",
@@ -207,7 +209,7 @@ pub async fn build_ztf_alerts(
             .get_binary_generic("cutoutDifference")?
             .to_vec();
 
-        // let's create the array of photometry (non forced phot only for now)
+        // let's create the array of photometry (non-forced phot only for now)
         let mut photometry = Vec::new();
         for doc in alert_document.get_array("prv_candidates")?.iter() {
             let doc = match doc.as_document() {

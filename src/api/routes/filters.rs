@@ -193,21 +193,17 @@ pub async fn post_filter_version(
         .update_one(doc! {"_id": filter_id.clone()}, update_doc)
         .await;
     match update_result {
-        Ok(_) => {
-            return response::ok(
-                &format!(
-                    "successfully added new version {} to filter id: {}",
-                    &new_pipeline_id, &filter_id
-                ),
-                serde_json::json!({"fid": new_pipeline_id}),
-            );
-        }
-        Err(e) => {
-            return response::internal_error(&format!(
-                "failed to add new version to filter. error: {}",
-                e
-            ));
-        }
+        Ok(_) => response::ok(
+            &format!(
+                "successfully added new version {} to filter id: {}",
+                &new_pipeline_id, &filter_id
+            ),
+            serde_json::json!({"fid": new_pipeline_id}),
+        ),
+        Err(e) => response::internal_error(&format!(
+            "failed to add new version to filter. error: {}",
+            e
+        )),
     }
 }
 
@@ -263,8 +259,8 @@ pub async fn post_filter(
     }
 
     // Save filter to database
-    let filter_id = uuid::Uuid::new_v4().to_string();
-    let filter_version: String = uuid::Uuid::new_v4().to_string();
+    let filter_id = Uuid::new_v4().to_string();
+    let filter_version: String = Uuid::new_v4().to_string();
     let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
     let pipeline_json = serde_json::to_string(&pipeline).unwrap();
@@ -288,22 +284,18 @@ pub async fn post_filter(
         updated_at: now,
     };
     match filter_collection.insert_one(&filter).await {
-        Ok(_) => {
-            return response::ok(
-                "successfully created new filter",
-                serde_json::to_value(FilterPublic::from(filter)).unwrap(),
-            );
-        }
-        Err(e) => {
-            return response::internal_error(&format!(
-                "failed to insert filter into database. error: {}",
-                e
-            ));
-        }
+        Ok(_) => response::ok(
+            "successfully created new filter",
+            serde_json::to_value(FilterPublic::from(filter)).unwrap(),
+        ),
+        Err(e) => response::internal_error(&format!(
+            "failed to insert filter into database. error: {}",
+            e
+        )),
     }
 }
 
-// we want a PATCH, that let's a user change fields like active, active_fid, permissions
+// we want a PATCH, that lets a user change fields like active, active_fid, permissions
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterPatch {
     name: Option<String>,
@@ -393,15 +385,8 @@ pub async fn patch_filter(
         .update_one(doc! {"_id": filter_id.clone()}, doc! {"$set": update_doc})
         .await;
     match update_result {
-        Ok(_) => {
-            return response::ok_no_data(&format!(
-                "successfully updated filter id: {}",
-                &filter_id
-            ));
-        }
-        Err(e) => {
-            return response::internal_error(&format!("failed to update filter. error: {}", e));
-        }
+        Ok(_) => response::ok_no_data(&format!("successfully updated filter id: {}", &filter_id)),
+        Err(e) => response::internal_error(&format!("failed to update filter. error: {}", e)),
     }
 }
 
@@ -448,9 +433,7 @@ pub async fn get_filters(
                 serde_json::to_value(&filter_list).unwrap(),
             )
         }
-        Err(e) => {
-            return response::internal_error(&format!("failed to query filters: {}", e));
-        }
+        Err(e) => response::internal_error(&format!("failed to query filters: {}", e)),
     }
 }
 
@@ -487,9 +470,7 @@ pub async fn get_filter(
             serde_json::to_value(filter).unwrap(),
         ),
         Ok(None) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
-        Err(e) => {
-            return response::internal_error(&format!("failed to query filter: {}", e));
-        }
+        Err(e) => response::internal_error(&format!("failed to query filter: {}", e)),
     }
 }
 

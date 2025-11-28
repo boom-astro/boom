@@ -494,10 +494,9 @@ impl AlertRandomizer {
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
                 let mut dec = self.dec;
-                let payload = match self.payload {
-                    Some(payload) => payload,
-                    None => fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap(),
-                };
+                let payload = self.payload.unwrap_or_else(|| {
+                    fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap()
+                });
                 let header = payload[0..5].to_vec();
                 let magic = header[0];
                 if magic != 0_u8 {

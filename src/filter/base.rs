@@ -404,7 +404,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
         }
         // check for project stages
         if stage.get("$project").is_some() {
-            // dont convert to a string here, just look over key/values
+            // don't convert to a string here, just look over key/values
             // we build the following variables:
             // - includes_object_id: bool, if the stage includes objectId
             // - excludes_object_id: bool, if the stage excludes objectId
@@ -821,7 +821,7 @@ pub enum FilterWorkerError {
     #[error("error from serde_json")]
     SerdeJson(#[from] serde_json::Error),
     #[error("failed to load config")]
-    LoadConfigError(#[from] crate::conf::BoomConfigError),
+    LoadConfigError(#[from] conf::BoomConfigError),
     #[error("filter error")]
     FilterError(#[from] FilterError),
     #[error("failed to get filter by queue")]
@@ -831,7 +831,7 @@ pub enum FilterWorkerError {
     #[error("filter not found")]
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
-    KafkaConfigMissing(crate::utils::enums::Survey),
+    KafkaConfigMissing(Survey),
 }
 
 #[async_trait::async_trait]
@@ -845,7 +845,7 @@ pub trait FilterWorker {
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
-    fn survey() -> crate::utils::enums::Survey;
+    fn survey() -> Survey;
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
@@ -1286,7 +1286,7 @@ mod tests {
         load_dotenv();
         let db = get_test_db().await;
         let filter_collection = db.collection::<Filter>("filters_test");
-        let filter_id = uuid::Uuid::new_v4().to_string();
+        let filter_id = Uuid::new_v4().to_string();
         let filter_name = format!("test_filter_{}", &filter_id[..8]);
         // first, insert a filter
         let mut permissions = HashMap::new();
