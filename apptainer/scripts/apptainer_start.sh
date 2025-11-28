@@ -214,8 +214,12 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
         PROGRAMS=("public" "partnership" "caltech")
       elif [ -z "$5" ]; then
         PROGRAMS=("")
-      else
+      elif [ "$5" = "public" ] || [ "$5" = "partnership" ] || [ "$5" = "caltech" ]; then
         PROGRAMS=("$5")
+      else
+        echo -e "${RED}Error: Invalid program ID '$5'.${END}"
+        echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech | all${END}"
+        exit 1
       fi
 
       for prog in "${PROGRAMS[@]}"; do
