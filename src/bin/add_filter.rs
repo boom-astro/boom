@@ -10,6 +10,8 @@ use boom::utils::enums::Survey;
 struct Cli {
     #[arg(value_enum, help = "Survey to add a filter for.")]
     survey: Survey,
+    #[arg(help = "Name of the filter to be added.")]
+    name: String,
     #[arg(help = "Path to the JSON file containing the filter")]
     filter_file: String,
 }
@@ -44,10 +46,13 @@ async fn main() {
 
     let filter = doc! {
         "_id": filter_id.clone(),
+        "name": args.name,
         "active": true,
         "user_id": "cli",
         "catalog": format!("{}_alerts", survey),
-        "permissions": [1, 2, 3],
+        "permissions": {
+            "ZTF": [1, 2, 3],
+        },
         "fv": [
             {
                 "fid": "v2e0fs",

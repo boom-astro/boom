@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-use std::{num::NonZero, sync::LazyLock};
+use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
 use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
@@ -55,6 +55,9 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+// Surveys that require permissions to be defined in filters
+pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
+
 // This is the schema of the avro object that we will send to kafka
 // that includes the alert data and filter results
 const ALERT_SCHEMA: &str = r#"
@@ -75,6 +78,7 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "FilterResults",
                 "fields": [
                     {"name": "filter_id", "type": "string"},
+                    {"name": "filter_name", "type": "string"},
                     {"name": "passed_at", "type": "double"},
                     {"name": "annotations", "type": "string"}
                 ]
@@ -190,6 +194,7 @@ pub struct Classification {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResults {
     pub filter_id: String,
+    pub filter_name: String,
     pub passed_at: f64, // timestamp in seconds
     pub annotations: String,
 }
@@ -399,7 +404,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
         }
         // check for project stages
         if stage.get("$project").is_some() {
-            // dont convert to a string here, just look over key/values
+            // don't convert to a string here, just look over key/values
             // we build the following variables:
             // - includes_object_id: bool, if the stage includes objectId
             // - excludes_object_id: bool, if the stage excludes objectId
@@ -601,6 +606,7 @@ pub async fn run_filter(
 pub struct FilterVersion {
     pub fid: String,
     pub pipeline: String,
+    pub changelog: Option<String>,
     pub created_at: f64,
 }
 
@@ -608,7 +614,9 @@ pub struct FilterVersion {
 pub struct Filter {
     #[serde(rename = "_id")]
     pub id: String,
-    pub permissions: Vec<i32>,
+    pub name: String,
+    pub description: Option<String>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
     pub active: bool,
@@ -620,7 +628,8 @@ pub struct Filter {
 
 pub struct LoadedFilter {
     pub id: String,
-    pub permissions: Vec<i32>,
+    pub name: String,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
 }
 
@@ -698,7 +707,7 @@ pub fn get_active_filter_pipeline(filter: &Filter) -> Result<Vec<serde_json::Val
 #[instrument(skip_all, err)]
 pub async fn build_filter_pipeline(
     pipeline: &Vec<serde_json::Value>,
-    permissions: &Vec<i32>,
+    permissions: &HashMap<Survey, Vec<i32>>,
     survey: &Survey,
 ) -> Result<Vec<Document>, FilterError> {
     let pipeline = match survey {
@@ -708,7 +717,7 @@ pub async fn build_filter_pipeline(
             }
             build_ztf_filter_pipeline(pipeline, permissions).await?
         }
-        Survey::Lsst => build_lsst_filter_pipeline(pipeline).await?,
+        Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         _ => {
             return Err(FilterError::InvalidFilterPipeline(
                 "Unsupported survey for filter pipeline".to_string(),
@@ -742,6 +751,7 @@ pub async fn build_loaded_filter(
 
     let loaded = LoadedFilter {
         id: filter.id.clone(),
+        name: filter.name.clone(),
         pipeline: pipeline,
         permissions: filter.permissions,
     };
@@ -811,7 +821,7 @@ pub enum FilterWorkerError {
     #[error("error from serde_json")]
     SerdeJson(#[from] serde_json::Error),
     #[error("failed to load config")]
-    LoadConfigError(#[from] crate::conf::BoomConfigError),
+    LoadConfigError(#[from] conf::BoomConfigError),
     #[error("filter error")]
     FilterError(#[from] FilterError),
     #[error("failed to get filter by queue")]
@@ -821,7 +831,7 @@ pub enum FilterWorkerError {
     #[error("filter not found")]
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
-    KafkaConfigMissing(crate::utils::enums::Survey),
+    KafkaConfigMissing(Survey),
 }
 
 #[async_trait::async_trait]
@@ -835,7 +845,7 @@ pub trait FilterWorker {
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
-    fn survey() -> crate::utils::enums::Survey;
+    fn survey() -> Survey;
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
@@ -1276,11 +1286,16 @@ mod tests {
         load_dotenv();
         let db = get_test_db().await;
         let filter_collection = db.collection::<Filter>("filters_test");
-        let filter_id = uuid::Uuid::new_v4().to_string();
+        let filter_id = Uuid::new_v4().to_string();
+        let filter_name = format!("test_filter_{}", &filter_id[..8]);
         // first, insert a filter
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let filter = Filter {
             id: filter_id.clone(),
-            permissions: vec![1, 2, 3],
+            name: filter_name.clone(),
+            description: Some("A test filter".to_string()),
+            permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
             active: true,
@@ -1288,6 +1303,7 @@ mod tests {
             fv: vec![FilterVersion {
                 fid: "v1".to_string(),
                 pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1}}]"#.to_string(),
+                changelog: None,
                 created_at: 0.0,
             }],
             created_at: 0.0,
@@ -1303,9 +1319,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_active_filter_pipeline() {
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
         let mut filter = Filter {
             id: "test_filter".to_string(),
-            permissions: vec![1, 2, 3],
+            name: "test_filter".to_string(),
+            description: Some("A test filter".to_string()),
+            permissions,
             user_id: "test_user".to_string(),
             survey: Survey::Ztf,
             active: true,
@@ -1315,6 +1335,7 @@ mod tests {
                     // active version
                     fid: "v1".to_string(),
                     pipeline: r#"[]"#.to_string(),
+                    changelog: None,
                     created_at: 1.0,
                 },
                 FilterVersion {
@@ -1322,6 +1343,7 @@ mod tests {
                     fid: "v2".to_string(),
                     pipeline: r#"[{"$match": {}}, {"$project": {"objectId": 1, "candidate": 1}}]"#
                         .to_string(),
+                    changelog: None,
                     created_at: 2.0,
                 },
             ],
