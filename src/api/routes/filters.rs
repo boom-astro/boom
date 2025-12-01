@@ -1,5 +1,8 @@
 use crate::api::{filters::SortOrder, models::response, routes::users::User};
-use crate::filter::{build_filter_pipeline, Filter, FilterError, FilterVersion};
+use crate::filter::{
+    build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+};
+use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 
 use actix_web::{get, patch, post, web, HttpResponse};
@@ -9,6 +12,7 @@ use mongodb::{
     bson::{doc, Document},
     Collection, Database,
 };
+use std::collections::HashMap;
 use std::vec;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -17,7 +21,9 @@ use uuid::Uuid;
 pub struct FilterPublic {
     #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
-    pub permissions: Vec<i32>,
+    pub name: String,
+    pub description: Option<String>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     pub survey: Survey,
     pub active: bool,
@@ -31,6 +37,8 @@ impl From<Filter> for FilterPublic {
     fn from(filter: Filter) -> Self {
         Self {
             id: filter.id,
+            name: filter.name,
+            description: filter.description,
             permissions: filter.permissions,
             user_id: filter.user_id,
             survey: filter.survey,
@@ -97,7 +105,7 @@ async fn build_and_test_filter_version(
     db: web::Data<Database>,
     survey: &Survey,
     pipeline: &Vec<serde_json::Value>,
-    permissions: &Vec<i32>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<(), FilterError> {
     let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
     run_test_pipeline(db, survey, test_pipeline).await
@@ -106,6 +114,7 @@ async fn build_and_test_filter_version(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterVersionPost {
     pipeline: Vec<serde_json::Value>,
+    changelog: Option<String>,
     set_as_active: Option<bool>,
 }
 
@@ -164,13 +173,17 @@ pub async fn post_filter_version(
     }
 
     let new_pipeline_id = Uuid::new_v4().to_string();
+    let mut fv_update = doc! {
+        "fid": &new_pipeline_id,
+        "pipeline": serde_json::to_string(&new_pipeline).unwrap(),
+        "created_at": Time::now().to_jd(),
+    };
+    if let Some(changelog) = body.changelog.clone() {
+        fv_update.insert("changelog", changelog);
+    }
     let mut update_doc = doc! {
         "$push": {
-            "fv": {
-                "fid": &new_pipeline_id,
-                "pipeline": serde_json::to_string(&new_pipeline).unwrap(),
-                "created_at": Time::now().to_jd(),
-            }
+            "fv": fv_update
         },
     };
     if body.set_as_active.unwrap_or(true) {
@@ -180,28 +193,26 @@ pub async fn post_filter_version(
         .update_one(doc! {"_id": filter_id.clone()}, update_doc)
         .await;
     match update_result {
-        Ok(_) => {
-            return response::ok(
-                &format!(
-                    "successfully added new version {} to filter id: {}",
-                    &new_pipeline_id, &filter_id
-                ),
-                serde_json::json!({"fid": new_pipeline_id}),
-            );
-        }
-        Err(e) => {
-            return response::internal_error(&format!(
-                "failed to add new version to filter. error: {}",
-                e
-            ));
-        }
+        Ok(_) => response::ok(
+            &format!(
+                "successfully added new version {} to filter id: {}",
+                &new_pipeline_id, &filter_id
+            ),
+            serde_json::json!({"fid": new_pipeline_id}),
+        ),
+        Err(e) => response::internal_error(&format!(
+            "failed to add new version to filter. error: {}",
+            e
+        )),
     }
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterPost {
+    pub name: String,
+    pub description: Option<String>,
     pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
 }
 
@@ -228,6 +239,12 @@ pub async fn post_filter(
 
     let survey = body.survey;
     let permissions = body.permissions;
+    if permissions.get(&survey).is_none() && SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+        return response::bad_request(&format!(
+            "Filters running on survey {:?} must have permissions defined for that survey",
+            survey
+        ));
+    }
     let pipeline = body.pipeline;
 
     // Test the filter to ensure it works
@@ -242,13 +259,15 @@ pub async fn post_filter(
     }
 
     // Save filter to database
-    let filter_id = uuid::Uuid::new_v4().to_string();
-    let filter_version: String = uuid::Uuid::new_v4().to_string();
+    let filter_id = Uuid::new_v4().to_string();
+    let filter_version: String = Uuid::new_v4().to_string();
     let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
     let pipeline_json = serde_json::to_string(&pipeline).unwrap();
     let now = Time::now().to_jd();
     let filter = Filter {
+        name: body.name,
+        description: body.description,
         permissions,
         survey,
         id: filter_id,
@@ -258,33 +277,32 @@ pub async fn post_filter(
         fv: vec![FilterVersion {
             fid: filter_version,
             pipeline: pipeline_json,
+            changelog: None,
             created_at: now,
         }],
         created_at: now,
         updated_at: now,
     };
     match filter_collection.insert_one(&filter).await {
-        Ok(_) => {
-            return response::ok(
-                "successfully created new filter",
-                serde_json::to_value(FilterPublic::from(filter)).unwrap(),
-            );
-        }
-        Err(e) => {
-            return response::internal_error(&format!(
-                "failed to insert filter into database. error: {}",
-                e
-            ));
-        }
+        Ok(_) => response::ok(
+            "successfully created new filter",
+            serde_json::to_value(FilterPublic::from(filter)).unwrap(),
+        ),
+        Err(e) => response::internal_error(&format!(
+            "failed to insert filter into database. error: {}",
+            e
+        )),
     }
 }
 
-// we want a PATCH, that let's a user change fields like active, active_fid, permissions
+// we want a PATCH, that lets a user change fields like active, active_fid, permissions
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterPatch {
+    name: Option<String>,
+    description: Option<String>,
     active: Option<bool>,
     active_fid: Option<String>,
-    permissions: Option<Vec<i32>>,
+    permissions: Option<HashMap<Survey, Vec<i32>>>,
 }
 /// Update a filter's metadata
 #[utoipa::path(
@@ -326,7 +344,16 @@ pub async fn patch_filter(
     }
 
     let mut update_doc = Document::new();
-
+    if let Some(name) = body.name.clone() {
+        if !name.is_empty() {
+            update_doc.insert("name", name);
+        }
+    }
+    if let Some(description) = body.description.clone() {
+        if !description.is_empty() {
+            update_doc.insert("description", description);
+        }
+    }
     if let Some(active) = body.active {
         update_doc.insert("active", active);
     }
@@ -340,7 +367,15 @@ pub async fn patch_filter(
         update_doc.insert("active_fid", active_fid);
     }
     if let Some(permissions) = body.permissions.clone() {
-        update_doc.insert("permissions", permissions);
+        if permissions.get(&filter.survey).is_none()
+            && SURVEYS_REQUIRING_PERMISSIONS.contains(&filter.survey)
+        {
+            return response::bad_request(&format!(
+                "Filters running on survey {:?} must have permissions defined for that survey",
+                filter.survey
+            ));
+        }
+        update_doc.insert("permissions", mongify(&permissions));
     }
     if update_doc.is_empty() {
         return response::bad_request("no valid fields to update");
@@ -350,15 +385,8 @@ pub async fn patch_filter(
         .update_one(doc! {"_id": filter_id.clone()}, doc! {"$set": update_doc})
         .await;
     match update_result {
-        Ok(_) => {
-            return response::ok_no_data(&format!(
-                "successfully updated filter id: {}",
-                &filter_id
-            ));
-        }
-        Err(e) => {
-            return response::internal_error(&format!("failed to update filter. error: {}", e));
-        }
+        Ok(_) => response::ok_no_data(&format!("successfully updated filter id: {}", &filter_id)),
+        Err(e) => response::internal_error(&format!("failed to update filter. error: {}", e)),
     }
 }
 
@@ -405,9 +433,7 @@ pub async fn get_filters(
                 serde_json::to_value(&filter_list).unwrap(),
             )
         }
-        Err(e) => {
-            return response::internal_error(&format!("failed to query filters: {}", e));
-        }
+        Err(e) => response::internal_error(&format!("failed to query filters: {}", e)),
     }
 }
 
@@ -444,16 +470,14 @@ pub async fn get_filter(
             serde_json::to_value(filter).unwrap(),
         ),
         Ok(None) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
-        Err(e) => {
-            return response::internal_error(&format!("failed to query filter: {}", e));
-        }
+        Err(e) => response::internal_error(&format!("failed to query filter: {}", e)),
     }
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
     pub end_jd: Option<f64>,
@@ -488,6 +512,12 @@ pub async fn post_filter_test(
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
+    if permissions.get(&survey).is_none() && SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+        return response::bad_request(&format!(
+            "Filters running on survey {:?} must have permissions defined for that survey",
+            survey
+        ));
+    }
     let pipeline = body.pipeline;
 
     // the first stage of test_pipeline is a match stage, we can overwrite it based on the test criteria
