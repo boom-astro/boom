@@ -7,7 +7,7 @@ pub use base::{
     create_producer, load_alert_schema, load_schema, run_filter, run_filter_worker,
     send_alert_to_kafka, to_avro_bytes, uses_field_in_filter, validate_filter_pipeline, Alert,
     Filter, FilterError, FilterResults, FilterVersion, FilterWorker, FilterWorkerError,
-    LoadedFilter,
+    LoadedFilter, SURVEYS_REQUIRING_PERMISSIONS,
 };
 use base::{
     parse_programid_candid_tuple, update_aliases_index_multiple, Classification, Origin, Photometry,
