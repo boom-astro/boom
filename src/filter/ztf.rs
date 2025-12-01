@@ -30,6 +30,7 @@ const ZTF_ZP: f64 = 23.9;
 pub fn build_ztf_aux_data(
     use_aliases_index: Option<usize>,
     filter_pipeline: &Vec<serde_json::Value>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> (Option<usize>, bool, Document) {
     let use_ztf_prv_candidates_index = uses_field_in_filter(filter_pipeline, "ZTF.prv_candidates");
     let use_ztf_fp_hists_index = uses_field_in_filter(filter_pipeline, "ZTF.fp_hists");
@@ -37,16 +38,39 @@ pub fn build_ztf_aux_data(
     let mut ztf_aux_add_fields = doc! {
         "ztf_aux": mongodb::bson::Bson::Null,
     };
+
+    static DEFAULT_ZTF_PERMS: &[i32] = &[1];
+    let ztf_permissions: &[i32] = permissions
+        .get(&Survey::Ztf)
+        .map(|v| &v[..])
+        .unwrap_or(DEFAULT_ZTF_PERMS);
+
+    let permissions_check = Some(vec![doc! {
+        "$in": [
+            "$$x.programid",
+            &ztf_permissions
+        ]
+    }]);
     if use_ztf_prv_candidates_index.is_some() {
         ztf_aux_add_fields.insert(
             "ZTF.prv_candidates".to_string(),
-            fetch_timeseries_op("ztf_aux.prv_candidates", "candidate.jd", 365, None),
+            fetch_timeseries_op(
+                "ztf_aux.prv_candidates",
+                "candidate.jd",
+                365,
+                permissions_check.clone(),
+            ),
         );
     }
     if use_ztf_fp_hists_index.is_some() {
         ztf_aux_add_fields.insert(
             "ZTF.fp_hists".to_string(),
-            fetch_timeseries_op("ztf_aux.fp_hists", "candidate.jd", 365, None),
+            fetch_timeseries_op(
+                "ztf_aux.fp_hists",
+                "candidate.jd",
+                365,
+                permissions_check.clone(),
+            ),
         );
     }
 
@@ -113,7 +137,7 @@ pub fn insert_ztf_aux_pipeline_if_needed(
 #[instrument(skip_all, err)]
 pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
-    alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
@@ -185,7 +209,7 @@ pub async fn build_ztf_alerts(
             .get_binary_generic("cutoutDifference")?
             .to_vec();
 
-        // let's create the array of photometry (non forced phot only for now)
+        // let's create the array of photometry (non-forced phot only for now)
         let mut photometry = Vec::new();
         for doc in alert_document.get_array("prv_candidates")?.iter() {
             let doc = match doc.as_document() {
@@ -344,7 +368,7 @@ pub async fn build_ztf_alerts(
 /// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
 pub async fn build_ztf_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
-    permissions: &Vec<i32>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<Vec<Document>, FilterError> {
     // validate filter
     validate_filter_pipeline(&filter_pipeline)?;
@@ -363,6 +387,15 @@ pub async fn build_ztf_filter_pipeline(
         "aux": mongodb::bson::Bson::Null,
     };
 
+    let ztf_permissions = match permissions.get(&Survey::Ztf) {
+        Some(perms) => perms,
+        None => {
+            return Err(FilterError::InvalidFilterPipeline(
+                "No ZTF permissions found for the filter".to_string(),
+            ))
+        }
+    };
+
     if use_prv_candidates_index.is_some() {
         // insert it in aux addFields stage
         aux_add_fields.insert(
@@ -374,7 +407,7 @@ pub async fn build_ztf_filter_pipeline(
                 Some(vec![doc! {
                     "$in": [
                         "$$x.programid",
-                        &permissions
+                        &ztf_permissions
                     ]
                 }]),
             ),
@@ -390,7 +423,7 @@ pub async fn build_ztf_filter_pipeline(
                 Some(vec![doc! {
                     "$in": [
                         "$$x.programid",
-                        &permissions
+                        &ztf_permissions
                     ]
                 }]),
             ),
@@ -406,7 +439,7 @@ pub async fn build_ztf_filter_pipeline(
                 Some(vec![doc! {
                     "$in": [
                         "$$x.programid",
-                        &permissions
+                        &ztf_permissions
                     ]
                 }]),
             ),
@@ -506,7 +539,7 @@ pub async fn build_ztf_filter_pipeline(
 }
 
 pub struct ZtfFilterWorker {
-    alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: mongodb::Collection<Document>,
     input_queue: String,
     output_topic: String,
     filters: Vec<LoadedFilter>,
@@ -531,12 +564,19 @@ impl FilterWorker for ZtfFilterWorker {
         let filters = build_loaded_filters(&filter_ids, &Survey::Ztf, &filter_collection).await?;
 
         // Create a hashmap of filters per programid (permissions)
-        // basically we'll have the 4 programid (from 0 to 3) as keys
-        // and the ids of the filters that have that programid in their
-        // permissions as values
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
-            for permission in &filter.permissions {
+            let ztf_permissions = match filter.permissions.get(&Survey::Ztf) {
+                Some(perms) => perms,
+                None => {
+                    warn!(
+                        "Filter {} running on ZTF alerts has no ZTF permissions set, skipping",
+                        filter.id
+                    );
+                    continue;
+                }
+            };
+            for permission in ztf_permissions {
                 let entry = filters_by_permission
                     .entry(*permission)
                     .or_insert(Vec::new());
@@ -636,6 +676,7 @@ impl FilterWorker for ZtfFilterWorker {
                             .inspect_err(as_error!("Failed to serialize annotations"))?;
                     let filter_result = FilterResults {
                         filter_id: filter.id.clone(),
+                        filter_name: filter.name.clone(),
                         passed_at: now_ts,
                         annotations,
                     };

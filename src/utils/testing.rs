@@ -127,18 +127,24 @@ pub async fn insert_custom_test_filter(
     pipeline_str: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let filter_id = uuid::Uuid::new_v4().to_string();
+    let filter_name = format!("test_filter_{}", &filter_id[..8]);
 
     let now = flare::Time::now().to_jd();
+    let mut permissions = std::collections::HashMap::new();
+    permissions.insert(survey.clone(), vec![1]);
     let filter_obj = Filter {
         id: filter_id.clone(),
+        name: filter_name,
+        description: Some("Test filter".to_string()),
         survey: survey.clone(),
         user_id: "test_user".to_string(),
-        permissions: vec![1],
+        permissions,
         active: true,
         active_fid: "v2e0fs".to_string(),
         fv: vec![FilterVersion {
             fid: "v2e0fs".to_string(),
             pipeline: pipeline_str.to_string(),
+            changelog: None,
             created_at: now,
         }],
         created_at: now,
@@ -488,10 +494,9 @@ impl AlertRandomizer {
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
                 let mut dec = self.dec;
-                let payload = match self.payload {
-                    Some(payload) => payload,
-                    None => fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap(),
-                };
+                let payload = self.payload.unwrap_or_else(|| {
+                    fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap()
+                });
                 let header = payload[0..5].to_vec();
                 let magic = header[0];
                 if magic != 0_u8 {

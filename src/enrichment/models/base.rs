@@ -4,6 +4,7 @@ use crate::{
 };
 use ndarray::{Array, Dim};
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use std::env;
 use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]
@@ -23,17 +24,25 @@ pub enum ModelError {
 }
 
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
-    let builder = Session::builder()?;
+    let mut builder = Session::builder()?;
 
-    // if CUDA or Apple's CoreML aren't available,
-    // it will fall back to CPU execution provider
-    let model = builder
-        .with_execution_providers([
+    let use_gpu = env::var("USE_GPU")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        == "true";
+    // Only attempt to load CUDA/CoreML when USE_GPU=true
+    if use_gpu {
+        // if CUDA or Apple's CoreML aren't available,
+        // it will fall back to CPU execution provider
+        builder = builder.with_execution_providers([
             #[cfg(target_os = "linux")]
             ort::execution_providers::CUDAExecutionProvider::default().build(),
             #[cfg(target_os = "macos")]
             ort::execution_providers::CoreMLExecutionProvider::default().build(),
-        ])?
+        ])?;
+    }
+
+    let model = builder
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
         .commit_from_file(path)?;
@@ -58,7 +67,7 @@ pub trait Model {
                 .iter()
                 .enumerate()
             {
-                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j as usize]);
+                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
                 let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
                 slice.assign(&cutout_array);
             }
