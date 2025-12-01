@@ -27,9 +27,11 @@ mod tests {
     /// Helper function to create a simple test filter JSON object
     fn create_test_filter_json() -> serde_json::Value {
         serde_json::json!({
+            "name": "test_filter",
+            "description": "Test filter",
             "pipeline": [{"$match": {"something": 5}}, {"$project": {"objectId": 1}}],
             "survey": "ZTF",
-            "permissions": [1, 2],
+            "permissions": {"ZTF": [1, 2]}
         })
     }
 
@@ -209,6 +211,7 @@ mod tests {
 
         // Now post a new version to this filter
         let new_version = serde_json::json!({
+            "changelog": "Added a new test version",
             "pipeline": [{"$match": {"somethingelse": 10}}, {"$project": {"objectId": 1}}],
             "set_as_active": true
         });
@@ -227,6 +230,7 @@ mod tests {
 
         // Post another version, but don't set it as active
         let new_version = serde_json::json!({
+            "changelog": "Added another test version",
             "pipeline": [{"$match": {"somethingelseelse": 20}}, {"$project": {"objectId": 1}}],
             "set_as_active": false
         });
@@ -266,6 +270,7 @@ mod tests {
 
         // POST a new version to ensure we have something to patch to
         let new_version = serde_json::json!({
+            "changelog": "Added a new test version",
             "pipeline": [{"$match": {"somethingelse": 10}}, {"$project": {"objectId": 1}}],
             "set_as_active": false
         });
@@ -280,7 +285,9 @@ mod tests {
         let patch_data = serde_json::json!({
             "active": false,
             "active_fid": active_fid_after,
-            "permissions": [1, 2, 3]
+            "permissions": {"ZTF": [1, 2, 3]},
+            "name": "updated_test_filter",
+            "description": "Updated test filter description"
         });
         let patch_req = test::TestRequest::patch()
             .uri(&format!("/filters/{}", filter_id))
@@ -288,7 +295,12 @@ mod tests {
             .set_json(&patch_data)
             .to_request();
         let patch_resp = test::call_service(&app, patch_req).await;
-        assert_eq!(patch_resp.status(), StatusCode::OK);
+        assert_eq!(
+            patch_resp.status(),
+            StatusCode::OK,
+            "Failed to patch filter: {:?}",
+            read_str_response(patch_resp).await
+        );
         let patch_resp = read_json_response(patch_resp).await;
 
         assert_eq!(
@@ -300,12 +312,19 @@ mod tests {
         let filter = get_test_filter(&filter_id, &token).await;
         assert_eq!(filter["active"], false);
         assert_eq!(filter["active_fid"].as_str().unwrap(), active_fid_after);
-        let permissions = filter["permissions"].as_array().unwrap();
-        let perm_values: Vec<i32> = permissions
+        let permissions = filter["permissions"].as_object().unwrap()["ZTF"]
+            .as_array()
+            .unwrap();
+        let permissions: Vec<i32> = permissions
             .iter()
             .map(|p| p.as_i64().unwrap() as i32)
             .collect();
-        assert_eq!(perm_values, vec![1, 2, 3]);
+        assert_eq!(permissions, vec![1, 2, 3]);
+        assert_eq!(filter["name"].as_str().unwrap(), "updated_test_filter");
+        assert_eq!(
+            filter["description"].as_str().unwrap(),
+            "Updated test filter description"
+        );
 
         // Clean up the filter
         cleanup_test_filter(&database, &filter_id).await;

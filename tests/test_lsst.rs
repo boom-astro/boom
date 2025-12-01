@@ -221,6 +221,5 @@ async fn test_filter_lsst_alert() {
 
     // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();
-    let encoded = alert_to_avro_bytes(&alert, &schema);
-    assert!(encoded.is_ok())
+    let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 }
