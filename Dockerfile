@@ -8,14 +8,16 @@ RUN apt-get update && \
 
 # First we build an empty rust project to cache dependencies
 # this way we skip dependencies build when only the source code changes
-RUN cargo init app
+RUN cargo init app && mkdir /app/apache-avro-macros && cd /app/apache-avro-macros && cargo init --lib
 COPY Cargo.toml Cargo.lock /app/
+COPY apache-avro-macros/Cargo.toml apache-avro-macros/Cargo.lock /app/apache-avro-macros/
 RUN cd app && cargo build --release && \
     rm -rf app/src
 
 # Now we copy the source code and build the actual application
 WORKDIR /app
 COPY ./src ./src
+COPY ./apache-avro-macros/src ./apache-avro-macros/src
 
 # Build the application
 RUN cargo build --release
