@@ -1,4 +1,4 @@
-FROM rust:1.87-slim-bookworm AS builder
+FROM rust:1.91.1-slim-trixie AS builder
 
 RUN apt-get update && \
     apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config && \
@@ -47,7 +47,7 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 
 ## Create a minimal runtime image for binaries
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 WORKDIR /app
 
