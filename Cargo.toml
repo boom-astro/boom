@@ -23,7 +23,6 @@ jsonwebtoken = "9.3.1"
 lettre = "0.11"
 mongodb = "3.3.0"
 ndarray = "0.16.1"
-openssl = { version = "0.10.73", features = ["vendored"] }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
 opentelemetry_sdk = "0.31.0"

@@ -112,7 +112,7 @@ pub fn insert_lsst_aux_pipeline_if_needed(
 #[instrument(skip_all, err)]
 pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
-    alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
@@ -406,7 +406,7 @@ pub async fn build_lsst_filter_pipeline(
 }
 
 pub struct LsstFilterWorker {
-    alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: mongodb::Collection<Document>,
     input_queue: String,
     output_topic: String,
     filters: Vec<LoadedFilter>,
