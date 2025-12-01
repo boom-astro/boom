@@ -710,13 +710,11 @@ pub async fn build_filter_pipeline(
     permissions: &HashMap<Survey, Vec<i32>>,
     survey: &Survey,
 ) -> Result<Vec<Document>, FilterError> {
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(survey) && permissions.is_empty() {
+        return Err(FilterError::InvalidFilterPermissions);
+    }
     let pipeline = match survey {
-        Survey::Ztf => {
-            if permissions.is_empty() {
-                return Err(FilterError::InvalidFilterPermissions);
-            }
-            build_ztf_filter_pipeline(pipeline, permissions).await?
-        }
+        Survey::Ztf => build_ztf_filter_pipeline(pipeline, permissions).await?,
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         _ => {
             return Err(FilterError::InvalidFilterPipeline(

@@ -608,7 +608,7 @@ pub async fn post_filter_test(
         }
     }
 
-    if survey == Survey::Ztf {
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
         // ZTF survey uses programid for permissions
         match_stage.insert(
             "candidate.programid",
@@ -619,6 +619,9 @@ pub async fn post_filter_test(
 
     // Add sort stage if specified, right after the match stage
     if let Some(sort_by) = body.sort_by {
+        if sort_by.is_empty() {
+            return response::bad_request("sort_by cannot be an empty string");
+        }
         let sort_order = match body.sort_order {
             Some(SortOrder::Ascending) => 1,
             Some(SortOrder::Descending) => -1,
@@ -667,7 +670,7 @@ pub async fn post_filter_test(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestCountRequest {
     pub pipeline: Vec<serde_json::Value>,
-    pub permissions: Vec<i32>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
     pub end_jd: Option<f64>,
@@ -679,12 +682,12 @@ pub struct FilterTestCountRequest {
 
 #[derive(serde::Serialize, ToSchema)]
 pub struct FilterTestCountResponse {
-    pub count: i32,
+    pub count: i64,
     pub pipeline: Vec<serde_json::Value>,
 }
 
 impl FilterTestCountResponse {
-    pub fn new(pipeline: Vec<Document>, count: i32) -> Self {
+    pub fn new(pipeline: Vec<Document>, count: i64) -> Self {
         Self {
             pipeline: doc2json(pipeline),
             count,
@@ -692,7 +695,7 @@ impl FilterTestCountResponse {
     }
 }
 
-/// Test a filter pipeline
+/// Test a filter pipeline and get count of matching alerts
 #[utoipa::path(
     post,
     path = "/filters/test/count",
@@ -707,7 +710,7 @@ impl FilterTestCountResponse {
 #[post("/filters/test/count")]
 pub async fn post_filter_test_count(
     db: web::Data<Database>,
-    body: web::Json<FilterTestRequest>,
+    body: web::Json<FilterTestCountRequest>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
     let _current_user = current_user.unwrap();
@@ -785,7 +788,7 @@ pub async fn post_filter_test_count(
         }
     }
 
-    if survey == Survey::Ztf {
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
         // ZTF survey uses programid for permissions
         match_stage.insert(
             "candidate.programid",
@@ -812,7 +815,7 @@ pub async fn post_filter_test_count(
     // there is no Vec of results, just one document with the count
     let count = match cursor.next().await {
         Some(res) => match res {
-            Ok(doc) => doc.get_i32("count").unwrap_or(0),
+            Ok(doc) => doc.get_i64("count").unwrap_or(0),
             Err(e) => {
                 // TODO: not returning internal error here, but log it
                 // with tracing (once we have that set up in the API)

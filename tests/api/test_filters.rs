@@ -423,12 +423,11 @@ mod tests {
             read_str_response(resp).await
         );
         let resp = read_json_response(resp).await;
-        // assert!(resp["data"]["count"].is_u64());
         let data = resp["data"].as_object().unwrap();
         let pipeline = data["pipeline"].as_array().unwrap();
         // should have at least the 2 stages we sent +
         // stages added by the system (e.g., permission filtering)
         assert!(pipeline.len() > 2);
-        let _ = data["count"].as_u64().unwrap();
+        let _ = data["count"].as_i64().unwrap();
     }
 }
