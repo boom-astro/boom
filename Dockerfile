@@ -11,6 +11,10 @@ RUN apt-get update && \
 RUN cargo init app && mkdir /app/apache-avro-macros && cd /app/apache-avro-macros && cargo init --lib
 COPY Cargo.toml Cargo.lock /app/
 COPY apache-avro-macros/Cargo.toml apache-avro-macros/Cargo.lock /app/apache-avro-macros/
+# apache-avro-macros is a procmacro, so the auto-generated lib.rs is incorrect since it contains a 
+# function like "fn add() {}", which doesn't have #[proc_macro] attribute. So we replace it with an empty file.
+RUN echo "// proc-macro crate, no code here" > /app/apache-avro-macros/src/lib.rs
+# Now we build only the dependencies
 RUN cd app && cargo build --release && \
     rm -rf app/src
 
