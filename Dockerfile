@@ -18,7 +18,6 @@ RUN cd app && cargo build --release && \
 # Now we copy the source code and build the actual application
 WORKDIR /app
 COPY ./src ./src
-COPY ./apache-avro-macros/src ./apache-avro-macros/src
 
 # Build the application
 RUN cargo build --release
