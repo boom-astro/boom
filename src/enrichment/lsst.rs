@@ -9,6 +9,7 @@ use crate::utils::lightcurves::{
 use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use schemars::JsonSchema;
 use tracing::{error, instrument, warn};
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
@@ -76,7 +77,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
 /// LSST alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct LsstAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
@@ -89,7 +90,7 @@ pub struct LsstAlertForEnrichment {
 
 /// LSST alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
@@ -97,7 +98,7 @@ pub struct LsstAlertProperties {
 }
 
 /// LSST with propertied (i.e., it's enriched)
-#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct EnrichedLsstAlert {
     #[serde(rename = "_id")]
     pub candid: i64,

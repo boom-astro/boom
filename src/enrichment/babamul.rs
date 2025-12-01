@@ -1,19 +1,13 @@
 //! Babamul is an optional component of ZTF and LSST enrichment pipelines,
 //! which sends enriched alerts to various Kafka topics for public consumption.
-
 use crate::conf::AppConfig;
 use crate::enrichment::lsst::EnrichedLsstAlert;
 use crate::enrichment::ztf::EnrichedZtfAlert;
 use crate::enrichment::EnrichmentWorkerError;
-use apache_avro::schema::derive::AvroSchemaComponent;
-use apache_avro::{Schema, Writer};
+use crate::utils::derive_avro_schema::SerdavroWriter;
+use apache_avro::{AvroSchema, Schema, Writer};
 use std::collections::HashMap;
-
-// Helper to obtain a Schema for a type that derives AvroSchema
-fn derived_schema<T: AvroSchemaComponent>() -> Schema {
-    let mut named = std::collections::HashMap::new();
-    <T as AvroSchemaComponent>::get_schema_in_ctxt(&mut named, &None)
-}
+use tracing::{info, instrument};
 
 pub enum EnrichedAlert<'a> {
     Lsst(&'a EnrichedLsstAlert),
@@ -50,8 +44,16 @@ impl Babamul {
                 .expect("Failed to create Babamul Kafka producer");
 
         // Generate Avro schemas via apache-avro-derive
-        let lsst_avro_schema = derived_schema::<EnrichedLsstAlert>();
-        let ztf_avro_schema = derived_schema::<EnrichedZtfAlert>();
+        // let lsst_avro_schema = derive_avro_schema::<EnrichedLsstAlert>();
+        // let ztf_avro_schema = derive_avro_schema::<EnrichedZtfAlert>();
+        let lsst_avro_schema = EnrichedLsstAlert::get_schema();
+        let ztf_avro_schema = EnrichedZtfAlert::get_schema();
+
+        // DEBUG, save schemas to files
+        std::fs::write("lsst_babamul.avsc", lsst_avro_schema.canonical_form())
+            .expect("Failed to write LSST Babamul schema");
+        std::fs::write("ztf_babamul.avsc", ztf_avro_schema.canonical_form())
+            .expect("Failed to write ZTF Babamul schema");
 
         Babamul {
             kafka_producer,
@@ -60,6 +62,7 @@ impl Babamul {
         }
     }
 
+    #[instrument(skip_all, err)]
     async fn send_alerts_by_topic<T, F>(
         &self,
         alerts_by_topic: HashMap<String, Vec<T>>,
@@ -77,6 +80,12 @@ impl Babamul {
                 let payload = self.alert_to_avro_bytes(to_enriched(alert))?;
                 payloads.push(payload);
             }
+
+            info!(
+                "Prepared {} payloads for topic {}",
+                payloads.len(),
+                topic_name
+            );
 
             // Send all messages to Kafka without awaiting immediately (allow batching)
             let mut send_futures = Vec::new();
@@ -100,28 +109,49 @@ impl Babamul {
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     fn alert_to_avro_bytes(&self, alert: EnrichedAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
-        let (schema, ser_value) = match alert {
+        match alert {
             EnrichedAlert::Lsst(a) => {
-                let v = apache_avro::to_value(a)
+                // debug, serialize the alert to JSON and save it to a file
+                let json = serde_json::to_string_pretty(a)
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-                (&self.lsst_avro_schema, v)
+                std::fs::write("lsst_alert.json", &json)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+                let mut writer = Writer::with_codec(
+                    &self.lsst_avro_schema,
+                    Vec::new(),
+                    apache_avro::Codec::Snappy,
+                );
+                writer
+                    .append_serdavro(a)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+                writer
+                    .into_inner()
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
             }
             EnrichedAlert::Ztf(a) => {
-                let v = apache_avro::to_value(a)
+                // debug, serialize the alert to JSON and save it to a file
+                let json = serde_json::to_string_pretty(a)
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-                (&self.ztf_avro_schema, v)
+                std::fs::write("ztf_alert.json", &json)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+                let mut writer = Writer::with_codec(
+                    &self.ztf_avro_schema,
+                    Vec::new(),
+                    apache_avro::Codec::Snappy,
+                );
+                writer
+                    .append_serdavro(a)
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+                writer
+                    .into_inner()
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
             }
-        };
-        let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
-        writer
-            .append(ser_value)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        writer
-            .into_inner()
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
+        }
     }
 
+    #[instrument(skip_all, err)]
     pub async fn process_lsst_alerts(
         &self,
         alerts: Vec<EnrichedLsstAlert>,
@@ -161,6 +191,7 @@ impl Babamul {
             .await
     }
 
+    #[instrument(skip_all, err)]
     pub async fn process_ztf_alerts(
         &self,
         alerts: Vec<EnrichedZtfAlert>,
@@ -187,6 +218,16 @@ impl Babamul {
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
                 .push(alert);
+        }
+
+        for (topic_name, alerts) in &alerts_by_topic {
+            info!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
+        }
+
+        // if there is nothing to send, return early
+        if alerts_by_topic.is_empty() {
+            info!("No alerts to send to Babamul");
+            return Ok(());
         }
 
         // Send all grouped alerts using shared helper
