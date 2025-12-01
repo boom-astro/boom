@@ -122,22 +122,11 @@ pub async fn remove_test_filter(
 
 // we want to replace the 3 insert_test_..._filter functions with a single function that
 // takes the survey as argument
-pub async fn insert_test_filter(
+pub async fn insert_custom_test_filter(
     survey: &Survey,
-    use_prv_candidates: bool,
+    pipeline_str: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let filter_id = uuid::Uuid::new_v4().to_string();
-    let pipeline = match (survey, use_prv_candidates) {
-        (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
-        (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
-        (Survey::Lsst, _) => LSST_TEST_PIPELINE,
-        _ => {
-            return Err(Box::from(format!(
-                "Unsupported survey for test filter: {}",
-                survey
-            )));
-        }
-    };
 
     let now = flare::Time::now().to_jd();
     let filter_obj = Filter {
@@ -149,7 +138,7 @@ pub async fn insert_test_filter(
         active_fid: "v2e0fs".to_string(),
         fv: vec![FilterVersion {
             fid: "v2e0fs".to_string(),
-            pipeline: pipeline.to_string(),
+            pipeline: pipeline_str.to_string(),
             created_at: now,
         }],
         created_at: now,
@@ -164,6 +153,27 @@ pub async fn insert_test_filter(
         .await;
 
     Ok(filter_id)
+}
+
+// we want to replace the 3 insert_test_..._filter functions with a single function that
+// takes the survey as argument
+pub async fn insert_test_filter(
+    survey: &Survey,
+    use_prv_candidates: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let pipeline = match (survey, use_prv_candidates) {
+        (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
+        (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
+        (Survey::Lsst, _) => LSST_TEST_PIPELINE,
+        _ => {
+            return Err(Box::from(format!(
+                "Unsupported survey for test filter: {}",
+                survey
+            )));
+        }
+    };
+
+    insert_custom_test_filter(survey, pipeline).await
 }
 
 pub async fn empty_processed_alerts_queue(
