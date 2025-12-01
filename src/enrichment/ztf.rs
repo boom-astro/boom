@@ -13,8 +13,10 @@ use crate::{
     },
 };
 use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use schemars::JsonSchema;
 use tracing::{instrument, warn};
 
 pub fn create_ztf_alert_pipeline() -> Vec<Document> {
@@ -95,7 +97,7 @@ pub struct ZtfAlertForEnrichment {
 
 /// ZTF alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
@@ -105,9 +107,9 @@ pub struct ZtfAlertProperties {
 }
 
 /// Enriched ZTF alert (i.e., one with properties)
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
+#[serdavro]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct EnrichedZtfAlert {
-    #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
@@ -301,9 +303,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // Send to Babamul for batch processing
         if let Some(babamul) = self.babamul.as_ref() {
-            if let Err(e) = babamul.process_ztf_alerts(enriched_alerts).await {
-                tracing::error!("Failed to process enriched alerts in Babamul: {}", e);
-            }
+            babamul.process_ztf_alerts(enriched_alerts).await?;
         }
 
         Ok(processed_alerts)

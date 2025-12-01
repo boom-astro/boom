@@ -13,6 +13,7 @@ use crate::{
     },
 };
 use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -56,7 +57,9 @@ pub struct Cutout {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default, AvroSchema,
+)]
 #[serde(default)]
 pub struct PrvCandidate {
     pub jd: f64,
@@ -105,6 +108,7 @@ pub struct PrvCandidate {
 
 #[serde_as]
 #[skip_serializing_none]
+#[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ZtfPrvCandidate {
     #[serde(flatten)]
@@ -195,7 +199,9 @@ where
 /// avro alert schema
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default, AvroSchema,
+)]
 #[serde(default)]
 pub struct FpHist {
     pub field: Option<i32>,
@@ -233,6 +239,7 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
+#[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ZtfForcedPhot {
     #[serde(flatten)]
@@ -437,7 +444,8 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ZtfCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
