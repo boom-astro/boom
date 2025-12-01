@@ -61,3 +61,10 @@ pub enum SortOrder {
     #[serde(alias = "descending", alias = "desc", alias = "DESC", alias = "-1")]
     Descending,
 }
+
+// function to convert a Vec<Document> to Vec<serde_json::Value>
+pub fn doc2json(docs: Vec<Document>) -> Vec<serde_json::Value> {
+    docs.into_iter()
+        .map(|doc| serde_json::to_value(doc).unwrap_or(serde_json::Value::Null))
+        .collect()
+}

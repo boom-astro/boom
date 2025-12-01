@@ -1,4 +1,8 @@
-use crate::api::{filters::SortOrder, models::response, routes::users::User};
+use crate::api::{
+    filters::{doc2json, SortOrder},
+    models::response,
+    routes::users::User,
+};
 use crate::filter::{
     build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
 };
@@ -490,13 +494,28 @@ pub struct FilterTestRequest {
     pub limit: Option<u32>,
 }
 
+#[derive(serde::Serialize, ToSchema)]
+pub struct FilterTestResponse {
+    pub pipeline: Vec<serde_json::Value>,
+    pub results: Vec<serde_json::Value>,
+}
+
+impl FilterTestResponse {
+    pub fn new(pipeline: Vec<Document>, results: Vec<Document>) -> Self {
+        Self {
+            pipeline: doc2json(pipeline),
+            results: doc2json(results),
+        }
+    }
+}
+
 /// Test a filter pipeline
 #[utoipa::path(
     post,
     path = "/filters/test",
     request_body = FilterTestRequest,
     responses(
-        (status = 200, description = "Filter test executed successfully", body = Vec::<serde_json::Value>),
+        (status = 200, description = "Filter test executed successfully", body = FilterTestResponse),
         (status = 400, description = "Invalid filter submitted"),
         (status = 500, description = "Internal server error")
     ),
@@ -588,6 +607,14 @@ pub async fn post_filter_test(
             return response::bad_request("pipeline must have at least one stage");
         }
     }
+
+    if survey == Survey::Ztf {
+        // ZTF survey uses programid for permissions
+        match_stage.insert(
+            "candidate.programid",
+            doc! { "$in": permissions.get(&survey).unwrap() },
+        );
+    }
     test_pipeline[0].insert("$match", match_stage);
 
     // Add sort stage if specified, right after the match stage
@@ -609,7 +636,7 @@ pub async fn post_filter_test(
 
     let collection: Collection<mongodb::bson::Document> =
         db.collection(format!("{}_alerts", survey).as_str());
-    let mut cursor = match collection.aggregate(test_pipeline).await {
+    let mut cursor = match collection.aggregate(test_pipeline.clone()).await {
         Ok(c) => c,
         Err(e) => {
             return response::bad_request(&format!(
@@ -631,9 +658,9 @@ pub async fn post_filter_test(
             }
         }
     }
-    response::ok(
+    response::ok_ser(
         "filter test executed successfully",
-        serde_json::to_value(results).unwrap(),
+        FilterTestResponse::new(test_pipeline, results),
     )
 }
 
@@ -653,6 +680,16 @@ pub struct FilterTestCountRequest {
 #[derive(serde::Serialize, ToSchema)]
 pub struct FilterTestCountResponse {
     pub count: i32,
+    pub pipeline: Vec<serde_json::Value>,
+}
+
+impl FilterTestCountResponse {
+    pub fn new(pipeline: Vec<Document>, count: i32) -> Self {
+        Self {
+            pipeline: doc2json(pipeline),
+            count,
+        }
+    }
 }
 
 /// Test a filter pipeline
@@ -747,6 +784,14 @@ pub async fn post_filter_test_count(
             return response::bad_request("pipeline must have at least one stage");
         }
     }
+
+    if survey == Survey::Ztf {
+        // ZTF survey uses programid for permissions
+        match_stage.insert(
+            "candidate.programid",
+            doc! { "$in": permissions.get(&survey).unwrap() },
+        );
+    }
     test_pipeline[0].insert("$match", match_stage);
 
     // Add count stage at the end of the pipeline
@@ -755,7 +800,7 @@ pub async fn post_filter_test_count(
 
     let collection: Collection<mongodb::bson::Document> =
         db.collection(format!("{}_alerts", survey).as_str());
-    let mut cursor = match collection.aggregate(test_pipeline).await {
+    let mut cursor = match collection.aggregate(test_pipeline.clone()).await {
         Ok(c) => c,
         Err(e) => {
             return response::bad_request(&format!(
@@ -765,14 +810,9 @@ pub async fn post_filter_test_count(
         }
     };
     // there is no Vec of results, just one document with the count
-    match cursor.next().await {
+    let count = match cursor.next().await {
         Some(res) => match res {
-            Ok(doc) => {
-                return response::ok(
-                    "filter test executed successfully",
-                    serde_json::json!({ "count": doc.get_i32("count").unwrap_or(0) }),
-                );
-            }
+            Ok(doc) => doc.get_i32("count").unwrap_or(0),
             Err(e) => {
                 // TODO: not returning internal error here, but log it
                 // with tracing (once we have that set up in the API)
@@ -782,11 +822,11 @@ pub async fn post_filter_test_count(
                 ));
             }
         },
-        None => {
-            return response::ok(
-                "filter test executed successfully",
-                serde_json::json!({ "count": 0 }),
-            );
-        }
+        None => 0,
     };
+
+    response::ok_ser(
+        "filter test count executed successfully",
+        FilterTestCountResponse::new(test_pipeline, count),
+    )
 }

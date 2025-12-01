@@ -329,4 +329,106 @@ mod tests {
         // Clean up the filter
         cleanup_test_filter(&database, &filter_id).await;
     }
+
+    // test the /filters/test endpoint
+    #[actix_rt::test]
+    async fn test_filter_pipeline_test_endpoint() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let token = create_admin_token(&database).await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::post_filter_test),
+        )
+        .await;
+
+        // Create a test pipeline
+        let test_pipeline = serde_json::json!([
+            { "$match": { "candidate.magpsf": { "$lt": 18 } } },
+            { "$project": { "objectId": 1, "annotation": { "mag_now": "$candidate.magpsf" } } }
+        ]);
+        let payload = serde_json::json!({
+            "pipeline": test_pipeline,
+            "permissions": {"ZTF": [1, 2]},
+            "survey": "ZTF",
+            "start_jd": 2459000.5,
+            "end_jd": 2459001.5
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/filters/test")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&payload)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to test filter pipeline: {:?}",
+            read_str_response(resp).await
+        );
+        let resp = read_json_response(resp).await;
+
+        let data = resp["data"].as_object().unwrap();
+        let pipeline = data["pipeline"].as_array().unwrap();
+        // should have at least the 2 stages we sent +
+        // stages added by the system (e.g., permission filtering)
+        assert!(pipeline.len() > 2);
+        let _ = data["results"].as_array().unwrap();
+    }
+
+    // test the /filters/test/count endpoint
+    #[actix_rt::test]
+    async fn test_filter_pipeline_test_count_endpoint() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let token = create_admin_token(&database).await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::post_filter_test_count),
+        )
+        .await;
+
+        // Create a test pipeline
+        let test_pipeline = serde_json::json!([
+            { "$match": { "candidate.magpsf": { "$lt": 18 } } },
+            { "$project": { "objectId": 1, "annotation": { "mag_now": "$candidate.magpsf" } } }
+        ]);
+        let payload = serde_json::json!({
+            "pipeline": test_pipeline,
+            "permissions": {"ZTF": [1, 2]},
+            "survey": "ZTF",
+            "start_jd": 2459000.5,
+            "end_jd": 2459001.5
+        });
+        let req = test::TestRequest::post()
+            .uri("/filters/test/count")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&payload)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to test filter pipeline count: {:?}",
+            read_str_response(resp).await
+        );
+        let resp = read_json_response(resp).await;
+        // assert!(resp["data"]["count"].is_u64());
+        let data = resp["data"].as_object().unwrap();
+        let pipeline = data["pipeline"].as_array().unwrap();
+        // should have at least the 2 stages we sent +
+        // stages added by the system (e.g., permission filtering)
+        assert!(pipeline.len() > 2);
+        let _ = data["count"].as_u64().unwrap();
+    }
 }
