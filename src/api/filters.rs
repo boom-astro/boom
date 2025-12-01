@@ -53,3 +53,11 @@ pub fn parse_pipeline(
         )),
     }
 }
+
+#[derive(serde::Deserialize, Clone, utoipa::ToSchema)]
+pub enum SortOrder {
+    #[serde(alias = "ascending", alias = "asc", alias = "ASC", alias = "1")]
+    Ascending,
+    #[serde(alias = "descending", alias = "desc", alias = "DESC", alias = "-1")]
+    Descending,
+}

@@ -1,4 +1,4 @@
-use crate::api::{models::response, routes::users::User};
+use crate::api::{filters::SortOrder, models::response, routes::users::User};
 use crate::filter::{build_filter_pipeline, Filter, FilterError, FilterVersion};
 use crate::utils::enums::Survey;
 
@@ -461,6 +461,9 @@ pub struct FilterTestRequest {
     pub object_ids: Option<Vec<String>>,
     #[schema(max_items = 100000)]
     pub candids: Option<Vec<String>>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<SortOrder>,
+    pub limit: Option<u32>,
 }
 
 /// Test a filter pipeline
@@ -557,6 +560,23 @@ pub async fn post_filter_test(
     }
     test_pipeline[0].insert("$match", match_stage);
 
+    // Add sort stage if specified, right after the match stage
+    if let Some(sort_by) = body.sort_by {
+        let sort_order = match body.sort_order {
+            Some(SortOrder::Ascending) => 1,
+            Some(SortOrder::Descending) => -1,
+            None => 1,
+        };
+        let sort_stage = doc! { "$sort": { sort_by: sort_order } };
+        test_pipeline.insert(1, sort_stage);
+    }
+
+    // Add limit stage if specified, at the very end of the pipeline
+    if let Some(limit) = body.limit {
+        let limit_stage = doc! { "$limit": limit as i64 };
+        test_pipeline.push(limit_stage);
+    }
+
     let collection: Collection<mongodb::bson::Document> =
         db.collection(format!("{}_alerts", survey).as_str());
     let mut cursor = match collection.aggregate(test_pipeline).await {
@@ -585,4 +605,158 @@ pub async fn post_filter_test(
         "filter test executed successfully",
         serde_json::to_value(results).unwrap(),
     )
+}
+
+#[derive(serde::Deserialize, Clone, ToSchema)]
+pub struct FilterTestCountRequest {
+    pub pipeline: Vec<serde_json::Value>,
+    pub permissions: Vec<i32>,
+    pub survey: Survey,
+    pub start_jd: Option<f64>,
+    pub end_jd: Option<f64>,
+    #[schema(max_items = 1000)]
+    pub object_ids: Option<Vec<String>>,
+    #[schema(max_items = 100000)]
+    pub candids: Option<Vec<String>>,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+pub struct FilterTestCountResponse {
+    pub count: i32,
+}
+
+/// Test a filter pipeline
+#[utoipa::path(
+    post,
+    path = "/filters/test/count",
+    request_body = FilterTestCountRequest,
+    responses(
+        (status = 200, description = "Filter test executed successfully", body = FilterTestCountResponse),
+        (status = 400, description = "Invalid filter submitted"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[post("/filters/test/count")]
+pub async fn post_filter_test_count(
+    db: web::Data<Database>,
+    body: web::Json<FilterTestRequest>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let _current_user = current_user.unwrap();
+    let body = body.clone();
+    let survey = body.survey;
+    let permissions = body.permissions;
+    let pipeline = body.pipeline;
+
+    // the first stage of test_pipeline is a match stage, we can overwrite it based on the test criteria
+    let mut match_stage = Document::new();
+
+    if let (Some(start_jd), Some(end_jd)) = (body.start_jd, body.end_jd) {
+        if end_jd <= start_jd {
+            return response::bad_request("end_jd cannot be less than or equal to start_jd");
+        }
+        if end_jd - start_jd > 7.0 {
+            return response::bad_request("JD window for filter test cannot exceed 7.0 JD");
+        }
+        match_stage.insert("candidate.jd", doc! { "$gte": start_jd, "$lte": end_jd });
+    }
+
+    let obj_ids: Vec<String> = body
+        .object_ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if obj_ids.len() > 1000 {
+        return response::bad_request("maximum of 1000 object_ids allowed for filter test");
+    }
+    if !obj_ids.is_empty() {
+        match_stage.insert("objectId", doc! { "$in": obj_ids });
+    }
+
+    let candid_ids: Vec<String> = body
+        .candids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if candid_ids.len() > 100000 {
+        return response::bad_request("maximum of 100000 candids allowed for filter test");
+    }
+    if !candid_ids.is_empty() {
+        let candids_i64: Vec<i64> = candid_ids
+            .iter()
+            .filter_map(|id| id.parse::<i64>().ok())
+            .collect();
+        match_stage.insert("_id", doc! { "$in": candids_i64 });
+    }
+
+    if match_stage.is_empty() {
+        return response::bad_request(
+            "at least one of (start_jd and end_jd), object_ids, or candid_ids must be provided",
+        );
+    }
+
+    let mut test_pipeline = match build_filter_pipeline(&pipeline, &permissions, &survey).await {
+        Ok(p) => p,
+        Err(e) => {
+            return response::bad_request(&format!(
+                "Invalid filter submitted, filter build failed with error: {}",
+                e
+            ));
+        }
+    };
+    match test_pipeline.get(0) {
+        Some(first_stage) => {
+            if first_stage.get("$match").is_none() {
+                return response::bad_request("first stage of pipeline must be a $match stage");
+            }
+        }
+        None => {
+            return response::bad_request("pipeline must have at least one stage");
+        }
+    }
+    test_pipeline[0].insert("$match", match_stage);
+
+    // Add count stage at the end of the pipeline
+    let count_stage = doc! { "$count": "count" };
+    test_pipeline.push(count_stage);
+
+    let collection: Collection<mongodb::bson::Document> =
+        db.collection(format!("{}_alerts", survey).as_str());
+    let mut cursor = match collection.aggregate(test_pipeline).await {
+        Ok(c) => c,
+        Err(e) => {
+            return response::bad_request(&format!(
+                "Invalid filter submitted, filter test failed with error: {}",
+                e
+            ))
+        }
+    };
+    // there is no Vec of results, just one document with the count
+    match cursor.next().await {
+        Some(res) => match res {
+            Ok(doc) => {
+                return response::ok(
+                    "filter test executed successfully",
+                    serde_json::json!({ "count": doc.get_i32("count").unwrap_or(0) }),
+                );
+            }
+            Err(e) => {
+                // TODO: not returning internal error here, but log it
+                // with tracing (once we have that set up in the API)
+                return response::internal_error(&format!(
+                    "error retrieving test filter count result: {}",
+                    e
+                ));
+            }
+        },
+        None => {
+            return response::ok(
+                "filter test executed successfully",
+                serde_json::json!({ "count": 0 }),
+            );
+        }
+    };
 }
