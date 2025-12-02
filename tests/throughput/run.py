@@ -54,7 +54,7 @@ config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
 with open("tests/throughput/config.yaml", "w") as f:
-    yaml.safe_dump(config, f, default_flow_style=False)
+    yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 # Reformat filter for insertion into database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:
@@ -62,10 +62,13 @@ with open("tests/throughput/cats150.pipeline.json", "r") as f:
 
 now_jd = Time.now().jd
 for_insert = {
-    "_id": str(uuid.uuid4()),
+    "_id": "replaced-in-mongo-init-script",
+    "name": "cats150-replaced-in-mongo-init-script",
     "survey": "ZTF",
     "user_id": "benchmarking",
-    "permissions": [1, 2, 3],
+    "permissions": {
+        "ZTF": [1, 2, 3]
+    },
     "active": True,
     "active_fid": "first",
     "fv": [
