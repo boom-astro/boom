@@ -2,7 +2,7 @@ use crate::{
     alert::AlertCutout,
     utils::fits::{prepare_triplet, CutoutError},
 };
-use ndarray::{Array, Dim};
+use ndarray::{Array, Array2, Axis, Dim};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use std::env;
 use tracing::instrument;
@@ -19,6 +19,8 @@ pub enum ModelError {
     PrepareCutoutError(#[from] CutoutError),
     #[error("error converting predictions to vec")]
     ModelOutputToVecError,
+    #[error("error converting array to tensor")]
+    TensorConversionError,
     #[error("missing feature in alert")]
     MissingFeature(&'static str),
 }
@@ -74,9 +76,20 @@ pub trait Model {
         }
         Ok(triplets)
     }
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError>;
+
+    #[instrument(skip_all)]
+    fn softmax(input: Array2<f32>) -> Array2<f32> {
+        let mut output = Array2::zeros(input.raw_dim());
+
+        for (i, row) in input.axis_iter(Axis(0)).enumerate() {
+            let max_val = row.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+            let exp_values: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
+            let sum_exp: f32 = exp_values.iter().sum();
+
+            for (j, &exp_val) in exp_values.iter().enumerate() {
+                output[[i, j]] = exp_val / sum_exp;
+            }
+        }
+        output
+    }
 }
