@@ -29,4 +29,8 @@ try:
         n_alerts += 1
 finally:
     consumer.close()
+
+if n_alerts != 28548:
+    raise RuntimeError(f"Expected 28548 alerts, but got {n_alerts}")
+
 print(f"Read {n_alerts} alerts from topic {topic}")
