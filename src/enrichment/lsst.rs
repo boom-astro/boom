@@ -7,6 +7,7 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
@@ -98,7 +99,8 @@ pub struct LsstAlertProperties {
 }
 
 /// LSST with properties (i.e., it's enriched)
-#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[serdavro]
+#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct EnrichedLsstAlert {
     #[serde(rename = "_id")]
     pub candid: i64,

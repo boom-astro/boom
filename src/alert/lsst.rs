@@ -43,9 +43,8 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema, AvroSchema,
-)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
@@ -203,7 +202,6 @@ pub struct DiaSource {
 #[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstCandidate {
-    #[serde(flatten)]
     pub dia_source: DiaSource,
     #[serde(rename = "objectId")]
     pub object_id: String,
