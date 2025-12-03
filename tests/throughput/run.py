@@ -1,18 +1,8 @@
-"""Script to benchmark BOOM."""
-# /// script
-# requires-python = ">=3.8"
-# dependencies = [
-#     "pyyaml",
-#     "pandas>2",
-#     "astropy",
-# ]
-# ///
-
+"""Script to benchmark BOOM. requires: Python 3.8+, pyyaml, pandas>2, astropy"""
 import argparse
 import json
 import os
 import subprocess
-import uuid
 
 import pandas as pd
 import yaml
@@ -38,19 +28,25 @@ parser.add_argument(
     default=1,
     help="Number of filter workers to use for benchmarking.",
 )
+parser.add_argument(
+    "--apptainer",
+    action="store_true",
+    help="Run the benchmark in Apptainer instead of Docker.",
+)
 args = parser.parse_args()
+use_apptainer = args.apptainer
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
 config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
 config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
 config["database"]["name"] = "boom-benchmarking"
-config["database"]["host"] = "mongo"
+config["database"]["host"] = "localhost" if use_apptainer else "mongo"
 config["database"]["password"] = "mongoadminsecret"
-config["kafka"]["consumer"]["ztf"]["server"] = "broker:29092"
+config["kafka"]["consumer"]["ztf"]["server"] = "localhost:29092" if use_apptainer else "broker:29092"
 config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
-config["kafka"]["producer"]["server"] = "broker:29092"
-config["redis"]["host"] = "valkey"
+config["kafka"]["producer"]["server"] = "localhost:29092" if use_apptainer else "broker:29092"
+config["redis"]["host"] = "localhost" if use_apptainer else "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
 with open("tests/throughput/config.yaml", "w") as f:
@@ -84,8 +80,12 @@ for_insert = {
 with open("tests/throughput/cats150.filter.json", "w") as f:
     json.dump(for_insert, f)
 
+# Retrieve boom directory using this script's location
+script_dir = os.path.dirname(os.path.abspath(__file__))
+boom_dir = os.path.abspath(os.path.join(script_dir, "../../"))
+
 logs_dir = os.path.join(
-    "logs",
+    f"{boom_dir}/logs",
     "boom-"
     + (
         f"na={args.n_alert_workers}-"
@@ -95,39 +95,41 @@ logs_dir = os.path.join(
 )
 
 # Now run the benchmark
-subprocess.run(["bash", "tests/throughput/_run.sh", logs_dir], check=True)
+subprocess.run([
+    "bash",
+    "tests/throughput/_run.sh",
+    boom_dir,
+    "apptainer" if use_apptainer else "docker",
+    logs_dir
+], check=True)
 
 # Now analyze the logs and raise an error if we're too slow
-boom_config = (
-    f"na={args.n_alert_workers}-"
-    f"ne={args.n_enrichment_workers}-"
-    f"nf={args.n_filter_workers}"
-)
-boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
-boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
 t1_b, t2_b = None, None
+
+def extract_date_from_log(line_to_process, is_on_apptainer):
+    line_index = 0 if is_on_apptainer else 2 # Docker logs have two extra columns
+    return pd.to_datetime(
+        line_to_process.split()[line_index].replace("\x1b[2m", "").replace("\x1b[0m", "")
+    )
+
 # To calculate BOOM wall time, take:
 # - Start: timestamp of the first message received by the consumer
 # - End: last timestamp in the scheduler log
-with open(boom_consumer_log_fpath) as f:
+with open(f"{logs_dir}/consumer.log") as f:
     lines = f.readlines()
     for line in lines:
         if "Consumer received first message, continuing..." in line:
-            t1_b = pd.to_datetime(
-                line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
-            )
+            t1_b = extract_date_from_log(line, use_apptainer)
             break
 
 if t1_b is None:
     raise ValueError("Could not find start time in consumer log")
-with open(boom_scheduler_log_fpath) as f:
+with open(f"{logs_dir}/scheduler.log") as f:
     lines = f.readlines()
     if len(lines) < 3:
         raise ValueError("Scheduler log has fewer than 3 lines; cannot determine end time.")
     line = lines[-3]
-    t2_b = pd.to_datetime(
-        line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
-    )
+    t2_b = extract_date_from_log(line, use_apptainer)
 
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")

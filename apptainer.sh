@@ -156,7 +156,7 @@ fi
 # -----------------------------
 if [ "$1" == "benchmark" ]; then
   pip install pandas pyyaml astropy
-  python3 "$BOOM_DIR/tests/throughput/apptainer_run.py"
+  python3 "$BOOM_DIR/tests/throughput/run.py" --apptainer
   exit 0
 fi
 
