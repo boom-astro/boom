@@ -43,9 +43,7 @@ impl Babamul {
                 .create()
                 .expect("Failed to create Babamul Kafka producer");
 
-        // Generate Avro schemas via apache-avro-derive
-        // let lsst_avro_schema = derive_avro_schema::<EnrichedLsstAlert>();
-        // let ztf_avro_schema = derive_avro_schema::<EnrichedZtfAlert>();
+        // Generate Avro schemas
         let lsst_avro_schema = EnrichedLsstAlert::get_schema();
         let ztf_avro_schema = EnrichedZtfAlert::get_schema();
 
