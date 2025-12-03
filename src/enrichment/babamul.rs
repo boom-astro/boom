@@ -47,12 +47,6 @@ impl Babamul {
         let lsst_avro_schema = EnrichedLsstAlert::get_schema();
         let ztf_avro_schema = EnrichedZtfAlert::get_schema();
 
-        // DEBUG, save schemas to files
-        std::fs::write("lsst_babamul.avsc", lsst_avro_schema.canonical_form())
-            .expect("Failed to write LSST Babamul schema");
-        std::fs::write("ztf_babamul.avsc", ztf_avro_schema.canonical_form())
-            .expect("Failed to write ZTF Babamul schema");
-
         Babamul {
             kafka_producer,
             lsst_avro_schema,
@@ -111,11 +105,6 @@ impl Babamul {
     fn alert_to_avro_bytes(&self, alert: EnrichedAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
         match alert {
             EnrichedAlert::Lsst(a) => {
-                // debug, serialize the alert to JSON and save it to a file
-                let json = serde_json::to_string_pretty(a)
-                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-                std::fs::write("lsst_alert.json", &json)
-                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
                 let mut writer = Writer::with_codec(
                     &self.lsst_avro_schema,
                     Vec::new(),
@@ -129,11 +118,6 @@ impl Babamul {
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
             }
             EnrichedAlert::Ztf(a) => {
-                // debug, serialize the alert to JSON and save it to a file
-                let json = serde_json::to_string_pretty(a)
-                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-                std::fs::write("ztf_alert.json", &json)
-                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
                 let mut writer = Writer::with_codec(
                     &self.ztf_avro_schema,
                     Vec::new(),
