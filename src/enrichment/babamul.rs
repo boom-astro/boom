@@ -9,7 +9,7 @@ use apache_avro::{AvroSchema, Schema, Writer};
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
-pub enum EnrichedAlert<'a> {
+enum EnrichedAlert<'a> {
     Lsst(&'a EnrichedLsstAlert),
     Ztf(&'a EnrichedZtfAlert),
 }

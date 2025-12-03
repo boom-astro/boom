@@ -1,4 +1,4 @@
-mod babamul;
+pub mod babamul;
 mod base;
 mod decam;
 mod lsst;
@@ -9,5 +9,5 @@ pub use base::{
     EnrichmentWorkerError,
 };
 pub use decam::DecamEnrichmentWorker;
-pub use lsst::LsstEnrichmentWorker;
+pub use lsst::{EnrichedLsstAlert, LsstAlertProperties, LsstEnrichmentWorker};
 pub use ztf::{EnrichedZtfAlert, ZtfAlertForEnrichment, ZtfAlertProperties, ZtfEnrichmentWorker};
