@@ -97,7 +97,7 @@ pub struct LsstAlertProperties {
     pub photstats: PerBandProperties,
 }
 
-/// LSST with propertied (i.e., it's enriched)
+/// LSST with properties (i.e., it's enriched)
 #[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct EnrichedLsstAlert {
     #[serde(rename = "_id")]
