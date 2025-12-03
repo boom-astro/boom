@@ -1,8 +1,7 @@
-import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { ModeToggle } from "./mode-toggle"
-
+import { Link } from "react-router-dom"
 export function SiteHeader() {
   return (
     <header className="flex h-(--header-height) shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-(--header-height)">
@@ -12,9 +11,11 @@ export function SiteHeader() {
           orientation="vertical"
           className="mx-2 data-[orientation=vertical]:h-4"
         />
-        <h1 className="text-base font-medium">ZTF Alerts</h1>
+        <h1 className="text-base font-medium">
+          <Link to="/" className="text-base font-medium">Babamul</Link>
+        </h1>
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" asChild size="sm" className="hidden sm:flex">
+          {/* <Button variant="ghost" asChild size="sm" className="hidden sm:flex">
             <a
               href="https://github.com/shadcn-ui/ui/tree/main/apps/v4/app/(examples)/dashboard"
               rel="noopener noreferrer"
@@ -23,8 +24,9 @@ export function SiteHeader() {
             >
               GitHub
             </a>
-          </Button>
-          <ModeToggle />
+          </Button> */}
+          <ModeToggle className="-ml-1" />
+          {/* Top-bar user avatar removed — NavUser in sidebar provides account actions */}
         </div>
       </div>
     </header>

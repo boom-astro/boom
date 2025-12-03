@@ -61,31 +61,29 @@ const formatNumber = (value: number) => {
     return value.toFixed(2);
 };
 
-function getArrayMinMax(arr: number[], field: string) {
-    let min = arr[0][field];
-    let max = arr[0][field];
-    for (let i = 1; i < arr.length; i++) {
-        if (arr[i][field] < min) {
-            min = arr[i][field];
-        }
-        if (arr[i][field] > max) {
-            max = arr[i][field];
-        }
-    }
-    return { min, max };
+function getArrayMinMax(arr: Array<Record<string, number>>, field: string) {
+  if (!arr || arr.length === 0) return { min: 0, max: 0 };
+  const values = arr.map((d) => d[field]).filter((v) => typeof v === 'number');
+  if (values.length === 0) return { min: 0, max: 0 };
+  return { min: Math.min(...values), max: Math.max(...values) };
 }
 
-function getChartData(
-  classification_history: any,
-): { mjd: number; drb: number, acai_h: number, acai_n: number, acai_v: number }[] {
-    const chartData = classification_history.map((item: any) => {
+type ClassificationEntry = { jd: number | string; drb: number; classifications: { acai_h: number; acai_n: number; acai_v: number } };
+
+function getChartData(classification_history: unknown): { mjd: number; drb: number; acai_h: number; acai_n: number; acai_v: number }[] {
+    if (!Array.isArray(classification_history)) return [];
+    const chartData = (classification_history as unknown[]).map((itemRaw) => {
+      const item = (itemRaw ?? {}) as ClassificationEntry;
+      const jd = typeof item.jd === 'number' ? item.jd : Number(item.jd ?? NaN);
+      const drb = typeof item.drb === 'number' ? item.drb : Number(item.drb ?? 0);
+      const cls = item.classifications ?? { acai_h: 0, acai_n: 0, acai_v: 0 };
       return {
-        mjd: jd2mjd(item.jd),
-        drb: item.drb * 100.0,
-        acai_h: item.classifications.acai_h * 100.0,
-        acai_n: item.classifications.acai_n * 100.0,
-        acai_v: item.classifications.acai_v * 100.0,
-      }
+        mjd: jd2mjd(jd),
+        drb: drb * 100.0,
+        acai_h: (cls.acai_h ?? 0) * 100.0,
+        acai_n: (cls.acai_n ?? 0) * 100.0,
+        acai_v: (cls.acai_v ?? 0) * 100.0,
+      };
     });
     return chartData;
 }
@@ -93,17 +91,18 @@ function getChartData(
 export default function ClassificationsHistory({
     alert,
   }: {
-    alert: any
+    alert: unknown
   }) {
-    const [chartData, setChartData] = useState([]);
+    const [chartData, setChartData] = useState<Array<Record<string, number>>>([]);
     const [selected, setSelected] = useState("all");
 
     useEffect(() => {
-      const data = getChartData(alert.classification_history);
+      const alertObj = (alert as Record<string, unknown> | undefined) ?? {};
+      const data = getChartData(alertObj['classification_history']);
       setChartData(data);
     }, [alert]);
 
-    let { min: min_mjd, max: max_mjd } = chartData?.length > 0 ? getArrayMinMax(chartData, "mjd") : { min: 0, max: 0 };
+    const { min: min_mjd, max: max_mjd } = chartData?.length > 0 ? getArrayMinMax(chartData, "mjd") : { min: 0, max: 0 };
     const xTicks = generateTicks(min_mjd, max_mjd, 6); // 6 ticks on X-axis
 
   return (

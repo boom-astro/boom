@@ -138,3 +138,16 @@
     background-color: transparent;
   }
 }
+
+.aladin-tooltip-container.aladin-stack-control.top.right {
+  position: absolute;
+  top: 5px;
+  .aladin-tooltip {
+    display: none;
+  }
+  .aladin-btn {
+    border: none;
+    background-color: transparent;
+    /* right: 5px; */
+  }
+}

@@ -1,6 +1,6 @@
 "use client"
 
-import { PolarAngleAxis, PolarGrid, Radar, RadarChart } from "recharts"
+// removed unused Radar imports
 
 import {
   Card,
@@ -49,38 +49,28 @@ function classifications2chartData(
 export default function Classifications({
   alert,
 }: {
-  alert: any
+  alert: unknown
 }) {
-  let [selected, setSelected] = useState("all");
-  let [chartData, setChartData] = useState([]);
-  // if there are no keys, return null
-  if (Object.keys(alert.classifications).length === 0) {
-    return (
-      <Card>
-        <CardHeader className="items-center">
-          <CardTitle>Classifications</CardTitle>
-        </CardHeader>
-        <CardContent className="pb-0">
-          <CardDescription>No classifications available</CardDescription>
-        </CardContent>
-      </Card>
-    )
-  }
-
+  const [selected, setSelected] = useState("all");
+  const [chartData, setChartData] = useState<Array<{ model: string; score: number }>>([]);
+  const alertObj = (alert ?? {}) as Record<string, unknown>;
+  const classifications = (alertObj['classifications'] as Record<string, number> | undefined) ?? {};
+  // run effect to prepare chart data
   useEffect(() => {
-    let chartDataTemp = classifications2chartData(alert.classifications);
+    let chartDataTemp = classifications2chartData(classifications);
+    const candidate = (alertObj['candidate'] as Record<string, unknown> | undefined) ?? {};
 
     // we inject the drb from alert.candidate.drb
     chartDataTemp.push({
       model: "drb",
-      score: alert.candidate.drb,
+      score: Number(candidate['drb'] ?? 0),
     });
 
     // if alert.candidate.distpsnr1 < 2, add sgscore1
-    if (alert.candidate.distpsnr1 < 2) {
+    if (Number(candidate['distpsnr1'] ?? 99) < 2) {
       chartDataTemp.push({
         model: "sgscore",
-        score: alert.candidate.sgscore1,
+        score: Number(candidate['sgscore1'] ?? 0),
       });
     }
 
@@ -118,7 +108,22 @@ export default function Classifications({
 
     // set the chart data
     setChartData(chartDataTemp);
-  }, [alert, selected]);
+  }, [classifications, selected]);
+
+  // if there are no keys, return null
+  if (Object.keys(classifications).length === 0) {
+    return (
+      <Card>
+        <CardHeader className="items-center">
+          <CardTitle>Classifications</CardTitle>
+        </CardHeader>
+        <CardContent className="pb-0">
+          <CardDescription>No classifications available</CardDescription>
+        </CardContent>
+      </Card>
+    )
+
+    }
 
   return (
     <Card className="@container/card">
@@ -171,7 +176,7 @@ export default function Classifications({
                 offset={8}
                 className="fill-foreground"
                 fontSize={12}
-                formatter={(value) => {
+                formatter={(value: number) => {
                   return `${value.toFixed(2)}%`
                 }}
               />

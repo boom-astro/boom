@@ -2,14 +2,16 @@ import { Moon, Sun } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { useTheme } from "@/components/theme-provider"
+import { cn } from "@/lib/utils"
 
-export function ModeToggle() {
+export function ModeToggle({ className }: { className?: string }) {
   const { setTheme } = useTheme()
 
   return (
     <Button
-      variant="secondary"
+      variant="ghost"
       size="icon"
+      className={cn("size-7", className)}
       onClick={() => {
         setTheme((prevTheme) => {
           if (prevTheme === "light") {
