@@ -177,13 +177,19 @@ impl Babamul {
             // Determine which topic this alert should go to
             // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
             // TODO: Get this implemented
-            // For now, all LSST alerts go to "babamul.none"
+            // For now, all LSST alerts go to "babamul.lsst.none"
             let category: String = "none".to_string();
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
                 .or_insert_with(Vec::new)
                 .push(alert);
+        }
+
+        // If there is nothing to send, return early
+        if alerts_by_topic.is_empty() {
+            info!("No LSST alerts to send to Babamul");
+            return Ok(());
         }
 
         // Send all grouped alerts using shared helper
@@ -211,7 +217,7 @@ impl Babamul {
             // Determine which topic this alert should go to
             // Is it a star, galaxy, or none, and does it have an LSST crossmatch?
             // TODO: Get this implemented
-            // For now, all ZTF alerts go to "babamul.none"
+            // For now, all ZTF alerts go to "babamul.ztf.none"
             let category: String = "none".to_string();
             let topic_name = format!("babamul.ztf.{}", category);
             alerts_by_topic
@@ -224,9 +230,9 @@ impl Babamul {
             info!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
         }
 
-        // if there is nothing to send, return early
+        // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No alerts to send to Babamul");
+            info!("No ZTF alerts to send to Babamul");
             return Ok(());
         }
 
