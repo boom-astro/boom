@@ -1,7 +1,10 @@
 use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, ZtfCandidate},
     conf::AppConfig,
-    enrichment::{EnrichedLsstAlert, EnrichedZtfAlert, LsstAlertProperties, ZtfAlertProperties},
+    enrichment::{
+        babamul::{EnrichedLsstAlert, EnrichedZtfAlert},
+        LsstAlertProperties, ZtfAlertProperties,
+    },
     utils::{
         lightcurves::{Band, PerBandProperties},
         testing::TEST_CONFIG_FILE,

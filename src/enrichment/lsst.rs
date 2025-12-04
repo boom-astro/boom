@@ -1,6 +1,6 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::Babamul;
+use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
 use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError,
 };
@@ -9,7 +9,6 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
@@ -98,48 +97,6 @@ pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
-}
-
-/// Enriched LSST alert
-#[serdavro]
-#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
-pub struct EnrichedLsstAlert {
-    #[serde(rename = "_id")]
-    pub candid: i64,
-    #[serde(rename = "objectId")]
-    pub object_id: String,
-    pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
-    pub properties: LsstAlertProperties,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<Vec<u8>>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<Vec<u8>>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<Vec<u8>>,
-}
-
-impl EnrichedLsstAlert {
-    pub fn from_alert_properties_and_cutouts(
-        alert: LsstAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-        properties: LsstAlertProperties,
-    ) -> Self {
-        EnrichedLsstAlert {
-            candid: alert.candid,
-            object_id: alert.object_id,
-            candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            fp_hists: alert.fp_hists,
-            properties,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
-        }
-    }
 }
 
 pub struct LsstEnrichmentWorker {

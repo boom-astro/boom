@@ -9,5 +9,5 @@ pub use base::{
     EnrichmentWorkerError,
 };
 pub use decam::DecamEnrichmentWorker;
-pub use lsst::{EnrichedLsstAlert, LsstAlertProperties, LsstEnrichmentWorker};
-pub use ztf::{EnrichedZtfAlert, ZtfAlertForEnrichment, ZtfAlertProperties, ZtfEnrichmentWorker};
+pub use lsst::{LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker};
+pub use ztf::{ZtfAlertForEnrichment, ZtfAlertProperties, ZtfEnrichmentWorker};

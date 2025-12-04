@@ -1,13 +1,132 @@
 //! Babamul is an optional component of ZTF and LSST enrichment pipelines,
 //! which sends enriched alerts to various Kafka topics for public consumption.
+use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
-use crate::enrichment::lsst::EnrichedLsstAlert;
-use crate::enrichment::ztf::EnrichedZtfAlert;
+use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
+use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
-use crate::utils::derive_avro_schema::SerdavroWriter;
+use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::PhotometryMag};
 use apache_avro::{AvroSchema, Schema, Writer};
+use apache_avro_macros::serdavro;
 use std::collections::HashMap;
 use tracing::{info, instrument};
+
+// Wrapper around cutout bytes, so we can implement
+// AvroSchemaComponent for it, to serialize as bytes in Avro
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct CutoutBytes(Vec<u8>);
+
+impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
+    fn get_schema_in_ctxt(
+        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
+        _enclosing_namespace: &apache_avro::schema::Namespace,
+    ) -> apache_avro::Schema {
+        apache_avro::Schema::Bytes
+    }
+}
+
+// Custom serializer for Option<CutoutBytes>, to serialize as bytes or null in Avro
+pub fn serialize_cutout_bytes_option<S>(
+    cutout: &Option<CutoutBytes>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+{
+    match cutout {
+        Some(cutout_bytes) => apache_avro::serde_avro_bytes::serialize(&cutout_bytes.0, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Enriched LSST alert
+#[serdavro]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct EnrichedLsstAlert {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
+    pub properties: LsstAlertProperties,
+    #[serde(rename = "cutoutScience")]
+    #[serde(serialize_with = "serialize_cutout_bytes_option")]
+    pub cutout_science: Option<CutoutBytes>,
+    #[serde(rename = "cutoutTemplate")]
+    #[serde(serialize_with = "serialize_cutout_bytes_option")]
+    pub cutout_template: Option<CutoutBytes>,
+    #[serde(rename = "cutoutDifference")]
+    #[serde(serialize_with = "serialize_cutout_bytes_option")]
+    pub cutout_difference: Option<CutoutBytes>,
+}
+
+impl EnrichedLsstAlert {
+    pub fn from_alert_properties_and_cutouts(
+        alert: LsstAlertForEnrichment,
+        cutout_science: Option<Vec<u8>>,
+        cutout_template: Option<Vec<u8>>,
+        cutout_difference: Option<Vec<u8>>,
+        properties: LsstAlertProperties,
+    ) -> Self {
+        EnrichedLsstAlert {
+            candid: alert.candid,
+            object_id: alert.object_id,
+            candidate: alert.candidate,
+            prv_candidates: alert.prv_candidates,
+            fp_hists: alert.fp_hists,
+            properties,
+            cutout_science: cutout_science.map(CutoutBytes),
+            cutout_template: cutout_template.map(CutoutBytes),
+            cutout_difference: cutout_difference.map(CutoutBytes),
+        }
+    }
+}
+
+/// Enriched ZTF alert
+#[serdavro]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct EnrichedZtfAlert {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
+    pub properties: ZtfAlertProperties,
+    #[serde(rename = "cutoutScience")]
+    #[serde(serialize_with = "serialize_cutout_bytes_option")]
+    pub cutout_science: Option<CutoutBytes>,
+    #[serde(rename = "cutoutTemplate")]
+    #[serde(serialize_with = "serialize_cutout_bytes_option")]
+    pub cutout_template: Option<CutoutBytes>,
+    #[serde(rename = "cutoutDifference")]
+    #[serde(serialize_with = "serialize_cutout_bytes_option")]
+    pub cutout_difference: Option<CutoutBytes>,
+}
+
+impl EnrichedZtfAlert {
+    pub fn from_alert_properties_and_cutouts(
+        alert: ZtfAlertForEnrichment,
+        cutout_science: Option<Vec<u8>>,
+        cutout_template: Option<Vec<u8>>,
+        cutout_difference: Option<Vec<u8>>,
+        properties: ZtfAlertProperties,
+    ) -> Self {
+        EnrichedZtfAlert {
+            candid: alert.candid,
+            object_id: alert.object_id,
+            candidate: alert.candidate,
+            prv_candidates: alert.prv_candidates,
+            fp_hists: alert.fp_hists,
+            properties,
+            cutout_science: cutout_science.map(CutoutBytes),
+            cutout_template: cutout_template.map(CutoutBytes),
+            cutout_difference: cutout_difference.map(CutoutBytes),
+        }
+    }
+}
 
 enum EnrichedAlert<'a> {
     Lsst(&'a EnrichedLsstAlert),

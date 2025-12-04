@@ -1,5 +1,5 @@
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::Babamul;
+use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
@@ -13,7 +13,6 @@ use crate::{
     },
 };
 use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
@@ -103,47 +102,6 @@ pub struct ZtfAlertProperties {
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
-}
-
-/// Enriched ZTF alert
-#[serdavro]
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, JsonSchema)]
-pub struct EnrichedZtfAlert {
-    pub candid: i64,
-    #[serde(rename = "objectId")]
-    pub object_id: String,
-    pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
-    pub properties: ZtfAlertProperties,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<Vec<u8>>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<Vec<u8>>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<Vec<u8>>,
-}
-
-impl EnrichedZtfAlert {
-    pub fn from_alert_properties_and_cutouts(
-        alert: ZtfAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
-        properties: ZtfAlertProperties,
-    ) -> Self {
-        EnrichedZtfAlert {
-            candid: alert.candid,
-            object_id: alert.object_id,
-            candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            fp_hists: alert.fp_hists,
-            properties,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
-        }
-    }
 }
 
 pub struct ZtfEnrichmentWorker {
