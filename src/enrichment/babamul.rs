@@ -86,7 +86,7 @@ impl Babamul {
                     rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
                 let future = self
                     .kafka_producer
-                    .send(record, std::time::Duration::from_secs(5));
+                    .send(record, std::time::Duration::from_secs(15));
                 send_futures.push(future);
             }
 

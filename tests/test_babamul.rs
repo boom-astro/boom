@@ -45,6 +45,9 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             stationary: false,
             photstats: PerBandProperties::default(),
         },
+        cutout_science: None,
+        cutout_template: None,
+        cutout_difference: None,
     }
 }
 
@@ -96,6 +99,9 @@ fn create_mock_enriched_lsst_alert(
             stationary: false,
             photstats: PerBandProperties::default(),
         },
+        cutout_science: None,
+        cutout_template: None,
+        cutout_difference: None,
     }
 }
 
@@ -105,9 +111,10 @@ async fn consume_kafka_messages(
     expected_count: usize,
     config: &AppConfig,
 ) -> Vec<Vec<u8>> {
+    let group_id = uuid::Uuid::new_v4().to_string();
     let consumer: StreamConsumer = rdkafka::config::ClientConfig::new()
         .set("bootstrap.servers", &config.kafka.producer.server)
-        .set("group.id", "test-consumer")
+        .set("group.id", &group_id)
         .set("auto.offset.reset", "earliest")
         .set("enable.auto.commit", "false")
         .create()
@@ -121,6 +128,8 @@ async fn consume_kafka_messages(
     let timeout = Duration::from_secs(5);
     let start = std::time::Instant::now();
 
+    let mut nb_errors = 0;
+    let max_nb_errors = 5;
     while messages.len() < expected_count && start.elapsed() < timeout {
         match consumer.recv().await {
             Ok(message) => {
@@ -130,12 +139,37 @@ async fn consume_kafka_messages(
             }
             Err(e) => {
                 eprintln!("Kafka receive error: {:?}", e);
-                break;
+                nb_errors += 1;
+                if nb_errors >= max_nb_errors {
+                    break;
+                }
             }
         }
     }
 
     messages
+}
+
+// add a function to delete a kafka topic before each test to ensure a clean state
+async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
+    use rdkafka::admin::{AdminClient, AdminOptions};
+
+    let admin: AdminClient<_> = rdkafka::config::ClientConfig::new()
+        .set("bootstrap.servers", &config.kafka.producer.server)
+        .create()
+        .expect("Failed to create Kafka admin client");
+
+    let result = admin
+        .delete_topics(&[topic], &AdminOptions::new())
+        .await
+        .unwrap();
+
+    for res in result {
+        match res {
+            Ok(_) => println!("Successfully deleted topic {}", topic),
+            Err((_, e)) => eprintln!("Failed to delete topic {}: {:?}", topic, e),
+        }
+    }
 }
 
 #[tokio::test]
@@ -144,6 +178,9 @@ async fn test_babamul_process_ztf_alerts() {
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
+
+    // Delete the topic before the test to ensure a clean state
+    delete_kafka_topic("babamul.ztf.none", &config).await;
 
     // Create mock enriched ZTF alerts
     let alert1 = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
@@ -169,6 +206,9 @@ async fn test_babamul_process_lsst_alerts() {
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
+
+    // Delete the topic before the test to ensure a clean state
+    delete_kafka_topic("babamul.lsst.none", &config).await;
 
     // Create mock enriched LSST alerts with good reliability and no flags
     let alert1 = create_mock_enriched_lsst_alert(9876543210, "LSST24aaaaaaa", 0.8, false, false);

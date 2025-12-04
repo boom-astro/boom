@@ -117,11 +117,20 @@ pub struct EnrichedZtfAlert {
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
     pub properties: ZtfAlertProperties,
+    #[serde(rename = "cutoutScience")]
+    pub cutout_science: Option<Vec<u8>>,
+    #[serde(rename = "cutoutTemplate")]
+    pub cutout_template: Option<Vec<u8>>,
+    #[serde(rename = "cutoutDifference")]
+    pub cutout_difference: Option<Vec<u8>>,
 }
 
 impl EnrichedZtfAlert {
-    pub fn from_alert_and_properties(
+    pub fn from_alert_properties_and_cutouts(
         alert: ZtfAlertForEnrichment,
+        cutout_science: Option<Vec<u8>>,
+        cutout_template: Option<Vec<u8>>,
+        cutout_difference: Option<Vec<u8>>,
         properties: ZtfAlertProperties,
     ) -> Self {
         EnrichedZtfAlert {
@@ -131,6 +140,9 @@ impl EnrichedZtfAlert {
             prv_candidates: alert.prv_candidates,
             fp_hists: alert.fp_hists,
             properties,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
         }
     }
 }
@@ -225,7 +237,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             return Ok(vec![]);
         }
 
-        let candid_to_cutouts =
+        let mut candid_to_cutouts =
             fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
 
         if candid_to_cutouts.len() != alerts.len() {
@@ -244,7 +256,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         for i in 0..alerts.len() {
             let candid = alerts[i].candid;
             let cutouts = candid_to_cutouts
-                .get(&candid)
+                .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
@@ -253,7 +265,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // Now, prepare inputs for ML models and run inference
             let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
-            let triplet = self.acai_h_model.get_triplet(&[cutouts])?;
+            let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
 
             let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
             let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
@@ -293,8 +305,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert =
-                    EnrichedZtfAlert::from_alert_and_properties(alerts[i].clone(), properties);
+                let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
+                    alerts[i].clone(),
+                    Some(cutouts.cutout_science),
+                    Some(cutouts.cutout_template),
+                    Some(cutouts.cutout_difference),
+                    properties,
+                );
                 enriched_alerts.push(enriched_alert);
             }
         }
