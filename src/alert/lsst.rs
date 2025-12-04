@@ -199,6 +199,7 @@ pub struct DiaSource {
 
 #[serde_as]
 #[skip_serializing_none]
+#[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
@@ -214,44 +215,6 @@ pub struct LsstCandidate {
     pub magap: f32,
     pub sigmagap: f32,
     pub is_sso: bool,
-}
-
-/// LsstCandidate for Avro serialization (without flatten)
-#[serde_as]
-#[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct LsstCandidateAvro {
-    pub dia_source: DiaSource,
-    #[serde(rename = "objectId")]
-    pub object_id: String,
-    pub jd: f64,
-    pub magpsf: f32,
-    pub sigmapsf: f32,
-    pub diffmaglim: f32,
-    pub isdiffpos: bool,
-    pub snr: f32,
-    pub magap: f32,
-    pub sigmagap: f32,
-    pub is_sso: bool,
-}
-
-impl From<LsstCandidate> for LsstCandidateAvro {
-    fn from(candidate: LsstCandidate) -> Self {
-        LsstCandidateAvro {
-            dia_source: candidate.dia_source,
-            object_id: candidate.object_id,
-            jd: candidate.jd,
-            magpsf: candidate.magpsf,
-            sigmapsf: candidate.sigmapsf,
-            diffmaglim: candidate.diffmaglim,
-            isdiffpos: candidate.isdiffpos,
-            snr: candidate.snr,
-            magap: candidate.magap,
-            sigmagap: candidate.sigmagap,
-            is_sso: candidate.is_sso,
-        }
-    }
 }
 
 impl TryFrom<DiaSource> for LsstCandidate {

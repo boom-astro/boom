@@ -1,5 +1,5 @@
 use boom::{
-    alert::{Candidate, DiaSource, LsstCandidateAvro, ZtfCandidate},
+    alert::{Candidate, DiaSource, LsstCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{EnrichedLsstAlert, EnrichedZtfAlert, LsstAlertProperties, ZtfAlertProperties},
     utils::{
@@ -76,7 +76,7 @@ fn create_mock_enriched_lsst_alert(
     EnrichedLsstAlert {
         candid,
         object_id: object_id.to_string(),
-        candidate: LsstCandidateAvro {
+        candidate: LsstCandidate {
             dia_source,
             object_id: object_id.to_string(),
             jd: 2460000.5,

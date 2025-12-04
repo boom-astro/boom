@@ -1,4 +1,4 @@
-use crate::alert::{LsstCandidate, LsstCandidateAvro};
+use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::Babamul;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
@@ -106,7 +106,7 @@ pub struct EnrichedLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
-    pub candidate: LsstCandidateAvro,
+    pub candidate: LsstCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
     pub properties: LsstAlertProperties,
@@ -120,7 +120,7 @@ impl EnrichedLsstAlert {
         EnrichedLsstAlert {
             candid: alert.candid,
             object_id: alert.object_id,
-            candidate: alert.candidate.into(),
+            candidate: alert.candidate,
             prv_candidates: alert.prv_candidates,
             fp_hists: alert.fp_hists,
             properties,
