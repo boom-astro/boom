@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 struct Obj {
     object_id: String,
     candidate: serde_json::Value,
+    properties: serde_json::Value,
     cutout_science: serde_json::Value,
     cutout_template: serde_json::Value,
     cutout_difference: serde_json::Value,
@@ -77,6 +78,7 @@ pub async fn get_object(
         })
         .projection(doc! {
             "candidate": 1,
+            "properties": 1,
             "classifications": 1,
         })
         .limit(1)
@@ -190,6 +192,7 @@ pub async fn get_object(
     let resp = Obj {
         object_id: object_id.clone(),
         candidate: serde_json::json!(newest_alert.get_document("candidate").unwrap().clone()),
+        properties: serde_json::json!(newest_alert.get_document("properties").unwrap().clone()),
         cutout_science: serde_json::json!(BASE64_STANDARD.encode(cutout_science)),
         cutout_template: serde_json::json!(BASE64_STANDARD.encode(cutout_template)),
         cutout_difference: serde_json::json!(BASE64_STANDARD.encode(cutout_difference)),

@@ -56,6 +56,7 @@ impl Modify for BabamulSecurityAddon {
         routes::users::post_user,
         routes::users::get_users,
         routes::users::delete_user,
+        routes::users::get_profile,
         routes::auth::post_auth,
         routes::surveys::get_object,
         routes::catalogs::get_catalogs,

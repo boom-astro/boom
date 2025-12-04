@@ -176,3 +176,27 @@ pub async fn delete_user(
         }
     }
 }
+
+// add a /profile route that returns the current user's info
+/// Get current user's profile
+#[utoipa::path(
+    get,
+    path = "/profile",
+    responses(
+        (status = 200, description = "User profile retrieved successfully", body = UserPublic),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Users"]
+)]
+#[get("/profile")]
+pub async fn get_profile(current_user: Option<web::ReqData<User>>) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    let user_public = UserPublic::from(current_user.into_inner().clone());
+    response::ok("success", serde_json::to_value(user_public).unwrap())
+}

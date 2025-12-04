@@ -69,6 +69,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::users::post_user)
                 .service(routes::users::get_users)
                 .service(routes::users::delete_user)
+                .service(routes::users::get_profile)
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
