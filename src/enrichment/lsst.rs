@@ -160,7 +160,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
-        let alert_cutout_collection = db.collection("LSST_alert_cutouts");
+        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
