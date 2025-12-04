@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 actix-rt = "2.11.0"
 actix-web = "4.11.0"
-apache-avro = { version = "0.20.0", features = ["snappy"] }
+apache-avro = { version = "0.21.0", features = ["snappy", "derive"] }
+apache-avro-derive = "0.21.0"
+apache-avro-macros = { version = "1", path = "apache-avro-macros" }
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bcrypt = "0.17.1"
@@ -56,3 +58,6 @@ ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
 # otherwise, install ort with the cuda feature
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
+
+[workspace]
+members = ["apache-avro-macros"]

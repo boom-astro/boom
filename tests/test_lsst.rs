@@ -146,7 +146,7 @@ async fn test_enrich_lsst_alert() {
 
     let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects

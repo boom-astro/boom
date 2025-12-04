@@ -15,6 +15,8 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
+use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -41,6 +43,7 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 
 #[serde_as]
 #[skip_serializing_none]
+#[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiaSource {
@@ -196,6 +199,7 @@ pub struct DiaSource {
 
 #[serde_as]
 #[skip_serializing_none]
+#[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
@@ -460,7 +464,9 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema, AvroSchema,
+)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
@@ -498,7 +504,8 @@ pub struct DiaForcedSource {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
