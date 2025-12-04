@@ -1,7 +1,9 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::Babamul;
-use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
+use crate::enrichment::{
+    fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError,
+};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
@@ -11,6 +13,7 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
+use std::collections::HashMap;
 use tracing::{error, instrument, warn};
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
@@ -110,11 +113,20 @@ pub struct EnrichedLsstAlert {
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
     pub properties: LsstAlertProperties,
+    #[serde(rename = "cutoutScience")]
+    pub cutout_science: Option<Vec<u8>>,
+    #[serde(rename = "cutoutTemplate")]
+    pub cutout_template: Option<Vec<u8>>,
+    #[serde(rename = "cutoutDifference")]
+    pub cutout_difference: Option<Vec<u8>>,
 }
 
 impl EnrichedLsstAlert {
-    pub fn from_alert_and_properties(
+    pub fn from_alert_properties_and_cutouts(
         alert: LsstAlertForEnrichment,
+        cutout_science: Option<Vec<u8>>,
+        cutout_template: Option<Vec<u8>>,
+        cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
     ) -> Self {
         EnrichedLsstAlert {
@@ -124,6 +136,9 @@ impl EnrichedLsstAlert {
             prv_candidates: alert.prv_candidates,
             fp_hists: alert.fp_hists,
             properties,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
         }
     }
 }
@@ -133,6 +148,7 @@ pub struct LsstEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
+    alert_cutout_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
 }
@@ -145,6 +161,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
+        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
@@ -161,6 +178,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
+            alert_cutout_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
         })
@@ -194,16 +212,30 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             return Ok(vec![]);
         }
 
+        let mut candid_to_cutouts = if self.babamul.is_some() {
+            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?
+        } else {
+            HashMap::new()
+        };
+
+        if candid_to_cutouts.len() != alerts.len() {
+            warn!(
+                "only {} cutouts fetched from {} candids",
+                candid_to_cutouts.len(),
+                alerts.len()
+            );
+        }
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<EnrichedLsstAlert> = Vec::new();
-        for i in 0..alerts.len() {
-            let candid = alerts[i].candid;
+        for alert in alerts {
+            let candid = alert.candid;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let properties = self.get_alert_properties(&alerts[i]).await?;
+            let properties = self.get_alert_properties(&alert).await?;
 
             let update_alert_document = doc! {
                 "$set": {
@@ -224,8 +256,16 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert =
-                    EnrichedLsstAlert::from_alert_and_properties(alerts[i].clone(), properties);
+                let cutouts = candid_to_cutouts
+                    .remove(&candid)
+                    .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
+                let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
+                    alert,
+                    Some(cutouts.cutout_science),
+                    Some(cutouts.cutout_template),
+                    Some(cutouts.cutout_difference),
+                    properties,
+                );
                 enriched_alerts.push(enriched_alert);
             }
         }
