@@ -13,7 +13,8 @@ Each alert is processed with the following pipeline:
    (from both live and archival surveys) are added.
    This is done based on the location (right ascension and declination)
    of the object in the alert.
-3. Machine learning model classification scores are added.
+3. Machine learning model classification scores and other properties are added
+   to "enrich" the alerts.
 4. A set of user-defined filters are applied.
    Any alert that passes through at least one filter is sent
    to a dedicated Kafka output stream for that alert's input stream.
@@ -27,6 +28,7 @@ graph TB
 
     subgraph Kafka
         Output[Output alert stream]
+        BabamulOutput[Babamul streams]
     end
 
     subgraph Valkey
@@ -59,6 +61,7 @@ graph TB
     EnrichmentQueue -- Candidate ID --> EnrichmentWorker
     EnrichmentWorker -- Candidate ID --> FilterQueue
     EnrichmentWorker -- Alert Enrichment scores --> AlertCollection
+    EnrichmentWorker -. Public ZTF/LSST alerts .-> BabamulOutput
     MongoDB -- Alert, object, images --> EnrichmentWorker
     FilterQueue -- Candidate ID --> FilterWorker
     MongoDB -- Enriched alert --> FilterWorker

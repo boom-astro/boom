@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 actix-rt = "2.11.0"
 actix-web = "4.11.0"
-apache-avro = { version = "0.20.0", features = ["snappy"] }
+apache-avro = { version = "0.21.0", features = ["snappy", "derive"] }
+apache-avro-derive = "0.21.0"
+apache-avro-macros = { version = "1", path = "apache-avro-macros" }
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bcrypt = "0.17.1"
@@ -23,7 +25,6 @@ jsonwebtoken = "9.3.1"
 lettre = "0.11"
 mongodb = "3.3.0"
 ndarray = "0.16.1"
-openssl = { version = "0.10.73", features = ["vendored"] }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
 opentelemetry_sdk = "0.31.0"
@@ -57,3 +58,6 @@ ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
 # otherwise, install ort with the cuda feature
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
+
+[workspace]
+members = ["apache-avro-macros"]

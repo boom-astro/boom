@@ -89,6 +89,10 @@ while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
     sleep 1
 done
 
+echo "$(current_datetime) - All alerts ingested, classified, and filtered"
+echo "$(current_datetime) - Reading from Kafka output topic"
+uv run tests/throughput/read-kafka-output.py
+
 echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
 
 # Shut down the BOOM services

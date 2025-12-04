@@ -1,10 +1,11 @@
 """Script to benchmark BOOM."""
 # /// script
-# requires-python = ">=3.8"
+# requires-python = ">=3.13"
 # dependencies = [
 #     "pyyaml",
 #     "pandas>2",
 #     "astropy",
+#     "confluent-kafka",
 # ]
 # ///
 
@@ -53,8 +54,9 @@ config["kafka"]["producer"]["server"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
+config["babamul"]["enabled"] = True
 with open("tests/throughput/config.yaml", "w") as f:
-    yaml.safe_dump(config, f, default_flow_style=False)
+    yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 # Reformat filter for insertion into database
 with open("tests/throughput/cats150.pipeline.json", "r") as f:
@@ -123,7 +125,9 @@ if t1_b is None:
 with open(boom_scheduler_log_fpath) as f:
     lines = f.readlines()
     if len(lines) < 3:
-        raise ValueError("Scheduler log has fewer than 3 lines; cannot determine end time.")
+        raise ValueError(
+            "Scheduler log has fewer than 3 lines; cannot determine end time."
+        )
     line = lines[-3]
     t2_b = pd.to_datetime(
         line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")

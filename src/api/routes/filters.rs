@@ -54,10 +54,9 @@ impl From<Filter> for FilterPublic {
 async fn run_test_pipeline(
     db: web::Data<Database>,
     catalog: &Survey,
-    mut pipeline: Vec<mongodb::bson::Document>,
+    mut pipeline: Vec<Document>,
 ) -> Result<(), FilterError> {
-    let collection: Collection<mongodb::bson::Document> =
-        db.collection(format!("{}_alerts", catalog).as_str());
+    let collection: Collection<Document> = db.collection(format!("{}_alerts", catalog).as_str());
     // get the latest candid from the alerts collection
     let result = collection
         .find_one(doc! {})
@@ -587,8 +586,7 @@ pub async fn post_filter_test(
     }
     test_pipeline[0].insert("$match", match_stage);
 
-    let collection: Collection<mongodb::bson::Document> =
-        db.collection(format!("{}_alerts", survey).as_str());
+    let collection: Collection<Document> = db.collection(format!("{}_alerts", survey).as_str());
     let mut cursor = match collection.aggregate(test_pipeline).await {
         Ok(c) => c,
         Err(e) => {
