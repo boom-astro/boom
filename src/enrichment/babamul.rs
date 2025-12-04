@@ -13,7 +13,7 @@ use tracing::{info, instrument};
 
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct CutoutBytes(Vec<u8>);
 
 impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
@@ -25,17 +25,12 @@ impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
     }
 }
 
-// Custom serializer for Option<CutoutBytes>, to serialize as bytes or null in Avro
-pub fn serialize_cutout_bytes_option<S>(
-    cutout: &Option<CutoutBytes>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::ser::Serializer,
-{
-    match cutout {
-        Some(cutout_bytes) => apache_avro::serde_avro_bytes::serialize(&cutout_bytes.0, serializer),
-        None => serializer.serialize_none(),
+impl serde::Serialize for CutoutBytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        apache_avro::serde_avro_bytes::serialize(&self.0, serializer)
     }
 }
 
@@ -52,13 +47,10 @@ pub struct EnrichedLsstAlert {
     pub fp_hists: Vec<PhotometryMag>,
     pub properties: LsstAlertProperties,
     #[serde(rename = "cutoutScience")]
-    #[serde(serialize_with = "serialize_cutout_bytes_option")]
     pub cutout_science: Option<CutoutBytes>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(serialize_with = "serialize_cutout_bytes_option")]
     pub cutout_template: Option<CutoutBytes>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(serialize_with = "serialize_cutout_bytes_option")]
     pub cutout_difference: Option<CutoutBytes>,
 }
 
@@ -96,13 +88,10 @@ pub struct EnrichedZtfAlert {
     pub fp_hists: Vec<PhotometryMag>,
     pub properties: ZtfAlertProperties,
     #[serde(rename = "cutoutScience")]
-    #[serde(serialize_with = "serialize_cutout_bytes_option")]
     pub cutout_science: Option<CutoutBytes>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(serialize_with = "serialize_cutout_bytes_option")]
     pub cutout_template: Option<CutoutBytes>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(serialize_with = "serialize_cutout_bytes_option")]
     pub cutout_difference: Option<CutoutBytes>,
 }
 
