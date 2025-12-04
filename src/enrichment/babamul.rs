@@ -42,6 +42,8 @@ pub struct EnrichedLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
@@ -65,6 +67,7 @@ impl EnrichedLsstAlert {
         EnrichedLsstAlert {
             candid: alert.candid,
             object_id: alert.object_id,
+            ss_object_id: alert.ss_object_id,
             candidate: alert.candidate,
             prv_candidates: alert.prv_candidates,
             fp_hists: alert.fp_hists,
