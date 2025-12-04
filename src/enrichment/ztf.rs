@@ -95,8 +95,7 @@ pub struct ZtfAlertForEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
-/// ZTF alert properties computed during enrichment
-/// and inserted back into the alert document
+/// ZTF alert properties computed during enrichment and inserted back into the alert document
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
@@ -106,7 +105,7 @@ pub struct ZtfAlertProperties {
     pub photstats: PerBandProperties,
 }
 
-/// Enriched ZTF alert (i.e., one with properties)
+/// Enriched ZTF alert
 #[serdavro]
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct EnrichedZtfAlert {

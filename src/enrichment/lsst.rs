@@ -92,8 +92,7 @@ pub struct LsstAlertForEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
-/// LSST alert properties computed during enrichment
-/// and inserted back into the alert document
+/// LSST alert properties computed during enrichment and inserted back into the alert document
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
@@ -101,7 +100,7 @@ pub struct LsstAlertProperties {
     pub photstats: PerBandProperties,
 }
 
-/// LSST with properties (i.e., it's enriched)
+/// Enriched LSST alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
 pub struct EnrichedLsstAlert {
