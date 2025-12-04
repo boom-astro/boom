@@ -52,11 +52,11 @@ pub struct DiaSource {
     pub visit: i64,
     /// Id of the detector where this diaSource was measured. Datatype short instead of byte because of DB concerns about unsigned bytes.
     pub detector: i32,
-    /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
+    /// Id of the diaObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with a diaObject).
     #[serde(rename = "diaObjectId")]
     #[serde(deserialize_with = "deserialize_optional_id")]
     pub dia_object_id: Option<i64>,
-    /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource will be associated with either a diaObject or ssObject).
+    /// Id of the ssObject this source was associated with, if any. If not, it is set to NULL (each diaSource may be associated with a ssObject).
     #[serde(rename = "ssObjectId")]
     #[serde(deserialize_with = "deserialize_optional_id")]
     pub ss_object_id: Option<i64>,
@@ -200,8 +200,6 @@ pub struct DiaSource {
 pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
-    #[serde(rename = "objectId")]
-    pub object_id: String,
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
@@ -210,7 +208,6 @@ pub struct LsstCandidate {
     pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
-    pub is_sso: bool,
 }
 
 impl TryFrom<DiaSource> for LsstCandidate {
@@ -233,24 +230,13 @@ impl TryFrom<DiaSource> for LsstCandidate {
 
         let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
 
-        // if dia_object_id is defined, is_sso is false
-        // if ss_object_id is defined, is_sso is true
-        // if both are undefined or both are defined, we throw an error
-        let (object_id, is_sso) = match (
-            dia_source.dia_object_id.clone(),
-            dia_source.ss_object_id.clone(),
-        ) {
-            (Some(dia_id), None) => (dia_id.to_string(), false),
-            (None, Some(ss_id)) => (format!("sso{}", ss_id.to_string()), true),
-            (None, None) => return Err(AlertError::MissingObjectId),
-            (Some(dia_id), Some(ss_id)) => {
-                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
-            }
-        };
+        // verify that there is a valid diaObjectId
+        if dia_source.dia_object_id.is_none() {
+            return Err(AlertError::MissingObjectId);
+        }
 
         Ok(LsstCandidate {
             dia_source,
-            object_id,
             jd,
             magpsf,
             sigmapsf,
@@ -259,7 +245,6 @@ impl TryFrom<DiaSource> for LsstCandidate {
             snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
-            is_sso,
         })
     }
 }
@@ -666,6 +651,8 @@ pub struct LsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -818,7 +805,17 @@ impl AlertWorker for LsstAlertWorker {
             .inspect_err(as_error!())?;
 
         let candid = avro_alert.candid;
-        let object_id = avro_alert.candidate.object_id.clone();
+        let object_id = match avro_alert.candidate.dia_source.dia_object_id {
+            Some(id) => id.to_string(),
+            None => {
+                return Err(AlertError::MissingObjectId);
+            }
+        };
+        let ss_object_id = avro_alert
+            .candidate
+            .dia_source
+            .ss_object_id
+            .map(|id| id.to_string());
         let ra = avro_alert.candidate.dia_source.ra;
         let dec = avro_alert.candidate.dia_source.dec;
 
@@ -888,6 +885,7 @@ impl AlertWorker for LsstAlertWorker {
         let alert = LsstAlert {
             candid,
             object_id: object_id.clone(),
+            ss_object_id,
             candidate: avro_alert.candidate,
             coordinates: Coordinates::new(ra, dec),
             created_at: now,
@@ -926,7 +924,16 @@ mod tests {
         // validate the alert
         let alert: LsstRawAvroAlert = alert.unwrap();
         assert_eq!(alert.candid, candid);
-        assert_eq!(alert.candidate.object_id, object_id);
+        assert_eq!(
+            alert
+                .candidate
+                .dia_source
+                .dia_object_id
+                .as_ref()
+                .unwrap()
+                .to_string(),
+            object_id
+        );
         assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
         assert!((alert.candidate.jd - 2460961.733092).abs() < 1e-6);

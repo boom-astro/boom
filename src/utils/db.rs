@@ -70,6 +70,14 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    // if survey is LSST, create a simple index on the ssObjectId field of the alerts collection
+    if survey == &Survey::Lsst {
+        let index = doc! {
+            "ssObjectId": 1,
+        };
+        create_index(&alerts_collection, index, false).await?;
+    }
+
     Ok(())
 }
 

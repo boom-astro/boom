@@ -38,6 +38,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$project": {
                 "objectId": 1,
+                "ssObjectId": 1,
                 "candidate": 1,
             }
         },
@@ -52,6 +53,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$project": doc! {
                 "objectId": 1,
+                "ssObjectId": 1,
                 "candidate": 1,
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
@@ -76,6 +78,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$project": doc! {
                 "objectId": 1,
+                "ssObjectId": 1,
                 "candidate": 1,
                 "prv_candidates.jd": 1,
                 "prv_candidates.magpsf": 1,
@@ -251,6 +254,8 @@ pub struct LsstAlertForEnrichment {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
@@ -272,6 +277,8 @@ pub struct EnrichedLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
@@ -286,6 +293,7 @@ impl EnrichedLsstAlert {
         EnrichedLsstAlert {
             candid: alert.candid,
             object_id: alert.object_id,
+            ss_object_id: alert.ss_object_id,
             candidate: alert.candidate,
             prv_candidates: alert.prv_candidates,
             fp_hists: alert.fp_hists,
@@ -418,9 +426,7 @@ impl LsstEnrichmentWorker {
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = &alert.candidate;
-
-        let is_rock = candidate.is_sso;
+        let is_rock = alert.ss_object_id.is_some();
 
         let prv_candidates = alert.prv_candidates.clone();
         let fp_hists = alert.fp_hists.clone();
