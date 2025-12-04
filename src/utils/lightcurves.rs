@@ -1,4 +1,6 @@
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::doc;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 
@@ -27,6 +29,7 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
     10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema)]
 pub enum Band {
     #[serde(rename = "g")]
@@ -43,7 +46,7 @@ pub enum Band {
     U,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct PhotometryMag {
     #[serde(alias = "jd")]
     pub time: f64,
@@ -56,16 +59,19 @@ pub struct PhotometryMag {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, JsonSchema)]
 pub struct BandRateProperties {
     pub rate: f32,
     pub r_squared: f32,
     pub nb_data: i32,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+// TODO: for some reason, avro serialization
+// seems to fail when we use skip_serializing_none (and rising and/or fading are None)
+// which is odd since we don't get this issue in other structs...
+// #[serde_as]
+// #[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, JsonSchema)]
 pub struct BandProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
@@ -76,7 +82,7 @@ pub struct BandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, JsonSchema, Default)]
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
@@ -88,7 +94,7 @@ pub struct PerBandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
 pub struct AllBandsProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
