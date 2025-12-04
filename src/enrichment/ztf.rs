@@ -253,18 +253,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
-        for i in 0..alerts.len() {
-            let candid = alerts[i].candid;
+        for alert in alerts {
+            let candid = alert.candid;
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, _lightcurve) =
-                self.get_alert_properties(&alerts[i]).await?;
+                self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
-            let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
+            let metadata = self.acai_h_model.get_metadata(&[&alert])?;
             let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
 
             let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
@@ -275,7 +275,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             let metadata_btsbot = self
                 .btsbot_model
-                .get_metadata(&alerts[i..i + 1], &[all_bands_properties])?;
+                .get_metadata(&[&alert], &[all_bands_properties])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
             let update_alert_document = doc! {
@@ -306,7 +306,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
                 let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
-                    alerts[i].clone(),
+                    alert,
                     Some(cutouts.cutout_science),
                     Some(cutouts.cutout_template),
                     Some(cutouts.cutout_difference),

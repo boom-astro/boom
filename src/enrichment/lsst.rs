@@ -231,11 +231,11 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<EnrichedLsstAlert> = Vec::new();
-        for i in 0..alerts.len() {
-            let candid = alerts[i].candid;
+        for alert in alerts {
+            let candid = alert.candid;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let properties = self.get_alert_properties(&alerts[i]).await?;
+            let properties = self.get_alert_properties(&alert).await?;
 
             let update_alert_document = doc! {
                 "$set": {
@@ -260,7 +260,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                     .remove(&candid)
                     .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
                 let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
-                    alerts[i].clone(),
+                    alert,
                     Some(cutouts.cutout_science),
                     Some(cutouts.cutout_template),
                     Some(cutouts.cutout_difference),
