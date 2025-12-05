@@ -1,6 +1,6 @@
 // Use /api prefix in dev so Vite's dev server proxy can forward requests to the backend.
 // In production you can set `VITE_API_BASE` to point to your API (for example an absolute URL).
-const API_BASE: string = import.meta.env.DEV ? "/api" : (import.meta.env.VITE_API_BASE ?? "");
+const API_BASE: string = import.meta.env.DEV ? "/api/babamul" : (import.meta.env.VITE_API_BASE ?? "");
 
 export type TokenRecord = {
   access_token: string;
@@ -54,13 +54,13 @@ export function getTokenRecord(): TokenRecord | null {
   return t;
 }
 
-export async function login(username: string, password: string): Promise<TokenRecord | null> {
+export async function login(email: string, password: string): Promise<TokenRecord | null> {
   const res = await fetch(`${API_BASE}/auth`, {
     method: "POST",
     // headers: { "Content-Type": "application/json" },
     // use form-encoded for compatibility with OAuth2 password grant
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ username, password }).toString(),
+    body: new URLSearchParams({ email, password }).toString(),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -70,14 +70,14 @@ export async function login(username: string, password: string): Promise<TokenRe
   if (!body.access_token) throw new Error("Auth response missing access_token");
   saveToken(body);
   try {
-    localStorage.setItem(USERNAME_KEY, username);
+    localStorage.setItem(USERNAME_KEY, email);
   } catch {
     // ignore
   }
   return getTokenRecord();
 }
 
-export function getUsername(): string | null {
+export function getEmail(): string | null {
   try {
     return localStorage.getItem(USERNAME_KEY);
   } catch {

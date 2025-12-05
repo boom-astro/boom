@@ -13,12 +13,13 @@ import {
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
+import { Link } from 'react-router-dom'
 import { Input } from "@/components/ui/input"
 
 interface LoginFormProps extends React.ComponentProps<"div"> {
-  username?: string;
+  email?: string;
   password?: string;
-  onUsernameChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onEmailChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onPasswordChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onSubmit?: (e?: React.FormEvent) => void;
   loading?: boolean;
@@ -27,9 +28,9 @@ interface LoginFormProps extends React.ComponentProps<"div"> {
 
 export function LoginForm({
   className,
-  username,
+  email,
   password,
-  onUsernameChange,
+  onEmailChange,
   onPasswordChange,
   onSubmit,
   loading,
@@ -42,21 +43,21 @@ export function LoginForm({
         <CardHeader>
           <CardTitle>Login to your account</CardTitle>
           <CardDescription>
-            Enter your username below to login to your account
+            Enter your email below to login to your account
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit}>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="username">Username</FieldLabel>
+                <FieldLabel htmlFor="email">Email</FieldLabel>
                 <Input
-                  id="username"
+                  id="email"
                   type="text"
-                  placeholder="your username"
+                  placeholder="your email"
                   required
-                  value={username}
-                  onChange={onUsernameChange}
+                  value={email}
+                  onChange={onEmailChange}
                 />
               </Field>
               <Field>
@@ -73,9 +74,8 @@ export function LoginForm({
               </Field>
               <Field>
                 <Button type="submit" disabled={!!loading}>{loading ? 'Signing in…' : 'Login'}</Button>
-                <Button variant="outline" type="button">Login with Google</Button>
                 <FieldDescription className="text-center">
-                  Don&apos;t have an account? <a href="#">Sign up</a>
+                  Don&apos;t have an account? <Link to="/signup" className="underline">Sign up</Link>
                 </FieldDescription>
               </Field>
             </FieldGroup>
