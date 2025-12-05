@@ -23,7 +23,7 @@ mod tests {
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup),
+                .service(routes::babamul::users::post_babamul_signup),
         )
         .await;
 
@@ -63,8 +63,9 @@ mod tests {
         );
 
         // Verify the user was created in the database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let babamul_users_collection: mongodb::Collection<
+            boom::api::routes::babamul::users::BabamulUser,
+        > = database.collection("babamul_users");
         let user = babamul_users_collection
             .find_one(doc! { "email": &test_email })
             .await
@@ -117,9 +118,9 @@ mod tests {
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
                 .app_data(web::Data::new(config.kafka.producer.clone()))
-                .service(routes::babamul::post_babamul_signup)
-                .service(routes::babamul::post_babamul_activate)
-                .service(routes::babamul::post_babamul_auth),
+                .service(routes::babamul::users::post_babamul_signup)
+                .service(routes::babamul::users::post_babamul_activate)
+                .service(routes::babamul::users::post_babamul_auth),
         )
         .await;
 
@@ -138,8 +139,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Get the activation code from the database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let babamul_users_collection: mongodb::Collection<
+            boom::api::routes::babamul::users::BabamulUser,
+        > = database.collection("babamul_users");
         let user = babamul_users_collection
             .find_one(doc! { "email": &test_email })
             .await
@@ -273,7 +275,7 @@ mod tests {
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
                 .app_data(web::Data::new(config.kafka.producer.clone()))
-                .service(routes::babamul::post_babamul_signup),
+                .service(routes::babamul::users::post_babamul_signup),
         )
         .await;
 

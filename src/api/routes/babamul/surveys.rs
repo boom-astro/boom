@@ -1,4 +1,5 @@
 use crate::api::models::response;
+use crate::api::routes::babamul::users::BabamulUser;
 use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -47,7 +48,7 @@ fn bson_docs_to_json_values(
 /// in a way that is useful for a frontend to display object-level information.
 #[utoipa::path(
     get,
-    path = "/surveys/{survey_name}/objects/{object_id}",
+    path = "/babamul/surveys/{survey_name}/objects/{object_id}",
     params(
         ("survey_name" = String, Path, description = "Name of the survey (e.g., 'ZTF')"),
         ("object_id" = String, Path, description = "ID of the object to retrieve"),
@@ -59,11 +60,20 @@ fn bson_docs_to_json_values(
     ),
     tags=["Surveys"]
 )]
-#[get("/surveys/{survey_name}/objects/{object_id}")]
+#[get("/babamul/surveys/{survey_name}/objects/{object_id}")]
 pub async fn get_object(
-    db: web::Data<Database>,
     path: web::Path<(String, String)>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
 ) -> HttpResponse {
+    // TODO: implement permissions for Babamul users, so we
+    // can constrain access to certain surveys' datapoints
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     let (survey_name, object_id) = path.into_inner();
     let survey_name = survey_name.to_uppercase(); // All alert collections are uppercase
     let alerts_collection: Collection<Document> = db.collection(&format!("{}_alerts", survey_name));

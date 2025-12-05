@@ -340,11 +340,15 @@ impl Default for RedisConfig {
 #[derive(Deserialize, Debug, Clone)]
 pub struct BabamulConfig {
     pub enabled: bool,
+    pub webapp_url: Option<String>,
 }
 
 impl Default for BabamulConfig {
     fn default() -> Self {
-        BabamulConfig { enabled: false }
+        BabamulConfig {
+            enabled: false,
+            webapp_url: None,
+        }
     }
 }
 

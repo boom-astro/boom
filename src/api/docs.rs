@@ -56,9 +56,7 @@ impl Modify for BabamulSecurityAddon {
         routes::users::post_user,
         routes::users::get_users,
         routes::users::delete_user,
-        routes::users::get_profile,
         routes::auth::post_auth,
-        routes::surveys::get_object,
         routes::catalogs::get_catalogs,
         routes::catalogs::get_catalog_indexes,
         routes::catalogs::get_catalog_sample,
@@ -89,10 +87,12 @@ pub struct ApiDoc;
         description = "The Public REST API for Babamul."
     ),
     paths(
-        routes::babamul::post_babamul_signup,
-        routes::babamul::post_babamul_activate,
-        routes::babamul::post_babamul_auth,
-        routes::babamul::get_babamul_schema,
+        routes::babamul::users::post_babamul_signup,
+        routes::babamul::users::post_babamul_activate,
+        routes::babamul::users::post_babamul_auth,
+        routes::babamul::users::get_babamul_profile,
+        routes::babamul::schemas::get_babamul_schema,
+        routes::babamul::surveys::get_object,
     ),
     security(
         ("babamul_jwt_token" = [])

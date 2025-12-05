@@ -1,4 +1,4 @@
-use crate::api::routes::babamul::BabamulUser;
+use crate::api::routes::babamul::users::BabamulUser;
 use crate::api::routes::users::User;
 use crate::conf::AppConfig;
 use actix_web::body::MessageBody;
@@ -218,6 +218,7 @@ pub async fn babamul_auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    println!("Babamul auth middleware invoked");
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -238,6 +239,7 @@ pub async fn babamul_auth_middleware(
 
     match req.headers().get("Authorization") {
         Some(auth_header) => {
+            println!("Authorization header found: {:?}", auth_header);
             let token = match auth_header.to_str() {
                 Ok(token) if token.starts_with("Bearer ") => token[7..].trim(),
                 _ => {

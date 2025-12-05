@@ -1,7 +1,7 @@
 use crate::api::email::EmailService;
 use crate::api::models::response;
 use crate::{api::auth::AuthProvider, utils::enums::Survey};
-use actix_web::{post, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,25 @@ pub struct BabamulUser {
     pub created_at: i64, // Unix timestamp
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct BabamulUserPublic {
+    // Save in the database as _id, but we want to rename on the way out
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub email: String,
+    pub created_at: i64, // Unix timestamp
+}
+
+impl From<BabamulUser> for BabamulUserPublic {
+    fn from(user: BabamulUser) -> Self {
+        Self {
+            id: user.id,
+            email: user.email,
+            created_at: user.created_at,
+        }
+    }
+}
+
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct BabamulSignupPost {
     pub email: String,
@@ -70,6 +89,7 @@ pub async fn post_babamul_signup(
     db: web::Data<Database>,
     email_service: web::Data<EmailService>,
     body: web::Json<BabamulSignupPost>,
+    config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
 
@@ -135,18 +155,27 @@ pub async fn post_babamul_signup(
             // Try to send activation email if email service is enabled
             let activation_code_to_send = activation_code.clone().unwrap_or_default();
             if email_service.is_enabled() {
-                if let Err(e) =
-                    email_service.send_activation_email(&email, &activation_code_to_send)
-                {
+                if let Err(e) = email_service.send_activation_email(
+                    &email,
+                    &activation_code_to_send,
+                    &config.babamul.webapp_url,
+                ) {
                     eprintln!("Failed to send activation email to {}: {}", email, e);
                     // Don't fail the signup, just log the error
                     // In production, you might want to queue this for retry
                 }
             } else {
-                println!(
-                    "Email service disabled - activation code for {}: {}",
-                    email, activation_code_to_send
-                );
+                if let Some(webapp_url) = &config.babamul.webapp_url {
+                    println!(
+                        "Email service disabled - activation code for {}: {} (link: {}/signup?email={}&activation_code={})",
+                        email, activation_code_to_send, webapp_url, email, activation_code_to_send
+                    );
+                } else {
+                    println!(
+                        "Email service disabled - activation code for {}: {}",
+                        email, activation_code_to_send
+                    );
+                }
             }
 
             HttpResponse::Ok().json(BabamulSignupResponse {
@@ -388,7 +417,7 @@ pub struct BabamulActivateResponse {
 pub async fn post_babamul_activate(
     db: web::Data<Database>,
     body: web::Json<BabamulActivatePost>,
-    kafka_producer_config: web::Data<crate::conf::KafkaProducerConfig>,
+    config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
     let activation_code = body.activation_code.trim();
@@ -432,7 +461,7 @@ pub async fn post_babamul_activate(
                     if let Err(e) = create_kafka_user_and_acls(
                         &user.email,
                         &password,
-                        &kafka_producer_config.server,
+                        &config.kafka.producer.server,
                     )
                     .await
                     {
@@ -500,7 +529,7 @@ pub struct BabamulAuthResponse {
 #[utoipa::path(
     post,
     path = "/babamul/auth",
-    request_body(content = BabamulAuthPost, content_type = "application/json"),
+    request_body(content = BabamulAuthPost, content_type = "application/x-www-form-urlencoded"),
     responses(
         (status = 200, description = "Successful authentication", body = BabamulAuthResponse),
         (status = 401, description = "Invalid credentials or account not activated"),
@@ -512,12 +541,17 @@ pub struct BabamulAuthResponse {
 pub async fn post_babamul_auth(
     db: web::Data<Database>,
     auth: web::Data<AuthProvider>,
-    body: web::Json<BabamulAuthPost>,
+    body: web::Form<BabamulAuthPost>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
     let password = &body.password;
 
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    println!(
+        "Authenticating Babamul user: {} (password: {})",
+        email, password
+    );
 
     // Find user by email
     match babamul_users_collection
@@ -567,6 +601,31 @@ pub async fn post_babamul_auth(
             response::internal_error("Database error")
         }
     }
+}
+
+// add a /profile route that returns the current user's info
+/// Get current user's profile
+#[utoipa::path(
+    get,
+    path = "/babamul/profile",
+    responses(
+        (status = 200, description = "User profile retrieved successfully", body = BabamulUserPublic),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[get("/babamul/profile")]
+pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>) -> HttpResponse {
+    println!("Babamul user: {:?}", current_user);
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    let user_public = BabamulUserPublic::from(current_user.into_inner().clone());
+    response::ok("success", serde_json::to_value(user_public).unwrap())
 }
 
 /// Get the Avro schema used by Babamul for the specified survey (lsst or ztf)

@@ -92,6 +92,7 @@ impl EmailService {
         &self,
         to_email: &str,
         activation_code: &str,
+        webapp_url: &Option<String>,
     ) -> Result<(), String> {
         if !self.enabled {
             return Err("Email service is not enabled".to_string());
@@ -102,19 +103,39 @@ impl EmailService {
             .as_ref()
             .ok_or("SMTP transport not configured")?;
 
-        let email_body = format!(
-            "Welcome to Babamul!\n\n\
-             Your activation code is: {}\n\n\
-             To activate your account, send a POST request to /babamul/activate with:\n\
-             - email: {}\n\
-             - activation_code: {}\n\n\
-             After activation, you'll receive a password that you can use to:\n\
-             1. Connect to Kafka streams (topics: babamul.*)\n\
-             2. Authenticate to the Babamul API\n\n\
-             This code will expire in 24 hours.\n\n\
-             If you did not request this, please ignore this email.",
-            activation_code, to_email, activation_code
-        );
+        // if webapp url exists then use it and give instructions to activate via web link
+        // else just give activation code and instructions to activate via code only
+        let email_body = if let Some(url) = webapp_url {
+            format!(
+                "Welcome to **Babamul**!\n\n\
+                 Your activation code is: **{}**\n\n\
+                 To activate your account, visit the following link:\n\n\
+                 {}/signup?email={}&activation_code={}\n\n\
+                 After activation, you'll receive a password that you can use to:\n\
+                 1. Connect to Kafka streams (topics: babamul.*)\n\
+                 2. Authenticate to the Babamul API\n\n\
+                 This code will expire in 24 hours.\n\n\
+                 If you did not request this, please ignore this email.",
+                activation_code, url, to_email, activation_code
+            )
+        } else {
+            format!(
+                "Welcome to **Babamul**!\n\n\
+                 Your activation code is: **{}**\n\n\
+                 To activate your account, use the following `curl` command:\n\n\
+                 ```bash\n\
+                 curl -X POST https://babamul.example.com/babamul/activate \\\n\
+                 -H 'Content-Type: application/x-www-form-urlencoded' \\\n\
+                 -d 'email={}&activation_code={}'\n\
+                 ```\n\n\
+                 After activation, you'll receive a password that you can use to:\n\
+                 1. Connect to Kafka streams (topics: babamul.*)\n\
+                 2. Authenticate to the Babamul API\n\n\
+                 This code will expire in 24 hours.\n\n\
+                 If you did not request this, please ignore this email.",
+                activation_code, to_email, activation_code
+            )
+        };
 
         let email = Message::builder()
             .from(
