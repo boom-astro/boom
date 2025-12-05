@@ -16,6 +16,11 @@ struct Cli {
     filter_file: String,
 }
 
+fn now_jd() -> f64 {
+    use chrono::Utc;
+    (Utc::now().timestamp() as f64) / 86400.0 + 2440587.5
+}
+
 #[tokio::main]
 async fn main() {
     // Load environment variables from .env file before anything else
@@ -49,17 +54,20 @@ async fn main() {
         "name": args.name,
         "active": true,
         "user_id": "cli",
-        "catalog": format!("{}_alerts", survey),
+        "survey": survey.to_string(),
         "permissions": {
             "ZTF": [1, 2, 3],
         },
         "fv": [
             {
                 "fid": "v2e0fs",
-                "pipeline": filter_pipeline
+                "pipeline": filter_pipeline,
+                "created_at": now_jd(),
             }
         ],
         "active_fid": "v2e0fs",
+        "created_at": now_jd(),
+        "updated_at": now_jd(),
     };
 
     // insert the filter into the database
