@@ -9,6 +9,7 @@ From: rust:1.91.1-slim-trixie
 %files
     Cargo.toml /app/Cargo.toml
     Cargo.lock /app/Cargo.lock
+    apache-avro-macros /app/apache-avro-macros
     src /app/src
     data/models /app/data/models
 
