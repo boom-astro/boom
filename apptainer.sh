@@ -155,7 +155,7 @@ fi
 # 5. Run benchmark
 # -----------------------------
 if [ "$1" == "benchmark" ]; then
-  pip install pandas pyyaml astropy
+  pip install pandas pyyaml astropy confluent-kafka
   python3 "$BOOM_DIR/tests/throughput/run.py" --apptainer
   exit 0
 fi

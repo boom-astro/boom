@@ -1,4 +1,4 @@
-"""Script to benchmark BOOM. requires: Python 3.8+, pyyaml, pandas>2, astropy"""
+"""Script to benchmark BOOM. requires: Python 3.13+, pyyaml, pandas>2, astropy, confluent-kafka"""
 import argparse
 import json
 import os
@@ -49,6 +49,7 @@ config["kafka"]["producer"]["server"] = "localhost:29092" if use_apptainer else 
 config["redis"]["host"] = "localhost" if use_apptainer else "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
+config["babamul"]["enabled"] = True
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
@@ -127,7 +128,9 @@ if t1_b is None:
 with open(f"{logs_dir}/scheduler.log") as f:
     lines = f.readlines()
     if len(lines) < 3:
-        raise ValueError("Scheduler log has fewer than 3 lines; cannot determine end time.")
+        raise ValueError(
+            "Scheduler log has fewer than 3 lines; cannot determine end time."
+        )
     line = lines[-3]
     t2_b = extract_date_from_log(line, use_apptainer)
 

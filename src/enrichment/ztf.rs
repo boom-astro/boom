@@ -1,4 +1,5 @@
 use crate::conf::AppConfig;
+use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
@@ -11,8 +12,10 @@ use crate::{
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use schemars::JsonSchema;
 use tracing::{instrument, warn};
 
 pub fn create_ztf_alert_pipeline() -> Vec<Document> {
@@ -80,7 +83,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
 /// ZTF alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ZtfAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
@@ -91,9 +94,8 @@ pub struct ZtfAlertForEnrichment {
     pub fp_hists: Vec<PhotometryMag>,
 }
 
-/// ZTF alert properties computed during enrichment
-/// and inserted back into the alert document
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+/// ZTF alert properties computed during enrichment and inserted back into the alert document
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
@@ -117,6 +119,7 @@ pub struct ZtfEnrichmentWorker {
     btsbot_model: BtsBotModel,
     ciderimages_model: CiderImagesModel,
     ciderphotometry_model: CiderPhotometryModel,
+    babamul: Option<Babamul>,
 }
 
 #[async_trait::async_trait]
@@ -144,6 +147,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let ciderimages_model = CiderImagesModel::new("data/models/cider_img_meta.onnx")?;
         let ciderphotometry_model = CiderPhotometryModel::new("data/models/cider_photometry.onnx")?;
 
+        // Detect if Babamul is enabled from the config
+        let babamul: Option<Babamul> = if config.babamul.enabled {
+            Some(Babamul::new(&config))
+        } else {
+            None
+        };
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -159,6 +169,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             btsbot_model,
             ciderimages_model,
             ciderphotometry_model,
+            babamul,
         })
     }
 
@@ -189,7 +200,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             return Ok(vec![]);
         }
 
-        let candid_to_cutouts =
+        let mut candid_to_cutouts =
             fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
 
         if candid_to_cutouts.len() != alerts.len() {
@@ -204,19 +215,20 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        for i in 0..alerts.len() {
-            let candid = alerts[i].candid;
+        let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
+        for alert in alerts {
+            let candid = alert.candid;
             let cutouts = candid_to_cutouts
-                .get(&candid)
+                .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, _lightcurve) =
-                self.get_alert_properties(&alerts[i]).await?;
+                self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
-            let metadata = self.acai_h_model.get_metadata(&alerts[i..i + 1])?;
-            let triplet = self.acai_h_model.get_triplet(&[cutouts])?;
+            let metadata = self.acai_h_model.get_metadata(&[&alert])?;
+            let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
 
             let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
             let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
@@ -226,13 +238,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             let metadata_btsbot = self
                 .btsbot_model
-                .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
+                .get_metadata(&[&alert], &[&all_bands_properties])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
             let metadata_cider = self
                 .ciderimages_model
-                .get_metadata(&alerts[i..i + 1], &[&all_bands_properties])?;
-            let triplet_cider = self.ciderimages_model.get_triplet(&[cutouts])?;
+                .get_metadata(&[&alert], &[&all_bands_properties])?;
+            let triplet_cider = self.ciderimages_model.get_triplet(&[&cutouts])?;
             let cider_img_scores = self
                 .ciderimages_model
                 .predict(&metadata_cider, &triplet_cider)?;
@@ -277,9 +289,26 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             updates.push(update);
             processed_alerts.push(format!("{},{}", programid, candid));
+
+            // If Babamul is enabled, add the enriched alert to the batch
+            if self.babamul.is_some() {
+                let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
+                    alert,
+                    Some(cutouts.cutout_science),
+                    Some(cutouts.cutout_template),
+                    Some(cutouts.cutout_difference),
+                    properties,
+                );
+                enriched_alerts.push(enriched_alert);
+            }
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // Send to Babamul for batch processing
+        if let Some(babamul) = self.babamul.as_ref() {
+            babamul.process_ztf_alerts(enriched_alerts).await?;
+        }
 
         Ok(processed_alerts)
     }
