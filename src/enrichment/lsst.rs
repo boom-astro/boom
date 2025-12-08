@@ -20,7 +20,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tracing::{error, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 
 pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
 pub const IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC: f64 = 20.0;
@@ -222,7 +222,7 @@ pub struct LsstEnrichmentWorker {
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for LsstEnrichmentWorker {
-    #[instrument(err)]
+    #[instrument(err, skip(config_path))]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db = config.build_db().await?;
@@ -289,7 +289,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         self.output_queue.clone()
     }
 
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all, fields(batch_size = candids.len()), err)]
     async fn process_alerts(
         &mut self,
         candids: &[i64],
@@ -297,11 +297,16 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let alerts: Vec<LsstAlertForEnrichment> =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
+        debug!(
+            alerts = alerts.len(),
+            candids = candids.len(),
+            "fetched alerts"
+        );
         if alerts.len() != candids.len() {
             warn!(
-                "only {} alerts fetched from {} candids",
-                alerts.len(),
-                candids.len()
+                alerts = alerts.len(),
+                candids = candids.len(),
+                "alert/candid mismatch"
             );
         }
 
@@ -386,12 +391,14 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             None => {}
         }
 
+        debug!("processed {} alerts", processed_alerts.len());
         Ok(processed_alerts)
     }
 }
 
 impl LsstEnrichmentWorker {
-    pub async fn get_alert_properties(
+    #[instrument(skip(self, alert), fields(candid = alert.candid), err)]
+    async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {

@@ -4,6 +4,7 @@ use crate::api::routes::users::User;
 use crate::api::{kafka::delete_kafka_credentials_and_acls, models::response};
 use actix_web::{delete, get, web, HttpResponse};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error};
 use utoipa::ToSchema;
 
 #[derive(Deserialize)]
@@ -26,11 +27,17 @@ pub struct DeleteKafkaCredentialsResponse {
     ),
     tags=["Kafka"]
 )]
+#[tracing::instrument(name = "kafka::get_kafka_acls", skip(current_user, config), fields(
+    http.method = "GET", 
+    http.route = "/api/kafka/acls", 
+    user_id = %current_user.id, is_admin = current_user.is_admin
+))]
 #[get("/kafka/acls")]
 pub async fn get_kafka_acls(
     current_user: web::ReqData<User>,
     config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
+    debug!(user_id = %current_user.id, is_admin = current_user.is_admin, "get_kafka_acls endpoint hit");
     // Only admins can access this endpoint
     if !current_user.is_admin {
         return response::forbidden("Access denied: Admins only");
@@ -40,7 +47,10 @@ pub async fn get_kafka_acls(
             "Kafka ACLs retrieved successfully",
             serde_json::to_value(entries).unwrap(),
         ),
-        Err(e) => response::internal_error(&format!("Error retrieving Kafka ACLs: {}", e)),
+        Err(e) => {
+            error!(error = %e, "Error retrieving Kafka ACLs");
+            response::internal_error(&format!("Error retrieving Kafka ACLs: {}", e))
+        }
     }
 }
 
@@ -59,12 +69,18 @@ pub async fn get_kafka_acls(
     ),
     tags=["Kafka"]
 )]
+#[tracing::instrument(name = "kafka::delete_kafka_acls_for_user", skip(path, current_user, config), fields(
+    http.method = "DELETE", 
+    http.route = "/api/kafka/acls/{user_email}", 
+    user_id = %current_user.id, is_admin = current_user.is_admin, kafka_username = %path.kafka_username
+))]
 #[delete("/kafka/credentials/{kafka_username}")]
 pub async fn delete_kafka_credentials(
     path: web::Path<DeleteKafkaCredentialsPath>,
     current_user: web::ReqData<User>,
     config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
+    debug!(user_id = %current_user.id, is_admin = current_user.is_admin, kafka_username = %path.kafka_username, "delete_kafka_acls_for_user endpoint hit");
     // Only admins can access this endpoint
     if !current_user.is_admin {
         return response::forbidden("Access denied: Admins only");

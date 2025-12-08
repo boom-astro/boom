@@ -1,9 +1,12 @@
 //! Common logging utilities.
+use std::sync::OnceLock;
 use std::{fs::File, io::BufWriter, iter::successors};
 
 use tracing::Subscriber;
 use tracing_flame::{FlameLayer, FlushGuard};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+
+static FLAME_GUARD: OnceLock<FlushGuard<BufWriter<File>>> = OnceLock::new();
 
 /// Iterate over the `Display` representations of the sources of the given error
 /// by recursively calling `std::error::Error::source()`.
@@ -260,5 +263,25 @@ pub fn build_subscriber() -> Result<
             Ok((Box::new(subscriber.with(flame_layer)), Some(guard)))
         }
         Err(_) => Ok((Box::new(subscriber), None)),
+    }
+}
+
+pub fn init() {
+    if tracing::dispatcher::has_been_set() {
+        return;
+    }
+
+    match build_subscriber() {
+        Ok((subscriber, guard)) => {
+            let dispatch = tracing::Dispatch::new(subscriber);
+            if tracing::dispatcher::set_global_default(dispatch).is_ok() {
+                if let Some(guard) = guard {
+                    let _ = FLAME_GUARD.set(guard);
+                }
+            }
+        }
+        Err(_e) => {
+            // keep silent; callers can still run without tracing
+        }
     }
 }

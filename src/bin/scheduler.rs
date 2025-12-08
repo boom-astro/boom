@@ -40,8 +40,9 @@ struct Cli {
     deployment_env: String,
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
+#[instrument(skip_all, fields(survey = %args.survey, deployment_env = %args.deployment_env))]
 async fn run(args: Cli, meter_provider: SdkMeterProvider) {
+    info!("Starting BOOM scheduler");
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -83,6 +84,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .instrument(info_span!("sigint handler")),
     );
 
+    info!("Initializing thread pools");
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
@@ -125,6 +127,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);
+    tracing::debug!("Thread pools dropped");
     if let Err(error) = meter_provider.shutdown() {
         log_error!(WARN, error, "failed to shut down the meter provider");
     }
