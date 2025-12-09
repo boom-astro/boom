@@ -7,7 +7,7 @@ mod tests {
     use boom::api::email::EmailService;
     use boom::api::kafka::delete_acls_for_user;
     use boom::api::routes;
-    use boom::api::test_utils::read_json_response;
+    use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use mongodb::bson::doc;
     use mongodb::Database;
@@ -16,10 +16,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_babamul_signup() {
         load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(config.clone()))
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
@@ -42,7 +44,8 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "Signup should succeed with valid email"
+            "Signup should succeed with valid email (error: {})",
+            read_str_response(resp).await
         );
 
         let body = read_json_response(resp).await;
@@ -80,7 +83,8 @@ mod tests {
             "Activation code should be set"
         );
 
-        // Try to signup with the same email again - should fail
+        // Try to signup with the same email again - should succeed
+        // (since it is not activated yet), but generate a new activation code
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
@@ -91,8 +95,30 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(
             resp.status(),
-            StatusCode::CONFLICT,
-            "Duplicate email should be rejected"
+            StatusCode::OK,
+            "Re-signup should succeed for unactivated account (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(
+            body["message"].is_string(),
+            "Response should contain message"
+        );
+        assert_eq!(
+            body["activation_required"].as_bool().unwrap(),
+            true,
+            "Activation should be required"
+        );
+
+        let user_after = babamul_users_collection
+            .find_one(doc! { "email": &test_email })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            user.activation_code, user_after.activation_code,
+            "A new activation code should be generated on re-signup"
         );
 
         // Clean up: delete the test user
@@ -114,10 +140,10 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(config.clone()))
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
-                .app_data(web::Data::new(config.kafka.producer.clone()))
                 .service(routes::babamul::users::post_babamul_signup)
                 .service(routes::babamul::users::post_babamul_activate)
                 .service(routes::babamul::users::post_babamul_auth),
@@ -211,7 +237,7 @@ mod tests {
         // Test authentication with the password
         let req = test::TestRequest::post()
             .uri("/babamul/auth")
-            .set_json(serde_json::json!({
+            .set_form(serde_json::json!({
                 "email": test_email,
                 "password": user_password
             }))
@@ -221,7 +247,8 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "Authentication should succeed"
+            "Authentication should succeed (error: {})",
+            read_str_response(resp).await
         );
 
         let auth_body = read_json_response(resp).await;
@@ -271,10 +298,10 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(config.clone()))
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(EmailService::new()))
-                .app_data(web::Data::new(config.kafka.producer.clone()))
                 .service(routes::babamul::users::post_babamul_signup),
         )
         .await;

@@ -33,6 +33,7 @@ pub struct BabamulUser {
     // Save in the database as _id, but we want to rename on the way out
     #[serde(rename = "_id")]
     pub id: String,
+    pub username: String,
     pub email: String,
     pub password_hash: String, // Hashed password (for both Kafka SCRAM auth and API auth)
     pub activation_code: Option<String>,
@@ -45,6 +46,7 @@ pub struct BabamulUserPublic {
     // Save in the database as _id, but we want to rename on the way out
     #[serde(rename = "_id")]
     pub id: String,
+    pub username: String,
     pub email: String,
     pub created_at: i64, // Unix timestamp
 }
@@ -53,6 +55,7 @@ impl From<BabamulUser> for BabamulUserPublic {
     fn from(user: BabamulUser) -> Self {
         Self {
             id: user.id,
+            username: user.username,
             email: user.email,
             created_at: user.created_at,
         }
@@ -101,103 +104,144 @@ pub async fn post_babamul_signup(
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
     // Check if email already exists
-    match babamul_users_collection
+    let user = match babamul_users_collection
         .find_one(doc! { "email": &email })
         .await
     {
-        Ok(Some(_)) => {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "message": "Email already registered",
-                "error": "DUPLICATE_EMAIL"
-            }));
+        Ok(Some(mut existing_user)) => {
+            if !existing_user.is_activated {
+                // generate a new activation code
+                let new_activation_code = Some(uuid::Uuid::new_v4().to_string());
+                existing_user.activation_code = new_activation_code;
+                // update the user in the database
+                match babamul_users_collection
+                    .update_one(
+                        doc! { "_id": &existing_user.id },
+                        doc! {
+                            "$set": {
+                                "activation_code": &existing_user.activation_code
+                            }
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => existing_user,
+                    Err(e) => {
+                        eprintln!("Database error updating activation code: {}", e);
+                        return response::internal_error("Database error");
+                    }
+                }
+            } else {
+                return HttpResponse::Conflict().json(serde_json::json!({
+                    "message": "Email already registered (and activated)",
+                    "error": "DUPLICATE_EMAIL"
+                }));
+            }
         }
         Ok(None) => {
             // Email doesn't exist, proceed with signup
+            // Generate user ID and password
+            let user_id = uuid::Uuid::new_v4().to_string();
+
+            // Generate a long random password (32 characters for good security)
+            let password = generate_random_string(32);
+
+            // Hash the password for storage (used for both Kafka SCRAM and API auth)
+            let password_hash = match bcrypt::hash(&password, bcrypt::DEFAULT_COST) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    eprintln!("Failed to hash password: {}", e);
+                    return response::internal_error("Failed to generate credentials");
+                }
+            };
+
+            // Generate activation code - user must activate before getting their password
+            let activation_code = Some(uuid::Uuid::new_v4().to_string());
+            let is_activated = false; // Require activation
+
+            // the username is the part before the @ in the email
+            // that we sanitize to only allow alphanumeric characters, dots, underscores, and hyphens
+            let username = email
+                .split('@')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-')
+                .collect::<String>();
+            if username.is_empty() {
+                return response::bad_request("Invalid email address for username extraction");
+            }
+
+            let babamul_user = BabamulUser {
+                id: user_id.clone(),
+                username: username.clone(),
+                email: email.clone(),
+                password_hash: password_hash.clone(),
+                activation_code: activation_code.clone(),
+                is_activated,
+                created_at: flare::Time::now().to_utc().timestamp(),
+            };
+
+            // Note: Kafka user/ACLs will be created upon activation, not signup
+            match babamul_users_collection
+                .insert_one(babamul_user.clone())
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Database error inserting babamul user: {}", e);
+                    if e.to_string().contains("E11000 duplicate key error") {
+                        return HttpResponse::Conflict().json(serde_json::json!({
+                            "message": "Email already registered",
+                            "error": "DUPLICATE_EMAIL"
+                        }));
+                    } else {
+                        return response::internal_error("Failed to create user");
+                    }
+                }
+            }
+            babamul_user
         }
         Err(e) => {
             eprintln!("Database error checking email existence: {}", e);
             return response::internal_error("Database error");
         }
-    }
-
-    // Generate user ID and password
-    let user_id = uuid::Uuid::new_v4().to_string();
-
-    // Generate a long random password (32 characters for good security)
-    let password = generate_random_string(32);
-
-    // Hash the password for storage (used for both Kafka SCRAM and API auth)
-    let password_hash = match bcrypt::hash(&password, bcrypt::DEFAULT_COST) {
-        Ok(hash) => hash,
-        Err(e) => {
-            eprintln!("Failed to hash password: {}", e);
-            return response::internal_error("Failed to generate credentials");
-        }
     };
 
-    // Generate activation code - user must activate before getting their password
-    let activation_code = Some(uuid::Uuid::new_v4().to_string());
-    let is_activated = false; // Require activation
+    let activation_code = user.activation_code.clone().unwrap_or_default();
 
-    let babamul_user = BabamulUser {
-        id: user_id.clone(),
-        email: email.clone(),
-        password_hash: password_hash.clone(),
-        activation_code: activation_code.clone(),
-        is_activated,
-        created_at: flare::Time::now().to_utc().timestamp(),
-    };
-
-    // Insert the user into the database
-    // Note: Kafka user/ACLs will be created upon activation, not signup
-    match babamul_users_collection.insert_one(babamul_user).await {
-        Ok(_) => {
-            // Try to send activation email if email service is enabled
-            let activation_code_to_send = activation_code.clone().unwrap_or_default();
-            if email_service.is_enabled() {
-                if let Err(e) = email_service.send_activation_email(
-                    &email,
-                    &activation_code_to_send,
-                    &config.babamul.webapp_url,
-                ) {
-                    eprintln!("Failed to send activation email to {}: {}", email, e);
-                    // Don't fail the signup, just log the error
-                    // In production, you might want to queue this for retry
-                }
-            } else {
-                if let Some(webapp_url) = &config.babamul.webapp_url {
-                    println!(
-                        "Email service disabled - activation code for {}: {} (link: {}/signup?email={}&activation_code={})",
-                        email, activation_code_to_send, webapp_url, email, activation_code_to_send
-                    );
-                } else {
-                    println!(
-                        "Email service disabled - activation code for {}: {}",
-                        email, activation_code_to_send
-                    );
-                }
-            }
-
-            HttpResponse::Ok().json(BabamulSignupResponse {
-                message: format!(
-                    "Signup successful. An activation code has been sent to {}. Use the /babamul/activate endpoint to activate your account and receive your password.",
-                    email
-                ),
-                activation_required: true,
-            })
+    // Try to send activation email if email service is enabled
+    if email_service.is_enabled() {
+        if let Err(e) = email_service.send_activation_email(
+            &email,
+            &activation_code,
+            &config.babamul.webapp_url,
+        ) {
+            eprintln!("Failed to send activation email to {}: {}", email, e);
+            // Don't fail the signup, just log the error
+            // In production, you might want to queue this for retry
         }
-        Err(e) => {
-            eprintln!("Database error inserting babamul user: {}", e);
-            if e.to_string().contains("E11000 duplicate key error") {
-                HttpResponse::Conflict().json(serde_json::json!({
-                    "message": "Email already registered",
-                    "error": "DUPLICATE_EMAIL"
-                }))
-            } else {
-                response::internal_error("Failed to create user")
-            }
+    } else {
+        if let Some(webapp_url) = &config.babamul.webapp_url {
+            println!(
+                "Email service disabled - activation code for {}: {} (link: {}/signup?email={}&activation_code={})",
+                email, activation_code, webapp_url, email, activation_code
+            );
+        } else {
+            println!(
+                "Email service disabled - activation code for {}: {}",
+                email, activation_code
+            );
         }
     }
+
+    HttpResponse::Ok().json(BabamulSignupResponse {
+        message: format!(
+            "Signup successful. An activation code has been sent to {}. Use the /babamul/activate endpoint to activate your account and receive your password.",
+            email
+        ),
+        activation_required: true,
+    })
 }
 
 /// Generate a random alphanumeric string of specified length
@@ -396,6 +440,7 @@ pub struct BabamulActivatePost {
 pub struct BabamulActivateResponse {
     pub message: String,
     pub activated: bool,
+    pub username: String,
     pub email: String,
     pub password: Option<String>, // Only returned on successful activation (not if already activated)
 }
@@ -435,6 +480,7 @@ pub async fn post_babamul_activate(
                 return HttpResponse::Ok().json(BabamulActivateResponse {
                     message: "Account is already activated. Your password was provided during initial activation.".to_string(),
                     activated: true,
+                    username: user.username.clone(),
                     email: user.email.clone(),
                     password: None, // Don't return password again for security
                 });
@@ -489,6 +535,7 @@ pub async fn post_babamul_activate(
                             HttpResponse::Ok().json(BabamulActivateResponse {
                                 message: "Account activated successfully. Save your password - it won't be shown again!".to_string(),
                                 activated: true,
+                                username: user.username.clone(),
                                 email: user.email.clone(),
                                 password: Some(password), // Return the password ONCE
                             })
