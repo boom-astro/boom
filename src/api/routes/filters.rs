@@ -811,20 +811,27 @@ pub async fn post_filter_test_count(
         }
     };
     // there is no Vec of results, just one document with the count
-    let count = match cursor.next().await {
-        Some(res) => match res {
-            Ok(doc) => doc.get_i64("count").unwrap_or(0),
-            Err(e) => {
-                // TODO: not returning internal error here, but log it
-                // with tracing (once we have that set up in the API)
-                return response::internal_error(&format!(
-                    "error retrieving test filter count result: {}",
-                    e
-                ));
-            }
-        },
-        None => 0,
-    };
+    let count =
+        match cursor.next().await {
+            Some(res) => match res {
+                Ok(doc) => match doc.get("count") {
+                    Some(mongodb::bson::Bson::Int32(c)) => *c as i64,
+                    Some(mongodb::bson::Bson::Int64(c)) => *c,
+                    _ => return response::internal_error(
+                        "error retrieving test filter count result: count field missing or invalid",
+                    ),
+                },
+                Err(e) => {
+                    // TODO: not returning internal error here, but log it
+                    // with tracing (once we have that set up in the API)
+                    return response::internal_error(&format!(
+                        "error retrieving test filter count result: {}",
+                        e
+                    ));
+                }
+            },
+            None => 0,
+        };
 
     response::ok_ser(
         "filter test count executed successfully",
