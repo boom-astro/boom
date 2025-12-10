@@ -12,6 +12,7 @@ use crate::{
 
 use std::{num::NonZero, sync::LazyLock};
 
+use apache_avro_derive::AvroSchema;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use opentelemetry::{
@@ -19,6 +20,7 @@ use opentelemetry::{
     KeyValue,
 };
 use redis::AsyncCommands;
+use schemars::JsonSchema;
 use tokio::sync::mpsc;
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
@@ -269,7 +271,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
 /// Schema for what a cross-match entry looks like
 /// in an enriched alert.
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema, JsonSchema)]
 pub struct CrossMatch {
     pub survey: String,
     pub object_id: String,

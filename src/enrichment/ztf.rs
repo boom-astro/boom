@@ -46,7 +46,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
         doc! {
             "$lookup": {
                 "from": "LSST_alerts_aux",
-                "let": { "lsst_ids": doc! { "$arrayElemAt": ["$aux.cross_matches.LSST", 0] } },
+                "let": { "lsst_ids": "$aux.cross_matches.LSST" },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$lsst_ids"] } } },
                     doc! {
@@ -64,7 +64,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
         doc! {
             "$lookup": {
                 "from": "DECAM_alerts_aux",
-                "let": { "decam_ids": doc! { "$arrayElemAt": ["$aux.cross_matches.DECAM", 0] } },
+                "let": { "decam_ids": "$aux.cross_matches.DECAM" },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$decam_ids"] } } },
                     doc! {
@@ -100,61 +100,21 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                     }]),
                 ),
                 "aliases": get_array_element("aux.aliases"),
-                "cross_matches": doc! {
-                    "LSST": doc! {
+                "cross_matches": {
+                    "LSST": {
                         "$map": {
                             "input": "$lsst_xmatches",
                             "as": "obj",
-                            "in": doc! {
-                                "survey": "LSST",
-                                "object_id": "$$obj._id",
-                                "prv_candidates": fetch_timeseries_op(
-                                    "$$obj.prv_candidates",
-                                    "jd",
-                                    365,
-                                    None
-                                ),
-                                "fp_hists": fetch_timeseries_op(
-                                    "$$obj.fp_hists",
-                                    "jd",
-                                    365,
-                                    Some(vec![doc! {
-                                        "$gte": [
-                                            "$$x.snr",
-                                            3.0
-                                        ]
-                                    }]),
-                                ),
-                            }
+                            "in": "$$obj"
                         }
                     },
-                    "DECAM": doc! {
+                    "DECAM": {
                         "$map": {
                             "input": "$decam_xmatches",
                             "as": "obj",
-                            "in": doc! {
-                                "survey": "DECAM",
-                                "object_id": "$$obj._id",
-                                "prv_candidates": fetch_timeseries_op(
-                                    "$$obj.prv_candidates",
-                                    "jd",
-                                    365,
-                                    None
-                                ),
-                                "fp_hists": fetch_timeseries_op(
-                                    "$$obj.fp_hists",
-                                    "jd",
-                                    365,
-                                    Some(vec![doc! {
-                                        "$gte": [
-                                            "$$x.snr",
-                                            3.0
-                                        ]
-                                    }]),
-                                ),
-                            }
+                            "in": "$$obj"
                         }
-                    },
+                    }
                 }
             }
         },
