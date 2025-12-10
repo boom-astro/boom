@@ -54,17 +54,61 @@ pub fn parse_pipeline(
     }
 }
 
-#[derive(serde::Deserialize, Clone, utoipa::ToSchema)]
+#[derive(Clone, utoipa::ToSchema)]
 pub enum SortOrder {
-    #[serde(alias = "ascending", alias = "asc", alias = "ASC", alias = "1")]
     Ascending,
-    #[serde(alias = "descending", alias = "desc", alias = "DESC", alias = "-1")]
     Descending,
+}
+// implement a custom serde::Deserialize so we can handle numericals like 1 and -1
+impl<'de> serde::Deserialize<'de> for SortOrder {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SortOrderVisitor;
+        impl<'de> serde::de::Visitor<'de> for SortOrderVisitor {
+            type Value = SortOrder;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or integer representing sort order")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value.to_lowercase().as_str() {
+                    "ascending" | "asc" | "1" => Ok(SortOrder::Ascending),
+                    "descending" | "desc" | "-1" => Ok(SortOrder::Descending),
+                    _ => Err(E::custom(format!("invalid sort order: {}", value))),
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    1 => Ok(SortOrder::Ascending),
+                    -1 => Ok(SortOrder::Descending),
+                    _ => Err(E::custom(format!("invalid sort order: {}", value))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SortOrderVisitor)
+    }
 }
 
 // function to convert a Vec<Document> to Vec<serde_json::Value>
 pub fn doc2json(docs: Vec<Document>) -> Vec<serde_json::Value> {
     docs.into_iter()
-        .map(|doc| serde_json::to_value(doc).unwrap_or(serde_json::Value::Null))
+        .filter_map(|doc| match serde_json::to_value(doc) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                println!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+                None
+            }
+        })
         .collect()
 }
