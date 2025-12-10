@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
@@ -61,6 +63,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                     }]),
                 ),
                 "aliases": get_array_element("aux.aliases"),
+                "cross_matches": get_array_element("aux.cross_matches"),
             }
         },
         doc! {
@@ -92,6 +95,7 @@ pub struct ZtfAlertForEnrichment {
     pub candidate: ZtfCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
+    pub cross_matches: Option<HashMap<String, Vec<String>>>,
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
