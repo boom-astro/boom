@@ -1,6 +1,7 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
+use crate::enrichment::base::CrossMatch;
 use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError,
 };
@@ -81,7 +82,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
 /// LSST alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LsstAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
@@ -90,7 +91,7 @@ pub struct LsstAlertForEnrichment {
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
-    pub cross_matches: Option<HashMap<String, Vec<String>>>,
+    pub cross_matches: Option<HashMap<String, Vec<CrossMatch>>>,
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document

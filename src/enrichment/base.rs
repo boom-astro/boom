@@ -4,6 +4,7 @@ use crate::{
     enrichment::models::ModelError,
     utils::{
         fits::CutoutError,
+        lightcurves::PhotometryMag,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
     },
@@ -264,4 +265,14 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     }
 
     Ok(())
+}
+
+/// Schema for what a cross-match entry looks like
+/// in an enriched alert.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct CrossMatch {
+    pub survey: String,
+    pub object_id: String,
+    pub prv_candidates: Vec<PhotometryMag>,
+    pub fp_hists: Vec<PhotometryMag>,
 }
