@@ -37,6 +37,42 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "as": "aux"
             }
         },
+        // Lookup ZTF cross-matches
+        doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "let": { "ztf_ids": doc! { "$arrayElemAt": ["$aux.cross_matches.ZTF", 0] } },
+                "pipeline": [
+                    doc! { "$match": { "$expr": { "$in": ["$_id", "$$ztf_ids"] } } },
+                    doc! {
+                        "$project": {
+                            "_id": 1,
+                            "prv_candidates": 1,
+                            "fp_hists": 1,
+                        }
+                    }
+                ],
+                "as": "ztf_xmatches"
+            }
+        },
+        // Lookup DECAM cross-matches
+        doc! {
+            "$lookup": {
+                "from": "DECAM_alerts_aux",
+                "let": { "decam_ids": doc! { "$arrayElemAt": ["$aux.cross_matches.DECAM", 0] } },
+                "pipeline": [
+                    doc! { "$match": { "$expr": { "$in": ["$_id", "$$decam_ids"] } } },
+                    doc! {
+                        "$project": {
+                            "_id": 1,
+                            "prv_candidates": 1,
+                            "fp_hists": 1,
+                        }
+                    }
+                ],
+                "as": "decam_xmatches"
+            }
+        },
         doc! {
             "$project": doc! {
                 "objectId": 1,
@@ -59,7 +95,62 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                     }]),
                 ),
                 "aliases": get_array_element("aux.aliases"),
-                "cross_matches": get_array_element("aux.cross_matches"),
+                "cross_matches": doc! {
+                    "ZTF": doc! {
+                        "$map": {
+                            "input": "$ztf_xmatches",
+                            "as": "obj",
+                            "in": doc! {
+                                "survey": "ZTF",
+                                "object_id": "$$obj._id",
+                                "prv_candidates": fetch_timeseries_op(
+                                    "$$obj.prv_candidates",
+                                    "jd",
+                                    365,
+                                    None
+                                ),
+                                "fp_hists": fetch_timeseries_op(
+                                    "$$obj.fp_hists",
+                                    "jd",
+                                    365,
+                                    Some(vec![doc! {
+                                        "$gte": [
+                                            "$$x.snr",
+                                            3.0
+                                        ]
+                                    }]),
+                                ),
+                            }
+                        }
+                    },
+                    "DECAM": doc! {
+                        "$map": {
+                            "input": "$decam_xmatches",
+                            "as": "obj",
+                            "in": doc! {
+                                "survey": "DECAM",
+                                "object_id": "$$obj._id",
+                                "prv_candidates": fetch_timeseries_op(
+                                    "$$obj.prv_candidates",
+                                    "jd",
+                                    365,
+                                    None
+                                ),
+                                "fp_hists": fetch_timeseries_op(
+                                    "$$obj.fp_hists",
+                                    "jd",
+                                    365,
+                                    Some(vec![doc! {
+                                        "$gte": [
+                                            "$$x.snr",
+                                            3.0
+                                        ]
+                                    }]),
+                                ),
+                            }
+                        }
+                    },
+                }
             }
         },
         doc! {
@@ -74,6 +165,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
+                "cross_matches": 1,
             }
         },
     ]
