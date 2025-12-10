@@ -149,7 +149,12 @@ pub fn fetch_timeseries_op(
     }
     doc! {
         "$filter": doc! {
-            "input": get_array_element(array_field),
+            "input": {
+                "$ifNull": [
+                    format!("${}", array_field),
+                    []
+                ]
+            },
             "as": "x",
             "cond": doc! {
                 "$and": conditions

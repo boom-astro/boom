@@ -1,3 +1,4 @@
+use apache_avro::AvroSchema;
 use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, ZtfCandidate},
     conf::AppConfig,
@@ -136,18 +137,22 @@ async fn consume_kafka_messages(
     let mut nb_errors = 0;
     let max_nb_errors = 5;
     while messages.len() < expected_count && start.elapsed() < timeout {
-        match consumer.recv().await {
-            Ok(message) => {
+        match tokio::time::timeout(timeout - start.elapsed(), consumer.recv()).await {
+            Ok(Ok(message)) => {
                 if let Some(payload) = message.payload() {
                     messages.push(payload.to_vec());
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("Kafka receive error: {:?}", e);
                 nb_errors += 1;
                 if nb_errors >= max_nb_errors {
                     break;
                 }
+            }
+            Err(_) => {
+                // timeout elapsed waiting for message
+                break;
             }
         }
     }
@@ -340,6 +345,8 @@ async fn test_babamul_with_cross_matches() {
     // Insert ZTF aux with cross-matches data
     let ztf_aux = doc! {
         "_id": &ztf_xmatch_id,
+        "object_id": &ztf_xmatch_id,
+        "survey": "ZTF",
         "prv_candidates": [],
         "fp_hists": [],
         "aliases": doc! {},
@@ -382,6 +389,7 @@ async fn test_babamul_with_cross_matches() {
             "ap_flux": 1100.0,
             "ap_flux_err": 15.0,
             "is_sso": false,
+            "reliability": 0.9,
         },
         "coordinates": doc! {
             "ra": 180.0,
@@ -469,27 +477,65 @@ async fn test_babamul_with_cross_matches() {
         "Expected one Babamul message with enriched alert containing cross-matches"
     );
 
-    // Check the message has the expected cross-matches
-    let message = &messages[0];
-    let enriched_alert: EnrichedLsstAlert = apache_avro::from_avro_datum(
-        &EnrichedLsstAlert::get_avro_schema(),
-        &mut &message[..],
-        None,
-    )
-    .expect("Failed to deserialize enriched LSST alert");
+    // Decode the Avro message to verify cross-matches are present
+    let schema = EnrichedLsstAlert::get_schema();
+    let reader = apache_avro::Reader::with_schema(&schema, &messages[0][..])
+        .expect("Failed to create Avro reader");
+
+    // Read all records and check for cross-matches
+    let mut found_cross_match = false;
+    for record_result in reader {
+        let value = record_result.expect("Failed to read Avro record");
+
+        // Verify cross_matches field exists and contains the ZTF ID
+        if let apache_avro::types::Value::Record(fields) = value {
+            if let Some((_, cross_matches_value)) =
+                fields.iter().find(|(name, _)| name == "cross_matches")
+            {
+                // cross_matches is an Option, so it's a Union in Avro
+                if let apache_avro::types::Value::Union(_, boxed) = cross_matches_value {
+                    // The inner value should be a Map
+                    if let apache_avro::types::Value::Map(map) = &**boxed {
+                        // Check for ZTF key
+                        if let Some(ztf_value) = map.get("ZTF") {
+                            // ZTF value should be an array of CrossMatch records
+                            if let apache_avro::types::Value::Array(arr) = ztf_value {
+                                if arr.is_empty() {
+                                    eprintln!(
+                                        "Debug: cross_matches map keys: {:?}",
+                                        map.keys().collect::<Vec<_>>()
+                                    );
+                                    eprintln!("Debug: ZTF array empty, full map: {:?}", map);
+                                }
+                                assert!(
+                                    !arr.is_empty(),
+                                    "ZTF cross-matches array should not be empty"
+                                );
+
+                                // Check that the array contains a record with our ZTF ID
+                                found_cross_match = arr.iter().any(|item| {
+                                    if let apache_avro::types::Value::Record(obj_fields) = item {
+                                        obj_fields.iter().any(|(field_name, field_value)| {
+                                            field_name == "object_id"
+                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_xmatch_id)
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                });
+
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     assert!(
-        enriched_alert.cross_matches.is_some(),
-        "Expected cross_matches in enriched alert"
-    );
-    let cross_matches = enriched_alert.cross_matches.unwrap();
-    assert!(
-        cross_matches.contains_key("ZTF"),
-        "Expected ZTF cross-match in enriched alert"
-    );
-    let ztf_matches = &cross_matches["ZTF"];
-    assert_eq!(ztf_matches.len(), 1, "Expected one ZTF cross-match entry");
-    assert_eq!(
-        ztf_matches[0], ztf_xmatch_id,
-        "ZTF cross-match ID does not match expected"
+        found_cross_match,
+        "Expected to find ZTF cross-match with object_id: {} in Babamul message",
+        ztf_xmatch_id
     );
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::base::CrossMatch;
-use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
+use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
 };
@@ -42,11 +42,16 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "as": "aux"
             }
         },
+        doc! {
+            "$addFields": {
+                "aux": { "$arrayElemAt": ["$aux", 0] }
+            }
+        },
         // Lookup LSST cross-matches
         doc! {
             "$lookup": {
                 "from": "LSST_alerts_aux",
-                "let": { "lsst_ids": "$aux.cross_matches.LSST" },
+                "let": { "lsst_ids": { "$ifNull": ["$aux.cross_matches.LSST", []] } },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$lsst_ids"] } } },
                     doc! {
@@ -64,7 +69,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
         doc! {
             "$lookup": {
                 "from": "DECAM_alerts_aux",
-                "let": { "decam_ids": "$aux.cross_matches.DECAM" },
+                "let": { "decam_ids": { "$ifNull": ["$aux.cross_matches.DECAM", []] } },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$decam_ids"] } } },
                     doc! {
@@ -99,7 +104,12 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                         ]
                     }]),
                 ),
-                "aliases": get_array_element("aux.aliases"),
+                "aliases": {
+                    "$ifNull": [
+                        "$aux.aliases",
+                        doc! {}
+                    ]
+                },
                 "cross_matches": {
                     "LSST": {
                         "$map": {

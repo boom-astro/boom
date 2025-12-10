@@ -383,9 +383,7 @@ pub async fn build_ztf_filter_pipeline(
     let (use_aliases_index, mut lsst_insert_aux_pipeline, lsst_aux_add_fields) =
         build_lsst_aux_data(use_aliases_index, filter_pipeline);
 
-    let mut aux_add_fields = doc! {
-        "aux": mongodb::bson::Bson::Null,
-    };
+    let mut aux_add_fields = doc! {};
 
     let ztf_permissions = match permissions.get(&Survey::Ztf) {
         Some(perms) => perms,
@@ -448,11 +446,24 @@ pub async fn build_ztf_filter_pipeline(
     if use_cross_matches_index.is_some() {
         aux_add_fields.insert(
             "cross_matches".to_string(),
-            get_array_element("aux.cross_matches"),
+            doc! {
+                "$ifNull": [
+                    "$aux.cross_matches",
+                    doc! {}
+                ]
+            },
         );
     }
     if use_aliases_index.is_some() {
-        aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
+        aux_add_fields.insert(
+            "aliases".to_string(),
+            doc! {
+                "$ifNull": [
+                    "$aux.aliases",
+                    doc! {}
+                ]
+            },
+        );
     }
 
     let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
@@ -517,6 +528,11 @@ pub async fn build_ztf_filter_pipeline(
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
+                }
+            });
+            pipeline.push(doc! {
+                "$addFields": {
+                    "aux": { "$arrayElemAt": ["$aux", 0] },
                 }
             });
             pipeline.push(doc! {

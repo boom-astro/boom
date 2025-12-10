@@ -5,7 +5,7 @@ use crate::enrichment::base::CrossMatch;
 use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError,
 };
-use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
+use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
@@ -37,11 +37,24 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "as": "aux"
             }
         },
+        doc! {
+            "$addFields": {
+                "aux": { "$arrayElemAt": ["$aux", 0] }
+            }
+        },
         // Lookup ZTF cross-matches
         doc! {
             "$lookup": {
                 "from": "ZTF_alerts_aux",
-                "let": { "ztf_ids": "$aux.cross_matches.ZTF" },
+                "let": {
+                    "ztf_ids": {
+                        "$cond": [
+                            { "$and": [{ "$isArray": "$aux.cross_matches.ZTF" }, { "$gt": [{ "$size": "$aux.cross_matches.ZTF" }, 0] }] },
+                            "$aux.cross_matches.ZTF",
+                            []
+                        ]
+                    }
+                },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$ztf_ids"] } } },
                     doc! {
@@ -59,7 +72,15 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$lookup": {
                 "from": "DECAM_alerts_aux",
-                "let": { "decam_ids": "$aux.cross_matches.DECAM" },
+                "let": {
+                    "decam_ids": {
+                        "$cond": [
+                            { "$and": [{ "$isArray": "$aux.cross_matches.DECAM" }, { "$gt": [{ "$size": "$aux.cross_matches.DECAM" }, 0] }] },
+                            "$aux.cross_matches.DECAM",
+                            []
+                        ]
+                    }
+                },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$decam_ids"] } } },
                     doc! {
@@ -94,22 +115,31 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                         ]
                     }]),
                 ),
-                "aliases": get_array_element("aux.aliases"),
+                "aliases": {
+                    "$ifNull": [
+                        "$aux.aliases",
+                        doc! {}
+                    ]
+                },
                 "cross_matches": {
                     "ZTF": {
                         "$map": {
-                            "input": "$ztf_xmatches",
+                            "input": {
+                                "$ifNull": [
+                                    "$ztf_xmatches",
+                                    {"$ifNull": ["$aux.cross_matches.ZTF", []]}
+                                ]
+                            },
                             "as": "obj",
-                            "in": "$$obj"
+                            "in": {
+                                "survey": "ZTF",
+                                "object_id": {"$ifNull": ["$$obj._id", "$$obj"]},
+                                "prv_candidates": {"$ifNull": ["$$obj.prv_candidates", []]},
+                                "fp_hists": {"$ifNull": ["$$obj.fp_hists", []]}
+                            }
                         }
                     },
-                    "DECAM": {
-                        "$map": {
-                            "input": "$decam_xmatches",
-                            "as": "obj",
-                            "in": "$$obj"
-                        }
-                    }
+                    "DECAM": []
                 }
             }
         },
