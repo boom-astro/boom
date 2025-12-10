@@ -320,171 +320,7 @@ async fn test_babamul_filters_pixel_flags() {
 }
 
 #[tokio::test]
-async fn test_cross_matches_data_storage_and_retrieval() {
-    use boom::enrichment::EnrichmentWorker;
-    use mongodb::bson::doc;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let db = boom::conf::get_test_db().await;
-
-    // Use unique IDs based on current timestamp to avoid collisions
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let lsst_object_id = format!("LSST24xmtest{}", timestamp);
-    let ztf_xmatch_id = format!("ZTF21xmtest{}", timestamp);
-
-    // Insert ZTF aux with cross-matches data
-    let ztf_aux = doc! {
-        "_id": &ztf_xmatch_id,
-        "prv_candidates": [],
-        "fp_hists": [],
-        "aliases": doc! {},
-        "cross_matches": doc! {},
-        "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
-        },
-    };
-
-    let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
-    ztf_aux_collection
-        .insert_one(&ztf_aux)
-        .await
-        .expect("Failed to insert ZTF aux");
-
-    // Insert LSST alert
-    let lsst_alert_id = 9876543220i64 + (timestamp % 1000000) as i64;
-
-    let lsst_alert = doc! {
-        "_id": lsst_alert_id,
-        "objectId": &lsst_object_id,
-        "candidate": doc! {
-            "candid": lsst_alert_id,
-            "visit": 123456789,
-            "detector": 1,
-            "ra": 180.0,
-            "dec": 0.0,
-            "magpsf": 18.5,
-            "sigmapsf": 0.1,
-            "diffmaglim": 20.5,
-            "isdiffpos": true,
-            "snr": 100.0,
-            "magap": 18.6,
-            "sigmagap": 0.12,
-            "objectId": &lsst_object_id,
-            "jd": 2460000.5,
-            "psf_flux": 1000.0,
-            "psf_flux_err": 10.0,
-            "ap_flux": 1100.0,
-            "ap_flux_err": 15.0,
-            "is_sso": false,
-        },
-        "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
-        },
-    };
-
-    let lsst_alerts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts");
-    lsst_alerts_collection
-        .insert_one(&lsst_alert)
-        .await
-        .expect("Failed to insert LSST alert");
-
-    // Insert cutouts for the alert
-    let cutout_doc = doc! {
-        "_id": lsst_alert_id,
-        "cutoutScience": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3, 4, 5] },
-        "cutoutTemplate": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![6, 7, 8, 9, 10] },
-        "cutoutDifference": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![11, 12, 13, 14, 15] },
-    };
-
-    let lsst_cutouts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_cutouts");
-    lsst_cutouts_collection
-        .insert_one(&cutout_doc)
-        .await
-        .expect("Failed to insert LSST cutout");
-
-    // Insert LSST aux with cross_matches pointing to ZTF
-    let lsst_aux = doc! {
-        "_id": &lsst_object_id,
-        "prv_candidates": [
-            doc! {
-                "jd": 2459999.5,
-                "magpsf": 18.0,
-                "sigmapsf": 0.05,
-                "band": "g",
-            }
-        ],
-        "fp_hists": [
-            doc! {
-                "jd": 2459998.5,
-                "magpsf": 18.2,
-                "sigmapsf": 0.08,
-                "band": "g",
-            }
-        ],
-        "aliases": doc! {},
-        "cross_matches": doc! {
-            "ZTF": [&ztf_xmatch_id],
-        },
-        "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
-        },
-    };
-
-    let lsst_aux_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_aux");
-    lsst_aux_collection
-        .insert_one(&lsst_aux)
-        .await
-        .expect("Failed to insert LSST aux");
-
-    // Create enrichment worker and process alert
-    let mut enrichment_worker = boom::enrichment::LsstEnrichmentWorker::new(TEST_CONFIG_FILE)
-        .await
-        .expect("Failed to create enrichment worker");
-
-    let processed = enrichment_worker
-        .process_alerts(&[lsst_alert_id])
-        .await
-        .expect("Failed to process alerts");
-
-    assert_eq!(processed.len(), 1);
-
-    // Verify the enriched alert has cross_matches info
-    let fetched_alert = lsst_alerts_collection
-        .find_one(doc! { "_id": lsst_alert_id })
-        .await
-        .expect("Failed to fetch alert")
-        .expect("Alert not found");
-
-    // The alert should have properties set by enrichment
-    assert!(
-        fetched_alert.contains_key("properties"),
-        "Alert should have properties after enrichment"
-    );
-
-    // Check that cross_matches are present in the alert
-    if let Ok(properties) = fetched_alert.get_document("properties") {
-        if let Ok(cross_matches) = properties.get_document("cross_matches") {
-            // Verify ZTF cross-matches exist
-            let ztf_matches = cross_matches.get_array("ZTF");
-            assert!(ztf_matches.is_ok(), "ZTF cross-matches should be present");
-            if let Ok(array) = ztf_matches {
-                assert!(
-                    !array.is_empty(),
-                    "ZTF cross-matches array should not be empty"
-                );
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_enrichment_worker_with_cross_matches() {
+async fn test_babamul_with_cross_matches() {
     use boom::enrichment::EnrichmentWorker;
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -633,9 +469,27 @@ async fn test_enrichment_worker_with_cross_matches() {
         "Expected one Babamul message with enriched alert containing cross-matches"
     );
 
-    // The cross_matches are now part of the enriched alert structure.
-    // This test verifies that:
-    // 1. The enrichment worker successfully fetched cross_matches from MongoDB
-    // 2. The enriched alert was published to Babamul topic
-    // Full E2E test complete: cross-matches fetched from aux → included in enriched alert → published to Kafka
+    // Check the message has the expected cross-matches
+    let message = &messages[0];
+    let enriched_alert: EnrichedLsstAlert = apache_avro::from_avro_datum(
+        &EnrichedLsstAlert::get_avro_schema(),
+        &mut &message[..],
+        None,
+    )
+    .expect("Failed to deserialize enriched LSST alert");
+    assert!(
+        enriched_alert.cross_matches.is_some(),
+        "Expected cross_matches in enriched alert"
+    );
+    let cross_matches = enriched_alert.cross_matches.unwrap();
+    assert!(
+        cross_matches.contains_key("ZTF"),
+        "Expected ZTF cross-match in enriched alert"
+    );
+    let ztf_matches = &cross_matches["ZTF"];
+    assert_eq!(ztf_matches.len(), 1, "Expected one ZTF cross-match entry");
+    assert_eq!(
+        ztf_matches[0], ztf_xmatch_id,
+        "ZTF cross-match ID does not match expected"
+    );
 }
