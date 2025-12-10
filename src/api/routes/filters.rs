@@ -1,21 +1,30 @@
-use crate::api::{
-    filters::{doc2json, SortOrder},
-    models::response,
-    routes::users::User,
+use crate::{
+    alert::{
+        LsstAliases, LsstCandidate, LsstForcedPhot, ZtfAliases, ZtfCandidate, ZtfForcedPhot,
+        ZtfPrvCandidate,
+    },
+    api::{
+        filters::{doc2json, SortOrder},
+        models::response,
+        routes::users::User,
+    },
+    enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
+    filter::{
+        build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+    },
+    utils::{db::mongify, enums::Survey},
 };
-use crate::filter::{
-    build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
-};
-use crate::utils::db::mongify;
-use crate::utils::enums::Survey;
 
 use actix_web::{get, patch, post, web, HttpResponse};
+use apache_avro::AvroSchema;
+use apache_avro_macros::serdavro;
 use flare::Time;
 use futures::stream::StreamExt;
 use mongodb::{
     bson::{doc, Document},
     Collection, Database,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::vec;
 use utoipa::ToSchema;
@@ -837,4 +846,94 @@ pub async fn post_filter_test_count(
         "filter test count executed successfully",
         FilterTestCountResponse::new(test_pipeline, count),
     )
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GalacticCoordinates {
+    pub l: f64,
+    pub b: f64,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ZtfFilterMatch {
+    pub prv_candidates: Vec<ZtfCandidate>,
+    pub prv_nondetections: Vec<ZtfPrvCandidate>,
+    pub fp_hists: Vec<ZtfForcedPhot>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LsstFilterMatch {
+    pub prv_candidates: Vec<LsstCandidate>,
+    pub fp_hists: Vec<LsstForcedPhot>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ZtfAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub classifications: ZtfAlertClassifications,
+    pub properties: ZtfAlertProperties,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<ZtfPrvCandidate>,
+    pub prv_nondetections: Vec<ZtfPrvCandidate>,
+    pub fp_hists: Vec<ZtfForcedPhot>,
+    pub aliases: ZtfAliases,
+    #[serde(rename = "LSST")]
+    pub lsst: Option<LsstFilterMatch>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LsstAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub properties: LsstAlertProperties,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<LsstCandidate>,
+    pub fp_hists: Vec<LsstForcedPhot>,
+    pub aliases: LsstAliases,
+    #[serde(rename = "ZTF")]
+    pub ztf: Option<ZtfFilterMatch>,
+}
+
+/// Get a schema of a survey's data available at filtering time
+#[utoipa::path(
+    get,
+    path = "/filters/schema/{survey_name}",
+    params(
+        ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
+    ),
+    responses(
+        (status = 200, description = "Schema found", body = serde_json::Value),
+        (status = 404, description = "Schema not found"),
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters/schema/{survey_name}")]
+pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
+    // return the avro schema
+    let survey_name = path.into_inner().0;
+    match survey_name {
+        Survey::Ztf => {
+            let schema = ZtfAlertToFilter::get_schema();
+            return response::ok(
+                &format!("avro schema for survey {}", survey_name),
+                serde_json::json!(schema),
+            );
+        }
+        _ => {
+            return response::not_found(&format!(
+                "no filter data schema found for survey {}",
+                survey_name
+            ));
+        }
+    }
 }

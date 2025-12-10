@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::{conf, utils::o11y::logging::as_error};
 
+use apache_avro::AvroSchema;
 use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
@@ -24,13 +25,13 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema, AvroSchema)]
 pub struct GeoJsonPoint {
     r#type: String,
     coordinates: Vec<f64>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema, AvroSchema)]
 pub struct Coordinates {
     radec_geojson: GeoJsonPoint,
     l: f64,

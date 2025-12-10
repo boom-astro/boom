@@ -122,7 +122,15 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
 
                             Schema::Record(record)
                         }
-                        _ => panic!("Only record schemas are supported")
+                        Schema::Ref { name } => {
+                            let name_str = name.to_string();
+                            let clean_name_str = name_str.trim_start_matches("__SERDAVRO__").trim_end_matches("__");
+                            let clean_name = Name::new(clean_name_str).expect("Unable to parse schema name");
+                            Schema::Ref { name: clean_name }
+                        }
+                        other => {
+                            panic!("Only record schemas are supported, found schema type: {:?}", other)
+                        }
                     }
                 }
             }
