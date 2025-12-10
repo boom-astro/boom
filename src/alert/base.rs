@@ -696,6 +696,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let max_backoff_secs: u64 = 64;
 
     let start = std::time::Instant::now();
+    let mut last_heartbeat = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let active_attrs = [worker_id_attr.clone()];
     let ok_added_attrs = vec![
@@ -739,13 +740,16 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => {
-                sleep_backoff_secs = 1;   
+                sleep_backoff_secs = 1;
                 bytes
             }
             Ok(None) => {
-                debug!(stream = %stream_name, worker.id = %worker_id.to_string(), "queue is empty");
                 ACTIVE.add(-1, &active_attrs);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                if last_heartbeat.elapsed().as_secs() >= 60 {
+                    info!("Alert Worker heartbeat");
+                    last_heartbeat = std::time::Instant::now();
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 command_check_countdown = 0;
                 continue;
             }

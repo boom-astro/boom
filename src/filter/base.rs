@@ -879,6 +879,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
 
+    let mut last_heartbeat = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let active_attrs = [worker_id_attr.clone()];
     let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
@@ -926,6 +927,10 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         if alerts.is_empty() {
             ACTIVE.add(-1, &active_attrs);
+            if last_heartbeat.elapsed().as_secs() >= 60 {
+                info!("Filter Wroker heartbeat");
+                last_heartbeat = std::time::Instant::now();
+            }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
