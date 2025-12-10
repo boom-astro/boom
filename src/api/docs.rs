@@ -92,6 +92,7 @@ pub struct ApiDoc;
         routes::babamul::post_babamul_signup,
         routes::babamul::post_babamul_activate,
         routes::babamul::post_babamul_auth,
+        routes::babamul::get_babamul_schema,
     ),
     security(
         ("babamul_jwt_token" = [])

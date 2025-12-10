@@ -63,6 +63,8 @@ services:
   broker:
     image: apache/kafka:latest
     hostname: broker
+    ports:
+      - "9092:9092"
     expose:
       - "9092"
       - "29092"

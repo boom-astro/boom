@@ -45,9 +45,12 @@ async fn main() -> std::io::Result<()> {
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {
             let kafka_producer_config = config.kafka.producer.clone();
+            let babamul_avro_schemas = routes::babamul::BabamulAvroSchemas::new();
             app = app
                 .app_data(web::Data::new(kafka_producer_config.clone()))
+                .app_data(web::Data::new(babamul_avro_schemas))
                 .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
+                .service(routes::babamul::get_babamul_schema)
                 .service(routes::babamul::post_babamul_signup)
                 .service(routes::babamul::post_babamul_activate)
                 .service(routes::babamul::post_babamul_auth);
