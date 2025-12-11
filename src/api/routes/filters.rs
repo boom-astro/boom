@@ -919,19 +919,18 @@ pub struct LsstAlertToFilter {
 pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     // return the avro schema
     let survey_name = path.into_inner().0;
-    match survey_name {
-        Survey::Ztf => {
-            let schema = ZtfAlertToFilter::get_schema();
-            return response::ok(
-                &format!("avro schema for survey {}", survey_name),
-                serde_json::json!(schema),
-            );
-        }
+    let schema = match survey_name {
+        Survey::Ztf => ZtfAlertToFilter::get_schema(),
+        Survey::Lsst => LsstAlertToFilter::get_schema(),
         _ => {
             return response::not_found(&format!(
                 "no filter data schema found for survey {}",
                 survey_name
             ));
         }
-    }
+    };
+    response::ok(
+        &format!("avro schema for survey {}", survey_name),
+        serde_json::json!(schema),
+    )
 }
