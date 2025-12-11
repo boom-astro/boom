@@ -53,3 +53,86 @@ pub fn parse_pipeline(
         )),
     }
 }
+
+#[derive(Clone, utoipa::ToSchema)]
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+// implement a custom serde::Deserialize so we can handle numericals like 1 and -1
+impl<'de> serde::Deserialize<'de> for SortOrder {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SortOrderVisitor;
+        impl<'de> serde::de::Visitor<'de> for SortOrderVisitor {
+            type Value = SortOrder;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or integer representing sort order")
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match s.to_lowercase().as_str() {
+                    "ascending" | "asc" | "1" => Ok(SortOrder::Ascending),
+                    "descending" | "desc" | "-1" => Ok(SortOrder::Descending),
+                    _ => Err(E::custom(format!("invalid sort order: {}", s))),
+                }
+            }
+
+            fn visit_i64<E>(self, i: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match i {
+                    1 => Ok(SortOrder::Ascending),
+                    -1 => Ok(SortOrder::Descending),
+                    _ => Err(E::custom(format!("invalid sort order: {}", i))),
+                }
+            }
+
+            fn visit_u64<E>(self, u: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match u {
+                    1 => Ok(SortOrder::Ascending),
+                    _ => Err(E::custom(format!("invalid sort order: {}", u))),
+                }
+            }
+
+            fn visit_i32<E>(self, i: i32) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_i64(i as i64)
+            }
+
+            fn visit_u32<E>(self, u: u32) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_u64(u as u64)
+            }
+        }
+
+        deserializer.deserialize_any(SortOrderVisitor)
+    }
+}
+
+// function to convert a Vec<Document> to Vec<serde_json::Value>
+pub fn doc2json(docs: Vec<Document>) -> Vec<serde_json::Value> {
+    docs.into_iter()
+        .filter_map(|doc| match serde_json::to_value(doc) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                println!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+                None
+            }
+        })
+        .collect()
+}
