@@ -51,7 +51,15 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
         doc! {
             "$lookup": {
                 "from": "LSST_alerts_aux",
-                "let": { "lsst_ids": { "$ifNull": ["$aux.cross_matches.LSST", []] } },
+                "let": {
+                    "lsst_ids": {
+                        "$cond": [
+                            { "$and": [{ "$isArray": "$aux.cross_matches.LSST" }, { "$gt": [{ "$size": "$aux.cross_matches.LSST" }, 0] }] },
+                            "$aux.cross_matches.LSST",
+                            []
+                        ]
+                    }
+                },
                 "pipeline": [
                     doc! { "$match": { "$expr": { "$in": ["$_id", "$$lsst_ids"] } } },
                     doc! {
@@ -95,9 +103,19 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "cross_matches": {
                     "LSST": {
                         "$map": {
-                            "input": "$lsst_xmatches",
+                            "input": {
+                                "$ifNull": [
+                                    "$lsst_xmatches",
+                                    {"$ifNull": ["$aux.cross_matches.LSST", []]}
+                                ]
+                            },
                             "as": "obj",
-                            "in": "$$obj"
+                            "in": {
+                                "survey": "LSST",
+                                "object_id": {"$ifNull": ["$$obj._id", "$$obj"]},
+                                "prv_candidates": {"$ifNull": ["$$obj.prv_candidates", []]},
+                                "fp_hists": {"$ifNull": ["$$obj.fp_hists", []]}
+                            }
                         }
                     }
                 }

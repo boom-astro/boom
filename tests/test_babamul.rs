@@ -327,7 +327,7 @@ async fn test_babamul_filters_pixel_flags() {
 }
 
 #[tokio::test]
-async fn test_babamul_with_cross_matches() {
+async fn test_babamul_lsst_with_ztf_cross_match() {
     use boom::enrichment::EnrichmentWorker;
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -572,4 +572,154 @@ async fn test_babamul_with_cross_matches() {
         .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
         .await
         .expect("Failed to cleanup LSST cutouts fixture after test");
+}
+
+#[tokio::test]
+async fn test_babamul_ztf_with_lsst_cross_match() {
+    use boom::alert::AlertWorker;
+    use boom::enrichment::EnrichmentWorker;
+    use boom::utils::enums::Survey;
+    use boom::utils::testing::AlertRandomizer;
+    use mongodb::bson::doc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let db = boom::conf::get_test_db().await;
+    let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let mut ztf_alert_worker = boom::utils::testing::ztf_alert_worker().await;
+    delete_kafka_topic("babamul.ztf.none", &config).await;
+
+    // Use unique ID based on current timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let lsst_xmatch_id = format!("LSST21enrichtest{}", timestamp);
+
+    // Use AlertRandomizer to create a realistic ZTF alert with all required fields
+    let (ztf_candid, ztf_object_id, _, _, ztf_bytes) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+
+    // Insert the alert and get cutouts
+    ztf_alert_worker.process_alert(&ztf_bytes).await.unwrap();
+
+    // Insert fake LSST aux for cross-matching
+    let lsst_aux_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_aux");
+    let lsst_aux = doc! {
+        "_id": &lsst_xmatch_id,
+        "object_id": &lsst_xmatch_id,
+        "survey": "LSST",
+        "prv_candidates": [],
+        "fp_hists": [],
+        "aliases": doc! {},
+        "cross_matches": doc! {},
+        "coordinates": doc! {
+            "ra": 180.0,
+            "dec": 0.0,
+        },
+    };
+    lsst_aux_collection
+        .insert_one(&lsst_aux)
+        .await
+        .expect("Failed to insert LSST aux");
+
+    // Update the ZTF aux with cross_matches pointing to LSST
+    let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
+    ztf_aux_collection
+        .update_one(
+            doc! {"_id": &ztf_object_id},
+            doc! {
+                "$set": {
+                    "cross_matches.LSST": [&lsst_xmatch_id],
+                }
+            },
+        )
+        .await
+        .expect("Failed to update ZTF aux with cross-matches");
+
+    // Create enrichment worker and process alert
+    let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE)
+        .await
+        .expect("Failed to create enrichment worker");
+
+    let processed = enrichment_worker
+        .process_alerts(&[ztf_candid])
+        .await
+        .expect("Failed to process alerts");
+
+    assert_eq!(
+        processed.len(),
+        1,
+        "Expected 1 processed alert from enrichment worker"
+    );
+
+    // Verify that the Babamul message was published
+    let messages = consume_kafka_messages("babamul.ztf.none", 3, &config).await;
+    assert!(
+        !messages.is_empty(),
+        "Expected at least one Babamul message with enriched alert containing cross-matches"
+    );
+
+    // Decode the Avro message to verify cross-matches are present
+    let schema = EnrichedZtfAlert::get_schema();
+    // Read all records from all messages and check for cross-matches on our alert
+    let mut found_cross_match = false;
+    'outer: for msg in messages {
+        let reader = apache_avro::Reader::with_schema(&schema, &msg[..])
+            .expect("Failed to create Avro reader");
+
+        for record_result in reader {
+            let value = record_result.expect("Failed to read Avro record");
+
+            if let apache_avro::types::Value::Record(fields) = value {
+                // Ensure this record matches our object_id to avoid stale topic data
+                let has_object_id = fields.iter().any(|(name, val)| {
+                    name == "objectId"
+                        && matches!(val, apache_avro::types::Value::String(s) if s == &ztf_object_id)
+                });
+
+                if !has_object_id {
+                    continue;
+                }
+
+                if let Some((_, cross_matches_value)) =
+                    fields.iter().find(|(name, _)| name == "cross_matches")
+                {
+                    if let apache_avro::types::Value::Union(_, boxed) = cross_matches_value {
+                        if let apache_avro::types::Value::Map(map) = &**boxed {
+                            if let Some(lsst_value) = map.get("LSST") {
+                                if let apache_avro::types::Value::Array(arr) = lsst_value {
+                                    found_cross_match = arr.iter().any(|item| {
+                                        if let apache_avro::types::Value::Record(obj_fields) = item {
+                                            obj_fields.iter().any(|(field_name, field_value)| {
+                                                field_name == "object_id"
+                                                    && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_xmatch_id)
+                                            })
+                                        } else {
+                                            false
+                                        }
+                                    });
+
+                                    if found_cross_match {
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_cross_match,
+        "Expected to find LSST cross-match with object_id: {} in Babamul message",
+        lsst_xmatch_id
+    );
+
+    // Cleanup inserted fixture
+    lsst_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&lsst_xmatch_id]}})
+        .await
+        .expect("Failed to cleanup LSST aux fixture after test");
 }
