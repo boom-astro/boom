@@ -341,6 +341,30 @@ async fn test_babamul_with_cross_matches() {
         .as_millis();
     let lsst_object_id = format!("LSST24enrichtest{}", timestamp);
     let ztf_xmatch_id = format!("ZTF21enrichtest{}", timestamp);
+    let lsst_alert_id = 9876543220i64 + (timestamp % 1000000) as i64;
+
+    // Ensure a clean slate for these IDs
+    let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
+    let lsst_alerts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts");
+    let lsst_aux_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_aux");
+    let lsst_cutouts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_cutouts");
+
+    ztf_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&ztf_xmatch_id]}})
+        .await
+        .expect("Failed to cleanup ZTF aux fixture");
+    lsst_alerts_collection
+        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+        .await
+        .expect("Failed to cleanup LSST alerts fixture");
+    lsst_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&lsst_object_id]}})
+        .await
+        .expect("Failed to cleanup LSST aux fixture");
+    lsst_cutouts_collection
+        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+        .await
+        .expect("Failed to cleanup LSST cutouts fixture");
 
     // Insert ZTF aux with cross-matches data
     let ztf_aux = doc! {
@@ -357,15 +381,12 @@ async fn test_babamul_with_cross_matches() {
         },
     };
 
-    let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
     ztf_aux_collection
         .insert_one(&ztf_aux)
         .await
         .expect("Failed to insert ZTF aux");
 
     // Insert LSST alert with good reliability and no flags
-    let lsst_alert_id = 9876543220i64 + (timestamp % 1000000) as i64;
-
     let lsst_alert = doc! {
         "_id": lsst_alert_id,
         "objectId": &lsst_object_id,
@@ -397,7 +418,6 @@ async fn test_babamul_with_cross_matches() {
         },
     };
 
-    let lsst_alerts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts");
     lsst_alerts_collection
         .insert_one(&lsst_alert)
         .await
@@ -411,7 +431,6 @@ async fn test_babamul_with_cross_matches() {
         "cutoutDifference": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![11, 12, 13, 14, 15] },
     };
 
-    let lsst_cutouts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_cutouts");
     lsst_cutouts_collection
         .insert_one(&cutout_doc)
         .await
@@ -446,7 +465,6 @@ async fn test_babamul_with_cross_matches() {
         },
     };
 
-    let lsst_aux_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_aux");
     lsst_aux_collection
         .insert_one(&lsst_aux)
         .await
@@ -538,4 +556,22 @@ async fn test_babamul_with_cross_matches() {
         "Expected to find ZTF cross-match with object_id: {} in Babamul message",
         ztf_xmatch_id
     );
+
+    // Cleanup inserted fixtures to avoid leaking state between tests
+    ztf_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&ztf_xmatch_id]}})
+        .await
+        .expect("Failed to cleanup ZTF aux fixture after test");
+    lsst_alerts_collection
+        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+        .await
+        .expect("Failed to cleanup LSST alerts fixture after test");
+    lsst_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&lsst_object_id]}})
+        .await
+        .expect("Failed to cleanup LSST aux fixture after test");
+    lsst_cutouts_collection
+        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+        .await
+        .expect("Failed to cleanup LSST cutouts fixture after test");
 }
