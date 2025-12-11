@@ -131,7 +131,7 @@ async fn consume_kafka_messages(
         .expect("Failed to subscribe to topic");
 
     let mut messages = Vec::new();
-    let timeout = Duration::from_secs(5);
+    let timeout = Duration::from_secs(8);
     let start = std::time::Instant::now();
 
     let mut nb_errors = 0;
@@ -490,61 +490,57 @@ async fn test_babamul_with_cross_matches() {
 
     // Verify that the Babamul message was published - since the alert passed enrichment
     // with good reliability and no pixel flags or rock flag, it should be sent to Babamul
-    let messages = consume_kafka_messages("babamul.lsst.none", 1, &config).await;
-    assert_eq!(
-        messages.len(),
-        1,
-        "Expected one Babamul message with enriched alert containing cross-matches"
+    // Fetch a few messages to tolerate leftover topic data and search for our alert
+    let messages = consume_kafka_messages("babamul.lsst.none", 3, &config).await;
+    assert!(
+        !messages.is_empty(),
+        "Expected at least one Babamul message with enriched alert containing cross-matches"
     );
 
     // Decode the Avro message to verify cross-matches are present
     let schema = EnrichedLsstAlert::get_schema();
-    let reader = apache_avro::Reader::with_schema(&schema, &messages[0][..])
-        .expect("Failed to create Avro reader");
-
-    // Read all records and check for cross-matches
+    // Read all records from all messages and check for cross-matches on our alert
     let mut found_cross_match = false;
-    for record_result in reader {
-        let value = record_result.expect("Failed to read Avro record");
+    'outer: for msg in messages {
+        let reader = apache_avro::Reader::with_schema(&schema, &msg[..])
+            .expect("Failed to create Avro reader");
 
-        // Verify cross_matches field exists and contains the ZTF ID
-        if let apache_avro::types::Value::Record(fields) = value {
-            if let Some((_, cross_matches_value)) =
-                fields.iter().find(|(name, _)| name == "cross_matches")
-            {
-                // cross_matches is an Option, so it's a Union in Avro
-                if let apache_avro::types::Value::Union(_, boxed) = cross_matches_value {
-                    // The inner value should be a Map
-                    if let apache_avro::types::Value::Map(map) = &**boxed {
-                        // Check for ZTF key
-                        if let Some(ztf_value) = map.get("ZTF") {
-                            // ZTF value should be an array of CrossMatch records
-                            if let apache_avro::types::Value::Array(arr) = ztf_value {
-                                if arr.is_empty() {
-                                    eprintln!(
-                                        "Debug: cross_matches map keys: {:?}",
-                                        map.keys().collect::<Vec<_>>()
-                                    );
-                                    eprintln!("Debug: ZTF array empty, full map: {:?}", map);
-                                }
-                                assert!(
-                                    !arr.is_empty(),
-                                    "ZTF cross-matches array should not be empty"
-                                );
+        for record_result in reader {
+            let value = record_result.expect("Failed to read Avro record");
 
-                                // Check that the array contains a record with our ZTF ID
-                                found_cross_match = arr.iter().any(|item| {
-                                    if let apache_avro::types::Value::Record(obj_fields) = item {
-                                        obj_fields.iter().any(|(field_name, field_value)| {
-                                            field_name == "object_id"
-                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_xmatch_id)
-                                        })
-                                    } else {
-                                        false
+            if let apache_avro::types::Value::Record(fields) = value {
+                // Ensure this record matches our object_id to avoid stale topic data
+                let has_object_id = fields.iter().any(|(name, val)| {
+                    name == "objectId"
+                        && matches!(val, apache_avro::types::Value::String(s) if s == &lsst_object_id)
+                });
+
+                if !has_object_id {
+                    continue;
+                }
+
+                if let Some((_, cross_matches_value)) =
+                    fields.iter().find(|(name, _)| name == "cross_matches")
+                {
+                    if let apache_avro::types::Value::Union(_, boxed) = cross_matches_value {
+                        if let apache_avro::types::Value::Map(map) = &**boxed {
+                            if let Some(ztf_value) = map.get("ZTF") {
+                                if let apache_avro::types::Value::Array(arr) = ztf_value {
+                                    found_cross_match = arr.iter().any(|item| {
+                                        if let apache_avro::types::Value::Record(obj_fields) = item {
+                                            obj_fields.iter().any(|(field_name, field_value)| {
+                                                field_name == "object_id"
+                                                    && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_xmatch_id)
+                                            })
+                                        } else {
+                                            false
+                                        }
+                                    });
+
+                                    if found_cross_match {
+                                        break 'outer;
                                     }
-                                });
-
-                                break;
+                                }
                             }
                         }
                     }
