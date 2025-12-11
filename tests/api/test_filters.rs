@@ -430,4 +430,79 @@ mod tests {
         assert!(pipeline.len() > 2);
         let _ = data["count"].as_i64().unwrap();
     }
+
+    // test the /filters/schema/{survey} endpoint
+    #[actix_rt::test]
+    async fn test_filter_schema_endpoint() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let token = create_admin_token(&database).await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::get_filter_schema),
+        )
+        .await;
+
+        // ZTF schema test
+        let req = test::TestRequest::get()
+            .uri("/filters/schema/ZTF")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to get filter schema: {:?}",
+            read_str_response(resp).await
+        );
+        let resp = read_json_response(resp).await;
+
+        // let's just check we have a data field with type and fields keys
+        let data = resp["data"].as_object().unwrap();
+        assert!(data.contains_key("type"));
+        assert!(data.contains_key("name"));
+        assert!(data.contains_key("fields"));
+        assert!(data["type"] == "record");
+        assert!(data["name"] == "ZtfAlertToFilter");
+        assert!(data["fields"].is_array());
+
+        // LSST schema test
+        let req = test::TestRequest::get()
+            .uri("/filters/schema/LSST")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to get filter schema: {:?}",
+            read_str_response(resp).await
+        );
+        let resp = read_json_response(resp).await;
+        let data = resp["data"].as_object().unwrap();
+        assert!(data.contains_key("type"));
+        assert!(data.contains_key("name"));
+        assert!(data.contains_key("fields"));
+        assert!(data["type"] == "record");
+        assert!(data["name"] == "LsstAlertToFilter");
+        assert!(data["fields"].is_array());
+
+        // Invalid survey test (should return NOT_FOUND)
+        let req = test::TestRequest::get()
+            .uri("/filters/schema/INVALID_SURVEY")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Expected NOT_FOUND for invalid survey, got: {:?}",
+            read_str_response(resp).await
+        );
+    }
 }
