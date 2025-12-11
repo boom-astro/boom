@@ -65,24 +65,6 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "as": "lsst_xmatches"
             }
         },
-        // Lookup DECAM cross-matches
-        doc! {
-            "$lookup": {
-                "from": "DECAM_alerts_aux",
-                "let": { "decam_ids": { "$ifNull": ["$aux.cross_matches.DECAM", []] } },
-                "pipeline": [
-                    doc! { "$match": { "$expr": { "$in": ["$_id", "$$decam_ids"] } } },
-                    doc! {
-                        "$project": {
-                            "_id": 1,
-                            "prv_candidates": 1,
-                            "fp_hists": 1,
-                        }
-                    }
-                ],
-                "as": "decam_xmatches"
-            }
-        },
         doc! {
             "$project": doc! {
                 "objectId": 1,
@@ -114,13 +96,6 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                     "LSST": {
                         "$map": {
                             "input": "$lsst_xmatches",
-                            "as": "obj",
-                            "in": "$$obj"
-                        }
-                    },
-                    "DECAM": {
-                        "$map": {
-                            "input": "$decam_xmatches",
                             "as": "obj",
                             "in": "$$obj"
                         }

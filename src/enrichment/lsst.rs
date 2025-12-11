@@ -68,32 +68,6 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "as": "ztf_xmatches"
             }
         },
-        // Lookup DECAM cross-matches
-        doc! {
-            "$lookup": {
-                "from": "DECAM_alerts_aux",
-                "let": {
-                    "decam_ids": {
-                        "$cond": [
-                            { "$and": [{ "$isArray": "$aux.cross_matches.DECAM" }, { "$gt": [{ "$size": "$aux.cross_matches.DECAM" }, 0] }] },
-                            "$aux.cross_matches.DECAM",
-                            []
-                        ]
-                    }
-                },
-                "pipeline": [
-                    doc! { "$match": { "$expr": { "$in": ["$_id", "$$decam_ids"] } } },
-                    doc! {
-                        "$project": {
-                            "_id": 1,
-                            "prv_candidates": 1,
-                            "fp_hists": 1,
-                        }
-                    }
-                ],
-                "as": "decam_xmatches"
-            }
-        },
         doc! {
             "$project": doc! {
                 "objectId": 1,
@@ -138,8 +112,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                                 "fp_hists": {"$ifNull": ["$$obj.fp_hists", []]}
                             }
                         }
-                    },
-                    "DECAM": []
+                    }
                 }
             }
         },
