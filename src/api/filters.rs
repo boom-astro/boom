@@ -73,26 +73,50 @@ impl<'de> serde::Deserialize<'de> for SortOrder {
                 formatter.write_str("a string or integer representing sort order")
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
-                match value.to_lowercase().as_str() {
+                match s.to_lowercase().as_str() {
                     "ascending" | "asc" | "1" => Ok(SortOrder::Ascending),
                     "descending" | "desc" | "-1" => Ok(SortOrder::Descending),
-                    _ => Err(E::custom(format!("invalid sort order: {}", value))),
+                    _ => Err(E::custom(format!("invalid sort order: {}", s))),
                 }
             }
 
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            fn visit_i64<E>(self, i: i64) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
-                match value {
+                match i {
                     1 => Ok(SortOrder::Ascending),
                     -1 => Ok(SortOrder::Descending),
-                    _ => Err(E::custom(format!("invalid sort order: {}", value))),
+                    _ => Err(E::custom(format!("invalid sort order: {}", i))),
                 }
+            }
+
+            fn visit_u64<E>(self, u: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match u {
+                    1 => Ok(SortOrder::Ascending),
+                    _ => Err(E::custom(format!("invalid sort order: {}", u))),
+                }
+            }
+
+            fn visit_i32<E>(self, i: i32) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_i64(i as i64)
+            }
+
+            fn visit_u32<E>(self, u: u32) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_u64(u as u64)
             }
         }
 

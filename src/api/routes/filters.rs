@@ -486,7 +486,7 @@ async fn build_test_filter_pipeline(
     object_ids: Option<Vec<String>>,
     candids: Option<Vec<String>>,
 ) -> Result<Vec<Document>, FilterError> {
-    if permissions.get(&survey).is_none() && SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) && permissions.get(&survey).is_none() {
         return Err(FilterError::InvalidFilterPipeline(format!(
             "Filters running on survey {:?} must have permissions defined for that survey",
             survey
@@ -553,7 +553,7 @@ async fn build_test_filter_pipeline(
         Ok(p) => p,
         Err(e) => {
             return Err(FilterError::InvalidFilterPipeline(format!(
-                "Invalid filter submitted, filter build failed with error: {}",
+                "Filter build failed with error: {}",
                 e
             )));
         }
@@ -820,7 +820,7 @@ pub async fn post_filter_test_count(
                     ),
                 },
                 Err(e) => {
-                    // TODO: instead of returning an  internal error, log it
+                    // TODO: instead of returning an internal error, log it
                     // with tracing (once we have that set up in the API)
                     return response::internal_error(&format!(
                         "error retrieving test filter count result: {}",
