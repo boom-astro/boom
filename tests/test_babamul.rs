@@ -160,7 +160,7 @@ async fn consume_kafka_messages(
     messages
 }
 
-// add a function to delete a kafka topic before each test to ensure a clean state
+// Delete a Kafka topic; tolerate "unknown topic" errors to avoid flakiness
 async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
     use rdkafka::admin::{AdminClient, AdminOptions};
 
@@ -169,15 +169,17 @@ async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
         .create()
         .expect("Failed to create Kafka admin client");
 
-    let result = admin
-        .delete_topics(&[topic], &AdminOptions::new())
-        .await
-        .unwrap();
-
-    for res in result {
-        match res {
-            Ok(_) => println!("Successfully deleted topic {}", topic),
-            Err((_, e)) => eprintln!("Failed to delete topic {}: {:?}", topic, e),
+    // Best effort delete; UnknownTopicOrPartition is fine
+    if let Ok(results) = admin.delete_topics(&[topic], &AdminOptions::new()).await {
+        for res in results {
+            if let Err((_, e)) = res {
+                // Ignore if topic does not exist; surface other errors
+                if format!("{:?}", e).contains("UnknownTopicOrPartition") {
+                    eprintln!("Topic {} did not exist before test (ignored)", topic);
+                } else {
+                    eprintln!("Failed to delete topic {}: {:?}", topic, e);
+                }
+            }
         }
     }
 }
