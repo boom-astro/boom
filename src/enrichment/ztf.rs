@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::base::SurveyMatch;
@@ -139,6 +137,11 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema, JsonSchema)]
+pub struct ZtfSurveyMatches {
+    pub lsst: Vec<SurveyMatch>,
+}
+
 /// ZTF alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
@@ -151,7 +154,7 @@ pub struct ZtfAlertForEnrichment {
     pub candidate: ZtfCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
-    pub cross_matches: Option<HashMap<String, Vec<SurveyMatch>>>,
+    pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document

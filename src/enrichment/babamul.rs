@@ -108,7 +108,7 @@ impl EnrichedZtfAlert {
         properties: ZtfAlertProperties,
     ) -> Self {
         EnrichedZtfAlert {
-            cross_matches: alert.cross_matches,
+            cross_matches: alert.survey_matches,
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,

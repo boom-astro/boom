@@ -135,8 +135,8 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema, JsonSchema)]
-struct LsstSurveyMatches {
-    ztf: Option<Vec<SurveyMatch>>,
+pub struct LsstSurveyMatches {
+    pub ztf: Vec<SurveyMatch>,
 }
 
 /// LSST alert structure used to deserialize alerts
@@ -151,7 +151,7 @@ pub struct LsstAlertForEnrichment {
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
-    pub survey_matches: LsstSurveyMatches,
+    pub survey_matches: Option<LsstSurveyMatches>,
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document
