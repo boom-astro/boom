@@ -54,8 +54,8 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "let": {
                     "lsst_ids": {
                         "$cond": [
-                            { "$and": [{ "$isArray": "$aux.cross_matches.LSST" }, { "$gt": [{ "$size": "$aux.cross_matches.LSST" }, 0] }] },
-                            "$aux.cross_matches.LSST",
+                            { "$and": [{ "$isArray": "$aux.aliases.LSST" }, { "$gt": [{ "$size": "$aux.aliases.LSST" }, 0] }] },
+                            "$aux.aliases.LSST",
                             []
                         ]
                     }
@@ -106,7 +106,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                             "input": {
                                 "$ifNull": [
                                     "$lsst_xmatches",
-                                    {"$ifNull": ["$aux.cross_matches.LSST", []]}
+                                    {"$ifNull": ["$aux.aliases.LSST", []]}
                                 ]
                             },
                             "as": "obj",

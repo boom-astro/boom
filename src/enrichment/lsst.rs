@@ -42,15 +42,15 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "aux": { "$arrayElemAt": ["$aux", 0] }
             }
         },
-        // Lookup ZTF cross-matches
+        // Lookup ZTF survey matches
         doc! {
             "$lookup": {
                 "from": "ZTF_alerts_aux",
                 "let": {
                     "ztf_ids": {
                         "$cond": [
-                            { "$and": [{ "$isArray": "$aux.cross_matches.ZTF" }, { "$gt": [{ "$size": "$aux.cross_matches.ZTF" }, 0] }] },
-                            "$aux.cross_matches.ZTF",
+                            { "$and": [{ "$isArray": "$aux.aliases.ZTF" }, { "$gt": [{ "$size": "$aux.aliases.ZTF" }, 0] }] },
+                            "$aux.aliases.ZTF",
                             []
                         ]
                     }
@@ -95,13 +95,13 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                         doc! {}
                     ]
                 },
-                "cross_matches": {
+                "survey_matches": {
                     "ZTF": {
                         "$map": {
                             "input": {
                                 "$ifNull": [
                                     "$ztf_xmatches",
-                                    {"$ifNull": ["$aux.cross_matches.ZTF", []]}
+                                    {"$ifNull": ["$aux.aliases.ZTF", []]}
                                 ]
                             },
                             "as": "obj",
@@ -128,7 +128,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
-                "cross_matches": 1,
+                "survey_matches": 1,
             }
         },
     ]
