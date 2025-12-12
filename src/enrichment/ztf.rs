@@ -104,6 +104,17 @@ pub struct ZtfAlertProperties {
     pub photstats: PerBandProperties,
 }
 
+/// ZTF alert ML classifier scores
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+pub struct ZtfAlertClassifications {
+    pub acai_h: f32,
+    pub acai_n: f32,
+    pub acai_v: f32,
+    pub acai_o: f32,
+    pub acai_b: f32,
+    pub btsbot: f32,
+}
+
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -235,15 +246,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .get_metadata(&[&alert], &[all_bands_properties])?;
             let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
 
+            let classifications = ZtfAlertClassifications {
+                acai_h: acai_h_scores[0],
+                acai_n: acai_n_scores[0],
+                acai_v: acai_v_scores[0],
+                acai_o: acai_o_scores[0],
+                acai_b: acai_b_scores[0],
+                btsbot: btsbot_scores[0],
+            };
+
             let update_alert_document = doc! {
                 "$set": {
                     // ML scores
-                    "classifications.acai_h": acai_h_scores[0],
-                    "classifications.acai_n": acai_n_scores[0],
-                    "classifications.acai_v": acai_v_scores[0],
-                    "classifications.acai_o": acai_o_scores[0],
-                    "classifications.acai_b": acai_b_scores[0],
-                    "classifications.btsbot": btsbot_scores[0],
+                    "classifications": mongify(&classifications),
                     // properties
                     "properties": mongify(&properties),
                 }
