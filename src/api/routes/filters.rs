@@ -905,7 +905,7 @@ pub struct LsstAlertToFilter {
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
-    path = "/filters/schema/{survey_name}",
+    path = "/filters/schemas/{survey_name}",
     params(
         ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
     ),
@@ -915,7 +915,7 @@ pub struct LsstAlertToFilter {
     ),
     tags=["Filters"]
 )]
-#[get("/filters/schema/{survey_name}")]
+#[get("/filters/schemas/{survey_name}")]
 pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     // return the avro schema
     let survey_name = path.into_inner().0;

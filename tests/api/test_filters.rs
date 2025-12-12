@@ -431,7 +431,7 @@ mod tests {
         let _ = data["count"].as_i64().unwrap();
     }
 
-    // test the /filters/schema/{survey} endpoint
+    // test the /filters/schemas/{survey} endpoint
     #[actix_rt::test]
     async fn test_filter_schema_endpoint() {
         load_dotenv();
@@ -450,7 +450,7 @@ mod tests {
 
         // ZTF schema test
         let req = test::TestRequest::get()
-            .uri("/filters/schema/ZTF")
+            .uri("/filters/schemas/ZTF")
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -473,7 +473,7 @@ mod tests {
 
         // LSST schema test
         let req = test::TestRequest::get()
-            .uri("/filters/schema/LSST")
+            .uri("/filters/schemas/LSST")
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -494,7 +494,7 @@ mod tests {
 
         // Invalid survey test (should return NOT_FOUND)
         let req = test::TestRequest::get()
-            .uri("/filters/schema/INVALID_SURVEY")
+            .uri("/filters/schemas/INVALID_SURVEY")
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
