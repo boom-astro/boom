@@ -327,7 +327,7 @@ async fn test_babamul_filters_pixel_flags() {
 }
 
 #[tokio::test]
-async fn test_babamul_lsst_with_ztf_cross_match() {
+async fn test_babamul_lsst_with_ztf_match() {
     use boom::enrichment::EnrichmentWorker;
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -575,7 +575,7 @@ async fn test_babamul_lsst_with_ztf_cross_match() {
 }
 
 #[tokio::test]
-async fn test_babamul_ztf_with_lsst_cross_match() {
+async fn test_babamul_ztf_with_lsst_match() {
     use boom::alert::AlertWorker;
     use boom::enrichment::EnrichmentWorker;
     use boom::utils::enums::Survey;
