@@ -5,8 +5,8 @@ mod lsst;
 mod models;
 mod ztf;
 pub use base::{
-    fetch_alert_cutouts, fetch_alerts, run_enrichment_worker, CrossMatch, EnrichmentWorker,
-    EnrichmentWorkerError,
+    fetch_alert_cutouts, fetch_alerts, run_enrichment_worker, EnrichmentWorker,
+    EnrichmentWorkerError, SurveyMatch,
 };
 pub use decam::DecamEnrichmentWorker;
 pub use lsst::{LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker};

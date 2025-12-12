@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
-use crate::enrichment::base::CrossMatch;
+use crate::enrichment::base::SurveyMatch;
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
@@ -151,7 +151,7 @@ pub struct ZtfAlertForEnrichment {
     pub candidate: ZtfCandidate,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
-    pub cross_matches: Option<HashMap<String, Vec<CrossMatch>>>,
+    pub cross_matches: Option<HashMap<String, Vec<SurveyMatch>>>,
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
