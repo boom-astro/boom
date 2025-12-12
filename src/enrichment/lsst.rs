@@ -96,7 +96,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                     ]
                 },
                 "survey_matches": {
-                    "ZTF": {
+                    "ztf": {
                         "$map": {
                             "input": {
                                 "$ifNull": [

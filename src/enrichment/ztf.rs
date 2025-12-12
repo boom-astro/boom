@@ -98,8 +98,8 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                         doc! {}
                     ]
                 },
-                "cross_matches": {
-                    "LSST": {
+                "survey_matches": {
+                    "lsst": {
                         "$map": {
                             "input": {
                                 "$ifNull": [
@@ -131,7 +131,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,
-                "cross_matches": 1,
+                "survey_matches": 1,
             }
         },
     ]

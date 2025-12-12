@@ -2,7 +2,6 @@
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
-use crate::enrichment::base::SurveyMatch;
 use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
@@ -53,7 +52,7 @@ pub struct EnrichedLsstAlert {
     pub cutout_template: Option<CutoutBytes>,
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
-    pub cross_matches: Option<std::collections::HashMap<String, Vec<SurveyMatch>>>,
+    pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
 }
 
 impl EnrichedLsstAlert {
@@ -74,7 +73,7 @@ impl EnrichedLsstAlert {
             cutout_science: cutout_science.map(CutoutBytes),
             cutout_template: cutout_template.map(CutoutBytes),
             cutout_difference: cutout_difference.map(CutoutBytes),
-            cross_matches: alert.survey_matches,
+            survey_matches: alert.survey_matches,
         }
     }
 }
@@ -90,7 +89,7 @@ pub struct EnrichedZtfAlert {
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
     pub properties: ZtfAlertProperties,
-    pub cross_matches: Option<HashMap<String, Vec<SurveyMatch>>>,
+    pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
     #[serde(rename = "cutoutScience")]
     pub cutout_science: Option<CutoutBytes>,
     #[serde(rename = "cutoutTemplate")]
@@ -108,7 +107,7 @@ impl EnrichedZtfAlert {
         properties: ZtfAlertProperties,
     ) -> Self {
         EnrichedZtfAlert {
-            cross_matches: alert.survey_matches,
+            survey_matches: alert.survey_matches,
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,

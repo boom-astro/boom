@@ -52,7 +52,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         cutout_science: None,
         cutout_template: None,
         cutout_difference: None,
-        cross_matches: None,
+        survey_matches: None,
     }
 }
 
@@ -107,7 +107,7 @@ fn create_mock_enriched_lsst_alert(
         cutout_science: None,
         cutout_template: None,
         cutout_difference: None,
-        cross_matches: None,
+        survey_matches: None,
     }
 }
 
@@ -368,7 +368,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         .await
         .expect("Failed to cleanup LSST cutouts fixture");
 
-    // Insert ZTF aux with cross-matches data
+    // Insert ZTF aux with alias data
     let ztf_aux = doc! {
         "_id": &ztf_xmatch_id,
         "object_id": &ztf_xmatch_id,
@@ -376,7 +376,6 @@ async fn test_babamul_lsst_with_ztf_match() {
         "prv_candidates": [],
         "fp_hists": [],
         "aliases": doc! {},
-        "cross_matches": doc! {},
         "coordinates": doc! {
             "ra": 180.0,
             "dec": 0.0,
@@ -438,7 +437,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         .await
         .expect("Failed to insert LSST cutout");
 
-    // Insert LSST aux with cross_matches pointing to ZTF
+    // Insert LSST aux with aliases pointing to ZTF
     let lsst_aux = doc! {
         "_id": &lsst_object_id,
         "prv_candidates": [
@@ -457,8 +456,7 @@ async fn test_babamul_lsst_with_ztf_match() {
                 "band": "g",
             }
         ],
-        "aliases": doc! {},
-        "cross_matches": doc! {
+        "aliases": doc! {
             "ZTF": [&ztf_xmatch_id],
         },
         "coordinates": doc! {
@@ -519,12 +517,14 @@ async fn test_babamul_lsst_with_ztf_match() {
                     continue;
                 }
 
-                if let Some((_, cross_matches_value)) =
-                    fields.iter().find(|(name, _)| name == "cross_matches")
+                if let Some((_, survey_matches_value)) =
+                    fields.iter().find(|(name, _)| name == "survey_matches")
                 {
-                    if let apache_avro::types::Value::Union(_, boxed) = cross_matches_value {
-                        if let apache_avro::types::Value::Map(map) = &**boxed {
-                            if let Some(ztf_value) = map.get("ZTF") {
+                    if let apache_avro::types::Value::Union(_, boxed) = survey_matches_value {
+                        if let apache_avro::types::Value::Record(fields) = &**boxed {
+                            if let Some((_, ztf_value)) =
+                                fields.iter().find(|(name, _)| name == "ztf")
+                            {
                                 if let apache_avro::types::Value::Array(arr) = ztf_value {
                                     found_cross_match = arr.iter().any(|item| {
                                         if let apache_avro::types::Value::Record(obj_fields) = item {
@@ -611,7 +611,6 @@ async fn test_babamul_ztf_with_lsst_match() {
         "prv_candidates": [],
         "fp_hists": [],
         "aliases": doc! {},
-        "cross_matches": doc! {},
         "coordinates": doc! {
             "ra": 180.0,
             "dec": 0.0,
@@ -622,19 +621,19 @@ async fn test_babamul_ztf_with_lsst_match() {
         .await
         .expect("Failed to insert LSST aux");
 
-    // Update the ZTF aux with cross_matches pointing to LSST
+    // Update the ZTF aux with aliases pointing to LSST
     let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
     ztf_aux_collection
         .update_one(
             doc! {"_id": &ztf_object_id},
             doc! {
                 "$set": {
-                    "cross_matches.LSST": [&lsst_xmatch_id],
+                    "aliases.LSST": [&lsst_xmatch_id],
                 }
             },
         )
         .await
-        .expect("Failed to update ZTF aux with cross-matches");
+        .expect("Failed to update ZTF aux with aliases");
 
     // Create enrichment worker and process alert
     let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE)
@@ -681,12 +680,14 @@ async fn test_babamul_ztf_with_lsst_match() {
                     continue;
                 }
 
-                if let Some((_, cross_matches_value)) =
-                    fields.iter().find(|(name, _)| name == "cross_matches")
+                if let Some((_, survey_matches_value)) =
+                    fields.iter().find(|(name, _)| name == "survey_matches")
                 {
-                    if let apache_avro::types::Value::Union(_, boxed) = cross_matches_value {
-                        if let apache_avro::types::Value::Map(map) = &**boxed {
-                            if let Some(lsst_value) = map.get("LSST") {
+                    if let apache_avro::types::Value::Union(_, boxed) = survey_matches_value {
+                        if let apache_avro::types::Value::Record(fields) = &**boxed {
+                            if let Some((_, lsst_value)) =
+                                fields.iter().find(|(name, _)| name == "lsst")
+                            {
                                 if let apache_avro::types::Value::Array(arr) = lsst_value {
                                     found_cross_match = arr.iter().any(|item| {
                                         if let apache_avro::types::Value::Record(obj_fields) = item {
