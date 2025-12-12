@@ -870,6 +870,7 @@ pub struct LsstFilterMatch {
 
 #[serdavro]
 #[derive(Debug, Deserialize, Serialize)]
+/// ZTF data available at filtering time
 pub struct ZtfAlertToFilter {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -888,6 +889,7 @@ pub struct ZtfAlertToFilter {
 
 #[serdavro]
 #[derive(Debug, Deserialize, Serialize)]
+/// LSST data available at filtering time
 pub struct LsstAlertToFilter {
     pub candid: i64,
     #[serde(rename = "objectId")]
