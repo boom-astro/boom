@@ -27,6 +27,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
     inner_candidate.magpsf = 18.5;
     inner_candidate.sigmapsf = 0.1;
     inner_candidate.fid = 1; // g-band
+    inner_candidate.programid = 1; // public
 
     let candidate = ZtfCandidate {
         candidate: inner_candidate,
