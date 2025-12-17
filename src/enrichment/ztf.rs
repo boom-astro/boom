@@ -1,9 +1,10 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
-use crate::enrichment::base::SurveyMatch;
-use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::enrichment::LsstMatch;
+use crate::utils::db::{get_array_dict_element, get_array_element, mongify};
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
+    PhotometryMag,
 };
 use crate::{
     alert::ZtfCandidate,
@@ -14,10 +15,56 @@ use crate::{
     },
 };
 use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
 use tracing::{instrument, warn};
+
+fn default_ztf_zp() -> Option<f64> {
+    Some(23.9)
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ZtfPhotometry {
+    pub jd: f64,
+    pub magpsf: Option<f64>,
+    pub sigmapsf: Option<f64>,
+    pub diffmaglim: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    // set a default of 23.9 for zp if missing
+    #[serde(default = "default_ztf_zp")]
+    pub zp: Option<f64>,
+    pub ra: Option<f64>,
+    pub dec: Option<f64>,
+    pub snr: Option<f64>,
+    pub programid: i32,
+}
+
+// it should return an optional PhotometryMag
+impl ZtfPhotometry {
+    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
+        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+        println!(
+            "ZtfPhotometry to_photometry_mag: jd={}, magpsf={:?}, sigmapsf={:?}, snr={:?}",
+            self.jd, self.magpsf, self.sigmapsf, self.snr
+        );
+        match (self.snr, self.magpsf, self.sigmapsf) {
+            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
+                time: self.jd,
+                mag: mag as f32,
+                mag_err: sig as f32,
+                band: self.band.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
 
 pub fn create_ztf_alert_pipeline() -> Vec<Document> {
     vec![
@@ -35,111 +82,156 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
         doc! {
             "$lookup": {
                 "from": "ZTF_alerts_aux",
-                "localField": "objectId",
-                "foreignField": "_id",
+                "let": { "obj_id": "$objectId" },
+                "pipeline": [
+                    doc! {
+                        "$match": {
+                            "$expr": {
+                                "$eq": [ "$_id", "$$obj_id" ]
+                            }
+                        }
+                    },
+                    doc! {
+                        "$project": {
+                            // prv_candidates
+                            "prv_candidates.jd": 1,
+                            "prv_candidates.magpsf": 1,
+                            "prv_candidates.sigmapsf": 1,
+                            "prv_candidates.diffmaglim": 1,
+                            "prv_candidates.band": 1,
+                            "prv_candidates.psfFlux": 1,
+                            "prv_candidates.psfFluxErr": 1,
+                            "prv_candidates.ra": 1,
+                            "prv_candidates.dec": 1,
+                            "prv_candidates.programid": 1,
+                            "prv_candidates.snr": 1,
+                            // prv_nondetections
+                            "prv_nondetections.jd": 1,
+                            "prv_nondetections.diffmaglim": 1,
+                            "prv_nondetections.band": 1,
+                            "prv_nondetections.psfFluxErr": 1,
+                            "prv_nondetections.programid": 1,
+                            // fp_hists
+                            "fp_hists.jd": 1,
+                            "fp_hists.magpsf": 1,
+                            "fp_hists.sigmapsf": 1,
+                            "fp_hists.diffmaglim": 1,
+                            "fp_hists.band": 1,
+                            "fp_hists.psfFlux": 1,
+                            "fp_hists.psfFluxErr": 1,
+                            "fp_hists.zp": 1,
+                            "fp_hists.programid": 1,
+                            "fp_hists.snr": 1,
+                            // aliases
+                            "aliases": 1,
+                        }
+                    }
+                ],
                 "as": "aux"
             }
         },
         doc! {
             "$addFields": {
-                "aux": { "$arrayElemAt": ["$aux", 0] }
+                "prv_candidates": get_array_element("aux.prv_candidates"),
+                "prv_nondetections": get_array_element("aux.prv_nondetections"),
+                "fp_hists": get_array_element("aux.fp_hists"),
+                "aliases": get_array_dict_element("aux.aliases"),
+                "aux": mongodb::bson::Bson::Null,
             }
         },
-        // Lookup LSST cross-matches
         doc! {
+            // same here, we do a pipeline to be more efficient
             "$lookup": {
                 "from": "LSST_alerts_aux",
-                "let": {
-                    "lsst_ids": {
-                        "$cond": [
-                            { "$and": [{ "$isArray": "$aux.aliases.LSST" }, { "$gt": [{ "$size": "$aux.aliases.LSST" }, 0] }] },
-                            "$aux.aliases.LSST",
-                            []
-                        ]
-                    }
-                },
+                "let": { "lsst_obj_id": { "$arrayElemAt": [ "$aliases.LSST", 0 ] } },
                 "pipeline": [
-                    doc! { "$match": { "$expr": { "$in": ["$_id", "$$lsst_ids"] } } },
+                    doc! {
+                        "$match": {
+                            "$expr": {
+                                "$eq": [ "$_id", "$$lsst_obj_id" ]
+                            }
+                        }
+                    },
                     doc! {
                         "$project": {
-                            "_id": 1,
-                            "prv_candidates": 1,
-                            "fp_hists": 1,
+                            // prv_candidates up to 365 days
+                            "prv_candidates.jd": 1,
+                            "prv_candidates.magpsf": 1,
+                            "prv_candidates.sigmapsf": 1,
+                            "prv_candidates.diffmaglim": 1,
+                            "prv_candidates.band": 1,
+                            "prv_candidates.psfFlux": 1,
+                            "prv_candidates.psfFluxErr": 1,
+                            "prv_candidates.ra": 1,
+                            "prv_candidates.dec": 1,
+                            "prv_candidates.snr": 1,
+                            // fp_hists up to 365 days
+                            "fp_hists.jd": 1,
+                            "fp_hists.magpsf": 1,
+                            "fp_hists.sigmapsf": 1,
+                            "fp_hists.diffmaglim": 1,
+                            "fp_hists.band": 1,
+                            "fp_hists.psfFlux": 1,
+                            "fp_hists.psfFluxErr": 1,
+                            "fp_hists.snr": 1,
+                            // grab the ra from coordinates.radec_geojson
+                            "ra": { "$add": [
+                                { "$arrayElemAt": [ "$coordinates.radec_geojson.coordinates", 0 ] },
+                                180
+                            ] },
+                            "dec": { "$arrayElemAt": [ "$coordinates.radec_geojson.coordinates", 1 ] },
                         }
                     }
                 ],
-                "as": "lsst_xmatches"
+                "as": "lsst_aux"
             }
         },
         doc! {
-            "$project": doc! {
-                "objectId": 1,
-                "candidate": 1,
-                "prv_candidates": fetch_timeseries_op(
-                    "aux.prv_candidates",
-                    "candidate.jd",
-                    365,
-                    None
-                ),
-                "fp_hists": fetch_timeseries_op(
-                    "aux.fp_hists",
-                    "candidate.jd",
-                    365,
-                    Some(vec![doc! {
-                        "$gte": [
-                            "$$x.snr",
-                            3.0
-                        ]
-                    }]),
-                ),
-                "aliases": {
-                    "$ifNull": [
-                        "$aux.aliases",
-                        doc! {}
-                    ]
-                },
-                "survey_matches": {
-                    "lsst": {
-                        "$map": {
-                            "input": {
-                                "$ifNull": [
-                                    "$lsst_xmatches",
-                                    {"$ifNull": ["$aux.aliases.LSST", []]}
-                                ]
-                            },
-                            "as": "obj",
-                            "in": {
-                                "survey": "LSST",
-                                "object_id": {"$ifNull": ["$$obj._id", "$$obj"]},
-                                "prv_candidates": {"$ifNull": ["$$obj.prv_candidates", []]},
-                                "fp_hists": {"$ifNull": ["$$obj.fp_hists", []]}
-                            }
-                        }
+            "$addFields": {
+                "survey_matches.lsst": {
+                    "$cond": {
+                        "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
+                        "then": {
+                            "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                            "prv_candidates": get_array_element("lsst_aux.prv_candidates"),
+                            "prv_nondetections": get_array_element("lsst_aux.prv_nondetections"),
+                            "fp_hists": get_array_element("lsst_aux.fp_hists"),
+                            "ra": { "$arrayElemAt": [ "$lsst_aux.ra", 0 ] },
+                            "dec": { "$arrayElemAt": [ "$lsst_aux.dec", 0 ] },
+                        },
+                        "else": null
                     }
-                }
+                },
+                "lsst_aux": mongodb::bson::Bson::Null,
             }
         },
         doc! {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
-                "prv_candidates.jd": 1,
-                "prv_candidates.magpsf": 1,
-                "prv_candidates.sigmapsf": 1,
-                "prv_candidates.band": 1,
-                "fp_hists.jd": 1,
-                "fp_hists.magpsf": 1,
-                "fp_hists.sigmapsf": 1,
-                "fp_hists.band": 1,
+                "prv_candidates":  1,
+                "prv_nondetections": 1,
+                "fp_hists": 1,
                 "survey_matches": 1,
             }
         },
     ]
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema, JsonSchema)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
 pub struct ZtfSurveyMatches {
-    pub lsst: Vec<SurveyMatch>,
+    pub lsst: Option<LsstMatch>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+pub struct ZtfMatch {
+    // #[serde(rename = "_id")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub prv_candidates: Vec<ZtfPhotometry>,
+    pub prv_nondetections: Vec<ZtfPhotometry>,
+    pub fp_hists: Vec<ZtfPhotometry>,
 }
 
 /// ZTF alert structure used to deserialize alerts
@@ -152,8 +244,9 @@ pub struct ZtfAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<ZtfPhotometry>,
+    pub prv_nondetections: Vec<ZtfPhotometry>,
+    pub fp_hists: Vec<ZtfPhotometry>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -165,6 +258,7 @@ pub struct ZtfAlertProperties {
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
+    pub multisurvey_photstats: PerBandProperties,
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -402,14 +496,44 @@ impl ZtfEnrichmentWorker {
                 && distpsnr1 < 0.5
                 && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
 
-        let prv_candidates = alert.prv_candidates.clone();
-        let fp_hists = alert.fp_hists.clone();
+        let prv_candidates: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .filter_map(|p| p.to_photometry_mag())
+            .collect();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .filter_map(|p| p.to_photometry_mag())
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
+
+        // make a multisurvey lightcurve if we have LSST matches
+        let multisurvey_photstats = if let Some(survey_matches) = &alert.survey_matches {
+            if let Some(lsst_match) = &survey_matches.lsst {
+                let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
+                    .prv_candidates
+                    .iter()
+                    .filter_map(|p| p.to_photometry_mag())
+                    .collect();
+                let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
+                    .fp_hists
+                    .iter()
+                    .filter_map(|p| p.to_photometry_mag())
+                    .collect();
+                let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
+                prepare_photometry(&mut lsst_lightcurve);
+                lightcurve.extend(lsst_lightcurve);
+            }
+            analyze_photometry(&lightcurve).0
+        } else {
+            PerBandProperties::default()
+        };
 
         Ok((
             ZtfAlertProperties {
@@ -418,6 +542,7 @@ impl ZtfEnrichmentWorker {
                 near_brightstar: is_near_brightstar,
                 stationary,
                 photstats,
+                multisurvey_photstats,
             },
             all_bands_properties,
             programid,

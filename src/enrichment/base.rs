@@ -126,6 +126,7 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
     while let Some(result) = alert_cursor.next().await {
         match result {
             Ok(document) => {
+                println!("Fetched alert document: {:?}", document);
                 let alert: T = mongodb::bson::from_document(document)?;
                 alerts.push(alert);
             }
@@ -273,6 +274,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema, JsonSchema)]
 pub struct SurveyMatch {
     pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
     pub prv_candidates: Vec<PhotometryMag>,
     pub fp_hists: Vec<PhotometryMag>,
 }

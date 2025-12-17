@@ -4,8 +4,8 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
-use crate::enrichment::EnrichmentWorkerError;
-use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::PhotometryMag};
+use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
+use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use std::collections::HashMap;
@@ -43,8 +43,8 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
     pub properties: LsstAlertProperties,
     #[serde(rename = "cutoutScience")]
     pub cutout_science: Option<CutoutBytes>,
@@ -86,8 +86,9 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<ZtfPhotometry>,
+    pub prv_nondetections: Vec<ZtfPhotometry>,
+    pub fp_hists: Vec<ZtfPhotometry>,
     pub properties: ZtfAlertProperties,
     pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
     #[serde(rename = "cutoutScience")]
@@ -112,6 +113,7 @@ impl EnrichedZtfAlert {
             object_id: alert.object_id,
             candidate: alert.candidate,
             prv_candidates: alert.prv_candidates,
+            prv_nondetections: alert.prv_nondetections,
             fp_hists: alert.fp_hists,
             properties,
             cutout_science: cutout_science.map(CutoutBytes),
