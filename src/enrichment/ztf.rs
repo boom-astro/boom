@@ -50,10 +50,6 @@ pub struct ZtfPhotometry {
 impl ZtfPhotometry {
     pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
         // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
-        println!(
-            "ZtfPhotometry to_photometry_mag: jd={}, magpsf={:?}, sigmapsf={:?}, snr={:?}",
-            self.jd, self.magpsf, self.sigmapsf, self.snr
-        );
         match (self.snr, self.magpsf, self.sigmapsf) {
             (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
                 time: self.jd,
