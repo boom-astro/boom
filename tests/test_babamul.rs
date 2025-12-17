@@ -646,10 +646,14 @@ async fn test_babamul_lsst_with_ztf_match() {
 
 #[tokio::test]
 async fn test_babamul_ztf_with_lsst_match() {
-    use boom::alert::AlertWorker;
+    use boom::alert::{
+        AlertWorker, DiaForcedSource, DiaSource, LsstAliases, LsstCandidate, LsstForcedPhot,
+        LsstObject, ZtfObject,
+    };
     use boom::enrichment::EnrichmentWorker;
     use boom::utils::enums::Survey;
     use boom::utils::testing::AlertRandomizer;
+    use flare::Time;
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -657,6 +661,7 @@ async fn test_babamul_ztf_with_lsst_match() {
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let mut ztf_alert_worker = boom::utils::testing::ztf_alert_worker().await;
     delete_kafka_topic("babamul.ztf.none", &config).await;
+    let now = Time::now().to_jd();
 
     // Use unique ID based on current timestamp
     let timestamp = SystemTime::now()
@@ -672,60 +677,71 @@ async fn test_babamul_ztf_with_lsst_match() {
     // Insert the alert and get cutouts
     ztf_alert_worker.process_alert(&ztf_bytes).await.unwrap();
 
-    // Insert fake LSST aux for matching
-    let lsst_aux_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_aux");
-    let lsst_aux = doc! {
-        "_id": &lsst_match_id,
-        "object_id": &lsst_match_id,
-        "prv_candidates": [
-            doc! {
-                "jd": 2459999.5,
-                "magpsf": 18.0,
-                "sigmapsf": 0.05,
-                "diffmaglim": 20.0,
-                "band": "g",
-                "psfFlux": 1200.0,
-                "psfFluxErr": 12.0,
-                "ra": 180.0,
-                "dec": 0.0,
-                "snr": 100.0,
-            }
-        ],
-        "fp_hists": [
-            doc! {
-                "jd": 2459998.5,
-                "magpsf": 18.2,
-                "sigmapsf": 0.08,
-                "diffmaglim": 20.2,
-                "band": "g",
-                "psfFlux": 1150.0,
-                "psfFluxErr": 11.0,
-                "snr": 95.0,
-            }
-        ],
-        "aliases": doc! {},
-        "coordinates": doc! {
-            "radec_geojson": {
-                "type": "Point",
-                "coordinates": [0.0, 0.0],
-            },
-        },
+    // Insert fake LSST aux for matching using typed structs
+    let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
+
+    let lsst_dia_source = {
+        let mut dia = DiaSource::default();
+        dia.candid = 1;
+        dia.visit = 123456789;
+        dia.detector = 1;
+        dia.dia_object_id = Some(42);
+        dia.midpoint_mjd_tai = 60000.5;
+        dia.ra = 180.0;
+        dia.dec = 0.0;
+        dia.psf_flux = Some(1200.0);
+        dia.psf_flux_err = Some(12.0);
+        dia.ap_flux = Some(1250.0);
+        dia.ap_flux_err = Some(13.0);
+        dia.pixel_flags = Some(false);
+        dia.reliability = Some(0.95);
+        dia.band = Some(Band::G);
+        dia
     };
+
+    let lsst_candidate = LsstCandidate::try_from(lsst_dia_source.clone()).unwrap();
+
+    let lsst_forced_phot = LsstForcedPhot::try_from(DiaForcedSource {
+        dia_forced_source_id: 1,
+        object_id: 42,
+        ra: 180.0,
+        dec: 0.0,
+        visit: 123456789,
+        detector: 1,
+        psf_flux: Some(1150.0),
+        psf_flux_err: Some(11.0),
+        midpoint_mjd_tai: 60000.4,
+        science_flux: Some(1150.0),
+        science_flux_err: Some(11.0),
+        band: Some(Band::G),
+    })
+    .unwrap();
+
+    let lsst_aux = LsstObject {
+        object_id: lsst_match_id.clone(),
+        prv_candidates: vec![lsst_candidate],
+        fp_hists: vec![lsst_forced_phot],
+        cross_matches: None,
+        aliases: Some(LsstAliases {
+            ztf: Vec::new(),
+            decam: Vec::new(),
+        }),
+        coordinates: boom::utils::spatial::Coordinates::new(180.0, 0.0),
+        created_at: now,
+        updated_at: now,
+    };
+
     lsst_aux_collection
         .insert_one(&lsst_aux)
         .await
         .expect("Failed to insert LSST aux");
 
     // Update the ZTF aux with aliases pointing to LSST
-    let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
+    let ztf_aux_collection = db.collection::<ZtfObject>("ZTF_alerts_aux");
     ztf_aux_collection
         .update_one(
             doc! {"_id": &ztf_object_id},
-            doc! {
-                "$set": {
-                    "aliases.LSST": [&lsst_match_id],
-                }
-            },
+            doc! {"$set": {"aliases.LSST": [&lsst_match_id]}},
         )
         .await
         .expect("Failed to update ZTF aux with aliases");
