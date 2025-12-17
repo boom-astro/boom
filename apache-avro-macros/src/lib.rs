@@ -129,7 +129,9 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
                             let clean_name = Name::new(clean_name_str).expect("Unable to parse schema name");
                             Schema::Ref { name: clean_name }
                         }
-                        _ => panic!("Only record and ref schemas are supported")
+                        other => {
+                            panic!("Only record schemas are supported, found schema type: {:?}", other)
+                        }
                     }
                 }
             }

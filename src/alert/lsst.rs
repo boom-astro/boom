@@ -646,6 +646,7 @@ where
     Ok(Some(forced_phots))
 }
 
+#[serdavro]
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LsstAliases {
     #[serde(rename = "ZTF")]

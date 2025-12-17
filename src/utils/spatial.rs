@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-
 use crate::{conf, utils::o11y::logging::as_error};
-
 use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
