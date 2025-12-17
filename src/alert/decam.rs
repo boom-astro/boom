@@ -36,6 +36,11 @@ pub const DECAM_ZTF_XMATCH_RADIUS: f64 =
 pub const DECAM_LSST_XMATCH_RADIUS: f64 =
     (DECAM_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
+fn midpoint_mjd_utc_to_midpoint_mjd_tai(mjd: f64) -> f64 {
+    let epoch = hifitime::Epoch::from_mjd_utc(mjd);
+    epoch.to_mjd_tai(hifitime::Unit::Day)
+}
+
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
@@ -74,7 +79,8 @@ pub struct Candidate {
 pub struct DecamCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
-    pub jd: f64,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
 }
 
 impl TryFrom<Candidate> for DecamCandidate {
@@ -82,7 +88,7 @@ impl TryFrom<Candidate> for DecamCandidate {
 
     fn try_from(candidate: Candidate) -> Result<Self, Self::Error> {
         Ok(DecamCandidate {
-            jd: candidate.mjd + 2400000.5,
+            midpoint_mjd_tai: midpoint_mjd_utc_to_midpoint_mjd_tai(candidate.mjd),
             candidate,
         })
     }
@@ -114,7 +120,8 @@ where
 pub struct DecamForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
-    pub jd: f64,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
 }
 
 impl TryFrom<FpHist> for DecamForcedPhot {
@@ -122,7 +129,7 @@ impl TryFrom<FpHist> for DecamForcedPhot {
 
     fn try_from(fp_hist: FpHist) -> Result<Self, Self::Error> {
         Ok(DecamForcedPhot {
-            jd: fp_hist.mjd + 2400000.5,
+            midpoint_mjd_tai: midpoint_mjd_utc_to_midpoint_mjd_tai(fp_hist.mjd),
             fp_hist,
         })
     }
@@ -232,8 +239,8 @@ impl DecamAlertWorker {
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {
             "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "prv_candidates": update_timeseries_op("prv_candidates", "midpointMjdTai", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "fp_hists": update_timeseries_op("fp_hists", "midpointMjdTai", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
             }
@@ -417,7 +424,7 @@ mod tests {
         assert_eq!(alert.candid, candid);
         assert_eq!(alert.candidate.candidate.ra, ra);
         assert_eq!(alert.candidate.candidate.dec, dec);
-
+        assert!((alert.candidate.midpoint_mjd_tai - 60801.193733).abs() < 1e-6);
         // validate the fp_hists
         let fp_hists = alert.clone().fp_hists;
         assert_eq!(fp_hists.len(), 61);
@@ -425,7 +432,7 @@ mod tests {
         let fp_positive_det = fp_hists.get(0).unwrap();
         assert!((fp_positive_det.fp_hist.magap - 22.595936).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.sigmagap - 0.093660).abs() < 1e-6);
-        assert!((fp_positive_det.jd - 2460709.838387).abs() < 1e-6);
+        assert!((fp_positive_det.midpoint_mjd_tai - 60709.338815).abs() < 1e-6);
         assert_eq!(fp_positive_det.fp_hist.band, Band::G);
 
         // validate the cutouts

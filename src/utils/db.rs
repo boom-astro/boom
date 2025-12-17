@@ -117,11 +117,10 @@ pub fn get_array_element(field: &str) -> Document {
 }
 
 /// This function generates a MongoDB aggregation operation
-/// that filters an array field based on a time window relative to a candidate's jd field.
+/// that filters an array field based on a time window relative to a candidate's midpointMjdTai.
 /// It can also include optional conditions for filtering.
 pub fn fetch_timeseries_op(
     array_field: &str,
-    candidate_jd_field: &str,
     time_window: i32,
     optional_conditions: Option<Vec<Document>>,
 ) -> Document {
@@ -130,8 +129,8 @@ pub fn fetch_timeseries_op(
             "$lt": [
                 {
                     "$subtract": [
-                        format!("${}", candidate_jd_field),
-                        "$$x.jd"
+                        "$candidate.midpointMjdTai",
+                        "$$x.midpointMjdTai"
                     ]
                 },
                 time_window
@@ -139,8 +138,8 @@ pub fn fetch_timeseries_op(
         },
         doc! { // only datapoints up to (and including) current alert
             "$lte": [
-                "$$x.jd",
-                format!("${}", candidate_jd_field),
+                "$$x.midpointMjdTai",
+                "$candidate.midpointMjdTai"
             ]
         },
     ];

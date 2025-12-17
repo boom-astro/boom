@@ -73,7 +73,7 @@ pub async fn get_object(
     // Find options for getting most recent alert from alerts collection
     let find_options_recent = mongodb::options::FindOptions::builder()
         .sort(doc! {
-            "candidate.jd": -1,
+            "candidate.midpointMjdTai": -1,
         })
         .projection(doc! {
             "candidate": 1,

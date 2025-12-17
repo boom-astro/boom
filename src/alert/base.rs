@@ -215,6 +215,8 @@ pub enum AlertError {
     UnknownFid(i32),
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("missing exposure time")]
+    MissingExposureTime,
 }
 
 #[derive(Debug, PartialEq)]

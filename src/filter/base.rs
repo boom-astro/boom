@@ -67,7 +67,7 @@ const ALERT_SCHEMA: &str = r#"
     "fields": [
         {"name": "candid", "type": "long"},
         {"name": "objectId", "type": "string"},
-        {"name": "jd", "type": "double"},
+        {"name": "mjd", "type": "double", "doc": "mjd of the midpoint of the candidate observation, in TAI"},
         {"name": "ra", "type": "double"},
         {"name": "dec", "type": "double"},
         {"name":"survey","type":{"type":"enum","name":"Survey","symbols":["ZTF","LSST","DECAM"]}},
@@ -101,7 +101,7 @@ const ALERT_SCHEMA: &str = r#"
                 "type": "record",
                 "name": "Photometry",
                 "fields": [
-                    {"name": "jd", "type": "double"},
+                    {"name": "mjd", "type": "double", "doc": "midpoint mjd in TAI"},
                     {"name": "flux",  "type": ["null", "double"], "doc": "in nJy"},
                     {"name": "flux_err",  "type":"double", "doc": "in nJy"},
                     {"name":"band","type":"string"},
@@ -173,7 +173,7 @@ pub enum Origin {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
-    pub jd: f64,
+    pub mjd: f64,          // midpoint mjd in TAI
     pub flux: Option<f64>, // in nJy
     pub flux_err: f64,     // in nJy
     pub band: String,
@@ -204,7 +204,7 @@ pub struct Alert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
-    pub jd: f64,
+    pub mjd: f64, // midpoint mjd in TAI
     pub ra: f64,
     pub dec: f64,
     pub survey: Survey,
@@ -1017,7 +1017,7 @@ mod tests {
         let alert = Alert {
             candid: 123456789,
             object_id: "ZTF18aaayemv".to_string(),
-            jd: 2459123.12345,
+            mjd: 2459123.12345,
             ra: 123.456789,
             dec: -12.3456789,
             survey: Survey::Ztf,
@@ -1049,7 +1049,7 @@ mod tests {
         let alert = Alert {
             candid: 123456789,
             object_id: "ZTF18aaayemv".to_string(),
-            jd: 2459123.12345,
+            mjd: 2459123.12345,
             ra: 123.456789,
             dec: -12.3456789,
             survey: Survey::Ztf,
@@ -1077,8 +1077,8 @@ mod tests {
         let found = uses_field_in_stage(&stage_json, "candidate.drb");
         assert!(found);
 
-        // uses_field_in_stage should return false for "candidate.jd"
-        let found = uses_field_in_stage(&stage_json, "candidate.jd");
+        // uses_field_in_stage should return false for "candidate.midpointMjdTai"
+        let found = uses_field_in_stage(&stage_json, "candidate.midpointMjdTai");
         assert!(!found);
 
         // uses_field_in_stage should return true for "LSST.prv_candidates"
@@ -1120,8 +1120,8 @@ mod tests {
         let stage_index = uses_field_in_filter(&pipeline, "prv_candidates");
         assert!(stage_index.is_none());
 
-        // uses_field_in_filter should return false for "candidate.jd"
-        let stage_index = uses_field_in_filter(&pipeline, "candidate.jd");
+        // uses_field_in_filter should return false for "candidate.midpointMjdTai"
+        let stage_index = uses_field_in_filter(&pipeline, "candidate.midpointMjdTai");
         assert!(stage_index.is_none());
     }
 

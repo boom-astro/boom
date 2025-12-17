@@ -54,23 +54,13 @@ pub fn build_ztf_aux_data(
     if use_ztf_prv_candidates_index.is_some() {
         ztf_aux_add_fields.insert(
             "ZTF.prv_candidates".to_string(),
-            fetch_timeseries_op(
-                "ztf_aux.prv_candidates",
-                "candidate.jd",
-                365,
-                permissions_check.clone(),
-            ),
+            fetch_timeseries_op("ztf_aux.prv_candidates", 365, permissions_check.clone()),
         );
     }
     if use_ztf_fp_hists_index.is_some() {
         ztf_aux_add_fields.insert(
             "ZTF.fp_hists".to_string(),
-            fetch_timeseries_op(
-                "ztf_aux.fp_hists",
-                "candidate.jd",
-                365,
-                permissions_check.clone(),
-            ),
+            fetch_timeseries_op("ztf_aux.fp_hists", 365, permissions_check.clone()),
         );
     }
 
@@ -149,7 +139,7 @@ pub async fn build_ztf_alerts(
         doc! {
             "$project": {
                 "objectId": 1,
-                "jd": "$candidate.jd",
+                "mjd": "$candidate.midpointMjdTai",
                 "ra": "$candidate.ra",
                 "dec": "$candidate.dec",
                 "rb": "$candidate.rb",
@@ -176,7 +166,7 @@ pub async fn build_ztf_alerts(
         doc! {
             "$project": {
                 "objectId": 1,
-                "jd": 1,
+                "mjd": 1,
                 "ra": 1,
                 "dec": 1,
                 "prv_candidates": get_array_element("aux.prv_candidates"),
@@ -198,7 +188,7 @@ pub async fn build_ztf_alerts(
         let alert_document = alert_document?;
         let candid = alert_document.get_i64("_id")?;
         let object_id = alert_document.get_str("objectId")?.to_string();
-        let jd = alert_document.get_f64("jd")?;
+        let mjd = alert_document.get_f64("mjd")?;
         let ra = alert_document.get_f64("ra")?;
         let dec = alert_document.get_f64("dec")?;
         let cutout_science = alert_document.get_binary_generic("cutoutScience")?.to_vec();
@@ -216,7 +206,7 @@ pub async fn build_ztf_alerts(
                 Some(doc) => doc,
                 None => continue, // skip if not a document
             };
-            let jd = doc.get_f64("jd")?;
+            let mjd = doc.get_f64("mjd")?;
             let flux = doc.get_f64("psfFlux")?; // in nJy
             let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
             let band = doc.get_str("band")?.to_string();
@@ -225,7 +215,7 @@ pub async fn build_ztf_alerts(
             let dec = doc.get_f64("dec").ok(); // optional, might not be present
 
             photometry.push(Photometry {
-                jd,
+                mjd,
                 flux: Some(flux),
                 flux_err,
                 band: format!("ztf{}", band),
@@ -244,13 +234,13 @@ pub async fn build_ztf_alerts(
                 Some(doc) => doc,
                 None => continue, // skip if not a document
             };
-            let jd = doc.get_f64("jd")?;
+            let mjd = doc.get_f64("mjd")?;
             let flux_err = doc.get_f64("psfFluxErr")?;
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
 
             photometry.push(Photometry {
-                jd,
+                mjd,
                 flux: None, // for non-detections, flux is None
                 flux_err,
                 band: format!("ztf{}", band),
@@ -273,7 +263,7 @@ pub async fn build_ztf_alerts(
             if doc.get_str("procstatus")? != "0" {
                 continue;
             }
-            let jd = doc.get_f64("jd")?;
+            let mjd = doc.get_f64("mjd")?;
             let magzpsci = doc.get_f64("magzpsci")?;
             let flux = doc.get_f64("psfFlux").ok();
             let flux_err = doc.get_f64("psfFluxErr")?;
@@ -281,7 +271,7 @@ pub async fn build_ztf_alerts(
             let programid = doc.get_i32("programid")?;
 
             photometry.push(Photometry {
-                jd,
+                mjd,
                 flux,
                 flux_err,
                 band: format!("ztf{}", band),
@@ -294,8 +284,8 @@ pub async fn build_ztf_alerts(
             });
         }
 
-        // sort the photometry by jd ascending
-        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+        // sort the photometry by mjd ascending
+        photometry.sort_by(|a, b| a.mjd.partial_cmp(&b.mjd).unwrap());
 
         // last but not least, we need to get the classifications
         let mut classifications = Vec::new();
@@ -329,7 +319,7 @@ pub async fn build_ztf_alerts(
         let alert = Alert {
             candid,
             object_id,
-            jd,
+            mjd,
             ra,
             dec,
             filters: alerts_with_filter_results
@@ -402,7 +392,6 @@ pub async fn build_ztf_filter_pipeline(
             "prv_candidates".to_string(),
             fetch_timeseries_op(
                 "aux.prv_candidates",
-                "candidate.jd",
                 365,
                 Some(vec![doc! {
                     "$in": [
@@ -418,7 +407,6 @@ pub async fn build_ztf_filter_pipeline(
             "prv_nondetections".to_string(),
             fetch_timeseries_op(
                 "aux.prv_nondetections",
-                "candidate.jd",
                 365,
                 Some(vec![doc! {
                     "$in": [
@@ -434,7 +422,6 @@ pub async fn build_ztf_filter_pipeline(
             "fp_hists".to_string(),
             fetch_timeseries_op(
                 "aux.fp_hists",
-                "candidate.jd",
                 365,
                 Some(vec![doc! {
                     "$in": [

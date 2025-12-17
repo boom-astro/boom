@@ -48,7 +48,7 @@ pub enum Band {
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct PhotometryMag {
-    #[serde(alias = "jd")]
+    #[serde(alias = "midpointMjdTai")]
     pub time: f64,
     #[serde(alias = "magpsf")]
     pub mag: f32,

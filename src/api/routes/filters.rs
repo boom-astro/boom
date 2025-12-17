@@ -74,7 +74,7 @@ async fn run_test_pipeline(
     let result = collection
         .find_one(doc! {})
         .projection(doc! { "_id": 1 })
-        .sort(doc! { "candidate.jd": -1 })
+        .sort(doc! { "candidate.midpointMjdTai": -1 })
         .await?;
     let candid = match result {
         Some(doc) => match doc.get_i64("_id").ok() {
@@ -490,8 +490,8 @@ async fn build_test_filter_pipeline(
     survey: &Survey,
     permissions: &HashMap<Survey, Vec<i32>>,
     pipeline: &Vec<serde_json::Value>,
-    start_jd: Option<f64>,
-    end_jd: Option<f64>,
+    start_mjd: Option<f64>,
+    end_mjd: Option<f64>,
     object_ids: Option<Vec<String>>,
     candids: Option<Vec<String>>,
 ) -> Result<Vec<Document>, FilterError> {
@@ -505,18 +505,21 @@ async fn build_test_filter_pipeline(
     // the first stage of test_pipeline is a match stage, we can overwrite it based on the test criteria
     let mut match_stage = Document::new();
 
-    if let (Some(start_jd), Some(end_jd)) = (start_jd, end_jd) {
-        if end_jd <= start_jd {
+    if let (Some(start_mjd), Some(end_mjd)) = (start_mjd, end_mjd) {
+        if end_mjd <= start_mjd {
             return Err(FilterError::InvalidFilterPipeline(
-                "end_jd cannot be less than or equal to start_jd".to_string(),
+                "end_mjd cannot be less than or equal to start_mjd".to_string(),
             ));
         }
-        if end_jd - start_jd > 7.0 {
+        if end_mjd - start_mjd > 7.0 {
             return Err(FilterError::InvalidFilterPipeline(
-                "JD window for filter test cannot exceed 7.0 JD".to_string(),
+                "MJD window for filter test cannot exceed 7.0 MJD".to_string(),
             ));
         }
-        match_stage.insert("candidate.jd", doc! { "$gte": start_jd, "$lte": end_jd });
+        match_stage.insert(
+            "candidate.midpointMjdTai",
+            doc! { "$gte": start_mjd, "$lte": end_mjd },
+        );
     }
 
     let obj_ids: Vec<String> = object_ids
@@ -598,8 +601,8 @@ pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
-    pub start_jd: Option<f64>,
-    pub end_jd: Option<f64>,
+    pub start_mjd: Option<f64>,
+    pub end_mjd: Option<f64>,
     #[schema(max_items = 1000)]
     pub object_ids: Option<Vec<String>>,
     #[schema(max_items = 100000)]
@@ -652,8 +655,8 @@ pub async fn post_filter_test(
         &survey,
         &permissions,
         &pipeline,
-        body.start_jd,
-        body.end_jd,
+        body.start_mjd,
+        body.end_mjd,
         body.object_ids,
         body.candids,
     )
@@ -730,8 +733,8 @@ pub struct FilterTestCountRequest {
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
-    pub start_jd: Option<f64>,
-    pub end_jd: Option<f64>,
+    pub start_mjd: Option<f64>,
+    pub end_mjd: Option<f64>,
     #[schema(max_items = 1000)]
     pub object_ids: Option<Vec<String>>,
     #[schema(max_items = 100000)]
@@ -781,8 +784,8 @@ pub async fn post_filter_test_count(
         &survey,
         &permissions,
         &pipeline,
-        body.start_jd,
-        body.end_jd,
+        body.start_mjd,
+        body.end_mjd,
         body.object_ids,
         body.candids,
     )

@@ -33,6 +33,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         psf_flux_err: 10.0,
         snr: 100.0,
         band: Band::G,
+        midpoint_mjd_tai: 60000.5,
     };
 
     EnrichedZtfAlert {
@@ -85,7 +86,6 @@ fn create_mock_enriched_lsst_alert(
         candidate: LsstCandidate {
             dia_source,
             object_id: object_id.to_string(),
-            jd: 2460000.5,
             magpsf: 18.5,
             sigmapsf: 0.1,
             diffmaglim: 20.5,

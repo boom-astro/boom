@@ -19,7 +19,6 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
-use hifitime::Epoch;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -207,7 +206,6 @@ pub struct LsstCandidate {
     pub dia_source: DiaSource,
     #[serde(rename = "objectId")]
     pub object_id: String,
-    pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
     pub diffmaglim: f32,
@@ -221,7 +219,6 @@ pub struct LsstCandidate {
 impl TryFrom<DiaSource> for LsstCandidate {
     type Error = AlertError;
     fn try_from(dia_source: DiaSource) -> Result<Self, Self::Error> {
-        let jd = Epoch::from_mjd_tai(dia_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
         let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
 
@@ -256,7 +253,6 @@ impl TryFrom<DiaSource> for LsstCandidate {
         Ok(LsstCandidate {
             dia_source,
             object_id,
-            jd,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -510,7 +506,6 @@ pub struct DiaForcedSource {
 pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
-    pub jd: f64,
     pub magpsf: Option<f32>,
     pub sigmapsf: Option<f32>,
     pub diffmaglim: f32,
@@ -521,7 +516,6 @@ pub struct LsstForcedPhot {
 impl TryFrom<DiaForcedSource> for LsstForcedPhot {
     type Error = AlertError;
     fn try_from(dia_forced_source: DiaForcedSource) -> Result<Self, Self::Error> {
-        let jd = Epoch::from_mjd_tai(dia_forced_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux_err = dia_forced_source
             .psf_flux_err
             .ok_or(AlertError::MissingFluxPSF)?;
@@ -550,7 +544,6 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
 
         Ok(LsstForcedPhot {
             dia_forced_source,
-            jd,
             magpsf,
             sigmapsf,
             diffmaglim,
@@ -732,8 +725,8 @@ impl LsstAlertWorker {
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {
             "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "prv_candidates": update_timeseries_op("prv_candidates", "midpointMjdTai", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "fp_hists": update_timeseries_op("fp_hists", "midpointMjdTai", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
             }
@@ -938,7 +931,6 @@ mod tests {
         assert_eq!(alert.candidate.object_id, object_id);
         assert!((alert.candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((alert.candidate.dia_source.dec - dec).abs() < 1e-6);
-        assert!((alert.candidate.jd - 2460961.732664).abs() < 1e-6);
         assert!((alert.candidate.magpsf - 23.674994).abs() < 1e-6);
         assert!((alert.candidate.sigmapsf - 0.217043).abs() < 1e-6);
         assert!((alert.candidate.diffmaglim - 23.675514).abs() < 1e-5);

@@ -45,13 +45,11 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "candidate": 1,
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
-                    "candidate.jd",
                     365,
                     None
                 ),
                 "fp_hists": fetch_timeseries_op(
                     "aux.fp_hists",
-                    "candidate.jd",
                     365,
                     Some(vec![doc! {
                         "$gte": [
@@ -67,11 +65,11 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
-                "prv_candidates.jd": 1,
+                "prv_candidates.midpointMjdTai": 1,
                 "prv_candidates.magpsf": 1,
                 "prv_candidates.sigmapsf": 1,
                 "prv_candidates.band": 1,
-                "fp_hists.jd": 1,
+                "fp_hists.midpointMjdTai": 1,
                 "fp_hists.magpsf": 1,
                 "fp_hists.sigmapsf": 1,
                 "fp_hists.band": 1,

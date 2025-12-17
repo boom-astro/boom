@@ -104,6 +104,7 @@ pub struct PrvCandidate {
     pub decnr: Option<f64>,
     pub scorr: Option<f64>,
     pub magzpsci: Option<f32>,
+    pub exptime: Option<f32>,
 }
 
 #[serde_as]
@@ -119,6 +120,13 @@ pub struct ZtfPrvCandidate {
     pub psf_flux_err: Option<f32>,
     pub snr: Option<f32>,
     pub band: Band,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
+}
+
+fn startjdutc_to_midpoint_mjd_tai(jd: f64, exposure: f64) -> f64 {
+    let epoch = hifitime::Epoch::from_jde_utc(jd + exposure / 2.0);
+    epoch.to_mjd_tai(hifitime::Unit::Day)
 }
 
 impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
@@ -129,6 +137,10 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
         let isdiffpos = prv_candidate.isdiffpos;
         let diffmaglim = prv_candidate.diffmaglim;
         let band = fid2band(prv_candidate.fid)?;
+        let exposure = prv_candidate
+            .exptime
+            .ok_or(AlertError::MissingExposureTime)?;
+        let midpoint_mjd_tai = startjdutc_to_midpoint_mjd_tai(prv_candidate.jd, exposure as f64);
 
         let (psf_flux, psf_flux_err, snr) = match (magpsf, sigmapsf, isdiffpos, diffmaglim) {
             (Some(mag), Some(sigmag), Some(isdiff), _) => {
@@ -159,6 +171,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             psf_flux_err,
             snr,
             band,
+            midpoint_mjd_tai,
         })
     }
 }
@@ -253,6 +266,8 @@ pub struct ZtfForcedPhot {
     pub isdiffpos: Option<bool>,
     pub snr: Option<f32>,
     pub band: Band,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
 }
 
 impl TryFrom<FpHist> for ZtfForcedPhot {
@@ -264,6 +279,8 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
+        let exposure = fp_hist.exptime.ok_or(AlertError::MissingExposureTime)?;
+        let midpoint_mjd_tai = startjdutc_to_midpoint_mjd_tai(fp_hist.jd, exposure as f64);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
@@ -293,6 +310,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             isdiffpos,
             snr,
             band,
+            midpoint_mjd_tai,
         })
     }
 }
@@ -455,6 +473,8 @@ pub struct ZtfCandidate {
     pub psf_flux_err: f32,
     pub snr: f32,
     pub band: Band,
+    #[serde(rename = "midpointMjdTai")]
+    pub midpoint_mjd_tai: f64,
 }
 
 impl TryFrom<Candidate> for ZtfCandidate {
@@ -465,6 +485,8 @@ impl TryFrom<Candidate> for ZtfCandidate {
         let sigmapsf = candidate.sigmapsf;
         let isdiffpos = candidate.isdiffpos;
         let band = fid2band(candidate.fid)?;
+        let exposure = candidate.exptime.ok_or(AlertError::MissingExposureTime)?;
+        let midpoint_mjd_tai = startjdutc_to_midpoint_mjd_tai(candidate.jd, exposure as f64);
 
         let (flux, flux_err) = mag2flux(magpsf, sigmapsf, ZTF_ZP);
 
@@ -478,6 +500,7 @@ impl TryFrom<Candidate> for ZtfCandidate {
             psf_flux_err: flux_err * 1e9_f32, // convert to nJy
             snr: flux / flux_err,
             band,
+            midpoint_mjd_tai,
         })
     }
 }
@@ -527,11 +550,13 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
                 decnr: Some(ztf_candidate.candidate.decnr),
                 scorr: ztf_candidate.candidate.scorr,
                 magzpsci: ztf_candidate.candidate.magzpsci,
+                exptime: ztf_candidate.candidate.exptime,
             },
             psf_flux: Some(ztf_candidate.psf_flux),
             psf_flux_err: Some(ztf_candidate.psf_flux_err),
             snr: Some(ztf_candidate.snr),
             band: ztf_candidate.band.clone(),
+            midpoint_mjd_tai: ztf_candidate.midpoint_mjd_tai,
         })
     }
 }
@@ -676,9 +701,9 @@ impl ZtfAlertWorker {
     ) -> Result<(), AlertError> {
         let update_pipeline = vec![doc! {
             "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "prv_candidates": update_timeseries_op("prv_candidates", "midpointMjdTai", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "prv_nondetections": update_timeseries_op("prv_nondetections", "midpointMjdTai", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "fp_hists": update_timeseries_op("fp_hists", "midpointMjdTai", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
             }
@@ -905,6 +930,7 @@ mod tests {
         assert_eq!(avro_alert.candid, candid);
         assert_eq!(avro_alert.candidate.candidate.ra, ra);
         assert_eq!(avro_alert.candidate.candidate.dec, dec);
+        assert!((avro_alert.candidate.midpoint_mjd_tai - 60464.378889).abs() < 1e-6);
 
         // validate the prv_candidates
         let prv_candidates = avro_alert.clone().prv_candidates;
@@ -939,6 +965,11 @@ mod tests {
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
+        println!(
+            "fp_negative_det.midpoint_mjd_tai: {}",
+            fp_negative_det.midpoint_mjd_tai
+        );
+        assert!((fp_negative_det.midpoint_mjd_tai - 2460447.920278).abs() < 1e-6);
         assert_eq!(fp_negative_det.band, Band::G);
 
         let fp_positive_det = fp_hists.get(9).unwrap();
@@ -947,7 +978,12 @@ mod tests {
         assert!((fp_positive_det.fp_hist.diffmaglim.unwrap() - 19.7873).abs() < 1e-6);
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
+        println!(
+            "fp_positive_det.midpoint_mjd_tai: {}",
+            fp_positive_det.midpoint_mjd_tai
+        );
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
+        assert!((fp_positive_det.midpoint_mjd_tai - 2460420.9637616).abs() < 1e-6);
         assert_eq!(fp_positive_det.band, Band::G);
 
         // validate the cutouts
