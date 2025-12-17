@@ -235,8 +235,6 @@ pub struct LsstAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    // pub prv_candidates: Vec<PhotometryMag>,
-    // pub fp_hists: Vec<PhotometryMag>,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub survey_matches: Option<LsstSurveyMatches>,
