@@ -330,13 +330,21 @@ async fn test_babamul_filters_pixel_flags() {
 
 #[tokio::test]
 async fn test_babamul_lsst_with_ztf_match() {
+    use boom::alert::{
+        AlertCutout, DiaForcedSource, FpHist, LsstAlert, LsstAliases, LsstForcedPhot, LsstObject,
+        PrvCandidate as ZtfPrvCandidateFields, ZtfAliases, ZtfForcedPhot, ZtfObject,
+        ZtfPrvCandidate,
+    };
     use boom::enrichment::EnrichmentWorker;
+    use boom::utils::spatial::Coordinates;
+    use flare::Time;
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let db = boom::conf::get_test_db().await;
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     delete_kafka_topic("babamul.lsst.none", &config).await;
+    let now = Time::now().to_jd();
 
     // Use unique IDs based on current timestamp to avoid collisions
     let timestamp = SystemTime::now()
@@ -348,10 +356,10 @@ async fn test_babamul_lsst_with_ztf_match() {
     let lsst_alert_id = 9876543220i64 + (timestamp % 1000000) as i64;
 
     // Ensure a clean slate for these IDs
-    let ztf_aux_collection = db.collection::<mongodb::bson::Document>("ZTF_alerts_aux");
-    let lsst_alerts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts");
-    let lsst_aux_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_aux");
-    let lsst_cutouts_collection = db.collection::<mongodb::bson::Document>("LSST_alerts_cutouts");
+    let ztf_aux_collection = db.collection::<ZtfObject>("ZTF_alerts_aux");
+    let lsst_alerts_collection = db.collection::<LsstAlert>("LSST_alerts");
+    let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
+    let lsst_cutouts_collection = db.collection::<AlertCutout>("LSST_alerts_cutouts");
 
     ztf_aux_collection
         .delete_many(doc! {"_id": {"$in": [&ztf_match_id]}})
@@ -371,42 +379,59 @@ async fn test_babamul_lsst_with_ztf_match() {
         .expect("Failed to cleanup LSST cutouts fixture");
 
     // Insert ZTF aux with alias data
-    let ztf_aux = doc! {
-        "_id": &ztf_match_id,
-        "object_id": &ztf_match_id,
-        "prv_candidates": [
-            doc! {
-                "jd": 2459999.5,
-                "magpsf": 19.0,
-                "sigmapsf": 0.07,
-                "diffmaglim": 21.0,
-                "band": "g",
-                "psfFlux": 1300.0,
-                "psfFluxErr": 13.0,
-                "ra": 180.0,
-                "dec": 0.0,
-                "programid": 1,
-            }
-        ],
-        "fp_hists": [
-            doc! {
-                "jd": 2459998.5,
-                "magpsf": 19.2,
-                "sigmapsf": 0.09,
-                "diffmaglim": 21.2,
-                "band": "g",
-                "psfFlux": 1250.0,
-                "psfFluxErr": 12.0,
-                "programid": 1,
-            }
-        ],
-        "aliases": doc! {},
-        "coordinates": doc! {
-            "radec_geojson": {
-                "type": "Point",
-                "coordinates": [0.0, 0.0],
-            },
+    let ztf_prv_candidate = ZtfPrvCandidate {
+        prv_candidate: ZtfPrvCandidateFields {
+            jd: 2459999.5,
+            fid: 1,
+            pid: 1,
+            programid: 1,
+            ra: Some(180.0),
+            dec: Some(0.0),
+            magpsf: Some(19.0),
+            sigmapsf: Some(0.07),
+            diffmaglim: Some(21.0),
+            ..Default::default()
         },
+        psf_flux: Some(1300.0),
+        psf_flux_err: Some(13.0),
+        snr: Some(100.0),
+        band: Band::G,
+    };
+
+    let ztf_forced_phot = ZtfForcedPhot {
+        fp_hist: FpHist {
+            fid: 1,
+            pid: 1,
+            rfid: 1,
+            jd: 2459998.5,
+            diffmaglim: Some(21.2),
+            programid: 1,
+            forcediffimflux: Some(1250.0),
+            forcediffimfluxunc: Some(12.0),
+            ..Default::default()
+        },
+        magpsf: Some(19.2),
+        sigmapsf: Some(0.09),
+        psf_flux: Some(1250.0),
+        psf_flux_err: Some(12.0),
+        isdiffpos: Some(true),
+        snr: Some(100.0),
+        band: Band::G,
+    };
+
+    let ztf_aux = ZtfObject {
+        object_id: ztf_match_id.clone(),
+        prv_candidates: vec![ztf_prv_candidate],
+        prv_nondetections: Vec::new(),
+        fp_hists: vec![ztf_forced_phot],
+        cross_matches: None,
+        aliases: Some(ZtfAliases {
+            lsst: Vec::new(),
+            decam: Vec::new(),
+        }),
+        coordinates: Coordinates::new(180.0, 0.0),
+        created_at: now,
+        updated_at: now,
     };
 
     ztf_aux_collection
@@ -415,35 +440,46 @@ async fn test_babamul_lsst_with_ztf_match() {
         .expect("Failed to insert ZTF aux");
 
     // Insert LSST alert with good reliability and no flags
-    let lsst_alert = doc! {
-        "_id": lsst_alert_id,
-        "objectId": &lsst_object_id,
-        "candidate": doc! {
-            "candid": lsst_alert_id,
-            "visit": 123456789,
-            "detector": 1,
-            "ra": 180.0,
-            "dec": 0.0,
-            "magpsf": 18.5,
-            "sigmapsf": 0.1,
-            "diffmaglim": 20.5,
-            "isdiffpos": true,
-            "snr": 100.0,
-            "magap": 18.6,
-            "sigmagap": 0.12,
-            "objectId": &lsst_object_id,
-            "jd": 2460000.5,
-            "psf_flux": 1000.0,
-            "psf_flux_err": 10.0,
-            "ap_flux": 1100.0,
-            "ap_flux_err": 15.0,
-            "is_sso": false,
-            "reliability": 0.9,
-        },
-        "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
-        },
+    let lsst_dia_source = {
+        let mut dia_source = DiaSource::default();
+        dia_source.candid = lsst_alert_id;
+        dia_source.visit = 123456789;
+        dia_source.detector = 1;
+        dia_source.dia_object_id = Some(987654321);
+        dia_source.midpoint_mjd_tai = 60000.5;
+        dia_source.ra = 180.0;
+        dia_source.dec = 0.0;
+        dia_source.psf_flux = Some(1000.0);
+        dia_source.psf_flux_err = Some(10.0);
+        dia_source.ap_flux = Some(1100.0);
+        dia_source.ap_flux_err = Some(15.0);
+        dia_source.pixel_flags = Some(false);
+        dia_source.reliability = Some(0.9);
+        dia_source.band = Some(Band::G);
+        dia_source
+    };
+
+    let lsst_candidate = LsstCandidate {
+        dia_source: lsst_dia_source.clone(),
+        object_id: lsst_object_id.clone(),
+        jd: 2460000.5,
+        magpsf: 18.5,
+        sigmapsf: 0.1,
+        diffmaglim: 20.5,
+        isdiffpos: true,
+        snr: 100.0,
+        magap: 18.6,
+        sigmagap: 0.12,
+        is_sso: false,
+    };
+
+    let lsst_alert = LsstAlert {
+        candid: lsst_alert_id,
+        object_id: lsst_object_id.clone(),
+        candidate: lsst_candidate.clone(),
+        coordinates: Coordinates::new(180.0, 0.0),
+        created_at: now,
+        updated_at: now,
     };
 
     lsst_alerts_collection
@@ -452,11 +488,11 @@ async fn test_babamul_lsst_with_ztf_match() {
         .expect("Failed to insert LSST alert");
 
     // Insert cutouts for the alert
-    let cutout_doc = doc! {
-        "_id": lsst_alert_id,
-        "cutoutScience": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3, 4, 5] },
-        "cutoutTemplate": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![6, 7, 8, 9, 10] },
-        "cutoutDifference": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![11, 12, 13, 14, 15] },
+    let cutout_doc = AlertCutout {
+        candid: lsst_alert_id,
+        cutout_science: vec![1, 2, 3, 4, 5],
+        cutout_template: vec![6, 7, 8, 9, 10],
+        cutout_difference: vec![11, 12, 13, 14, 15],
     };
 
     lsst_cutouts_collection
@@ -465,41 +501,41 @@ async fn test_babamul_lsst_with_ztf_match() {
         .expect("Failed to insert LSST cutout");
 
     // Insert LSST aux with aliases pointing to ZTF
-    let lsst_aux = doc! {
-        "_id": &lsst_object_id,
-        "prv_candidates": [
-            doc! {
-                "jd": 2459999.5,
-                "magpsf": 18.0,
-                "sigmapsf": 0.05,
-                "diffmaglim": 20.0,
-                "band": "g",
-                "psfFlux": 1200.0,
-                "psfFluxErr": 12.0,
-                "ra": 180.0,
-                "dec": 0.0,
-                "snr": 110.0,
-            }
-        ],
-        "fp_hists": [
-            doc! {
-                "jd": 2459998.5,
-                "magpsf": 18.2,
-                "sigmapsf": 0.08,
-                "diffmaglim": 20.2,
-                "band": "g",
-                "psfFlux": 1150.0,
-                "psfFluxErr": 11.0,
-                "snr": 105.0,
-            }
-        ],
-        "aliases": doc! {
-            "ZTF": [&ztf_match_id],
+    let lsst_forced_phot = LsstForcedPhot {
+        dia_forced_source: DiaForcedSource {
+            dia_forced_source_id: 1,
+            object_id: 987654321,
+            ra: 180.0,
+            dec: 0.0,
+            visit: 123456789,
+            detector: 1,
+            psf_flux: Some(1150.0),
+            psf_flux_err: Some(11.0),
+            midpoint_mjd_tai: 60000.4,
+            science_flux: Some(1150.0),
+            science_flux_err: Some(11.0),
+            band: Some(Band::G),
         },
-        "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
-        },
+        jd: 2459998.5,
+        magpsf: Some(18.2),
+        sigmapsf: Some(0.08),
+        diffmaglim: 20.2,
+        isdiffpos: Some(true),
+        snr: Some(105.0),
+    };
+
+    let lsst_aux = LsstObject {
+        object_id: lsst_object_id.clone(),
+        prv_candidates: vec![lsst_candidate.clone()],
+        fp_hists: vec![lsst_forced_phot],
+        cross_matches: None,
+        aliases: Some(LsstAliases {
+            ztf: vec![ztf_match_id.clone()],
+            decam: Vec::new(),
+        }),
+        coordinates: Coordinates::new(180.0, 0.0),
+        created_at: now,
+        updated_at: now,
     };
 
     lsst_aux_collection
