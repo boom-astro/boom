@@ -137,9 +137,8 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
         let isdiffpos = prv_candidate.isdiffpos;
         let diffmaglim = prv_candidate.diffmaglim;
         let band = fid2band(prv_candidate.fid)?;
-        let exposure = prv_candidate
-            .exptime
-            .ok_or(AlertError::MissingExposureTime)?;
+        // we assume a default exposure time of 30s if not provided
+        let exposure = prv_candidate.exptime.unwrap_or(30.0);
         let midpoint_mjd_tai = startjdutc_to_midpoint_mjd_tai(prv_candidate.jd, exposure as f64);
 
         let (psf_flux, psf_flux_err, snr) = match (magpsf, sigmapsf, isdiffpos, diffmaglim) {
@@ -279,7 +278,8 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
-        let exposure = fp_hist.exptime.ok_or(AlertError::MissingExposureTime)?;
+        // we assume a default exposure time of 30s if not provided
+        let exposure = fp_hist.exptime.unwrap_or(30.0);
         let midpoint_mjd_tai = startjdutc_to_midpoint_mjd_tai(fp_hist.jd, exposure as f64);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
@@ -485,7 +485,8 @@ impl TryFrom<Candidate> for ZtfCandidate {
         let sigmapsf = candidate.sigmapsf;
         let isdiffpos = candidate.isdiffpos;
         let band = fid2band(candidate.fid)?;
-        let exposure = candidate.exptime.ok_or(AlertError::MissingExposureTime)?;
+        // we assume a default exposure time of 30s if not provided
+        let exposure = candidate.exptime.unwrap_or(30.0);
         let midpoint_mjd_tai = startjdutc_to_midpoint_mjd_tai(candidate.jd, exposure as f64);
 
         let (flux, flux_err) = mag2flux(magpsf, sigmapsf, ZTF_ZP);
