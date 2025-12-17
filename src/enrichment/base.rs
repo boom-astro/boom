@@ -126,7 +126,7 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
     while let Some(result) = alert_cursor.next().await {
         match result {
             Ok(document) => {
-                println!("Fetched alert document: {:?}", document);
+                tracing::debug!("Fetched alert document: {:?}", document);
                 let alert: T = mongodb::bson::from_document(document)?;
                 alerts.push(alert);
             }
