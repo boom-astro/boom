@@ -41,6 +41,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         object_id: object_id.to_string(),
         candidate,
         prv_candidates: vec![],
+        prv_nondetections: vec![],
         fp_hists: vec![],
         properties: ZtfAlertProperties {
             rock: is_rock,
@@ -48,6 +49,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             near_brightstar: false,
             stationary: false,
             photstats: PerBandProperties::default(),
+            multisurvey_photstats: PerBandProperties::default(),
         },
         cutout_science: None,
         cutout_template: None,
@@ -372,13 +374,38 @@ async fn test_babamul_lsst_with_ztf_match() {
     let ztf_aux = doc! {
         "_id": &ztf_match_id,
         "object_id": &ztf_match_id,
-        "survey": "ZTF",
-        "prv_candidates": [],
-        "fp_hists": [],
+        "prv_candidates": [
+            doc! {
+                "jd": 2459999.5,
+                "magpsf": 19.0,
+                "sigmapsf": 0.07,
+                "diffmaglim": 21.0,
+                "band": "g",
+                "psfFlux": 1300.0,
+                "psfFluxErr": 13.0,
+                "ra": 180.0,
+                "dec": 0.0,
+                "programid": 1,
+            }
+        ],
+        "fp_hists": [
+            doc! {
+                "jd": 2459998.5,
+                "magpsf": 19.2,
+                "sigmapsf": 0.09,
+                "diffmaglim": 21.2,
+                "band": "g",
+                "psfFlux": 1250.0,
+                "psfFluxErr": 12.0,
+                "programid": 1,
+            }
+        ],
         "aliases": doc! {},
         "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
+            "radec_geojson": {
+                "type": "Point",
+                "coordinates": [0.0, 0.0],
+            },
         },
     };
 
@@ -445,7 +472,13 @@ async fn test_babamul_lsst_with_ztf_match() {
                 "jd": 2459999.5,
                 "magpsf": 18.0,
                 "sigmapsf": 0.05,
+                "diffmaglim": 20.0,
                 "band": "g",
+                "psfFlux": 1200.0,
+                "psfFluxErr": 12.0,
+                "ra": 180.0,
+                "dec": 0.0,
+                "snr": 110.0,
             }
         ],
         "fp_hists": [
@@ -453,7 +486,11 @@ async fn test_babamul_lsst_with_ztf_match() {
                 "jd": 2459998.5,
                 "magpsf": 18.2,
                 "sigmapsf": 0.08,
+                "diffmaglim": 20.2,
                 "band": "g",
+                "psfFlux": 1150.0,
+                "psfFluxErr": 11.0,
+                "snr": 105.0,
             }
         ],
         "aliases": doc! {
@@ -498,7 +535,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     // Decode the Avro message to verify matches are present
     let schema = EnrichedLsstAlert::get_schema();
     // Read all records from all messages and check for matches on our alert
-    let mut found_cross_match = false;
+    let mut found_match = false;
     'outer: for msg in messages {
         let reader = apache_avro::Reader::with_schema(&schema, &msg[..])
             .expect("Failed to create Avro reader");
@@ -525,20 +562,17 @@ async fn test_babamul_lsst_with_ztf_match() {
                             if let Some((_, ztf_value)) =
                                 fields.iter().find(|(name, _)| name == "ztf")
                             {
-                                if let apache_avro::types::Value::Array(arr) = ztf_value {
-                                    found_cross_match = arr.iter().any(|item| {
-                                        if let apache_avro::types::Value::Record(obj_fields) = item {
-                                            obj_fields.iter().any(|(field_name, field_value)| {
-                                                field_name == "object_id"
-                                                    && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
-                                            })
-                                        } else {
-                                            false
+                                if let apache_avro::types::Value::Union(_, ztf_boxed) = ztf_value {
+                                    if let apache_avro::types::Value::Record(obj_fields) =
+                                        &**ztf_boxed
+                                    {
+                                        found_match = obj_fields.iter().any(|(field_name, field_value)| {
+                                            field_name == "object_id"
+                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
+                                        });
+                                        if found_match {
+                                            break 'outer;
                                         }
-                                    });
-
-                                    if found_cross_match {
-                                        break 'outer;
                                     }
                                 }
                             }
@@ -550,7 +584,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     }
 
     assert!(
-        found_cross_match,
+        found_match,
         "Expected to find ZTF match with object_id: {} in Babamul message",
         ztf_match_id
     );
@@ -607,13 +641,38 @@ async fn test_babamul_ztf_with_lsst_match() {
     let lsst_aux = doc! {
         "_id": &lsst_match_id,
         "object_id": &lsst_match_id,
-        "survey": "LSST",
-        "prv_candidates": [],
-        "fp_hists": [],
+        "prv_candidates": [
+            doc! {
+                "jd": 2459999.5,
+                "magpsf": 18.0,
+                "sigmapsf": 0.05,
+                "diffmaglim": 20.0,
+                "band": "g",
+                "psfFlux": 1200.0,
+                "psfFluxErr": 12.0,
+                "ra": 180.0,
+                "dec": 0.0,
+                "snr": 100.0,
+            }
+        ],
+        "fp_hists": [
+            doc! {
+                "jd": 2459998.5,
+                "magpsf": 18.2,
+                "sigmapsf": 0.08,
+                "diffmaglim": 20.2,
+                "band": "g",
+                "psfFlux": 1150.0,
+                "psfFluxErr": 11.0,
+                "snr": 95.0,
+            }
+        ],
         "aliases": doc! {},
         "coordinates": doc! {
-            "ra": 180.0,
-            "dec": 0.0,
+            "radec_geojson": {
+                "type": "Point",
+                "coordinates": [0.0, 0.0],
+            },
         },
     };
     lsst_aux_collection
@@ -688,20 +747,18 @@ async fn test_babamul_ztf_with_lsst_match() {
                             if let Some((_, lsst_value)) =
                                 fields.iter().find(|(name, _)| name == "lsst")
                             {
-                                if let apache_avro::types::Value::Array(arr) = lsst_value {
-                                    found_match = arr.iter().any(|item| {
-                                        if let apache_avro::types::Value::Record(obj_fields) = item {
-                                            obj_fields.iter().any(|(field_name, field_value)| {
-                                                field_name == "object_id"
-                                                    && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
-                                            })
-                                        } else {
-                                            false
+                                if let apache_avro::types::Value::Union(_, lsst_boxed) = lsst_value
+                                {
+                                    if let apache_avro::types::Value::Record(obj_fields) =
+                                        &**lsst_boxed
+                                    {
+                                        found_match = obj_fields.iter().any(|(field_name, field_value)| {
+                                            field_name == "object_id"
+                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
+                                        });
+                                        if found_match {
+                                            break 'outer;
                                         }
-                                    });
-
-                                    if found_match {
-                                        break 'outer;
                                     }
                                 }
                             }

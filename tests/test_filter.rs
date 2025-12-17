@@ -22,12 +22,12 @@ async fn test_build_filter() {
         doc! { "$match": { "_id": { "$in": [] } } },
         doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1 } },
         doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
-        doc! { "$addFields": { "aux": { "$arrayElemAt": ["$aux", 0] } } },
         doc! {
             "$addFields": {
+                "aux": mongodb::bson::Bson::Null,
                 "prv_candidates": {
                     "$filter": {
-                        "input": { "$ifNull": ["$aux.prv_candidates", []] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -96,14 +96,10 @@ async fn test_build_multisurvey_filter() {
         doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
         doc! {
             "$addFields": {
-                "aux": { "$arrayElemAt": ["$aux", 0] }
-            }
-        },
-        doc! {
-            "$addFields": {
+                "aux": mongodb::bson::Bson::Null,
                 "prv_candidates": {
                     "$filter": {
-                        "input": { "$ifNull": ["$aux.prv_candidates", []] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -115,7 +111,7 @@ async fn test_build_multisurvey_filter() {
                     }
                 },
                 "aliases": {
-                    "$ifNull": ["$aux.aliases", doc!{}]
+                    "$ifNull": [ {"$arrayElemAt": ["$aux.aliases", 0] }, doc!{}]
                 }
             }
         },
@@ -125,7 +121,7 @@ async fn test_build_multisurvey_filter() {
                 "lsst_aux": mongodb::bson::Bson::Null,
                 "LSST.prv_candidates": {
                     "$filter": {
-                        "input": { "$ifNull": ["$lsst_aux.prv_candidates", []] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$lsst_aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
