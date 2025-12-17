@@ -11,11 +11,11 @@ pub use decam::{
     DecamAlert, DecamAlertWorker, DecamCandidate, DecamObject, DecamRawAvroAlert, DECAM_DEC_RANGE,
 };
 pub use lsst::{
-    LsstAlert, LsstAlertWorker, LsstCandidate, LsstObject, LsstRawAvroAlert, LSST_DEC_RANGE,
-    LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
+    DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate, LsstForcedPhot, LsstObject,
+    LsstRawAvroAlert, LSST_DEC_RANGE, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use ztf::{
-    deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, ZtfAlert,
-    ZtfAlertWorker, ZtfCandidate, ZtfForcedPhot, ZtfObject, ZtfPrvCandidate, ZtfRawAvroAlert,
-    ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS,
+    deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, Candidate,
+    ZtfAlert, ZtfAlertWorker, ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject, ZtfPrvCandidate,
+    ZtfRawAvroAlert, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS,
 };
