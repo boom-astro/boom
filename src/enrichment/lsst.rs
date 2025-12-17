@@ -4,7 +4,7 @@ use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
 use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
-use crate::utils::db::{get_array_dict_element, get_array_element, mongify};
+use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
@@ -64,144 +64,52 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
-            "$project": {
-                "objectId": 1,
-                "candidate": 1,
-            }
-        },
-        doc! {
             "$lookup": {
                 "from": "LSST_alerts_aux",
-                "let": { "obj_id": "$objectId" },
-                "pipeline": [
-                    doc! {
-                        "$match": {
-                            "$expr": {
-                                "$eq": [ "$_id", "$$obj_id" ]
-                            }
-                        }
-                    },
-                    doc! {
-                        "$project": {
-                            // prv_candidates
-                            "prv_candidates.jd": 1,
-                            "prv_candidates.magpsf": 1,
-                            "prv_candidates.sigmapsf": 1,
-                            "prv_candidates.diffmaglim": 1,
-                            "prv_candidates.band": 1,
-                            "prv_candidates.psfFlux": 1,
-                            "prv_candidates.psfFluxErr": 1,
-                            "prv_candidates.ra": 1,
-                            "prv_candidates.dec": 1,
-                            "prv_candidates.snr": 1,
-                            // fp_hists
-                            "fp_hists.jd": 1,
-                            "fp_hists.magpsf": 1,
-                            "fp_hists.sigmapsf": 1,
-                            "fp_hists.diffmaglim": 1,
-                            "fp_hists.band": 1,
-                            "fp_hists.psfFlux": 1,
-                            "fp_hists.psfFluxErr": 1,
-                            "fp_hists.zp": 1,
-                            "fp_hists.snr": 1,
-                            // aliases
-                            "aliases": 1,
-                        }
-                    }
-                ],
+                "localField": "objectId",
+                "foreignField": "_id",
                 "as": "aux"
             }
         },
         doc! {
-            "$addFields": {
-                "prv_candidates": get_array_element("aux.prv_candidates"),
-                "fp_hists": get_array_element("aux.fp_hists"),
-                "aliases": get_array_dict_element("aux.aliases"),
-                "aux": mongodb::bson::Bson::Null,
+            "$unwind": {
+                "path": "$aux",
+                "preserveNullAndEmptyArrays": false
             }
         },
         doc! {
-            // same here, we do a pipeline to be more efficient
             "$lookup": {
                 "from": "ZTF_alerts_aux",
-                "let": { "ztf_obj_id": { "$arrayElemAt": [ "$aliases.ZTF", 0 ] } },
-                "pipeline": [
-                    doc! {
-                        "$match": {
-                            "$expr": {
-                                "$eq": [ "$_id", "$$ztf_obj_id" ]
-                            }
-                        }
-                    },
-                    doc! {
-                        "$project": {
-                            // prv_candidates
-                            "prv_candidates.jd": 1,
-                            "prv_candidates.magpsf": 1,
-                            "prv_candidates.sigmapsf": 1,
-                            "prv_candidates.diffmaglim": 1,
-                            "prv_candidates.band": 1,
-                            "prv_candidates.psfFlux": 1,
-                            "prv_candidates.psfFluxErr": 1,
-                            "prv_candidates.ra": 1,
-                            "prv_candidates.dec": 1,
-                            "prv_candidates.programid": 1,
-                            "prv_candidates.snr": 1,
-                            // prv_nondetections
-                            "prv_nondetections.jd": 1,
-                            "prv_nondetections.diffmaglim": 1,
-                            "prv_nondetections.band": 1,
-                            "prv_nondetections.psfFluxErr": 1,
-                            "prv_nondetections.programid": 1,
-                            // fp_hists
-                            "fp_hists.jd": 1,
-                            "fp_hists.magpsf": 1,
-                            "fp_hists.sigmapsf": 1,
-                            "fp_hists.diffmaglim": 1,
-                            "fp_hists.band": 1,
-                            "fp_hists.psfFlux": 1,
-                            "fp_hists.psfFluxErr": 1,
-                            "fp_hists.zp": 1,
-                            "fp_hists.programid": 1,
-                            "fp_hists.snr": 1,
-                            // grab the ra from coordinates.radec_geojson
-                            "ra": { "$add": [
-                                { "$arrayElemAt": [ "$coordinates.radec_geojson.coordinates", 0 ] },
-                                180
-                            ] },
-                            "dec": { "$arrayElemAt": [ "$coordinates.radec_geojson.coordinates", 1 ] },
-                        }
-                    }
-                ],
+                "localField": "aux.aliases.ZTF.0",
+                "foreignField": "_id",
                 "as": "ztf_aux"
             }
         },
         doc! {
-            "$addFields": {
-                "survey_matches.ztf": {
-                    "$cond": {
-                        "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
-                        "then": {
-                            "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
-                            "prv_candidates": get_array_element("ztf_aux.prv_candidates"),
-                            "prv_nondetections": get_array_element("ztf_aux.prv_nondetections"),
-                            "fp_hists": get_array_element("ztf_aux.fp_hists"),
-                            "ra": { "$arrayElemAt": [ "$ztf_aux.ra", 0 ] },
-                            "dec": { "$arrayElemAt": [ "$ztf_aux.dec", 0 ] },
-                        },
-                        "else": null
-                    }
-                },
-                "ztf_aux": mongodb::bson::Bson::Null,
-            }
-        },
-        doc! {
-            "$project": doc! {
+            "$project": {
                 "objectId": 1,
                 "candidate": 1,
-                "prv_candidates":  1,
-                "fp_hists": 1,
-                "survey_matches": 1,
+                "prv_candidates": "$aux.prv_candidates",
+                "fp_hists": "$aux.fp_hists",
+                "survey_matches": {
+                    "ztf": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
+                            "then": {
+                                "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
+                                "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    }
+                }
             }
         },
     ]

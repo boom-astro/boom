@@ -42,6 +42,9 @@ while ! docker compose -f $COMPOSE_CONFIG logs consumer | grep -q "Consumer rece
     fi
     sleep 1
 done
+END_TIME=$(date +%s)
+STARTUP_TIME=$((END_TIME - START_TIME))
+echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
@@ -56,6 +59,9 @@ while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoa
     fi
     sleep 1
 done
+END_TIME=$(date +%s)
+INGESTION_TIME=$((END_TIME - START_TIME))
+echo "$(current_datetime) - All $EXPECTED_ALERTS alerts ingested in $INGESTION_TIME seconds"
 
 # Wait until we see all alerts with classifications
 echo "$(current_datetime) - Waiting for all alerts to be classified"
@@ -70,6 +76,9 @@ while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoa
     fi
     sleep 1
 done
+END_TIME=$(date +%s)
+CLASSIFICATION_TIME=$((END_TIME - START_TIME))
+echo "$(current_datetime) - All $EXPECTED_ALERTS alerts classified in $CLASSIFICATION_TIME seconds"
 
 # Wait until we've filtered all alerts
 echo "$(current_datetime) - Waiting for filters to run on all alerts"
@@ -88,6 +97,9 @@ while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
     fi
     sleep 1
 done
+END_TIME=$(date +%s)
+FILTERING_TIME=$((END_TIME - START_TIME))
+echo "$(current_datetime) - All $EXPECTED_ALERTS alerts filtered in $FILTERING_TIME seconds"
 
 echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"

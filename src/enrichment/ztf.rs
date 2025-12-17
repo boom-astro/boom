@@ -1,7 +1,7 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
-use crate::utils::db::{get_array_dict_element, get_array_element, mongify};
+use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
     PhotometryMag,
@@ -19,14 +19,55 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer};
 use tracing::{instrument, warn};
 
-fn default_ztf_zp() -> Option<f64> {
-    Some(23.9)
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Represents ZTF alert photometry data we retrieve from the database
+/// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
+pub struct ZtfAlertPhotometry {
+    pub jd: f64,
+    pub magpsf: Option<f64>,
+    pub sigmapsf: Option<f64>,
+    pub diffmaglim: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    pub ra: Option<f64>,
+    pub dec: Option<f64>,
+    pub snr: Option<f64>,
+    pub programid: i32,
 }
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Represents ZTF forced photometry data we retrieve from the database
+/// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
+pub struct ZtfForcedPhotometry {
+    pub jd: f64,
+    pub magpsf: Option<f64>,
+    pub sigmapsf: Option<f64>,
+    pub diffmaglim: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    pub magzpsci: Option<f64>,
+    pub ra: Option<f64>,
+    pub dec: Option<f64>,
+    pub snr: Option<f64>,
+    pub programid: i32,
+    pub procstatus: Option<String>,
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Represents ZTF photometry data we retrieved from the database
+/// (from alert or forced photometry)
 pub struct ZtfPhotometry {
     pub jd: f64,
     pub magpsf: Option<f64>,
@@ -37,13 +78,117 @@ pub struct ZtfPhotometry {
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
     pub band: Band,
-    // set a default of 23.9 for zp if missing
-    #[serde(default = "default_ztf_zp")]
     pub zp: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
     pub snr: Option<f64>,
     pub programid: i32,
+}
+
+impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
+    type Error = EnrichmentWorkerError;
+    fn try_from(phot: ZtfAlertPhotometry) -> Result<Self, Self::Error> {
+        Ok(ZtfPhotometry {
+            jd: phot.jd,
+            magpsf: phot.magpsf,
+            sigmapsf: phot.sigmapsf,
+            diffmaglim: phot.diffmaglim,
+            flux: phot.flux,
+            flux_err: phot.flux_err,
+            ra: phot.ra,
+            dec: phot.dec,
+            band: phot.band,
+            snr: phot.snr,
+            programid: phot.programid,
+            zp: Some(23.9), // alert photometry uses a fixed zeropoint of 23.9
+        })
+    }
+}
+
+impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
+    type Error = EnrichmentWorkerError;
+    fn try_from(phot: ZtfForcedPhotometry) -> Result<Self, Self::Error> {
+        let procstatus = phot.procstatus.ok_or(EnrichmentWorkerError::Serialization(
+            "missing procstatus".to_string(),
+        ))?;
+        // TODO: accept all "acceptable" procstatus (if not just "0")
+        if procstatus == "0" {
+            return Err(EnrichmentWorkerError::Serialization(
+                "Invalid procstatus".to_string(),
+            ));
+        }
+
+        Ok(ZtfPhotometry {
+            jd: phot.jd,
+            magpsf: phot.magpsf,
+            sigmapsf: phot.sigmapsf,
+            diffmaglim: phot.diffmaglim,
+            flux: phot.flux,
+            flux_err: phot.flux_err,
+            ra: phot.ra,
+            dec: phot.dec,
+            band: phot.band,
+            snr: phot.snr,
+            programid: phot.programid,
+            zp: phot.magzpsci, // forced photometry has a zeropoint per datapoint
+        })
+    }
+}
+
+pub fn deserialize_ztf_alert_lightcurve<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ZtfPhotometry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let lightcurve = <Option<Vec<ZtfAlertPhotometry>> as Deserialize>::deserialize(deserializer)?;
+    match lightcurve {
+        Some(lightcurve) => {
+            let converted_lightcurve = lightcurve
+                .into_iter()
+                .filter_map(|p| {
+                    ZtfPhotometry::try_from(p)
+                        .map_err(|e| {
+                            warn!(
+                                "Failed to convert ZtfAlertPhotometry to ZtfPhotometry: {}",
+                                e
+                            );
+                        })
+                        .ok()
+                })
+                .collect();
+            Ok(converted_lightcurve)
+        }
+        None => Ok(vec![]),
+    }
+}
+
+pub fn deserialize_ztf_forced_lightcurve<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ZtfPhotometry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let lightcurve = <Option<Vec<ZtfForcedPhotometry>> as Deserialize>::deserialize(deserializer)?;
+    match lightcurve {
+        Some(lightcurve) => {
+            let converted_lightcurve = lightcurve
+                .into_iter()
+                .filter_map(|p| {
+                    ZtfPhotometry::try_from(p)
+                        .map_err(|e| {
+                            warn!(
+                                "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
+                                e
+                            );
+                        })
+                        .ok()
+                })
+                .collect();
+            Ok(converted_lightcurve)
+        }
+        None => Ok(vec![]),
+    }
 }
 
 // it should return an optional PhotometryMag
@@ -70,145 +215,52 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
-            "$project": {
-                "objectId": 1,
-                "candidate": 1,
-            }
-        },
-        doc! {
             "$lookup": {
                 "from": "ZTF_alerts_aux",
-                "let": { "obj_id": "$objectId" },
-                "pipeline": [
-                    doc! {
-                        "$match": {
-                            "$expr": {
-                                "$eq": [ "$_id", "$$obj_id" ]
-                            }
-                        }
-                    },
-                    doc! {
-                        "$project": {
-                            // prv_candidates
-                            "prv_candidates.jd": 1,
-                            "prv_candidates.magpsf": 1,
-                            "prv_candidates.sigmapsf": 1,
-                            "prv_candidates.diffmaglim": 1,
-                            "prv_candidates.band": 1,
-                            "prv_candidates.psfFlux": 1,
-                            "prv_candidates.psfFluxErr": 1,
-                            "prv_candidates.ra": 1,
-                            "prv_candidates.dec": 1,
-                            "prv_candidates.programid": 1,
-                            "prv_candidates.snr": 1,
-                            // prv_nondetections
-                            "prv_nondetections.jd": 1,
-                            "prv_nondetections.diffmaglim": 1,
-                            "prv_nondetections.band": 1,
-                            "prv_nondetections.psfFluxErr": 1,
-                            "prv_nondetections.programid": 1,
-                            // fp_hists
-                            "fp_hists.jd": 1,
-                            "fp_hists.magpsf": 1,
-                            "fp_hists.sigmapsf": 1,
-                            "fp_hists.diffmaglim": 1,
-                            "fp_hists.band": 1,
-                            "fp_hists.psfFlux": 1,
-                            "fp_hists.psfFluxErr": 1,
-                            "fp_hists.zp": 1,
-                            "fp_hists.programid": 1,
-                            "fp_hists.snr": 1,
-                            // aliases
-                            "aliases": 1,
-                        }
-                    }
-                ],
+                "localField": "objectId",
+                "foreignField": "_id",
                 "as": "aux"
             }
         },
         doc! {
-            "$addFields": {
-                "prv_candidates": get_array_element("aux.prv_candidates"),
-                "prv_nondetections": get_array_element("aux.prv_nondetections"),
-                "fp_hists": get_array_element("aux.fp_hists"),
-                "aliases": get_array_dict_element("aux.aliases"),
-                "aux": mongodb::bson::Bson::Null,
+            "$unwind": {
+                "path": "$aux",
+                "preserveNullAndEmptyArrays": false
             }
         },
         doc! {
-            // same here, we do a pipeline to be more efficient
             "$lookup": {
                 "from": "LSST_alerts_aux",
-                "let": { "lsst_obj_id": { "$arrayElemAt": [ "$aliases.LSST", 0 ] } },
-                "pipeline": [
-                    doc! {
-                        "$match": {
-                            "$expr": {
-                                "$eq": [ "$_id", "$$lsst_obj_id" ]
-                            }
-                        }
-                    },
-                    doc! {
-                        "$project": {
-                            // prv_candidates up to 365 days
-                            "prv_candidates.jd": 1,
-                            "prv_candidates.magpsf": 1,
-                            "prv_candidates.sigmapsf": 1,
-                            "prv_candidates.diffmaglim": 1,
-                            "prv_candidates.band": 1,
-                            "prv_candidates.psfFlux": 1,
-                            "prv_candidates.psfFluxErr": 1,
-                            "prv_candidates.ra": 1,
-                            "prv_candidates.dec": 1,
-                            "prv_candidates.snr": 1,
-                            // fp_hists up to 365 days
-                            "fp_hists.jd": 1,
-                            "fp_hists.magpsf": 1,
-                            "fp_hists.sigmapsf": 1,
-                            "fp_hists.diffmaglim": 1,
-                            "fp_hists.band": 1,
-                            "fp_hists.psfFlux": 1,
-                            "fp_hists.psfFluxErr": 1,
-                            "fp_hists.snr": 1,
-                            // grab the ra from coordinates.radec_geojson
-                            "ra": { "$add": [
-                                { "$arrayElemAt": [ "$coordinates.radec_geojson.coordinates", 0 ] },
-                                180
-                            ] },
-                            "dec": { "$arrayElemAt": [ "$coordinates.radec_geojson.coordinates", 1 ] },
-                        }
-                    }
-                ],
+                "localField": "aux.aliases.LSST.0",
+                "foreignField": "_id",
                 "as": "lsst_aux"
             }
         },
         doc! {
-            "$addFields": {
-                "survey_matches.lsst": {
-                    "$cond": {
-                        "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
-                        "then": {
-                            "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
-                            "prv_candidates": get_array_element("lsst_aux.prv_candidates"),
-                            "prv_nondetections": get_array_element("lsst_aux.prv_nondetections"),
-                            "fp_hists": get_array_element("lsst_aux.fp_hists"),
-                            "ra": { "$arrayElemAt": [ "$lsst_aux.ra", 0 ] },
-                            "dec": { "$arrayElemAt": [ "$lsst_aux.dec", 0 ] },
-                        },
-                        "else": null
-                    }
-                },
-                "lsst_aux": mongodb::bson::Bson::Null,
-            }
-        },
-        doc! {
-            "$project": doc! {
+            "$project": {
                 "objectId": 1,
                 "candidate": 1,
-                "prv_candidates":  1,
-                "prv_nondetections": 1,
-                "fp_hists": 1,
-                "survey_matches": 1,
+                "prv_candidates": "$aux.prv_candidates",
+                "prv_nondetections": "$aux.prv_nondetections",
+                "fp_hists": "$aux.fp_hists",
+                "survey_matches": {
+                    "lsst": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
+                            "then": {
+                                "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    }
+                }
             }
         },
     ]
@@ -225,8 +277,11 @@ pub struct ZtfMatch {
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,
+    #[serde(deserialize_with = "deserialize_ztf_alert_lightcurve")]
     pub prv_candidates: Vec<ZtfPhotometry>,
+    #[serde(deserialize_with = "deserialize_ztf_alert_lightcurve")]
     pub prv_nondetections: Vec<ZtfPhotometry>,
+    #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
 }
 
@@ -240,8 +295,11 @@ pub struct ZtfAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
+    #[serde(deserialize_with = "deserialize_ztf_alert_lightcurve")]
     pub prv_candidates: Vec<ZtfPhotometry>,
+    #[serde(deserialize_with = "deserialize_ztf_alert_lightcurve")]
     pub prv_nondetections: Vec<ZtfPhotometry>,
+    #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
