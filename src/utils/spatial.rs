@@ -290,10 +290,14 @@ pub async fn xmatch(
                 } else if da_kpc != -1.0 && db_kpc == -1.0 {
                     std::cmp::Ordering::Greater
                 } else if da_kpc != db_kpc {
-                    da_kpc.partial_cmp(&db_kpc).unwrap()
+                    da_kpc
+                        .partial_cmp(&db_kpc)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 } else {
                     // If distance_kpc are equal, sort by distance_arcsec
-                    da_arcsec.partial_cmp(&db_arcsec).unwrap()
+                    da_arcsec
+                        .partial_cmp(&db_arcsec)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 }
             });
             xmatch_results
