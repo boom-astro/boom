@@ -103,6 +103,12 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_s3_storage:
+    region: local
+    endpoint_url: http://127.0.0.1:9000
+    access_key: rustfsadmin
+    secret_key: rustfsadminsecret
+    credentials_provider: rustfs
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -133,6 +139,12 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_s3_storage:
+    region: local
+    endpoint_url: http://127.0.0.1:9000
+    access_key: rustfsadmin
+    secret_key: rustfsadminsecret
+    credentials_provider: rustfs
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -164,6 +176,12 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_s3_storage:
+    region: local
+    endpoint_url: http://127.0.0.1:9000
+    access_key: rustfsadmin
+    secret_key: rustfsadminsecret
+    credentials_provider: rustfs
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();

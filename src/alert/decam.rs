@@ -2,13 +2,12 @@ use std::collections::HashMap;
 
 use crate::{
     alert::{
-        base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache,
-        },
+        base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
         lsst, ztf,
     },
     conf::{self, AppConfig},
     utils::{
+        cutouts::CutoutStorage,
         db::{mongify, update_timeseries_op},
         enums::Survey,
         lightcurves::Band,
@@ -29,7 +28,6 @@ pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
 pub const DECAM_POSITION_UNCERTAINTY: f64 = 1.24;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
-pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const DECAM_ZTF_XMATCH_RADIUS: f64 =
     (DECAM_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
@@ -188,7 +186,7 @@ pub struct DecamAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
-    alert_cutout_collection: mongodb::Collection<AlertCutout>,
+    alert_cutout_storage: CutoutStorage,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     schema_cache: SchemaCache,
@@ -263,7 +261,10 @@ impl AlertWorker for DecamAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Decam)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&ztf::ALERT_AUX_COLLECTION);
@@ -277,7 +278,7 @@ impl AlertWorker for DecamAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             ztf_alert_aux_collection,
             lsst_alert_aux_collection,
             schema_cache: SchemaCache::default(),
@@ -318,10 +319,11 @@ impl AlertWorker for DecamAlertWorker {
         let status = self
             .format_and_insert_cutouts(
                 candid,
+                &object_id,
                 avro_alert.cutout_science,
                 avro_alert.cutout_template,
                 avro_alert.cutout_difference,
-                &self.alert_cutout_collection,
+                &self.alert_cutout_storage,
             )
             .await
             .inspect_err(as_error!())?;

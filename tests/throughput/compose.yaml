@@ -6,6 +6,7 @@ networks:
 volumes:
   mongodb:
   kafka_data:
+  rustfs_data:
 
 services:
   mongo:
@@ -42,6 +43,40 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=mongoadmin
       - MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
     entrypoint: ["/bin/bash", "/mongo-init.sh"]
+  rustfs:
+    image: rustfs/rustfs:latest
+    hostname: rustfs
+    restart: unless-stopped
+    expose:
+      - "9000"
+      - "9001"
+    ports:
+      - "9000:9000" # For local testing; remove in production
+      - "9001:9001" # For local testing; remove in production
+    environment:
+      - RUSTFS_STORAGE_PATH=/data
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadminsecret
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      # - RUSTFS_SERVER_DOMAINS=rustfs
+      - RUSTFS_SERVER_DOMAINS=rustfs
+      - RUSTFS_CONSOLE_ENABLE=true
+    networks:
+      - boom
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh", "-c",
+          "curl -f http://0.0.0.0:9000/health && curl -f http://0.0.0.0:9001/rustfs/console/health"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
   valkey:
     image: valkey/valkey:7.2.6
     environment:
@@ -163,6 +198,8 @@ services:
       mongo-init:
         condition: service_completed_successfully
       valkey:
+        condition: service_healthy
+      rustfs:
         condition: service_healthy
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml

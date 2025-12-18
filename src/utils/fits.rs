@@ -1,6 +1,6 @@
 // we use zune_inflate as a replacement for flate2
 // which is a slightly faster alternative
-use crate::alert::AlertCutout;
+use crate::utils::cutouts::AlertCutout;
 use zune_inflate::{DeflateDecoder, DeflateOptions};
 
 const NAXIS1_BYTES: &[u8] = "NAXIS1  =".as_bytes();
@@ -150,9 +150,9 @@ fn prepare_cutout(cutout: &[u8]) -> Result<Vec<f32>, CutoutError> {
 pub fn prepare_triplet(
     alert_cutouts: &AlertCutout,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), CutoutError> {
-    let cutout_science = prepare_cutout(&alert_cutouts.cutout_science)?;
-    let cutout_template = prepare_cutout(&alert_cutouts.cutout_template)?;
-    let cutout_difference = prepare_cutout(&alert_cutouts.cutout_difference)?;
+    let cutout_science = prepare_cutout(&alert_cutouts.science)?;
+    let cutout_template = prepare_cutout(&alert_cutouts.template)?;
+    let cutout_difference = prepare_cutout(&alert_cutouts.difference)?;
 
     Ok((cutout_science, cutout_template, cutout_difference))
 }

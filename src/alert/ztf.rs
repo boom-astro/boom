@@ -1,10 +1,11 @@
 use crate::{
     alert::{
         base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
-        decam, lsst, AlertCutout,
+        decam, lsst,
     },
     conf::{self, AppConfig},
     utils::{
+        cutouts::CutoutStorage,
         db::{mongify, update_timeseries_op},
         enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
@@ -28,7 +29,6 @@ pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
-pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
@@ -627,7 +627,7 @@ pub struct ZtfAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
-    alert_cutout_collection: mongodb::Collection<AlertCutout>,
+    alert_cutout_storage: CutoutStorage,
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
@@ -728,7 +728,10 @@ impl AlertWorker for ZtfAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
 
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&lsst::ALERT_AUX_COLLECTION);
@@ -742,7 +745,7 @@ impl AlertWorker for ZtfAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
@@ -793,10 +796,11 @@ impl AlertWorker for ZtfAlertWorker {
         let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
+                &object_id,
                 avro_alert.cutout_science,
                 avro_alert.cutout_template,
                 avro_alert.cutout_difference,
-                &self.alert_cutout_collection,
+                &self.alert_cutout_storage,
             )
             .await
             .inspect_err(as_error!())?;

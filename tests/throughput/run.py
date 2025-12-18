@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import subprocess
-import uuid
 
 import pandas as pd
 import yaml
@@ -54,6 +53,7 @@ config["kafka"]["producer"]["server"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
+config["cutouts_s3_storage"]["endpoint_url"] = "http://rustfs:9000"
 config["babamul"]["enabled"] = True
 with open("tests/throughput/config.yaml", "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
