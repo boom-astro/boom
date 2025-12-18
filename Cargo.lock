@@ -533,6 +533,7 @@ dependencies = [
  "flare",
  "futures",
  "indicatif",
+ "itertools",
  "jsonwebtoken",
  "lettre",
  "mongodb",

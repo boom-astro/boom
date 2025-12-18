@@ -63,8 +63,6 @@ workers:
     filter:
       n_workers: 1
 crossmatch:
-  lsst: []
-  decam: []
   ztf:
     - catalog: PS1_DR1
       radius: 2.0 # 2 arcseconds
@@ -129,3 +127,15 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+  lsst:
+    - catalog: LSSG
+      radius: 30.0 # 1 arcsecond
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        score: 1
+        magwhite: 1
+      max_results: 3
+  decam: []
