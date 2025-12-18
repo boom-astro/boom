@@ -32,7 +32,7 @@ pub struct LsstPhotometry {
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
     pub band: Band,
-    // set a default of 23.9 for zp if missing
+    // Set a default if missing
     #[serde(default = "default_lsst_zp")]
     pub zp: Option<f64>,
     pub ra: Option<f64>,
