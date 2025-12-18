@@ -40,7 +40,6 @@ pub struct LsstPhotometry {
     pub snr: Option<f64>,
 }
 
-// same for LsstPhotometry
 impl LsstPhotometry {
     pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
         // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
