@@ -122,6 +122,7 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
 
                             Schema::Record(record)
                         }
+                        // Support Schema::Ref by cleaning up the name.
                         Schema::Ref { name } => {
                             let name_str = name.to_string();
                             let clean_name_str = name_str.trim_start_matches("__SERDAVRO__").trim_end_matches("__");

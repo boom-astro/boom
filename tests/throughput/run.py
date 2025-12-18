@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import subprocess
-import uuid
 
 import pandas as pd
 import yaml
