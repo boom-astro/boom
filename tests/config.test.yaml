@@ -129,7 +129,7 @@ crossmatch:
         Mstar_unc: 1
   lsst:
     - catalog: LSSG
-      radius: 30.0 # 1 arcsecond
+      radius: 30.0 # 30 arcseconds
       use_distance: false
       projection:
         _id: 1
