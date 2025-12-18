@@ -4,7 +4,6 @@ use crate::{
     enrichment::models::ModelError,
     utils::{
         fits::CutoutError,
-        lightcurves::PhotometryMag,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
     },
@@ -12,7 +11,6 @@ use crate::{
 
 use std::{num::NonZero, sync::LazyLock};
 
-use apache_avro_derive::AvroSchema;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use opentelemetry::{
@@ -20,7 +18,6 @@ use opentelemetry::{
     KeyValue,
 };
 use redis::AsyncCommands;
-use schemars::JsonSchema;
 use tokio::sync::mpsc;
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
@@ -267,14 +264,4 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     }
 
     Ok(())
-}
-
-/// Schema for what a survey match entry looks like in an enriched alert.
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema, JsonSchema)]
-pub struct SurveyMatch {
-    pub object_id: String,
-    pub ra: f64,
-    pub dec: f64,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
 }
