@@ -206,7 +206,7 @@ pub async fn xmatch(
                 .sorted_by(|a, b| {
                     let da = get_f64_from_doc(a, "distance_arcsec").unwrap_or(f64::INFINITY);
                     let db = get_f64_from_doc(b, "distance_arcsec").unwrap_or(f64::INFINITY);
-                    da.partial_cmp(&db).unwrap()
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .take(xmatch_config.max_results.unwrap_or(usize::MAX))
                 .collect();
