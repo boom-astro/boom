@@ -112,7 +112,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             "missing procstatus".to_string(),
         ))?;
         // TODO: accept all "acceptable" procstatus (if not just "0")
-        if procstatus == "0" {
+        if procstatus != "0" {
             return Err(EnrichmentWorkerError::Serialization(
                 "Invalid procstatus".to_string(),
             ));
