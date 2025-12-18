@@ -626,7 +626,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         ztf_match_id
     );
 
-    // Cleanup inserted fixtures to avoid leaking state between tests
+    // Clean up inserted fixtures to avoid leaking state between tests
     ztf_aux_collection
         .delete_many(doc! {"_id": {"$in": [&ztf_match_id]}})
         .await
@@ -675,11 +675,34 @@ async fn test_babamul_ztf_with_lsst_match() {
     let (ztf_candid, ztf_object_id, _, _, ztf_bytes) =
         AlertRandomizer::new_randomized(Survey::Ztf).get().await;
 
+    // Get collection references and ensure a clean slate for these IDs
+    let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
+    let ztf_aux_collection = db.collection::<ZtfObject>("ZTF_alerts_aux");
+    let ztf_alerts_collection = db.collection::<boom::alert::ZtfAlert>("ZTF_alerts");
+    let ztf_cutouts_collection = db.collection::<boom::alert::AlertCutout>("ZTF_alerts_cutouts");
+
+    // Clean up any existing fixtures with this ID
+    lsst_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&lsst_match_id]}})
+        .await
+        .expect("Failed to cleanup LSST aux fixture");
+    ztf_alerts_collection
+        .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
+        .await
+        .expect("Failed to cleanup ZTF alerts fixture");
+    ztf_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&ztf_object_id]}})
+        .await
+        .expect("Failed to cleanup ZTF aux fixture");
+    ztf_cutouts_collection
+        .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
+        .await
+        .expect("Failed to cleanup ZTF cutouts fixture");
+
     // Insert the alert and get cutouts
     ztf_alert_worker.process_alert(&ztf_bytes).await.unwrap();
 
     // Insert fake LSST aux for matching using typed structs
-    let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
 
     let lsst_dia_source = {
         let mut dia = DiaSource::default();
@@ -828,9 +851,21 @@ async fn test_babamul_ztf_with_lsst_match() {
         lsst_match_id
     );
 
-    // Cleanup inserted fixture
+    // Clean up inserted fixtures to avoid leaking state between tests
     lsst_aux_collection
         .delete_many(doc! {"_id": {"$in": [&lsst_match_id]}})
         .await
         .expect("Failed to cleanup LSST aux fixture after test");
+    ztf_alerts_collection
+        .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
+        .await
+        .expect("Failed to cleanup ZTF alerts fixture after test");
+    ztf_aux_collection
+        .delete_many(doc! {"_id": {"$in": [&ztf_object_id]}})
+        .await
+        .expect("Failed to cleanup ZTF aux fixture after test");
+    ztf_cutouts_collection
+        .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
+        .await
+        .expect("Failed to cleanup ZTF cutouts fixture after test");
 }
