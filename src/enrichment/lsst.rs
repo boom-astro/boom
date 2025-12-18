@@ -42,7 +42,7 @@ pub struct LsstPhotometry {
 
 impl LsstPhotometry {
     pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+        // If the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
         match (self.snr, self.magpsf, self.sigmapsf) {
             (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
                 time: self.jd,
