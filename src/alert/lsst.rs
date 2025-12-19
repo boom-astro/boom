@@ -207,6 +207,8 @@ pub struct LsstCandidate {
     pub dia_source: DiaSource,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
@@ -215,7 +217,6 @@ pub struct LsstCandidate {
     pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
-    pub is_sso: bool,
 }
 
 impl TryFrom<DiaSource> for LsstCandidate {
@@ -238,24 +239,25 @@ impl TryFrom<DiaSource> for LsstCandidate {
 
         let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
 
-        // if dia_object_id is defined, is_sso is false
-        // if ss_object_id is defined, is_sso is true
-        // if both are undefined or both are defined, we throw an error
-        let (object_id, is_sso) = match (
+        // if dia_object_id is defined, we use the dia_object_id as object_id
+        // if dia_object_id is undefined but ss_object_id is defined, use "sso{ss_object_id}" as object_id
+        // if none are defined, throw an error
+        // also, set ss_object_id as Option<String> if defined
+        let (object_id, ss_object_id) = match (
             dia_source.dia_object_id.clone(),
             dia_source.ss_object_id.clone(),
         ) {
-            (Some(dia_id), None) => (dia_id.to_string(), false),
-            (None, Some(ss_id)) => (format!("sso{}", ss_id.to_string()), true),
-            (None, None) => return Err(AlertError::MissingObjectId),
-            (Some(dia_id), Some(ss_id)) => {
-                return Err(AlertError::AmbiguousObjectId(dia_id, ss_id))
+            (Some(dia_id), ss_object_id) => {
+                (dia_id.to_string(), ss_object_id.map(|id| id.to_string()))
             }
+            (None, Some(ss_id)) => (format!("sso{}", ss_id.to_string()), Some(ss_id.to_string())),
+            (None, None) => return Err(AlertError::MissingObjectId),
         };
 
         Ok(LsstCandidate {
             dia_source,
             object_id,
+            ss_object_id,
             jd,
             magpsf,
             sigmapsf,
@@ -264,7 +266,6 @@ impl TryFrom<DiaSource> for LsstCandidate {
             snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
-            is_sso,
         })
     }
 }
@@ -662,6 +663,7 @@ pub struct LsstObject {
     pub object_id: String,
     pub prv_candidates: Vec<LsstCandidate>,
     pub fp_hists: Vec<LsstForcedPhot>,
+    pub is_sso: bool,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
@@ -828,6 +830,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let candid = avro_alert.candid;
         let object_id = avro_alert.candidate.object_id.clone();
+        let ss_object_id = avro_alert.candidate.ss_object_id.clone();
         let ra = avro_alert.candidate.dia_source.ra;
         let dec = avro_alert.candidate.dia_source.dec;
 
@@ -868,6 +871,7 @@ impl AlertWorker for LsstAlertWorker {
                 object_id: object_id.clone(),
                 prv_candidates,
                 fp_hists,
+                is_sso: ss_object_id.is_some(),
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),

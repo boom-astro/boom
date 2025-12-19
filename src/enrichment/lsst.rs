@@ -302,7 +302,7 @@ impl LsstEnrichmentWorker {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let candidate = &alert.candidate;
 
-        let is_rock = candidate.is_sso;
+        let is_rock = candidate.ss_object_id.is_some();
 
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates

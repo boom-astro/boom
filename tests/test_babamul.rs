@@ -84,12 +84,16 @@ fn create_mock_enriched_lsst_alert(
     dia_source.pixel_flags = Some(pixel_flags);
     dia_source.reliability = Some(reliability as f32);
 
+    let ss_object_id = if is_rock { Some(555555_i64) } else { None };
+    dia_source.ss_object_id = ss_object_id;
+
     EnrichedLsstAlert {
         candid,
         object_id: object_id.to_string(),
         candidate: LsstCandidate {
             dia_source,
             object_id: object_id.to_string(),
+            ss_object_id: ss_object_id.map(|id| id.to_string()),
             jd: 2460000.5,
             magpsf: 18.5,
             sigmapsf: 0.1,
@@ -98,7 +102,6 @@ fn create_mock_enriched_lsst_alert(
             snr: 100.0,
             magap: 18.6,
             sigmagap: 0.12,
-            is_sso: false,
         },
         prv_candidates: vec![],
         fp_hists: vec![],
@@ -457,12 +460,14 @@ async fn test_babamul_lsst_with_ztf_match() {
         dia_source.pixel_flags = Some(false);
         dia_source.reliability = Some(0.9);
         dia_source.band = Some(Band::G);
+        dia_source.ss_object_id = None;
         dia_source
     };
 
     let lsst_candidate = LsstCandidate {
         dia_source: lsst_dia_source.clone(),
         object_id: lsst_object_id.clone(),
+        ss_object_id: None,
         jd: 2460000.5,
         magpsf: 18.5,
         sigmapsf: 0.1,
@@ -471,7 +476,6 @@ async fn test_babamul_lsst_with_ztf_match() {
         snr: 100.0,
         magap: 18.6,
         sigmagap: 0.12,
-        is_sso: false,
     };
 
     let lsst_alert = LsstAlert {
@@ -529,6 +533,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         object_id: lsst_object_id.clone(),
         prv_candidates: vec![lsst_candidate.clone()],
         fp_hists: vec![lsst_forced_phot],
+        is_sso: false,
         cross_matches: None,
         aliases: Some(LsstAliases {
             ztf: vec![ztf_match_id.clone()],
@@ -745,6 +750,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         object_id: lsst_match_id.clone(),
         prv_candidates: vec![lsst_candidate],
         fp_hists: vec![lsst_forced_phot],
+        is_sso: false,
         cross_matches: None,
         aliases: Some(LsstAliases {
             ztf: Vec::new(),
