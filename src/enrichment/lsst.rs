@@ -137,6 +137,8 @@ pub struct LsstAlertForEnrichment {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
@@ -300,9 +302,7 @@ impl LsstEnrichmentWorker {
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = &alert.candidate;
-
-        let is_rock = candidate.ss_object_id.is_some();
+        let is_rock = alert.ss_object_id.is_some();
 
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates

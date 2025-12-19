@@ -207,8 +207,6 @@ pub struct LsstCandidate {
     pub dia_source: DiaSource,
     #[serde(rename = "objectId")]
     pub object_id: String,
-    #[serde(rename = "ssObjectId")]
-    pub ss_object_id: Option<String>,
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
@@ -242,22 +240,18 @@ impl TryFrom<DiaSource> for LsstCandidate {
         // if dia_object_id is defined, we use the dia_object_id as object_id
         // if dia_object_id is undefined but ss_object_id is defined, use "sso{ss_object_id}" as object_id
         // if none are defined, throw an error
-        // also, set ss_object_id as Option<String> if defined
-        let (object_id, ss_object_id) = match (
+        let object_id = match (
             dia_source.dia_object_id.clone(),
             dia_source.ss_object_id.clone(),
         ) {
-            (Some(dia_id), ss_object_id) => {
-                (dia_id.to_string(), ss_object_id.map(|id| id.to_string()))
-            }
-            (None, Some(ss_id)) => (format!("sso{}", ss_id.to_string()), Some(ss_id.to_string())),
+            (Some(dia_id), _) => dia_id.to_string(),
+            (None, Some(ss_id)) => format!("sso{}", ss_id.to_string()),
             (None, None) => return Err(AlertError::MissingObjectId),
         };
 
         Ok(LsstCandidate {
             dia_source,
             object_id,
-            ss_object_id,
             jd,
             magpsf,
             sigmapsf,
@@ -677,6 +671,8 @@ pub struct LsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -830,7 +826,11 @@ impl AlertWorker for LsstAlertWorker {
 
         let candid = avro_alert.candid;
         let object_id = avro_alert.candidate.object_id.clone();
-        let ss_object_id = avro_alert.candidate.ss_object_id.clone();
+        let ss_object_id = avro_alert
+            .candidate
+            .dia_source
+            .ss_object_id
+            .map(|id| id.to_string());
         let ra = avro_alert.candidate.dia_source.ra;
         let dec = avro_alert.candidate.dia_source.dec;
 
@@ -901,6 +901,7 @@ impl AlertWorker for LsstAlertWorker {
         let alert = LsstAlert {
             candid,
             object_id: object_id.clone(),
+            ss_object_id: ss_object_id,
             candidate: avro_alert.candidate,
             coordinates: Coordinates::new(ra, dec),
             created_at: now,

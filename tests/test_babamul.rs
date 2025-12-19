@@ -73,7 +73,6 @@ fn create_mock_enriched_lsst_alert(
     dia_source.visit = 123456789;
     dia_source.detector = 1;
     dia_source.dia_object_id = Some(987654321);
-    dia_source.ss_object_id = None;
     dia_source.midpoint_mjd_tai = 60000.5;
     dia_source.ra = 180.0;
     dia_source.dec = 0.0;
@@ -93,7 +92,6 @@ fn create_mock_enriched_lsst_alert(
         candidate: LsstCandidate {
             dia_source,
             object_id: object_id.to_string(),
-            ss_object_id: ss_object_id.map(|id| id.to_string()),
             jd: 2460000.5,
             magpsf: 18.5,
             sigmapsf: 0.1,
@@ -460,14 +458,12 @@ async fn test_babamul_lsst_with_ztf_match() {
         dia_source.pixel_flags = Some(false);
         dia_source.reliability = Some(0.9);
         dia_source.band = Some(Band::G);
-        dia_source.ss_object_id = None;
         dia_source
     };
 
     let lsst_candidate = LsstCandidate {
         dia_source: lsst_dia_source.clone(),
         object_id: lsst_object_id.clone(),
-        ss_object_id: None,
         jd: 2460000.5,
         magpsf: 18.5,
         sigmapsf: 0.1,
@@ -481,6 +477,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     let lsst_alert = LsstAlert {
         candid: lsst_alert_id,
         object_id: lsst_object_id.clone(),
+        ss_object_id: None,
         candidate: lsst_candidate.clone(),
         coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
