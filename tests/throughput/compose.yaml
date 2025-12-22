@@ -6,7 +6,6 @@ networks:
 volumes:
   mongodb:
   kafka_data:
-  rustfs_data:
 
 services:
   mongo:
@@ -59,13 +58,10 @@ services:
       - RUSTFS_SECRET_KEY=rustfsadminsecret
       - RUSTFS_ADDRESS=0.0.0.0:9000
       - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
-      # - RUSTFS_SERVER_DOMAINS=rustfs
       - RUSTFS_SERVER_DOMAINS=rustfs
       - RUSTFS_CONSOLE_ENABLE=true
     networks:
       - boom
-    volumes:
-      - rustfs_data:/data
     healthcheck:
       test:
         [

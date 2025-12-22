@@ -1,6 +1,6 @@
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum CutoutStorageError {
@@ -71,17 +71,22 @@ async fn create_bucket_if_not_exists(
         .iter()
         .any(|b| b.name().unwrap_or_default() == bucket_name);
 
-    if !bucket_exists {
-        match s3_client.create_bucket().bucket(bucket_name).send().await {
-            Ok(_) => {
-                debug!("Created bucket: {}", bucket_name);
-            }
-            Err(e) => {
-                println!("Failed to create bucket {}: {:?}", bucket_name, e);
-                return Err(CutoutStorageError::BucketCreateFailed);
-            }
-        };
+    if bucket_exists {
+        debug!("Bucket {} already exists", bucket_name);
+        return Ok(());
     }
+    // we may have some concurrency issues here, so let's just try to create the bucket and ignore errors if it already exists
+    match s3_client.create_bucket().bucket(bucket_name).send().await {
+        Ok(_) => {
+            debug!("Created bucket: {}", bucket_name);
+        }
+        Err(e) => {
+            warn!(
+                "Bucket {} may already exist or failed to create: {:?}",
+                bucket_name, e
+            );
+        }
+    };
 
     Ok(())
 }

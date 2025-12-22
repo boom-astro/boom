@@ -51,6 +51,10 @@ services:
       - RUSTFS_STORAGE_PATH=/data
       - RUSTFS_ACCESS_KEY=rustfsadmin
       - RUSTFS_SECRET_KEY=rustfsadminsecret
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_SERVER_DOMAINS=rustfs
+      - RUSTFS_CONSOLE_ENABLE=true
     networks:
       - boom
     volumes:
@@ -60,7 +64,7 @@ services:
         [
           "CMD",
           "sh", "-c",
-          "curl -f http://localhost:9000/health && curl -f http://localhost:9001/rustfs/console/health"
+          "curl -f http://0.0.0.0:9000/health && curl -f http://0.0.0.0:9001/rustfs/console/health"
         ]
       interval: 10s
       timeout: 5s

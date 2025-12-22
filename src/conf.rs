@@ -173,7 +173,12 @@ async fn build_cutout_storage(
         .load()
         .await;
 
-    let rustfs_client = aws_sdk_s3::Client::new(&s3_config);
+    let rustfs_client = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::Config::from(&s3_config)
+            .to_builder()
+            .force_path_style(true)
+            .build(),
+    );
     let bucket_name = format!("{}-cutouts", survey.to_string().to_lowercase());
     let storage = CutoutStorage::new(rustfs_client, bucket_name, None)
         .await

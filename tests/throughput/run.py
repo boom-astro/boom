@@ -23,7 +23,7 @@ parser = argparse.ArgumentParser(description="Benchmark BOOM")
 parser.add_argument(
     "--n-alert-workers",
     type=int,
-    default=3,
+    default=4,
     help="Number of alert workers to use for benchmarking.",
 )
 parser.add_argument(
