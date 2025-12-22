@@ -400,7 +400,7 @@ async fn create_kafka_user_and_acls(
 }
 
 /// Create a JWT token for a Babamul user
-async fn create_babamul_jwt(
+pub async fn create_babamul_jwt(
     auth: &AuthProvider,
     user_id: &str,
 ) -> Result<(String, Option<usize>), String> {
