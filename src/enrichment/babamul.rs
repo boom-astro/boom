@@ -4,8 +4,8 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
-use crate::enrichment::EnrichmentWorkerError;
-use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::PhotometryMag};
+use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
+use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use std::collections::HashMap;
@@ -43,8 +43,8 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
     pub properties: LsstAlertProperties,
     #[serde(rename = "cutoutScience")]
     pub cutout_science: Option<CutoutBytes>,
@@ -52,6 +52,7 @@ pub struct EnrichedLsstAlert {
     pub cutout_template: Option<CutoutBytes>,
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
+    pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
 }
 
 impl EnrichedLsstAlert {
@@ -72,6 +73,7 @@ impl EnrichedLsstAlert {
             cutout_science: cutout_science.map(CutoutBytes),
             cutout_template: cutout_template.map(CutoutBytes),
             cutout_difference: cutout_difference.map(CutoutBytes),
+            survey_matches: alert.survey_matches,
         }
     }
 }
@@ -84,9 +86,11 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<ZtfPhotometry>,
+    pub prv_nondetections: Vec<ZtfPhotometry>,
+    pub fp_hists: Vec<ZtfPhotometry>,
     pub properties: ZtfAlertProperties,
+    pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
     #[serde(rename = "cutoutScience")]
     pub cutout_science: Option<CutoutBytes>,
     #[serde(rename = "cutoutTemplate")]
@@ -104,10 +108,12 @@ impl EnrichedZtfAlert {
         properties: ZtfAlertProperties,
     ) -> Self {
         EnrichedZtfAlert {
+            survey_matches: alert.survey_matches,
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,
             prv_candidates: alert.prv_candidates,
+            prv_nondetections: alert.prv_nondetections,
             fp_hists: alert.fp_hists,
             properties,
             cutout_science: cutout_science.map(CutoutBytes),
@@ -255,7 +261,16 @@ impl Babamul {
         let min_reliability = 0.5;
 
         // Iterate over the alerts
-        for alert in alerts {
+        for mut alert in alerts {
+            // Filter ZTF matches to only include public (programid=1)
+            if let Some(ref mut survey_matches) = alert.survey_matches {
+                if let Some(ref mut ztf_match) = survey_matches.ztf {
+                    ztf_match.prv_candidates.retain(|p| p.programid == 1);
+                    ztf_match.prv_nondetections.retain(|p| p.programid == 1);
+                    ztf_match.fp_hists.retain(|p| p.programid == 1);
+                }
+            }
+
             if alert.candidate.dia_source.reliability.unwrap_or(0.0) < min_reliability
                 || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
                 || alert.properties.rock
@@ -298,11 +313,17 @@ impl Babamul {
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
 
         // Iterate over the alerts
-        for alert in alerts {
-            if alert.properties.rock {
+        for mut alert in alerts {
+            // Only send public ZTF alerts (programid=1) to Babamul
+            if alert.candidate.candidate.programid != 1 || alert.properties.rock {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
             }
+
+            // Filter photometry to only include public (programid=1)
+            alert.prv_candidates.retain(|p| p.programid == 1);
+            alert.prv_nondetections.retain(|p| p.programid == 1);
+            alert.fp_hists.retain(|p| p.programid == 1);
 
             // Determine which topic this alert should go to
             // Is it a star, galaxy, or none, and does it have an LSST crossmatch?

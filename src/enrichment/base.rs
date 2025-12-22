@@ -19,7 +19,7 @@ use opentelemetry::{
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, error, instrument};
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is

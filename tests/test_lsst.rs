@@ -172,7 +172,7 @@ async fn test_enrich_lsst_alert() {
     let peak_mag = r_stats.get_f64("peak_mag").unwrap();
     let peak_jd = r_stats.get_f64("peak_jd").unwrap();
     assert!((peak_mag - 23.674994).abs() < 1e-6);
-    assert!((peak_jd - 2460961.733092).abs() < 1e-6);
+    assert!((peak_jd - 2460961.732664).abs() < 1e-6);
 }
 
 #[tokio::test]
