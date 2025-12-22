@@ -5,7 +5,7 @@ use mongodb::bson::doc;
 use mongodb::Database;
 use serde::Deserialize;
 use std::{collections::HashMap, path::Path};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 

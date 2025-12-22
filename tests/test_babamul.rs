@@ -73,7 +73,6 @@ fn create_mock_enriched_lsst_alert(
     dia_source.visit = 123456789;
     dia_source.detector = 1;
     dia_source.dia_object_id = Some(987654321);
-    dia_source.ss_object_id = None;
     dia_source.midpoint_mjd_tai = 60000.5;
     dia_source.ra = 180.0;
     dia_source.dec = 0.0;
@@ -83,6 +82,9 @@ fn create_mock_enriched_lsst_alert(
     dia_source.ap_flux_err = Some(15.0);
     dia_source.pixel_flags = Some(pixel_flags);
     dia_source.reliability = Some(reliability as f32);
+
+    let ss_object_id = if is_rock { Some(555555_i64) } else { None };
+    dia_source.ss_object_id = ss_object_id;
 
     EnrichedLsstAlert {
         candid,
@@ -98,7 +100,6 @@ fn create_mock_enriched_lsst_alert(
             snr: 100.0,
             magap: 18.6,
             sigmagap: 0.12,
-            is_sso: false,
         },
         prv_candidates: vec![],
         fp_hists: vec![],
@@ -471,12 +472,12 @@ async fn test_babamul_lsst_with_ztf_match() {
         snr: 100.0,
         magap: 18.6,
         sigmagap: 0.12,
-        is_sso: false,
     };
 
     let lsst_alert = LsstAlert {
         candid: lsst_alert_id,
         object_id: lsst_object_id.clone(),
+        ss_object_id: None,
         candidate: lsst_candidate.clone(),
         coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
@@ -529,6 +530,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         object_id: lsst_object_id.clone(),
         prv_candidates: vec![lsst_candidate.clone()],
         fp_hists: vec![lsst_forced_phot],
+        is_sso: false,
         cross_matches: None,
         aliases: Some(LsstAliases {
             ztf: vec![ztf_match_id.clone()],
@@ -745,6 +747,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         object_id: lsst_match_id.clone(),
         prv_candidates: vec![lsst_candidate],
         fp_hists: vec![lsst_forced_phot],
+        is_sso: false,
         cross_matches: None,
         aliases: Some(LsstAliases {
             ztf: Vec::new(),
