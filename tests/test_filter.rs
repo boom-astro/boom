@@ -27,7 +27,7 @@ async fn test_build_filter() {
                 "aux": mongodb::bson::Bson::Null,
                 "prv_candidates": {
                     "$filter": {
-                        "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -99,7 +99,7 @@ async fn test_build_multisurvey_filter() {
                 "aux": mongodb::bson::Bson::Null,
                 "prv_candidates": {
                     "$filter": {
-                        "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -111,7 +111,7 @@ async fn test_build_multisurvey_filter() {
                     }
                 },
                 "aliases": {
-                    "$arrayElemAt": ["$aux.aliases", 0]
+                    "$ifNull": [ {"$arrayElemAt": ["$aux.aliases", 0] }, doc!{}]
                 }
             }
         },
@@ -121,7 +121,7 @@ async fn test_build_multisurvey_filter() {
                 "lsst_aux": mongodb::bson::Bson::Null,
                 "LSST.prv_candidates": {
                     "$filter": {
-                        "input": { "$arrayElemAt": ["$lsst_aux.prv_candidates", 0] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$lsst_aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [

@@ -9,7 +9,10 @@ pub use base::{
     EnrichmentWorkerError,
 };
 pub use decam::DecamEnrichmentWorker;
-pub use lsst::{LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker};
+pub use lsst::{
+    LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker, LsstMatch, LsstPhotometry,
+};
 pub use ztf::{
     ZtfAlertClassifications, ZtfAlertForEnrichment, ZtfAlertProperties, ZtfEnrichmentWorker,
+    ZtfMatch, ZtfPhotometry,
 };
