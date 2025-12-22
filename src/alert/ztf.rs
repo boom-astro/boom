@@ -109,7 +109,7 @@ pub struct PrvCandidate {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct ZtfPrvCandidate {
     #[serde(flatten)]
     pub prv_candidate: PrvCandidate,
@@ -586,7 +586,7 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
 pub struct ZtfAliases {
     #[serde(rename = "LSST")]
     pub lsst: Vec<String>,

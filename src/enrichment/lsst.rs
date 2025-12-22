@@ -2,30 +2,64 @@ use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
 use crate::enrichment::{
-    fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError,
+    fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
-use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
+use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
 use std::collections::HashMap;
 use tracing::{error, instrument, warn};
 
+fn default_lsst_zp() -> Option<f64> {
+    Some(8.9)
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsstPhotometry {
+    pub jd: f64,
+    pub magpsf: Option<f32>,
+    pub sigmapsf: Option<f32>,
+    pub diffmaglim: f32,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    // Set a default if missing
+    #[serde(default = "default_lsst_zp")]
+    pub zp: Option<f64>,
+    pub ra: Option<f64>,
+    pub dec: Option<f64>,
+    pub snr: Option<f64>,
+}
+
+impl LsstPhotometry {
+    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
+        // If the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+        match (self.snr, self.magpsf, self.sigmapsf) {
+            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
+                time: self.jd,
+                mag,
+                mag_err: sig,
+                band: self.band.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {
                 "_id": {"$in": []}
-            }
-        },
-        doc! {
-            "$project": {
-                "objectId": 1,
-                "candidate": 1,
             }
         },
         doc! {
@@ -37,58 +71,78 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
-            "$project": doc! {
-                "objectId": 1,
-                "candidate": 1,
-                "prv_candidates": fetch_timeseries_op(
-                    "aux.prv_candidates",
-                    "candidate.jd",
-                    365,
-                    None
-                ),
-                "fp_hists": fetch_timeseries_op(
-                    "aux.fp_hists",
-                    "candidate.jd",
-                    365,
-                    Some(vec![doc! {
-                        "$gte": [
-                            "$$x.snr",
-                            3.0
-                        ]
-                    }]),
-                ),
-                "aliases": get_array_element("aux.aliases"),
+            "$unwind": {
+                "path": "$aux",
+                "preserveNullAndEmptyArrays": false
             }
         },
         doc! {
-            "$project": doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "aux.aliases.ZTF.0",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        },
+        doc! {
+            "$project": {
                 "objectId": 1,
                 "candidate": 1,
-                "prv_candidates.jd": 1,
-                "prv_candidates.magpsf": 1,
-                "prv_candidates.sigmapsf": 1,
-                "prv_candidates.band": 1,
-                "fp_hists.jd": 1,
-                "fp_hists.magpsf": 1,
-                "fp_hists.sigmapsf": 1,
-                "fp_hists.band": 1,
+                "prv_candidates": "$aux.prv_candidates",
+                "fp_hists": "$aux.fp_hists",
+                "survey_matches": {
+                    "ztf": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
+                            "then": {
+                                "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
+                                "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    }
+                }
             }
         },
     ]
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+pub struct LsstSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+pub struct LsstMatch {
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
+}
+
 /// LSST alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LsstAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
+    pub survey_matches: Option<LsstSurveyMatches>,
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document
@@ -248,12 +302,18 @@ impl LsstEnrichmentWorker {
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = &alert.candidate;
+        let is_rock = alert.ss_object_id.is_some();
 
-        let is_rock = candidate.is_sso;
-
-        let prv_candidates = alert.prv_candidates.clone();
-        let fp_hists = alert.fp_hists.clone();
+        let prv_candidates: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .filter_map(|p| p.to_photometry_mag())
+            .collect();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .filter_map(|p| p.to_photometry_mag())
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
