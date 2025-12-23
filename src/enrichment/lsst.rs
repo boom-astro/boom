@@ -5,6 +5,7 @@ use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
 use crate::utils::db::mongify;
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
@@ -180,7 +181,29 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
         // Detect if Babamul is enabled from the config
-        let babamul: Option<Babamul> = if config.babamul.enabled {
+        let babamul_enabled = config.babamul.enabled;
+        // If enabled, we need to ensure we have LSSG cross-matches configured
+        // and that the catalog exists in the database
+        if babamul_enabled {
+            // Require LSST cross-match config to include LSSG
+            let lsst_crossmatch_config =
+                config.crossmatch.get(&Survey::Lsst).unwrap_or_else(|| {
+                    panic!("Babamul is enabled but no LSST cross-match configuration is present")
+                });
+            let lssg_found = lsst_crossmatch_config
+                .iter()
+                .any(|xmatch_config| xmatch_config.catalog == "LSSG");
+
+            if !lssg_found {
+                panic!("Babamul is enabled but LSSG cross-match is not configured for LSST alerts");
+            }
+            // Also require the LSSG catalog collection to exist in the database
+            let collections = db.list_collection_names().await?;
+            if !collections.contains(&"LSSG".to_string()) {
+                panic!("Babamul is enabled but the LSSG catalog does not exist in the database");
+            }
+        }
+        let babamul: Option<Babamul> = if babamul_enabled {
             Some(Babamul::new(&config))
         } else {
             None
