@@ -186,21 +186,28 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // and that the catalog exists in the database
         if babamul_enabled {
             // Require LSST cross-match config to include LSSG
-            let lsst_crossmatch_config =
-                config.crossmatch.get(&Survey::Lsst).unwrap_or_else(|| {
-                    panic!("Babamul is enabled but no LSST cross-match configuration is present")
-                });
+            let Some(lsst_crossmatch_config) = config.crossmatch.get(&Survey::Lsst) else {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but no LSST cross-match configuration is present"
+                        .to_string(),
+                ));
+            };
             let lssg_found = lsst_crossmatch_config
                 .iter()
                 .any(|xmatch_config| xmatch_config.catalog == "LSSG");
-
             if !lssg_found {
-                panic!("Babamul is enabled but LSSG cross-match is not configured for LSST alerts");
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but LSSG cross-match is not configured for LSST alerts"
+                        .to_string(),
+                ));
             }
             // Also require the LSSG catalog collection to exist in the database
             let collections = db.list_collection_names().await?;
             if !collections.contains(&"LSSG".to_string()) {
-                panic!("Babamul is enabled but the LSSG catalog does not exist in the database");
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but the LSSG catalog does not exist in the database"
+                        .to_string(),
+                ));
             }
         }
         let babamul: Option<Babamul> = if babamul_enabled {
