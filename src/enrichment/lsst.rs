@@ -90,6 +90,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
+                "cross_matches": "$aux.cross_matches",
                 "survey_matches": {
                     "ztf": {
                         "$cond": {
@@ -142,6 +143,7 @@ pub struct LsstAlertForEnrichment {
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
+    pub cross_matches: Option<HashMap<String, Vec<Document>>>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
@@ -150,6 +152,7 @@ pub struct LsstAlertForEnrichment {
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
+    pub star: bool,
     pub photstats: PerBandProperties,
 }
 
@@ -304,6 +307,9 @@ impl LsstEnrichmentWorker {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
 
+        // TODO: Determine if this is a star based on LSSG cross-matches
+        let is_star = false;
+
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
@@ -323,6 +329,7 @@ impl LsstEnrichmentWorker {
 
         Ok(LsstAlertProperties {
             rock: is_rock,
+            star: is_star,
             stationary,
             photstats,
         })
