@@ -63,7 +63,14 @@ workers:
     filter:
       n_workers: 1
 crossmatch:
-  lsst: []
+  lsst:
+    - catalog: LSSG
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
   decam: []
   ztf:
     - catalog: PS1_DR1

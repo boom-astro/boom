@@ -105,6 +105,7 @@ fn create_mock_enriched_lsst_alert(
         fp_hists: vec![],
         properties: LsstAlertProperties {
             rock: is_rock,
+            star: false,
             stationary: false,
             photstats: PerBandProperties::default(),
         },
@@ -344,6 +345,11 @@ async fn test_babamul_lsst_with_ztf_match() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let db = boom::conf::get_test_db().await;
+    // Ensure the LSSG catalog collection exists for Babamul validation
+    db.collection::<mongodb::bson::Document>("LSSG")
+        .insert_one(doc! {"_init": true})
+        .await
+        .ok();
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     delete_kafka_topic("babamul.lsst.none", &config).await;
     let now = Time::now().to_jd();
