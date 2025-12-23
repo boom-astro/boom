@@ -2,7 +2,7 @@
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
-use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
+use crate::enrichment::lsst::{CrossMatch, LsstAlertForEnrichment, LsstAlertProperties};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
@@ -53,6 +53,7 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
+    pub cross_matches: Option<std::collections::HashMap<String, Vec<CrossMatch>>>,
 }
 
 impl EnrichedLsstAlert {
@@ -62,6 +63,7 @@ impl EnrichedLsstAlert {
         cutout_template: Option<Vec<u8>>,
         cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
+        cross_matches: Option<std::collections::HashMap<String, Vec<CrossMatch>>>,
     ) -> Self {
         EnrichedLsstAlert {
             candid: alert.candid,
@@ -74,6 +76,53 @@ impl EnrichedLsstAlert {
             cutout_template: cutout_template.map(CutoutBytes),
             cutout_difference: cutout_difference.map(CutoutBytes),
             survey_matches: alert.survey_matches,
+            cross_matches,
+        }
+    }
+
+    pub fn compute_babamul_category(&self) -> String {
+        const DISTANCE_THRESHOLD_ARCSEC: f64 = 1.0;
+        const SCORE_THRESHOLD: f64 = 0.5;
+
+        // Check if we have LSSG cross-matches
+        if let Some(xmatches) = &self.cross_matches {
+            if let Some(lssg_matches) = xmatches.get("LSSG") {
+                if !lssg_matches.is_empty() {
+                    // Rule 1: Check if nearest match is within distance threshold and score > 0.5
+                    if let Some(nearest) = lssg_matches.first() {
+                        // Convert distance from radians to arcseconds if needed
+                        let distance_arcsec = if nearest.distance > 1.0 {
+                            // Assume already in arcseconds
+                            nearest.distance
+                        } else {
+                            // Assume in radians, convert to arcseconds
+                            nearest.distance * 206265.0
+                        };
+
+                        if distance_arcsec <= DISTANCE_THRESHOLD_ARCSEC
+                            && nearest.score > SCORE_THRESHOLD
+                        {
+                            return "stellar".to_string();
+                        }
+                    }
+
+                    // Rule 2: Check if any match has score < 0.5
+                    if lssg_matches.iter().any(|m| m.score < SCORE_THRESHOLD) {
+                        return "hosted".to_string();
+                    }
+
+                    // Rule 3: Matches exist but none of the above
+                    return "hostless".to_string();
+                }
+            }
+        }
+
+        // No matches: check if in footprint (for now, randomly assign)
+        let in_footprint = rand::random::<bool>();
+        if in_footprint {
+            "hostless".to_string()
+        } else {
+            "unknown".to_string()
         }
     }
 }
@@ -253,8 +302,6 @@ impl Babamul {
         alerts: Vec<EnrichedLsstAlert>,
     ) -> Result<(), EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
-        // For now, we will just send all alerts to "babamul.none"
-        // In the future, we will determine the topic based on the alert properties
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
@@ -279,11 +326,8 @@ impl Babamul {
                 continue;
             }
 
-            // Determine which topic this alert should go to
-            // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
-            // TODO: Get this implemented
-            // For now, all LSST alerts go to "babamul.lsst.none"
-            let category: String = "none".to_string();
+            // Compute the category for this alert to determine the topic
+            let category = alert.compute_babamul_category();
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
