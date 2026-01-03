@@ -11,10 +11,11 @@ mod tests {
     use boom::api::routes;
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
-    use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker};
+    use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
     use boom::utils::enums::Survey;
     use boom::utils::testing::{
-        drop_alert_from_collections, lsst_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+        drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
+        TEST_CONFIG_FILE,
     };
     use mongodb::bson::doc;
     use mongodb::Database;
@@ -562,7 +563,7 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey_name}/alerts
+    /// Test GET /babamul/surveys/lsst/alerts
     #[actix_rt::test]
     async fn test_get_lsst_alerts() {
         load_dotenv();
@@ -629,7 +630,73 @@ mod tests {
         drop_alert_from_collections(candid, "LSST").await.unwrap();
     }
 
-    /// Test GET /babamul/surveys/{survey_name}/objects/{object_id}
+    /// Test GET /babamul/surveys/ztf/alerts
+    #[actix_rt::test]
+    async fn test_get_ztf_alerts() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(
+            &database,
+            &auth_app_data,
+            &format!("objects_{}", unique_suffix()),
+        )
+        .await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(babamul_auth_middleware))
+                .service(routes::babamul::surveys::get_alerts),
+        )
+        .await;
+
+        let mut alert_worker = ztf_alert_worker().await;
+        let (candid, object_id, _, _, bytes_content) = AlertRandomizer::new_randomized(Survey::Ztf)
+            .ra(180.0)
+            .dec(0.0)
+            .get()
+            .await;
+        let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+        let result = enrichment_worker.process_alerts(&[candid]).await;
+        assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
+        // Query with cone search and magnitude filters
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/alerts?ra=180.0&dec=0.0&radius_arcsec=60&min_magpsf=11&max_magpsf=26")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve alerts (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let alerts = body["data"].as_array().unwrap();
+        assert!(
+            !alerts.is_empty(),
+            "Response should contain at least one alert"
+        );
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert["objectId"].as_str().unwrap() == object_id
+                    && alert["candid"].as_i64().unwrap() == candid),
+            "Response should contain the inserted alert"
+        );
+
+        // Clean up
+        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+    }
+
+    /// Test GET /babamul/surveys/lsst/objects/{object_id}
     #[actix_rt::test]
     async fn test_get_lsst_object() {
         load_dotenv();
@@ -696,6 +763,84 @@ mod tests {
         // Test retrieval of non-existent object
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/lsst/objects/nonexistent_object")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Should return 404 for non-existent object"
+        );
+    }
+
+    /// Test GET /babamul/surveys/ztf/objects/{object_id}
+    #[actix_rt::test]
+    async fn test_get_ztf_object() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(
+            &database,
+            &auth_app_data,
+            &format!("object_{}", unique_suffix()),
+        )
+        .await;
+
+        let mut alert_worker = ztf_alert_worker().await;
+        let (candid, object_id, _, _, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+        let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+        let result = enrichment_worker.process_alerts(&[candid]).await;
+        assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(babamul_auth_middleware))
+                .service(routes::babamul::surveys::get_object),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/objects/{}", &object_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve object (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["data"]["object_id"].as_str().unwrap(),
+            &object_id,
+            "Response should contain correct object_id"
+        );
+        assert!(
+            body["data"]["candidate"].is_object(),
+            "Response should contain candidate"
+        );
+        assert!(
+            body["data"]["cutout_science"].is_string(),
+            "Cutout should be base64 encoded string"
+        );
+
+        // Clean up
+        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+
+        // Test retrieval of non-existent object
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/objects/nonexistent_object")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
 
