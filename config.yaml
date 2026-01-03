@@ -8,6 +8,7 @@ database:
   password: "" # Set via BOOM_DATABASE__PASSWORD environment variable
   srv: false
 api:
+  domain: "localhost" # Set via BOOM_API__DOMAIN environment variable
   port: 4000 # Set via BOOM_API__PORT environment variable
   auth:
     secret_key: "" # Set via BOOM_API__AUTH__SECRET_KEY environment variable

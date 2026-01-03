@@ -198,6 +198,7 @@ pub async fn post_babamul_signup(
         if let Err(e) = email_service.send_activation_email(
             &email,
             &activation_code,
+            &config.api.domain,
             &config.babamul.webapp_url,
         ) {
             eprintln!("Failed to send activation email to {}: {}", email, e);

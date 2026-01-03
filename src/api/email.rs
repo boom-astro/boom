@@ -92,6 +92,7 @@ impl EmailService {
         &self,
         to_email: &str,
         activation_code: &str,
+        domain: &str,
         webapp_url: &Option<String>,
     ) -> Result<(), String> {
         if !self.enabled {
@@ -110,7 +111,7 @@ impl EmailService {
                 "Welcome to **Babamul**!\n\n\
                  Your activation code is: **{}**\n\n\
                  To activate your account, visit the following link:\n\n\
-                 {}/signup?email={}&activation_code={}\n\n\
+                 {}/activate?email={}&activation_code={}\n\n\
                  After activation, you'll receive a password that you can use to:\n\
                  1. Connect to Kafka streams (topics: babamul.*)\n\
                  2. Authenticate to the Babamul API\n\n\
@@ -124,16 +125,16 @@ impl EmailService {
                  Your activation code is: **{}**\n\n\
                  To activate your account, use the following `curl` command:\n\n\
                  ```bash\n\
-                 curl -X POST https://babamul.example.com/babamul/activate \\\n\
-                 -H 'Content-Type: application/x-www-form-urlencoded' \\\n\
-                 -d 'email={}&activation_code={}'\n\
+                 curl -X POST https://{}/babamul/activate \\\n\
+                 -H 'Content-Type: application/json' \\\n\
+                 -d '{{\"email\":\"{}\",\"activation_code\":\"{}\"}}'\n\
                  ```\n\n\
                  After activation, you'll receive a password that you can use to:\n\
                  1. Connect to Kafka streams (topics: babamul.*)\n\
                  2. Authenticate to the Babamul API\n\n\
                  This code will expire in 24 hours.\n\n\
                  If you did not request this, please ignore this email.",
-                activation_code, to_email, activation_code
+                activation_code, domain, to_email, activation_code
             )
         };
 
