@@ -47,19 +47,21 @@ async fn main() -> std::io::Result<()> {
 
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {
-            let babamul_avro_schemas = routes::babamul::schemas::BabamulAvroSchemas::new();
+            let babamul_avro_schemas = routes::babamul::surveys::BabamulAvroSchemas::new();
             app = app
                 .app_data(web::Data::new(babamul_avro_schemas))
                 .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
-                .service(routes::babamul::schemas::get_babamul_schema)
-                .service(routes::babamul::users::post_babamul_signup)
-                .service(routes::babamul::users::post_babamul_activate)
-                .service(routes::babamul::users::post_babamul_auth)
+                .service(routes::babamul::surveys::get_babamul_schema)
+                .service(routes::babamul::post_babamul_signup)
+                .service(routes::babamul::post_babamul_activate)
+                .service(routes::babamul::post_babamul_auth)
                 .service(
                     actix_web::web::scope("")
                         .wrap(from_fn(babamul_auth_middleware))
-                        .service(routes::babamul::users::get_babamul_profile)
-                        .service(routes::babamul::surveys::get_object),
+                        .service(routes::babamul::get_babamul_profile)
+                        .service(routes::babamul::surveys::get_object)
+                        .service(routes::babamul::surveys::get_alert_cutouts)
+                        .service(routes::babamul::surveys::get_alerts),
                 )
         }
 

@@ -12,7 +12,6 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use std::collections::HashMap;
 use tracing::{error, instrument, warn};
 
@@ -146,7 +145,7 @@ pub struct LsstAlertForEnrichment {
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,

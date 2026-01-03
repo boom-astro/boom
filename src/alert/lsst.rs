@@ -45,7 +45,7 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, utoipa::ToSchema)]
 #[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
@@ -201,7 +201,7 @@ pub struct DiaSource {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
@@ -461,7 +461,7 @@ pub struct DiaObject {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema, AvroSchema,
+    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
 )]
 #[serde(default)]
 pub struct DiaForcedSource {
@@ -501,7 +501,7 @@ pub struct DiaForcedSource {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
@@ -643,7 +643,7 @@ where
 }
 
 #[serdavro]
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema, Default)]
 pub struct LsstAliases {
     #[serde(rename = "ZTF")]
     pub ztf: Vec<String>,
@@ -665,7 +665,7 @@ pub struct LsstObject {
     pub updated_at: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LsstAlert {
     #[serde(rename = "_id")]
     pub candid: i64,

@@ -22,13 +22,13 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct GeoJsonPoint {
     r#type: String,
     coordinates: Vec<f64>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Coordinates {
     radec_geojson: GeoJsonPoint,
     l: f64,

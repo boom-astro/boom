@@ -58,7 +58,7 @@ pub struct Cutout {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default, AvroSchema,
+    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
 )]
 #[serde(default)]
 pub struct PrvCandidate {
@@ -109,7 +109,7 @@ pub struct PrvCandidate {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ZtfPrvCandidate {
     #[serde(flatten)]
     pub prv_candidate: PrvCandidate,
@@ -200,7 +200,7 @@ where
 #[serde_as]
 #[skip_serializing_none]
 #[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema, Default, AvroSchema,
+    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
 )]
 #[serde(default)]
 pub struct FpHist {
@@ -240,7 +240,7 @@ where
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ZtfForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
@@ -301,7 +301,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, schemars::JsonSchema, AvroSchema,
+    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
 )]
 #[serde(default)]
 pub struct Candidate {
@@ -445,7 +445,7 @@ where
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ZtfCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
@@ -586,7 +586,7 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, AvroSchema)]
+#[derive(Debug, Deserialize, Serialize, AvroSchema, utoipa::ToSchema, Default)]
 pub struct ZtfAliases {
     #[serde(rename = "LSST")]
     pub lsst: Vec<String>,
@@ -609,7 +609,7 @@ pub struct ZtfObject {
     pub updated_at: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ZtfAlert {
     #[serde(rename = "_id")]
     pub candid: i64,

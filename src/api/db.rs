@@ -123,7 +123,7 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
     // Only create babamul_users collection if Babamul is enabled
     if conf.babamul.enabled {
         // Create babamul_users collection with unique email index
-        use crate::api::routes::babamul::users::BabamulUser;
+        use crate::api::routes::babamul::BabamulUser;
         let babamul_users_collection: mongodb::Collection<BabamulUser> =
             db.collection("babamul_users");
         let email_index = mongodb::IndexModel::builder()

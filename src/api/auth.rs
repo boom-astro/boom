@@ -1,4 +1,4 @@
-use crate::api::routes::babamul::users::BabamulUser;
+use crate::api::routes::babamul::BabamulUser;
 use crate::api::routes::users::User;
 use crate::conf::AppConfig;
 use actix_web::body::MessageBody;

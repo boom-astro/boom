@@ -2,7 +2,6 @@ use crate::api::models::response;
 use crate::utils::enums::Survey;
 use actix_web::{web, HttpResponse};
 use mongodb::bson::doc;
-
 pub struct BabamulAvroSchemas {
     lsst_schema: serde_json::Value,
     ztf_schema: serde_json::Value,
@@ -22,21 +21,21 @@ impl BabamulAvroSchemas {
     }
 }
 
-/// Get the Avro schema used by Babamul for the specified survey (lsst or ztf)
+/// Get the Avro schema used by Babamul for the specified survey
 #[utoipa::path(
     get,
-    path = "/babamul/schema/{survey}",
+    path = "/babamul/surveys/{survey}/schemas",
     responses(
         (status = 200, description = "Schema retrieved successfully", body = String),
         (status = 400, description = "Invalid survey"),
         (status = 500, description = "Internal server error")
     ),
     params(
-        ("survey" = String, Path, description = "Survey name (lsst or ztf)")
+        ("survey" = Survey, Path, description = "Survey name (e.g., ztf, lsst)")
     ),
-    tags=["Babamul"]
+    tags=["Schemas"]
 )]
-#[actix_web::get("/babamul/schema/{survey}")]
+#[actix_web::get("/babamul/surveys/{survey}/schemas")]
 pub async fn get_babamul_schema(
     survey: web::Path<Survey>,
     babamul_avro_schemas: web::Data<BabamulAvroSchemas>,
