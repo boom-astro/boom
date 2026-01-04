@@ -1,28 +1,11 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import api from '@/lib/api';
-import LandingSky from '@/components/LandingSky';
+import Kilonova from '@/components/Kilonova';
 
 export default function Landing() {
   const token = api.getTokenRecord();
   const loggedIn = !!token;
-  const BG_KEY = 'landing_bg_mode';
-  const modes = ['sky', 'blob', 'none'] as const;
-  type Mode = typeof modes[number];
-  const [bgMode, setBgMode] = useState<Mode>(() => {
-    try {
-      const v = localStorage.getItem(BG_KEY);
-      if (v && modes.includes(v as Mode)) return v as Mode;
-    } catch {}
-    return 'blob';
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(BG_KEY, bgMode);
-    } catch {}
-  }, [bgMode]);
 
   return (
     <div className="w-full min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-950 to-slate-900 text-white">
@@ -38,21 +21,10 @@ export default function Landing() {
         @keyframes fadeUp { to { transform: translateY(0); opacity: 1; } }
       `}</style>
 
-      {/* Background variants rendered as full-viewport fixed layers */}
-      {bgMode === 'sky' && (
-        <div className="fixed inset-0 pointer-events-none z-0">
-          <LandingSky />
-        </div>
-      )}
-      {bgMode === 'blob' && (
-        <div className="fixed inset-0 flex items-center justify-center pointer-events-none z-0">
-          <svg className="hero-blob w-[60%] h-[60%]" viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
-            <g transform="translate(300,300)">
-              <path d="M120,-172C159,-146,196,-111,210,-70C224,-29,215,18,193,59C171,100,135,135,92,165C49,195,-2,220,-42,205C-82,191,-113,137,-154,96C-196,55,-248,26,-259,-17C-270,-60,-241,-116,-203,-150C-164,-184,-116,-197,-67,-209C-18,-221,31,-233,72,-217C113,-201,82,-198,120,-172Z" fill="#ffb86b" />
-            </g>
-          </svg>
-        </div>
-      )}
+      {/* Kilonova background */}
+      <div className="fixed inset-0 pointer-events-none z-0">
+        <Kilonova />
+      </div>
 
       <div className="relative max-w-6xl w-full px-6 lg:px-12 py-12 md:py-20">
 
@@ -95,23 +67,6 @@ export default function Landing() {
           ) : (
             <p className="mt-8 text-sm text-slate-400">Want to get started quickly? <Link to="/login" className="underline">Log in</Link> or <Link to="/signup" className="underline">create an account</Link>.</p>
           )}
-        </div>
-        {/* background toggle - sticky top-right */}
-        <div className="fixed top-4 right-4 z-50">
-          <div className="flex items-center gap-2">
-            <button
-              title="Cycle background"
-              aria-label="Cycle landing background"
-              onClick={() => {
-                const idx = modes.indexOf(bgMode);
-                const next = modes[(idx + 1) % modes.length];
-                setBgMode(next);
-              }}
-              className="bg-slate-800/60 text-slate-100 hover:bg-slate-800/80 backdrop-blur-sm rounded-md px-3 py-2 shadow-md border border-slate-700"
-            >
-              {bgMode === 'sky' ? 'Sky' : bgMode === 'blob' ? 'Blob' : 'None'}
-            </button>
-          </div>
         </div>
       </div>
     </div>
