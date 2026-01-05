@@ -22,7 +22,17 @@ RUN bun run build
 # Stage 1, based on Nginx, to have only the compiled app, ready for production with Nginx
 FROM nginx:1
 
+ARG BOOM_API__DOMAIN=${BOOM_API__DOMAIN}
+ENV VITE_API_PROXY_TARGET=${BOOM_API__DOMAIN}
+
 COPY --from=build-stage /app/dist/ /usr/share/nginx/html
 
 COPY ./config/nginx.conf /etc/nginx/conf.d/default.conf
 COPY ./config/nginx-backend-not-found.conf /etc/nginx/extra-conf.d/backend-not-found.conf
+
+# Replace the API placeholder with the provided target (fallback to https://api.localhost)
+RUN sed -i "s|__API_ORIGIN__|${VITE_API_PROXY_TARGET:-https://api.localhost}|g" /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

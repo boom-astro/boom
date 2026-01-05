@@ -13,6 +13,8 @@ services:
     environment:
       BOOM_API__DOMAIN: api.${DOMAIN?Variable not set}
       PRERELEASE_MODE: ${PRERELEASE_MODE:-false}
+    # ports:
+    #   - "5173:80" # map the nginx 80 port to host 5173 for local testing
     networks:
       - traefik-public
     labels:
