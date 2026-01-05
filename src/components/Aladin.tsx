@@ -2,17 +2,26 @@ import {
     Card,
     CardContent,
 } from "@/components/ui/card"
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ApiObject } from '@/lib/api';
+import { loadAladinScript } from '@/lib/aladinLoader';
 
 export default function Aladin({
         alert,
     }: {
         alert: ApiObject | null | undefined
     }) {
+        const [isAladinLoaded, setIsAladinLoaded] = useState(false);
+
+        // Load Aladin script when component mounts
+        useEffect(() => {
+                loadAladinScript()
+                        .then(() => setIsAladinLoaded(true))
+                        .catch((err) => console.error('Failed to load Aladin:', err));
+        }, []);
 
         useEffect(() => {
-                if (!alert || !window.A) return;
+                if (!alert || !isAladinLoaded || !window.A) return;
                 const candidate = alert['candidate'] as Record<string, unknown> | undefined;
                 const ra: number = Number(candidate?.['ra'] ?? alert['ra'] ?? alert['ra_deg']);
                 const dec: number = Number(candidate?.['dec'] ?? alert['dec'] ?? alert['dec_deg']);
@@ -100,7 +109,7 @@ export default function Aladin({
                 // ignore cleanup errors
             }
         };
-    }, [alert]);
+    }, [alert, isAladinLoaded]);
 
     return (
     //   <Card className="@container/card">
