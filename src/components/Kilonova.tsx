@@ -38,6 +38,7 @@ export default function Kilonova({ className }: { className?: string }) {
     const ORBIT_DURATION = 10000; // 10 seconds to complete orbit and collide
     const EXPLOSION_DURATION = 6000; // 6 seconds for explosion
     const REMNANT_DISPLAY_TIME = 6000; //  seconds to show remnant star (tunable parameter)
+    const FADE_IN_DURATION = 1500; // 1.5 second fade in for stars and trails
     const TOTAL_CYCLE = ORBIT_DURATION + EXPLOSION_DURATION + REMNANT_DISPLAY_TIME;
     const TILT_ANGLE = Math.PI / 7.5; // ~24 degrees tilt for perspective view
 
@@ -104,6 +105,10 @@ export default function Kilonova({ className }: { className?: string }) {
       if (cycleTime < ORBIT_DURATION) {
         const orbitProgress = cycleTime / ORBIT_DURATION;
         
+        // Calculate fade-in alpha for the first FADE_IN_DURATION milliseconds
+        const fadeInProgress = Math.min(1, cycleTime / FADE_IN_DURATION);
+        const fadeInAlpha = fadeInProgress;
+        
         // Stars spiral inward more slowly - use cubic easing for gradual approach
         const spiralEase = orbitProgress * orbitProgress * orbitProgress;
         const currentOrbitRadius = star1.orbitRadius * (1 - spiralEase * 0.96);
@@ -133,13 +138,16 @@ export default function Kilonova({ className }: { className?: string }) {
         star2.y = centerY + z2_3d * Math.sin(TILT_ANGLE);
 
         // Draw mathematical trails (smooth curves generated from orbit parameters)
+        ctx.save();
+        ctx.globalAlpha = fadeInAlpha;
         const trailArcLength = Math.PI * 0.5; // Show ~90 degrees of trail
         drawMathematicalTrail(ctx, centerX, centerY, angle1, currentOrbitRadius, trailArcLength, TILT_ANGLE);
         drawMathematicalTrail(ctx, centerX, centerY, angle2, currentOrbitRadius, trailArcLength, TILT_ANGLE);
+        ctx.restore();
 
         // Fade out stars only at the very end
         const fadeOutThreshold = 0.96; // Start fading very late
-        const starAlpha = orbitProgress < fadeOutThreshold ? 1 : 1 - ((orbitProgress - fadeOutThreshold) / (1 - fadeOutThreshold));
+        const starAlpha = orbitProgress < fadeOutThreshold ? fadeInAlpha : fadeInAlpha * (1 - ((orbitProgress - fadeOutThreshold) / (1 - fadeOutThreshold)));
         
         // Very subtle tidal stretching - only noticeable at the very end
         const stretchFactor = orbitProgress > 0.97 ? 1 + (orbitProgress - 0.97) / 0.03 * 0.6 : 1;
@@ -238,31 +246,9 @@ export default function Kilonova({ className }: { className?: string }) {
         
         if (pauseProgress > 0.7) {
           const starFadeProgress = Math.min(1, (pauseProgress - 0.7) / 0.3);
-          const newOrbitRadius = star1.orbitRadius;
           
           ctx.save();
           ctx.globalAlpha = starFadeProgress;
-          
-          const angle1 = star1.angle + star1.orbitSpeed * pauseTime;
-          const angle2 = star2.angle + star2.orbitSpeed * pauseTime;
-          
-          const x1 = centerX + Math.cos(angle1) * newOrbitRadius;
-          const y1 = centerY + Math.sin(angle1) * newOrbitRadius * Math.sin(TILT_ANGLE);
-          const z1 = Math.sin(angle1) * newOrbitRadius;
-          
-          const x2 = centerX + Math.cos(angle2) * newOrbitRadius;
-          const y2 = centerY + Math.sin(angle2) * newOrbitRadius * Math.sin(TILT_ANGLE);
-          const z2 = Math.sin(angle2) * newOrbitRadius;
-          
-          const depthScale1 = 0.7 + 0.3 * ((z1 / star1.orbitRadius + 1) / 2);
-          const depthScale2 = 0.7 + 0.3 * ((z2 / star1.orbitRadius + 1) / 2);
-          
-          const stars = [{x: x1, y: y1, z: z1, r: star1.r * depthScale1}, {x: x2, y: y2, z: z2, r: star2.r * depthScale2}];
-          stars.sort((a, b) => a.z - b.z);
-          
-          for (const star of stars) {
-            drawStar(ctx, star.x, star.y, star.r, 1, 0);
-          }
           
           ctx.restore();
         }
