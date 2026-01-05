@@ -1,20 +1,22 @@
 # Stage 0, "build-stage", based on Node.js, to build and compile the frontend
-FROM node:20 AS build-stage
+FROM oven/bun AS build-stage
 
 WORKDIR /app
 
 COPY package.json /app/
 COPY bun.lock /app/
 
-RUN npm install
+RUN bun install
 
 COPY ./ /app/
 
-# TODO: Set below in Docker Compose to point to API URL and read this in the
-# app
-# ARG VITE_API_URL=${VITE_API_URL}
+# Set API domain from build arg and expose it as VITE_ env var for build time
+ARG BOOM_API__DOMAIN=${BOOM_API__DOMAIN}
+ARG PRERELEASE_MODE=${PRERELEASE_MODE:-false}
+ENV VITE_API_PROXY_TARGET=${BOOM_API__DOMAIN}
+ENV VITE_PRERELEASE_MODE=${PRERELEASE_MODE}
 
-RUN npm run build
+RUN bun run build
 
 
 # Stage 1, based on Nginx, to have only the compiled app, ready for production with Nginx

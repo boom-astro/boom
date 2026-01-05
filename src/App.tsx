@@ -1,18 +1,24 @@
 import { BrowserRouter, Routes, Route, useNavigate, Navigate, useLocation } from "react-router-dom";
 import api from "@/lib/api";
 import useAppStore, { ensureProfileLoaded } from "@/lib/store";
-import { useEffect } from "react";
-import Query from "@/pages/Query";
-import BabamulDocs from "@/pages/BabamulDocs";
-import Landing from "@/pages/Landing";
+import { Suspense, lazy, useEffect } from "react";
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteHeader } from "@/components/site-header"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "sonner";
-import Login from "@/pages/Login";
-import ObjectPage from "@/pages/ObjectPage";
-import SignupPage from "@/pages/Signup";
+
+const Query = lazy(() => import("@/pages/Query"));
+const BabamulDocs = lazy(() => import("@/pages/BabamulDocs"));
+const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
+const Login = lazy(() => import("@/pages/Login"));
+const ObjectPage = lazy(() => import("@/pages/ObjectPage"));
+const SignupPage = lazy(() => import("@/pages/Signup"));
+const Landing = lazy(() => import("@/pages/Landing"));
+const Profile = lazy(() => import("@/pages/Profile"));
+
+// Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
+const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
 
 // Home removed — landing page is the main entrypoint. Use `/query` for app search.
 
@@ -24,7 +30,7 @@ function LoginPageWrapper() {
 export default function App() {
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
-      <SidebarProvider>
+      <SidebarProvider defaultOpen={false}>
         <BrowserRouter>
           {/* Layout wrapper to conditionally show header/sidebar on non-landing routes */}
           <LayoutRoutes />
@@ -62,6 +68,11 @@ function LayoutRoutes() {
   const path = location.pathname || '/';
   const isLanding = path === '/' || path === '/landing';
 
+  // In release mode, only allow landing page
+  if (PRERELEASE_MODE && !['/', '/landing'].includes(path)) {
+    return <Navigate to="/" replace />;
+  }
+
   return (
     <>
       {!isLanding && <AppSidebar variant="inset" />}
@@ -71,15 +82,20 @@ function LayoutRoutes() {
         <div className="flex flex-1 flex-col">
           <div className="@container/main flex flex-1 flex-col gap-2">
             <div className={`flex flex-col gap-4 ${isLanding ? '' : 'py-4 md:gap-6 md:py-6'}`}>
-              <Routes>
-                <Route path="/" element={<Landing />} />
-                <Route path="/landing" element={<Landing />} />
-                <Route path="/login" element={<LoginPageWrapper />} />
-                <Route path="/signup" element={<SignupPage />} />
-                <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
-                <Route path="/babamul/docs" element={<ProtectedRoute><BabamulDocs /></ProtectedRoute>} />
-                <Route path="/objects/:survey/:objectId" element={<ProtectedRoute><ObjectPage /></ProtectedRoute>} />
-              </Routes>
+              <Suspense fallback={<div className="px-4 py-6">Loading...</div>}>
+                <Routes>
+                  <Route path="/" element={<Landing />} />
+                  <Route path="/landing" element={<Landing />} />
+                  {!PRERELEASE_MODE && <Route path="/login" element={<LoginPageWrapper />} />}
+                  {!PRERELEASE_MODE && <Route path="/signup" element={<SignupPage />} />}
+                  {!PRERELEASE_MODE && <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />}
+                  {!PRERELEASE_MODE && <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />}
+                  {!PRERELEASE_MODE && <Route path="/docs/kafka" element={<ProtectedRoute><BabamulDocs /></ProtectedRoute>} />}
+                  {!PRERELEASE_MODE && <Route path="/docs/api" element={<ApiDocs />} />}
+                  {!PRERELEASE_MODE && <Route path="/objects/:survey/:objectId" element={<ProtectedRoute><ObjectPage /></ProtectedRoute>} />}
+                  {PRERELEASE_MODE && <Route path="*" element={<Navigate to="/" replace />} />}
+                </Routes>
+              </Suspense>
             </div>
           </div>
         </div>

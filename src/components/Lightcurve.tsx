@@ -1,5 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Maximize2 } from 'lucide-react';
 
 // Band colors matching other plots
 const BAND_COLORS: Record<string, string> = {
@@ -82,6 +84,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
 
     // hover state from legend (same semantics as centroid plot)
     const [hoveredBand, setHoveredBand] = useState<string | null>(null);
+    const [dialogOpen, setDialogOpen] = useState(false);
 
     // sizing
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -118,14 +121,18 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
         return arr;
     }, [domain, plotW]);
     const yTicks = useMemo(() => {
-        const n = 6;
+        const step = 0.5;
         const arr: number[] = [];
-        for (let i = 0; i < n; i++) arr.push(domain.y0 + (i / (n - 1)) * (domain.y1 - domain.y0));
-        return arr;
+        const start = Math.ceil(domain.y0 / step) * step;
+        const end = Math.floor(domain.y1 / step) * step;
+        for (let val = start; val <= end; val += step) {
+            arr.push(val);
+        }
+        return arr.length > 0 ? arr : [domain.y0, domain.y1];
     }, [domain]);
 
     // interaction: tooltip, drag-zoom
-    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; nondet?: boolean }>(() => ({ visible: false, x: 0, y: 0 }));
+    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean }>(() => ({ visible: false, x: 0, y: 0 }));
 
     const dragging = useRef(false);
     const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -148,7 +155,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                 (c as HTMLElement).style.touchAction = 'none';
             }
         } catch (err) {
-            // ignore (SSR or restricted env)
+            console.debug('Lightcurve: unable to update selection styles', err);
         }
         // attach global handlers so drag continues even if cursor leaves the overlay
         selectionCreatedRef.current = false;
@@ -212,7 +219,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                     (c as HTMLElement).style.touchAction = '';
                 }
             } catch (err) {
-                // ignore
+                console.debug('Lightcurve: unable to restore selection styles', err);
             }
             window.removeEventListener('mousemove', onWindowMove);
             window.removeEventListener('mouseup', onWindowUp);
@@ -256,9 +263,10 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     // (no additional helpers needed right now)
 
     return (
+        <>
         <Card className="@container/card col-span-2 lg:col-span-2">
             <CardContent>
-                <div ref={containerRef} style={{ width: '100%', height: 360, marginBottom: 20}}>
+                <div ref={containerRef} style={{ width: '100%', height: '36vh', marginBottom: 20, position: 'relative'}}>
                     <div className="flex items-center justify-between">
                         <div className="text-sm font-medium pb-2">Photometry</div>
                         <div className="flex items-center gap-3">
@@ -277,12 +285,15 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                 </div>
                                 );
                             })}
+                            <button onClick={() => setDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
+                                <Maximize2 className="w-4 h-4 text-gray-600" />
+                            </button>
                         </div>
                     </div>
 
                     <svg width={size.width} height={size.height} onDoubleClick={onDoubleClick}>
                         {/* background */}
-                        <rect x={0} y={0} width={size.width} height={size.height} className="fill-white dark:fill-slate-900" rx={4} />
+                        {/* <rect x={0} y={0} width={size.width} height={size.height} className="fill-transparent" rx={4} /> */}
 
                         {/* grid and axes */}
                         {/* horizontal grid (y ticks) */}
@@ -323,47 +334,23 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             </clipPath>
                         </defs>
 
-                        {/* points: detections */}
-                        <g clipPath="url(#plot-area)">
+                        {/* points: detections - error bars with clipping */}
+                        <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
                             {detections.map((pt, i) => {
                                 const px = xToPixel(pt.t);
-                                const py = yToPixel(pt.mag);
                                 const bandKey = String(pt.band ?? 'default').toLowerCase();
                                 const isActive = !hoveredBand || hoveredBand === bandKey;
-                                                                const sigma = Number((pt as any).sigma);
-                                                                const hasSigma = Number.isFinite(sigma) && sigma > 0;
-                                                                const color = toColor(pt.band);
-                                                                const capW = 6;
-                                                                return (
-                                                                        <g key={`d-${i}-${bandKey}`}>
-                                                                            {hasSigma && (
-                                                                                (() => {
-                                                                                    const pyTop = yToPixel(pt.mag - sigma);
-                                                                                    const pyBottom = yToPixel(pt.mag + sigma);
-                                                                                    return (
-                                                                                        <g>
-                                                                                            <line x1={px} x2={px} y1={pyTop} y2={pyBottom} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                                                                            <line x1={px - capW} x2={px + capW} y1={pyTop} y2={pyTop} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                                                                            <line x1={px - capW} x2={px + capW} y1={pyBottom} y2={pyBottom} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                                                                        </g>
-                                                                                    );
-                                                                                })()
-                                                                            )}
-                                                                            <circle
-                                                                                cx={px}
-                                                                                cy={py}
-                                                                                r={isActive ? 4 : 2}
-                                                                                fill={color}
-                                                                                style={{ opacity: isActive ? 1 : 0.12, transition: 'opacity 200ms ease, r 120ms ease' }}
-                                                                                onMouseEnter={() => setTooltip({ visible: true, x: px, y: py, mag: pt.mag, t: pt.t, band: pt.band, nondet: false })}
-                                                                                onMouseMove={(e) => {
-                                                                                        const rect = (e.currentTarget as SVGCircleElement).ownerSVGElement?.getBoundingClientRect();
-                                                                                        if (rect) setTooltip(t => ({ ...t, x: e.clientX - rect.left, y: e.clientY - rect.top }));
-                                                                                }}
-                                                                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
-                                                                            />
-                                                                        </g>
-                                                                );
+                                const sigma = Number(pt.sigma);
+                                const hasSigma = Number.isFinite(sigma) && sigma > 0;
+                                const color = toColor(pt.band);
+                                const capW = 6;
+                                return hasSigma ? (
+                                    <g key={`errbar-${i}-${bandKey}`}>
+                                        <line x1={px} x2={px} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag - sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag + sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                    </g>
+                                ) : null;
                             })}
 
                             {/* non-detections as downward triangles */}
@@ -373,25 +360,19 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                 const bandKey = String(pt.band ?? 'default').toLowerCase();
                                 const isActive = !hoveredBand || hoveredBand === bandKey;
                                 const sizeTri = isActive ? 5 : 4;
-                                const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`; // down facing triangle
+                                const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
                                 return (
                                     <polygon
-                                        key={`nd-${i}-${bandKey}`}
+                                        key={`nd-vis-${i}-${bandKey}`}
                                         points={path}
                                         fill={toColor(pt.band)}
                                         style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease' }}
-                                        onMouseEnter={() => setTooltip({ visible: true, x: px, y: py, mag: pt.mag, t: pt.t, band: pt.band, nondet: true })}
-                                        onMouseMove={(e) => {
-                                            const rect = (e.currentTarget as SVGPolygonElement).ownerSVGElement?.getBoundingClientRect();
-                                            if (rect) setTooltip(t => ({ ...t, x: e.clientX - rect.left, y: e.clientY - rect.top }));
-                                        }}
-                                        onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
                                     />
                                 );
                             })}
                         </g>
 
-                        {/* transparent overlay to capture drag events */}
+                        {/* transparent overlay to capture drag events - rendered early so interactive elements are on top */}
                         <rect
                             x={pad.left}
                             y={pad.top}
@@ -403,27 +384,233 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             onMouseUp={onMouseUp}
                         />
 
+                        {/* Interactive circles and polygons - rendered after overlay so they're on top */}
+                        {detections.map((pt, i) => {
+                            const px = xToPixel(pt.t);
+                            const py = yToPixel(pt.mag);
+                            const bandKey = String(pt.band ?? 'default').toLowerCase();
+                            const isActive = !hoveredBand || hoveredBand === bandKey;
+                            const color = toColor(pt.band);
+                            return (
+                                <g key={`d-hit-${i}-${bandKey}`}>
+                                    {/* invisible hit area */}
+                                    <circle
+                                        cx={px}
+                                        cy={py}
+                                        r={8}
+                                        fill="transparent"
+                                        style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+                                        onMouseEnter={(e: React.MouseEvent<SVGCircleElement>) => {
+                                            const rect = containerRef.current?.getBoundingClientRect();
+                                            const clientX = e.clientX;
+                                            const clientY = e.clientY;
+                                            const x = rect ? clientX - rect.left : clientX;
+                                            const y = rect ? clientY - rect.top : clientY;
+                                            setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, sigma: Number(pt.sigma), nondet: false });
+                                        }}
+                                        onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
+                                            const rect = containerRef.current?.getBoundingClientRect();
+                                            const clientX = e.clientX;
+                                            const clientY = e.clientY;
+                                            const x = rect ? clientX - rect.left : clientX;
+                                            const y = rect ? clientY - rect.top : clientY;
+                                            setTooltip(prev => ({ ...prev, x, y }));
+                                        }}
+                                        onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
+                                    />
+                                    {/* visible circle */}
+                                    <circle
+                                        cx={px}
+                                        cy={py}
+                                        r={isActive ? 4 : 2}
+                                        fill={color}
+                                        style={{ opacity: isActive ? 1 : 0.12, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
+                                    />
+                                </g>
+                            );
+                        })}
+
+                        {/* Interactive non-detection polygons */}
+                        {nondetectionsSeries.map((pt, i) => {
+                            const px = xToPixel(pt.t);
+                            const py = yToPixel(pt.mag);
+                            const bandKey = String(pt.band ?? 'default').toLowerCase();
+                            const isActive = !hoveredBand || hoveredBand === bandKey;
+                            const sizeTri = isActive ? 5 : 4;
+                            const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                            return (
+                                <g key={`nd-hit-${i}-${bandKey}`}>
+                                    {/* invisible hit area */}
+                                    <circle
+                                        cx={px}
+                                        cy={py}
+                                        r={8}
+                                        fill="transparent"
+                                        style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+                                        onMouseEnter={(e: React.MouseEvent<SVGCircleElement>) => {
+                                            const rect = containerRef.current?.getBoundingClientRect();
+                                            const clientX = e.clientX;
+                                            const clientY = e.clientY;
+                                            const x = rect ? clientX - rect.left : clientX;
+                                            const y = rect ? clientY - rect.top : clientY;
+                                            setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, nondet: true });
+                                        }}
+                                        onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
+                                            const rect = containerRef.current?.getBoundingClientRect();
+                                            const clientX = e.clientX;
+                                            const clientY = e.clientY;
+                                            const x = rect ? clientX - rect.left : clientX;
+                                            const y = rect ? clientY - rect.top : clientY;
+                                            setTooltip(prev => ({ ...prev, x, y }));
+                                        }}
+                                        onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
+                                    />
+                                    {/* visible polygon */}
+                                    <polygon
+                                        points={path}
+                                        fill={toColor(pt.band)}
+                                        style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
+                                    />
+                                </g>
+                            );
+                        })}
+
                         {/* selection rect */}
                         {selection && (
                             <rect x={pad.left + selection.x} y={pad.top + selection.y} width={selection.w} height={selection.h} fill="#3b82f6" opacity={0.12} stroke="#3b82f6" strokeDasharray="4 2" />
                         )}
-
-                        {/* tooltip */}
-                        {tooltip.visible && (
-                            <g>
-                                <foreignObject x={tooltip.x + 12} y={tooltip.y + 12} width={220} height={80}>
-                                    <div className="bg-white dark:bg-slate-800 text-xs border rounded shadow p-2" style={{ pointerEvents: 'none' }}>
-                                        <div className="font-medium">{String(tooltip.band).toUpperCase()}{tooltip.nondet ? ' (non-detection)' : ''}</div>
-                                        <div>MJD: {tooltip.t?.toFixed(3)}</div>
-                                        <div>Mag: {tooltip.mag?.toFixed(3)}</div>
-                                    </div>
-                                </foreignObject>
-                            </g>
-                        )}
-
                     </svg>
+
+                    {/* tooltip outside SVG */}
+                    {tooltip.visible && (
+                        <div style={{ position: 'absolute', left: tooltip.x + 12, top: tooltip.y + 12, zIndex: 50, pointerEvents: 'none' }}>
+                            <div className="bg-white dark:bg-slate-800 text-xs border border-gray-300 dark:border-slate-600 rounded shadow-lg p-2 dark:text-gray-100" style={{ minWidth: 140 }}>
+                                <div className="font-medium">Band: {String(tooltip.band).toUpperCase()}{tooltip.nondet ? ' (non-det)' : ''}</div>
+                                <div>MJD: {tooltip.t?.toFixed(3)}</div>
+                                {!tooltip.nondet && (
+                                    <div>Mag: {tooltip.mag?.toFixed(3)} {tooltip.sigma !== undefined && Number.isFinite(tooltip.sigma) && tooltip.sigma > 0 ? `± ${tooltip.sigma?.toFixed(3)}` : ''}</div>
+                                )}
+                                <div>Lim mag: {tooltip.mag?.toFixed(3)}</div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </CardContent>
         </Card>
+
+        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            <DialogContent className="w-[min(1400px,95vw)] max-w-none sm:!max-w-none h-[90vh] flex flex-col">
+                <DialogHeader>
+                    <DialogTitle className="text-xl">Photometry - Expanded View</DialogTitle>
+                </DialogHeader>
+                <div className="flex-1 flex items-center justify-center overflow-hidden">
+                    <svg width={1200} height={600} onDoubleClick={onDoubleClick}>
+                        {/* Same structure as main plot but with larger dimensions */}
+                        {(() => {
+                            const dialogPad = { left: 80, right: 30, top: 30, bottom: 60 };
+                            const dialogW = 1200;
+                            const dialogH = 600;
+                            const dialogPlotW = dialogW - dialogPad.left - dialogPad.right;
+                            const dialogPlotH = dialogH - dialogPad.top - dialogPad.bottom;
+                            
+                            const xToPixelDialog = (t: number) => dialogPad.left + ((t - domain.x0) / (domain.x1 - domain.x0)) * dialogPlotW;
+                            const yToPixelDialog = (mag: number) => dialogPad.top + ((mag - domain.y0) / (domain.y1 - domain.y0)) * dialogPlotH;
+
+                            return (
+                                <>
+                                    {/* grid */}
+                                    {yTicks.map((yt, i) => {
+                                        const py = yToPixelDialog(yt);
+                                        return <line key={`gy-${i}`} x1={dialogPad.left} x2={dialogW - dialogPad.right} y1={py} y2={py} className="stroke-[#eef2f6] dark:stroke-slate-700" />;
+                                    })}
+                                    {xTicks.map((xt, i) => {
+                                        const px = xToPixelDialog(xt);
+                                        return <line key={`gx-${i}`} x1={px} x2={px} y1={dialogPad.top} y2={dialogPad.top + dialogPlotH} className="stroke-[#f3f4f6] dark:stroke-slate-700" />;
+                                    })}
+
+                                    {/* axis labels */}
+                                    {yTicks.map((yt, i) => {
+                                        const py = yToPixelDialog(yt);
+                                        return <text key={`yt-${i}`} x={dialogPad.left - 10} y={py + 4} textAnchor="end" className="text-sm fill-gray-400 dark:fill-gray-300">{yt.toFixed(2)}</text>;
+                                    })}
+                                    {xTicks.map((xt, i) => {
+                                        const px = xToPixelDialog(xt);
+                                        return <text key={`xt-${i}`} x={px} y={dialogPad.top + dialogPlotH + 25} textAnchor="middle" className="text-sm fill-gray-400 dark:fill-gray-300">{xt.toFixed(1)}</text>;
+                                    })}
+
+                                    <text x={dialogW / 2} y={dialogH - 15} textAnchor="middle" className="text-base fill-gray-600 dark:fill-gray-300">MJD</text>
+                                    <text x={20} y={dialogH / 2} transform={`rotate(-90 20 ${dialogH / 2})`} textAnchor="middle" className="text-base fill-gray-600 dark:fill-gray-300">AB mag</text>
+
+                                    {/* clip path for dialog */}
+                                    <defs>
+                                        <clipPath id="plot-area-dialog">
+                                            <rect x={dialogPad.left} y={dialogPad.top} width={dialogPlotW} height={dialogPlotH} />
+                                        </clipPath>
+                                    </defs>
+
+                                    {/* error bars */}
+                                    <g clipPath="url(#plot-area-dialog)" style={{ pointerEvents: 'none' }}>
+                                        {detections.map((pt, i) => {
+                                            const px = xToPixelDialog(pt.t);
+                                            const bandKey = String(pt.band ?? 'default').toLowerCase();
+                                            const isActive = !hoveredBand || hoveredBand === bandKey;
+                                            const sigma = Number(pt.sigma);
+                                            const hasSigma = Number.isFinite(sigma) && sigma > 0;
+                                            const color = toColor(pt.band);
+                                            const capW = 8;
+                                            return hasSigma ? (
+                                                <g key={`errbar-${i}-${bandKey}`}>
+                                                    <line x1={px} x2={px} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag - sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag + sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                                </g>
+                                            ) : null;
+                                        })}
+
+                                        {nondetectionsSeries.map((pt, i) => {
+                                            const px = xToPixelDialog(pt.t);
+                                            const py = yToPixelDialog(pt.mag);
+                                            const bandKey = String(pt.band ?? 'default').toLowerCase();
+                                            const isActive = !hoveredBand || hoveredBand === bandKey;
+                                            const sizeTri = isActive ? 6 : 5;
+                                            const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                                            return (
+                                                <polygon key={`nd-vis-${i}-${bandKey}`} points={path} fill={toColor(pt.band)} style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease' }} />
+                                            );
+                                        })}
+                                    </g>
+
+                                    {/* detection points */}
+                                    {detections.map((pt, i) => {
+                                        const px = xToPixelDialog(pt.t);
+                                        const py = yToPixelDialog(pt.mag);
+                                        const bandKey = String(pt.band ?? 'default').toLowerCase();
+                                        const isActive = !hoveredBand || hoveredBand === bandKey;
+                                        const color = toColor(pt.band);
+                                        return (
+                                            <circle key={`d-${i}-${bandKey}`} cx={px} cy={py} r={isActive ? 5 : 3} fill={color} style={{ opacity: isActive ? 1 : 0.12, transition: 'opacity 200ms ease, r 120ms ease' }} />
+                                        );
+                                    })}
+
+                                    {/* non-detection points */}
+                                    {nondetectionsSeries.map((pt, i) => {
+                                        const px = xToPixelDialog(pt.t);
+                                        const py = yToPixelDialog(pt.mag);
+                                        const bandKey = String(pt.band ?? 'default').toLowerCase();
+                                        const isActive = !hoveredBand || hoveredBand === bandKey;
+                                        const sizeTri = isActive ? 6 : 5;
+                                        const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                                        return (
+                                            <polygon key={`nd-${i}-${bandKey}`} points={path} fill={toColor(pt.band)} style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease' }} />
+                                        );
+                                    })}
+                                </>
+                            );
+                        })()}
+                    </svg>
+                </div>
+            </DialogContent>
+        </Dialog>
+        </>
     );
 }

@@ -246,7 +246,7 @@ export default function LandingSky({ className }: { className?: string }) {
         const grad = ctx.createLinearGradient(px, py, px - c.vx * tailLen, py - c.vy * tailLen);
         grad.addColorStop(0, 'rgba(220,240,255,0.95)');
         grad.addColorStop(1, 'rgba(120,160,200,0.0)');
-        ctx.strokeStyle = grad as any;
+        ctx.strokeStyle = grad;
         ctx.lineWidth = 2.5;
         ctx.lineCap = 'round';
         ctx.moveTo(px, py);

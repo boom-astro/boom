@@ -78,11 +78,8 @@ export default function CentroidPlot() {
 
     // determine zoom from the furthest point (radial separation)
     const seps = points.map(p => Math.sqrt(p.x * p.x + p.y * p.y));
-    console.log("Centroid plot separations (arcsec):", seps);
     const finiteSeps = seps.filter(s => Number.isFinite(s) && s >= 0);
-    console.log("Centroid plot finite separations (arcsec):", finiteSeps);
     const maxSep = finiteSeps.length ? Math.max(...finiteSeps) : 1;
-    console.log("Centroid plot max separation (arcsec):", maxSep);
     // use furthest point with padding (×1.5) to set zoom radius
     let maxOffsetArcsec = Math.max(0.25, maxSep) * 1.5;
     const step = 0.5;
@@ -138,7 +135,7 @@ export default function CentroidPlot() {
     <>
     <Card data-slot="card" className="col-span-1">
       <CardContent>
-        <div className="pt-0 pb-2 flex items-center justify-between">
+        <div className="pt-0 pb-1 flex items-center justify-between">
           <CardTitle className="text-lg">Centroid Plot</CardTitle>
           <div>
             <button onClick={() => setDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
@@ -149,9 +146,8 @@ export default function CentroidPlot() {
         {!points || points.length === 0 ? (
           <div className="text-sm text-gray-500">No previous detections available to compute centroid.</div>
         ) : (
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col">
             <div className="flex items-center justify-between">
-              <div className="text-sm text-gray-600">Centroid: {centroidRa?.toFixed(6)}, {centroidDec?.toFixed(6)}</div>
               <div className="flex items-center gap-2">
                 {(() => {
                   const present = new Set(points.map(p => String(p.band ?? '').toLowerCase()).filter(Boolean));
@@ -176,8 +172,8 @@ export default function CentroidPlot() {
               </div>
             </div>
 
-            <div ref={containerRef} className="w-full overflow-auto relative">
-              <svg width={size} height={size} className="block mx-auto bg-transparent">
+            <div ref={containerRef} className="w-full relative">
+              <svg viewBox={`0 0 ${size} ${size}`} className="block mx-auto bg-transparent w-full h-auto" style={{ maxWidth: size }}>
                 {/* center lines */}
                 <line x1={padding} y1={size/2} x2={size-padding} y2={size/2} stroke="#e5e7eb" strokeWidth={1} />
                 <line x1={size/2} y1={padding} x2={size/2} y2={size-padding} stroke="#e5e7eb" strokeWidth={1} />
@@ -234,12 +230,42 @@ export default function CentroidPlot() {
                       next += step;
                     }
                   }
-                  return circles.map((arcsec, i) => {
-                    const r = (arcsec / maxOffsetArcsec) * (inner/2);
-                    return (
-                      <circle key={i} cx={size/2} cy={size/2} r={r} stroke="#e5e7eb" strokeWidth={0.8} fill="none" strokeDasharray="3 3" />
-                    )
-                  });
+                  return (
+                    <g>
+                      {circles.map((arcsec, i) => {
+                        const r = (arcsec / maxOffsetArcsec) * (inner/2);
+                        return (
+                          <circle key={i} cx={size/2} cy={size/2} r={r} stroke="#e5e7eb" strokeWidth={0.8} fill="none" strokeDasharray="3 3" />
+                        )
+                      })}
+                      {/* Dots at x-axis intersection points */}
+                      {circles.map((arcsec, i) => {
+                        const r = (arcsec / maxOffsetArcsec) * (inner/2);
+                        return (
+                          <circle key={`dot-${i}`} cx={size/2 + r} cy={size/2} r={3} fill="#9ca3af" />
+                        );
+                      })}
+                      {/* Circle radius labels on x-axis */}
+                      {circles.map((arcsec, i) => {
+                        const r = (arcsec / maxOffsetArcsec) * (inner/2);
+                        const labelX = size/2 + r;
+                        const labelY = size/2;
+                        return (
+                          <text 
+                            key={`label-${i}`} 
+                            x={labelX - 2} 
+                            y={labelY - 4} 
+                            fontSize={14} 
+                            textAnchor="end" 
+                            fill="#95a0b0ff"
+                            className="select-none"
+                          >
+                            {arcsec.toFixed(2)}″
+                          </text>
+                        );
+                      })}
+                    </g>
+                  );
                 })()}
                 {/* points */}
                 {points.map((p, idx) => {
@@ -296,29 +322,58 @@ export default function CentroidPlot() {
                 })()}
 
                 {/* centroid marker */}
-                <g>
+                <g
+                  style={{ cursor: 'pointer' }}
+                  onMouseEnter={(e: React.MouseEvent<SVGGElement>) => {
+                    const rect = containerRef.current?.getBoundingClientRect();
+                    const clientX = e.clientX;
+                    const clientY = e.clientY;
+                    const x = rect ? clientX - rect.left : clientX;
+                    const y = rect ? clientY - rect.top : clientY;
+                    setTooltip({ visible: true, x, y, point: { x: 0, y: 0 } });
+                  }}
+                  onMouseMove={(e: React.MouseEvent<SVGGElement>) => {
+                    const rect = containerRef.current?.getBoundingClientRect();
+                    const clientX = e.clientX;
+                    const clientY = e.clientY;
+                    const x = rect ? clientX - rect.left : clientX;
+                    const y = rect ? clientY - rect.top : clientY;
+                    setTooltip(prev => ({ ...prev, x, y }));
+                  }}
+                  onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
+                >
                   <circle cx={size/2} cy={size/2} r={5} fill="none" stroke="#111827" strokeWidth={1.5} />
                   <circle cx={size/2} cy={size/2} r={2} fill="#111827" />
                 </g>
               </svg>
 
-              {tooltip.visible && tooltip.point && (
+              {tooltip.visible && (
                 <div style={{ left: tooltip.x + 12, top: tooltip.y + 12 }} className="absolute z-50 pointer-events-none">
                   <div className="bg-white text-xs border rounded shadow p-2 dark:bg-slate-800 dark:text-gray-100 dark:border-slate-700" style={{ minWidth: 180 }}>
-                    <div className="font-medium">Band: {String(tooltip.point.band).toUpperCase()}</div>
-                    <div>RA offset: {tooltip.point.x.toFixed(3)}″</div>
-                    <div>Dec offset: {tooltip.point.y.toFixed(3)}″</div>
-                    <div>Separation: {(Math.sqrt(tooltip.point.x*tooltip.point.x + tooltip.point.y*tooltip.point.y)).toFixed(3)}″</div>
-                    {tooltip.point.row?.jd !== undefined && typeof tooltip.point.row?.jd === 'number' && <div>MJD: {(tooltip.point.row.jd - 2400000.5).toFixed(3)}</div>}
-                    {tooltip.point.row?.magpsf !== undefined && <div>Mag: {Number(tooltip.point.row.magpsf).toFixed(3)}</div>}
+                    {tooltip.point && (tooltip.point.x !== 0 || tooltip.point.y !== 0 || tooltip.point.band) ? (
+                      <>
+                        <div className="font-medium">Band: {String(tooltip.point.band).toUpperCase()}</div>
+                        <div>RA offset: {tooltip.point.x.toFixed(3)}″</div>
+                        <div>Dec offset: {tooltip.point.y.toFixed(3)}″</div>
+                        <div>Separation: {(Math.sqrt(tooltip.point.x*tooltip.point.x + tooltip.point.y*tooltip.point.y)).toFixed(3)}″</div>
+                        {tooltip.point.row?.jd !== undefined && typeof tooltip.point.row?.jd === 'number' && <div>MJD: {(tooltip.point.row.jd - 2400000.5).toFixed(3)}</div>}
+                        {tooltip.point.row?.magpsf !== undefined && <div>Mag: {Number(tooltip.point.row.magpsf).toFixed(3)}</div>}
+                      </>
+                    ) : (
+                      <>
+                        <div className="font-medium">Centroid</div>
+                        <div>RA: {centroidRa?.toFixed(6)}</div>
+                        <div>Dec: {centroidDec?.toFixed(6)}</div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
             </div>
 
-            <div className="mt-2 text-xs text-gray-400 pt-2">
+            <div className="mt-2 text-xs text-gray-400 p-0">
                 <div>Points: {points.length} · maxSep: {(Math.max(0, ((() => { const s = points.map(p => Math.sqrt(p.x*p.x + p.y*p.y)).filter(n=>Number.isFinite(n)); return s.length?Math.max(...s):0 })())))?.toFixed(3)}″ · zoom: {maxOffsetArcsec.toFixed(3)}″</div>
-                <div className="text-xs text-gray-600">Offsets shown in arcsec relative to centroid (0,0).</div>
+                {/* <div className="text-xs text-gray-600">Offsets shown in arcsec relative to centroid (0,0).</div> */}
             </div>
           </div>
         )}
@@ -551,7 +606,7 @@ export default function CentroidPlot() {
                       const x = pad.left + ((pt - tMin) / (tMax - tMin)) * plotW;
                       return <text key={`xt-${i}`} x={x} y={h - 16} textAnchor="middle" className="text-xs fill-gray-400">{pt.toFixed(1)}</text>;
                     })}
-                    {/* global X axis label */}
+                    {/* overall X axis label */}
                     <text x={w / 2} y={h - 6} textAnchor="middle" className="text-sm fill-gray-600">MJD</text>
                   </svg>
                   </div>

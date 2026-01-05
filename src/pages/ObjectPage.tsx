@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import api, { ApiObject } from "@/lib/api";
 import useAppStore from "@/lib/store";
 import { greatCircleDistance } from "@/lib/utils";
-import { SectionCards } from "@/components/section-cards";
+
+const SectionCards = lazy(async () => {
+  const mod = await import("@/components/section-cards");
+  return { default: mod.SectionCards };
+});
 
 export default function ObjectPage() {
   const params = useParams();
@@ -34,7 +38,6 @@ export default function ObjectPage() {
           const candidate = data && (data['candidate'] as Record<string, unknown> | undefined);
           const srcRa = candidate?.['ra'] ?? data?.['ra'] ?? data?.['ra_deg'] ?? data?.['RA'] ?? null;
           const srcDec = candidate?.['dec'] ?? data?.['dec'] ?? data?.['dec_deg'] ?? data?.['DEC'] ?? null;
-          console.log("Source coordinates for cross-match formatting:", srcRa, srcDec);
 
           const formatted: Record<string, Record<string, unknown>[]> = {};
           for (const [cat, matches] of Object.entries(cross)) {
@@ -119,11 +122,13 @@ export default function ObjectPage() {
   }, [survey, objectId]);
 
   return (
-    <div className="px-4 lg:px-6">
+    <div className="px-2">
       {loading && <div className="mb-4">Loading object {survey}/{objectId}…</div>}
       {error && <div className="text-red-600 mb-4">{error}</div>}
       {!loading && !error && data && (
-        <SectionCards data={data} />
+        <Suspense fallback={<div className="p-6">Loading components…</div>}>
+          <SectionCards data={data} />
+        </Suspense>
       )}
       {!loading && !error && !data && (
         <div className="p-6 rounded-lg border bg-card/50">No data available for {survey}/{objectId}.</div>

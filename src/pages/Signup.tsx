@@ -4,8 +4,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
-// compose API base like api.ts
-const API_BASE: string = import.meta.env.DEV ? '/api/babamul' : (import.meta.env.VITE_API_BASE ?? '');
+// Use same-origin proxy; prod nginx should route /api to backend
+const API_BASE = '/api/babamul';
 
 export default function SignupPage() {
   const navigate = useNavigate();
@@ -250,12 +250,15 @@ export default function SignupPage() {
                               <span className="inline-block px-1">{password}</span>
                             </div>
                             <p className="mt-3 font-medium">This is the only time this password will be displayed. Copy or save it now.</p>
-                            <p className="mt-1 text-sm text-muted-foreground">These are the same credentials you'll use to sign in and to read real-time alerts (Kafka) later on.</p>
                             <div className="flex gap-2 mt-3">
                                 <Button onClick={() => navigator.clipboard.writeText(password)}>Copy password</Button>
                                 <Button onClick={async () => {
                                 if (!password) return;
-                                try { localStorage.setItem('signup_prefill', JSON.stringify({ email, password })); } catch {}
+                                try {
+                                  localStorage.setItem('signup_prefill', JSON.stringify({ email, password }));
+                                } catch (err) {
+                                  console.warn('Failed to persist signup prefill', err);
+                                }
                                 navigate('/login');
                                 }}>Proceed to login</Button>
                             </div>

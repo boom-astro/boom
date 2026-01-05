@@ -7,6 +7,7 @@ import {
   IconTrash,
   type Icon,
 } from "@tabler/icons-react"
+import { Link, useLocation } from "react-router-dom"
 
 import {
   DropdownMenu,
@@ -35,18 +36,19 @@ export function NavDocuments({
   }[]
 }) {
   const { isMobile } = useSidebar()
+  const location = useLocation()
 
   return (
-    <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+    <SidebarGroup>
       <SidebarGroupLabel>Documentation</SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => (
           <SidebarMenuItem key={item.name}>
-            <SidebarMenuButton asChild>
-              <a href={item.url}>
+            <SidebarMenuButton asChild tooltip={item.name}>
+              <Link to={item.url} state={{ from: location.pathname }}>
                 <item.icon />
                 <span>{item.name}</span>
-              </a>
+              </Link>
             </SidebarMenuButton>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -83,7 +85,7 @@ export function NavDocuments({
         <SidebarMenuItem>
           <SidebarMenuButton className="text-sidebar-foreground/70">
             <IconDots className="text-sidebar-foreground/70" />
-            <span>More</span>
+            <span>More (coming soon)</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       </SidebarMenu>

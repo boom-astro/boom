@@ -5,7 +5,6 @@ import {
   IconHelp,
   IconSearch,
   IconSettings,
-  IconBomb,
   IconBinaryTree,
 } from "@tabler/icons-react"
 
@@ -21,6 +20,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarSeparator,
 } from "@/components/ui/sidebar"
 
 const data = {
@@ -129,12 +129,12 @@ const data = {
   documentation: [
     {
       name: "Kafka Data Access",
-      url: "/babamul/docs",
+      url: "/docs/kafka",
       icon: IconBinaryTree,
     },
     {
       name: "API Data Access",
-      url: "#",
+      url: "/docs/api",
       icon: IconDatabase,
     }
   ],
@@ -142,7 +142,7 @@ const data = {
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
-    <Sidebar collapsible="offcanvas" {...props}>
+    <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
@@ -150,8 +150,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               asChild
               className="data-[slot=sidebar-menu-button]:!p-1.5"
             >
-              <Link to="/">
-                <IconBomb className="!size-5" />
+              <Link to="/" className="flex items-center gap-2">
+                {/* Collapsed version - stacked */}
+                <div className="hidden group-data-[collapsible=icon]:flex flex-col items-center justify-center leading-[1.1] text-md -ml-1">
+                  <span>𒁀𒁀</span>
+                  <span>𒀯</span>
+                </div>
+                {/* Expanded version - horizontal */}
+                <span className="group-data-[collapsible=icon]:hidden">𒁀𒁀𒀯</span>
                 <span className="text-base font-semibold">Babamul</span>
               </Link>
             </SidebarMenuButton>
@@ -160,7 +166,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={data.navMain} />
+        <SidebarSeparator />
         <NavDocuments items={data.documentation} />
+        <SidebarSeparator />
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>

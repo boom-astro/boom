@@ -1,11 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import useAppStore from "@/lib/store";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Link } from "react-router-dom";
+import { toast } from "sonner";
+import { fetchKafkaCredentials, type KafkaCredential } from "@/lib/api";
 
 type TopicNode = {
   key: string;
@@ -69,7 +73,7 @@ const TOPIC_TREE: TopicNode[] = [
   },
 ];
 
-function generatePython(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<EMAIL>", passwordVar = "<PASSWORD>") {
+function generatePython(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<CLIENT_ID>", passwordVar = "<CLIENT_SECRET>") {
   const topicsList = topics.map(t => `"${t}"`).join(', ');
   return `from confluent_kafka import Consumer
 
@@ -102,7 +106,7 @@ finally:
 `;
 }
 
-function generateRust(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<EMAIL>", passwordVar = "<PASSWORD>") {
+function generateRust(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<CLIENT_ID>", passwordVar = "<CLIENT_SECRET>") {
   const topicsList = topics.map(t => `"${t}"`).join(', ');
   const autoCommitCfg = autoCommit ? 'true' : 'false';
   return `use rdkafka::config::ClientConfig;
@@ -140,12 +144,9 @@ fn main() {
 }
 
 export default function BabamulDocs() {
-  const profile = useAppStore(s => s.profile);
-  const usernamePrefill = profile?.username ?? "<EMAIL>";
-
   const [step, setStep] = useState<number>(0);
-
   const [selected, setSelected] = useState<string[]>([]);
+  
   // compute default collapsed nodes: groups whose immediate children are leaves
   function findLeafGroupKeys(nodes: TopicNode[]): string[] {
     const out: string[] = [];
@@ -162,6 +163,41 @@ export default function BabamulDocs() {
   const defaultCollapsed = findLeafGroupKeys(TOPIC_TREE);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(defaultCollapsed));
 
+  // Kafka credentials state
+  const [kafkaCredentials, setKafkaCredentials] = useState<KafkaCredential[]>([]);
+  const [selectedCredentialId, setSelectedCredentialId] = useState<string>("");
+  const [loadingCredentials, setLoadingCredentials] = useState(false);
+
+  // Other settings
+  const [groupId, setGroupId] = useState<string>("");
+  const [offset, setOffset] = useState<string>("earliest");
+  const [autoCommit, setAutoCommit] = useState<boolean>(true);
+  const [lang, setLang] = useState<'python'|'rust'>('python');
+
+  // Load kafka credentials on mount
+  useEffect(() => {
+    async function loadCredentials() {
+      setLoadingCredentials(true);
+      try {
+        const creds = await fetchKafkaCredentials();
+        setKafkaCredentials(creds);
+        if (creds.length > 0) {
+          setSelectedCredentialId(creds[0].client_id);
+        }
+      } catch (err) {
+        console.error('Failed to load kafka credentials:', err);
+      } finally {
+        setLoadingCredentials(false);
+      }
+    }
+    loadCredentials();
+  }, []);
+
+  // Get selected credential details for code generation
+  const selectedCredential = kafkaCredentials.find(c => c.client_id === selectedCredentialId);
+  const clientIdForGeneration = selectedCredential?.client_id || "<CLIENT_ID>";
+  const clientSecretForGeneration = selectedCredential?.client_secret || "<CLIENT_SECRET>";
+
   function toggleCollapsed(key: string) {
     setCollapsed(prev => {
       const next = new Set(prev);
@@ -170,10 +206,6 @@ export default function BabamulDocs() {
       return next;
     });
   }
-  const [groupId, setGroupId] = useState<string>("");
-  const [offset, setOffset] = useState<string>("earliest");
-  const [autoCommit, setAutoCommit] = useState<boolean>(true);
-  const [lang, setLang] = useState<'python'|'rust'>('python');
 
   // no default groupId; user must enter one before generating code
 
@@ -204,11 +236,10 @@ export default function BabamulDocs() {
 
   const generated = useMemo(() => {
     if (effectiveSelected.length === 0) return '';
-    const user = usernamePrefill;
     return lang === 'python'
-      ? generatePython(effectiveSelected, groupId, offset, autoCommit, user, '<PASSWORD>')
-      : generateRust(effectiveSelected, groupId, offset, autoCommit, user, '<PASSWORD>');
-  }, [effectiveSelected, groupId, offset, autoCommit, lang, usernamePrefill]);
+      ? generatePython(effectiveSelected, groupId, offset, autoCommit, clientIdForGeneration, clientSecretForGeneration)
+      : generateRust(effectiveSelected, groupId, offset, autoCommit, clientIdForGeneration, clientSecretForGeneration);
+  }, [effectiveSelected, groupId, offset, autoCommit, lang, clientIdForGeneration, clientSecretForGeneration]);
 
   // topic toggling handled inline via Checkbox `onCheckedChange`
 
@@ -230,7 +261,11 @@ export default function BabamulDocs() {
 
   function copyGenerated() {
     if (!generated) return;
-    navigator.clipboard.writeText(generated).then(() => alert('Copied to clipboard'));
+    navigator.clipboard.writeText(generated).then(() => {
+      toast.success('Code copied to clipboard');
+    }).catch(() => {
+      toast.error('Failed to copy code');
+    });
   }
 
   const renderNode = (node: TopicNode, depth = 0) => {
@@ -297,7 +332,7 @@ export default function BabamulDocs() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h2 className="text-lg font-medium">Babamul — Kafka access guide</h2>
-            <p className="text-sm text-muted-foreground">Your Babamul Kafka username is the same email you use to sign in to this web application. Use the activation password given at account activation for SCRAM authentication.</p>
+            <p className="text-sm text-muted-foreground">Use your Kafka credentials from your profile page for SCRAM authentication. Client ID is the username and client secret is the password.</p>
           </div>
           <div className="flex items-center gap-3">
             <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-primary text-white font-medium select-none">{step+1}/3</div>
@@ -334,11 +369,38 @@ export default function BabamulDocs() {
         {step === 1 && (
           <Card className="min-h-[50vh]">
             <CardHeader>
-              <CardTitle>2 — Consumer settings</CardTitle>
-              <CardDescription>Configure your Kafka consumer behavior and group id.</CardDescription>
+              <CardTitle>2 — Consumer settings & credentials</CardTitle>
+              <CardDescription>Configure your Kafka consumer behavior and select your credentials.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid gap-4">
+                <div>
+                  <label className="text-sm font-medium">Kafka Credential</label>
+                  <div className="flex gap-2 mt-1">
+                    {loadingCredentials ? (
+                      <div className="text-sm text-muted-foreground">Loading credentials...</div>
+                    ) : kafkaCredentials.length === 0 ? (
+                      <div className="text-sm text-red-600 dark:text-red-400">
+                        No Kafka credentials found. <Link to="/profile" className="underline hover:text-red-500">Create one in your profile</Link>.
+                      </div>
+                    ) : (
+                      <Select value={selectedCredentialId} onValueChange={setSelectedCredentialId}>
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {kafkaCredentials.map(cred => (
+                            <SelectItem key={cred.client_id} value={cred.client_id}>
+                              {cred.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-2">Don't have any credentials or want to create new ones? <Link to="/profile" className="underline hover:text-muted-foreground">Create one</Link> in your profile.</p>
+                </div>
+
                 <div>
                   <label className="text-sm font-medium">Group ID</label>
                   <Input value={groupId} onChange={e => setGroupId(e.target.value)} placeholder="e.g. babamul-demo" className="mt-1" />
@@ -377,12 +439,27 @@ export default function BabamulDocs() {
                 <Button variant={lang === 'python' ? 'default' : 'outline'} onClick={() => setLang('python')}>Python</Button>
                 <Button variant={lang === 'rust' ? 'default' : 'outline'} onClick={() => setLang('rust')}>Rust</Button>
                 <Separator orientation="vertical" className="mx-2" />
-                <div className="text-sm text-muted-foreground">Username will be your account's username: <span className="font-medium">{usernamePrefill}</span></div>
+                {selectedCredential && (
+                  <div className="text-sm text-muted-foreground">Using credential: <span className="font-medium">{selectedCredential.name}</span></div>
+                )}
               </div>
               <div className="text-sm text-muted-foreground mb-2">Selected topics ({effectiveSelected.length}): <span className="font-mono text-xs">{effectiveSelected.join(', ')}</span></div>
-              <pre className="p-4 rounded bg-muted text-sm overflow-auto"><code>{generated}</code></pre>
-              <div className="flex gap-2 mt-3">
-                <Button onClick={copyGenerated}>Copy code</Button>
+              <div className="relative">
+                <pre className="p-4 rounded bg-muted text-sm overflow-auto"><code>{generated}</code></pre>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={copyGenerated}
+                        className="absolute top-2 right-2 p-2 rounded bg-muted-foreground/10 hover:bg-muted-foreground/20 transition-colors"
+                        aria-label="Copy code to clipboard"
+                      >
+                        <Copy className="h-4 w-4" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Copy code to clipboard</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
 
               <div className="mt-6">

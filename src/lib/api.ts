@@ -1,6 +1,9 @@
-// Use /api prefix in dev so Vite's dev server proxy can forward requests to the backend.
-// In production you can set `VITE_API_BASE` to point to your API (for example an absolute URL).
-const API_BASE: string = import.meta.env.DEV ? "/api/babamul" : (import.meta.env.VITE_API_BASE ?? "");
+// Always use the same-origin proxy; production should map /api to the backend via the web server
+const API_BASE = "/api/babamul";
+// import JSONbig from 'json-bigint';
+// import it with the native bigint support
+// var JSONbig = require('json-bigint');
+// would turn into var JSONbigNative = require('json-bigint')({ useNativeBigInt: true });
 
 export type TokenRecord = {
   access_token: string;
@@ -14,8 +17,45 @@ export type ApiObject = Record<string, unknown>;
 // Profile shape returned by `/profile` endpoint (partial)
 export type Profile = { username?: string; name?: string; email?: string; avatar?: string } | null;
 
+// Kafka credential returned by `/babamul/kafka-credentials`
+export type KafkaCredential = { name: string; client_id: string; client_secret: string };
+
 const TOKEN_KEY = "api_token";
 const USERNAME_KEY = "api_user";
+
+// Helper function to parse JSON with bigint support
+async function parseResponseJson(res: Response): Promise<unknown> {
+  const text = await res.text();
+  // return JSONbigNative.parse(text);
+  // const text = await response.text();
+  // Parse with a reviver function to keep int64 as strings
+  const data = JSON.parse(text, (_, value) => {
+    // Check if this looks like a large integer
+    // if (typeof value === 'number' && !Number.isSafeInteger(value)) {
+    //   return value.toString();
+    // }
+    // the above doesn't work with floating point numbers that exceed safe integer range
+    // so if we have a number that isn't safe integer and has no fractional part, treat it as bigint
+    if (typeof value === 'number' && !Number.isSafeInteger(value) && Number.isInteger(value)) {
+      return value.toString();
+    }
+    return value;
+  });
+  return data;
+}
+
+type DataEnvelope<T> = { data?: T };
+
+function unwrapData<T>(body: unknown, fallback: T): T {
+  if (body && typeof body === 'object' && 'data' in body) {
+    const dataVal = (body as DataEnvelope<unknown>).data;
+    if (dataVal !== undefined) return dataVal as T;
+  }
+  if (body !== null && body !== undefined) {
+    return body as T;
+  }
+  return fallback;
+}
 
 function getSavedToken(): TokenRecord | null {
   const raw = localStorage.getItem(TOKEN_KEY);
@@ -66,9 +106,9 @@ export async function login(email: string, password: string): Promise<TokenRecor
     const txt = await res.text().catch(() => "");
     throw new Error(`Login failed: ${res.status} ${txt}`);
   }
-  const body = await res.json();
-  if (!body.access_token) throw new Error("Auth response missing access_token");
-  saveToken(body);
+  const body = await parseResponseJson(res);
+  if (!body || typeof body !== 'object' || !('access_token' in body)) throw new Error("Auth response missing access_token");
+  saveToken(body as { access_token: string; token_type?: string; expires_in?: number });
   try {
     localStorage.setItem(USERNAME_KEY, email);
   } catch {
@@ -109,8 +149,8 @@ export async function fetchObject(survey: string, objectId: string): Promise<Api
     throw new Error(`Fetch object failed: ${res.status} ${txt}`);
   }
   // API responses sometimes wrap the payload in { data: ... }
-  const body = await res.json().catch(() => ({}));
-  return (body && (body.data ?? body)) as ApiObject;
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<ApiObject>(body, {} as ApiObject);
 }
 
 export async function fetchProfile(): Promise<Profile> {
@@ -120,8 +160,112 @@ export async function fetchProfile(): Promise<Profile> {
     const txt = await res.text().catch(() => "");
     throw new Error(`Fetch profile failed: ${res.status} ${txt}`);
   }
-  const body = await res.json().catch(() => ({}));
-  return (body && (body.data ?? body)) as Profile;
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<Profile>(body, null);
+}
+
+export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
+  const url = `${API_BASE}/kafka-credentials`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch kafka credentials failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  const result = unwrapData<unknown>(body, []);
+  return Array.isArray(result) ? (result as KafkaCredential[]) : [];
+}
+
+export async function createKafkaCredential(name: string): Promise<KafkaCredential> {
+  const url = `${API_BASE}/kafka-credentials`;
+  const res = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Create kafka credential failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<KafkaCredential>(body, {} as KafkaCredential);
+}
+
+export type AlertSearchParams = {
+  object_id?: string;
+  ra?: number;
+  dec?: number;
+  radius_arcsec?: number;
+  start_jd?: number;
+  end_jd?: number;
+  min_magpsf?: number;
+  max_magpsf?: number;
+  min_drb?: number;
+  max_drb?: number;
+  min_sgscore1?: number;
+  max_sgscore1?: number;
+  min_distpsnr1?: number;
+  max_distpsnr1?: number;
+};
+
+export type Cutouts = {
+  cutout_science?: string;
+  cutout_difference?: string;
+  cutout_template?: string;
+};
+
+export type Alert = {
+  object_id: string;
+  objectId?: string;
+  candid: number;
+  jd: number;
+  candidate: {
+    jd: number;
+    magpsf?: number;
+    fid?: number;
+    drb?: number;
+    reliability?: number;
+    [key: string]: unknown;
+  };
+  magpsf?: number;
+  drb?: number;
+  reliability?: number;
+  cutouts?: Cutouts;
+  [key: string]: unknown;
+};
+
+export async function fetchAlerts(survey: string, params: AlertSearchParams): Promise<Alert[]> {
+  const searchParams = new URLSearchParams();
+  
+  // Add all defined parameters to the query string
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      searchParams.append(key, String(value));
+    }
+  });
+  
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/alerts?${searchParams.toString()}`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch alerts failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  const result = unwrapData<unknown>(body, []);
+  console.log("fetchAlerts: fetched alerts:", result);
+  return Array.isArray(result) ? (result as Alert[]) : [];
+}
+
+export async function fetchAlertCutouts(survey: string, candid: number): Promise<Cutouts> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/alerts/${candid}/cutouts`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch cutouts failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const result = unwrapData<unknown>(body, {});
+  return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
 }
 
 export default {
@@ -130,4 +274,8 @@ export default {
   getTokenRecord,
   fetchObject,
   fetchProfile,
+  fetchKafkaCredentials,
+  createKafkaCredential,
+  fetchAlerts,
+  fetchAlertCutouts,
 };
