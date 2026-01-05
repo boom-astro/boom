@@ -76,7 +76,8 @@ if start_service "mongo" "$2"; then
     echo && echo "$(current_datetime) - Starting MongoDB"
     mkdir -p "$PERSISTENT_DIR/mongodb"
     mkdir -p "$LOGS_DIR/mongodb"
-    apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" \
+    apptainer instance run --env-file .env \
+      --bind "$PERSISTENT_DIR/mongodb:/data/db" \
       --bind "$LOGS_DIR/mongodb:/log" \
       "$SIF_DIR/mongo.sif" mongo
     sleep 5
@@ -94,7 +95,7 @@ if start_service "valkey" "$2"; then
     echo && echo "$(current_datetime) - Starting Valkey"
     mkdir -p "$PERSISTENT_DIR/valkey"
     mkdir -p "$LOGS_DIR/valkey"
-    apptainer instance run \
+    apptainer instance run --env-file .env \
       --bind "$PERSISTENT_DIR/valkey:/data" \
       --bind "$LOGS_DIR/valkey:/log" \
       "$SIF_DIR/valkey.sif" valkey
@@ -112,7 +113,7 @@ if start_service "kafka" "$2"; then
     echo && echo "$(current_datetime) - Starting Kafka"
     mkdir -p "$PERSISTENT_DIR/kafka_data"
     mkdir -p "$LOGS_DIR/kafka"
-    apptainer instance run \
+    apptainer instance run --env-file .env \
       --bind "$BOOM_DIR/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
       --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
       --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
@@ -122,8 +123,6 @@ if start_service "kafka" "$2"; then
 
     echo "$(current_datetime) - Initializing Kafka ACLs"
     apptainer exec \
-      --env KAFKA_ADMIN_PASSWORD="${KAFKA_ADMIN_PASSWORD}" \
-      --env KAFKA_READONLY_PASSWORD="${KAFKA_READONLY_PASSWORD}" \
       --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
       "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
   fi
@@ -140,6 +139,7 @@ if start_service "prometheus" "$2"; then
     mkdir -p "$LOGS_DIR/prometheus"
     mkdir -p "$PERSISTENT_DIR/prometheus"
     apptainer instance start \
+      --env-file .env \
       --bind "$BOOM_DIR/config/prometheus.yaml:/etc/prometheus/prometheus.yaml" \
       --bind "$PERSISTENT_DIR/prometheus:/prometheus/data" \
       --bind "$LOGS_DIR/prometheus:/var/log" \
@@ -199,7 +199,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       echo && echo -e "${YELLOW}$(current_datetime) - BOOM is already running${END}"
     else
       echo && echo "$(current_datetime) - Starting boom${survey:+_$survey} instance"
-      apptainer instance start \
+      apptainer instance start --env-file .env \
         --bind "$CONFIG_FILE:/app/config.yaml" \
         "$SIF_DIR/boom.sif" "boom${survey:+_$survey}"
       sleep 3
@@ -229,7 +229,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
         if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
           echo -e "${YELLOW}Boom consumer already running for survey $survey${4:+ on date $4}${prog:+ for program $prog}.${END}"
         else
-          apptainer exec --pwd /app --env-file .env \
+          apptainer exec --pwd /app \
             "instance://boom_$survey" /app/kafka_consumer "${ARGS[@]}" \
             > "$LOGS_DIR/${survey}${4:+_$4}${prog:+_$prog}_consumer.log" 2>&1 &
           echo -e "${GREEN}Boom consumer started for survey $survey${4:+ on date $4}${prog:+ for program $prog}${END}"
@@ -246,7 +246,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       if pgrep -f "/app/scheduler ${ARGS[*]}" > /dev/null; then
         echo -e "${YELLOW}Boom scheduler already running.${END}"
       else
-        apptainer exec --pwd /app --env-file .env "instance://boom_$survey" /app/scheduler \
+        apptainer exec --pwd /app "instance://boom_$survey" /app/scheduler \
           "${ARGS[@]}" > "$LOGS_DIR/${survey}_scheduler.log" 2>&1 &
         echo -e "${GREEN}Boom scheduler started for survey $survey${END}"
       fi
