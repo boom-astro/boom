@@ -31,10 +31,12 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-web-https.entrypoints=https
       - traefik.http.routers.${STACK_NAME?Variable not set}-web-https.tls=true
       - traefik.http.routers.${STACK_NAME?Variable not set}-web-https.tls.certresolver=le
+      # Define compression middleware
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-compress.compress=true
       # Define Traefik Middleware to handle domain with and without "www" to redirect to only one
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-www-redirect.redirectregex.regex=^http(s)?://www.(${WEBAPP_DOMAIN?Variable not set})/(.*)
       # Redirect a domain with www to non-www
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-www-redirect.redirectregex.replacement=http$${1}://${WEBAPP_DOMAIN?Variable not set}/$${3}
       # Enable www redirection for HTTP and HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-web-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect
-      - traefik.http.routers.${STACK_NAME?Variable not set}-web-https.middlewares=${STACK_NAME?Variable not set}-www-redirect
+      - traefik.http.routers.${STACK_NAME?Variable not set}-web-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-compress
