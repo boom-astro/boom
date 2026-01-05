@@ -122,7 +122,7 @@ if start_service "kafka" "$2"; then
     "$HEALTHCHECK_DIR/kafka-healthcheck.sh"
 
     echo "$(current_datetime) - Initializing Kafka ACLs"
-    apptainer exec \
+    apptainer exec --env-file .env \
       --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
       "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
   fi
