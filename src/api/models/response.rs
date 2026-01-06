@@ -49,3 +49,15 @@ pub fn bad_request(message: &str) -> HttpResponse {
 pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }
+
+// have an ok_ser() that takes a serializable object and converts it to serde_json::Value
+pub fn ok_ser<T: serde::Serialize>(message: &str, data: T) -> HttpResponse {
+    match serde_json::to_value(data) {
+        Ok(data_value) => HttpResponse::Ok().json(ApiResponseBody::ok(message, data_value)),
+        Err(e) => {
+            println!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+            HttpResponse::InternalServerError()
+                .json(ApiResponseBody::error("Failed to serialize response data"))
+        }
+    }
+}

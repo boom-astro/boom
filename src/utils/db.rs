@@ -70,6 +70,14 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    // if survey is LSST, create an index on the ss_object_id field of the alerts collection
+    if survey == &Survey::Lsst {
+        let index = doc! {
+            "ss_object_id": 1,
+        };
+        create_index(&alerts_collection, index, false).await?;
+    }
+
     Ok(())
 }
 
@@ -109,9 +117,28 @@ pub fn update_timeseries_op(
 
 pub fn get_array_element(field: &str) -> Document {
     doc! {
-        "$arrayElemAt": [
-            format!("${}", field),
-            0
+        "$ifNull": [
+            {
+                "$arrayElemAt": [
+                    format!("${}", field),
+                    0
+                ]
+            },
+            []
+        ]
+    }
+}
+
+pub fn get_array_dict_element(field: &str) -> Document {
+    doc! {
+        "$ifNull": [
+            {
+                "$arrayElemAt": [
+                    format!("${}", field),
+                    0
+                ]
+            },
+            {}
         ]
     }
 }
@@ -119,6 +146,8 @@ pub fn get_array_element(field: &str) -> Document {
 /// This function generates a MongoDB aggregation operation
 /// that filters an array field based on a time window relative to a candidate's jd field.
 /// It can also include optional conditions for filtering.
+/// The array_field is expected to come from an auxiliary collection
+/// (i.e. "ztf_aux.prv_candidates", where "ztf_aux" is an array of documents itself).
 pub fn fetch_timeseries_op(
     array_field: &str,
     candidate_jd_field: &str,
