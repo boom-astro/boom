@@ -239,7 +239,6 @@ pub async fn babamul_auth_middleware(
 
     match req.headers().get("Authorization") {
         Some(auth_header) => {
-            println!("Authorization header found: {:?}", auth_header);
             let token = match auth_header.to_str() {
                 Ok(token) if token.starts_with("Bearer ") => token[7..].trim(),
                 _ => {

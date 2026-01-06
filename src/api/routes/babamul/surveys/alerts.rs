@@ -35,6 +35,7 @@ pub struct EnrichedLsstAlert {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 struct AlertsQuery {
+    object_id: Option<String>,
     ra: Option<f64>,
     dec: Option<f64>,
     radius_arcsec: Option<f64>,
@@ -61,6 +62,7 @@ enum AlertsQueryResult {
     path = "/babamul/surveys/{survey}/alerts",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+        ("object_id" = Option<String>, Query, description = "Object ID to filter alerts"),
         ("ra" = Option<f64>, Query, description = "Right Ascension in degrees for cone search"),
         ("dec" = Option<f64>, Query, description = "Declination in degrees for cone search"),
         ("radius_arcsec" = Option<f64>, Query, description = "Radius in arcseconds for cone search"),
@@ -98,7 +100,17 @@ pub async fn get_alerts(
     let survey = path.into_inner();
     let mut filter_doc = Document::new();
     // Build the filter document based on the query parameters
-    if let (Some(ra), Some(dec), Some(radius_arcsec)) = (query.ra, query.dec, query.radius_arcsec) {
+    if let Some(object_id) = &query.object_id {
+        filter_doc.insert("objectId", object_id);
+    } else if let (Some(ra), Some(dec), Some(radius_arcsec)) =
+        (query.ra, query.dec, query.radius_arcsec)
+    {
+        // if the radius is > 600 arcsec (10 arcmin), reject the query to avoid expensive searches
+        if radius_arcsec > 600.0 {
+            return response::bad_request(
+                "Radius too large, maximum allowed is 600 arcseconds (10 arcminutes)",
+            );
+        }
         // Add cone search filter
         filter_doc.insert(
             "coordinates.radec_geojson",
@@ -110,6 +122,10 @@ pub async fn get_alerts(
                     ]
                 }
             },
+        );
+    } else {
+        return response::bad_request(
+            "Either object_id or (ra, dec, radius_arcsec) must be provided",
         );
     }
     if let (Some(start_jd), Some(end_jd)) = (query.start_jd, query.end_jd) {

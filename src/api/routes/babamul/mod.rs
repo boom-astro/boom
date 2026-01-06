@@ -3,7 +3,7 @@ pub mod surveys;
 use crate::api::auth::AuthProvider;
 use crate::api::email::EmailService;
 use crate::api::models::response;
-use actix_web::{get, post, web, HttpResponse};
+use actix_web::{delete, get, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
@@ -12,16 +12,27 @@ use std::process::Command;
 use utoipa::ToSchema;
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct KafkaCredential {
+    pub id: String,            // Unique ID for this credential
+    pub name: String,          // User-defined name for this credential
+    pub client_id: String,     // Randomized Kafka username
+    pub client_secret: String, // Randomized Kafka password (stored in plain text)
+    pub created_at: i64,       // Unix timestamp
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUser {
     // Save in the database as _id, but we want to rename on the way out
     #[serde(rename = "_id")]
     pub id: String,
     pub username: String,
     pub email: String,
-    pub password_hash: String, // Hashed password (for both Kafka SCRAM auth and API auth)
+    pub password_hash: String, // Hashed password (for API auth only, not Kafka)
     pub activation_code: Option<String>,
     pub is_activated: bool,
     pub created_at: i64, // Unix timestamp
+    #[serde(default)]
+    pub kafka_credentials: Vec<KafkaCredential>, // List of Kafka credentials
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -163,9 +174,10 @@ pub async fn post_babamul_signup(
                 activation_code: activation_code.clone(),
                 is_activated,
                 created_at: flare::Time::now().to_utc().timestamp(),
+                kafka_credentials: Vec::new(), // Empty list, credentials created on demand
             };
 
-            // Note: Kafka user/ACLs will be created upon activation, not signup
+            // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
             match babamul_users_collection
                 .insert_one(babamul_user.clone())
                 .await
@@ -280,8 +292,8 @@ fn is_valid_email(email: &str) -> bool {
 /// This function is idempotent - it can be called multiple times safely.
 /// kafka-acls --add operations will silently succeed if the ACL already exists.
 async fn create_kafka_user_and_acls(
-    email: &str,
-    password: &str,
+    client_id: &str,
+    client_secret: &str,
     broker: &str,
 ) -> Result<(), String> {
     // Try to find the right command names
@@ -306,9 +318,9 @@ async fn create_kafka_user_and_acls(
         .arg("--entity-type")
         .arg("users")
         .arg("--entity-name")
-        .arg(email)
+        .arg(client_id)
         .arg("--add-config")
-        .arg(format!("SCRAM-SHA-512=[password={}]", password))
+        .arg(format!("SCRAM-SHA-512=[password={}]", client_secret))
         .output()
         .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
 
@@ -322,7 +334,7 @@ async fn create_kafka_user_and_acls(
         .arg("--bootstrap-server")
         .arg(&broker)
         .arg("--allow-principal")
-        .arg(format!("User:{}", email))
+        .arg(format!("User:{}", client_id))
         .arg("--add")
         .arg("--operation")
         .arg("READ")
@@ -343,7 +355,7 @@ async fn create_kafka_user_and_acls(
         .arg("--bootstrap-server")
         .arg(&broker)
         .arg("--allow-principal")
-        .arg(format!("User:{}", email))
+        .arg(format!("User:{}", client_id))
         .arg("--add")
         .arg("--operation")
         .arg("DESCRIBE")
@@ -364,7 +376,7 @@ async fn create_kafka_user_and_acls(
         .arg("--bootstrap-server")
         .arg(&broker)
         .arg("--allow-principal")
-        .arg(format!("User:{}", email))
+        .arg(format!("User:{}", client_id))
         .arg("--add")
         .arg("--operation")
         .arg("READ")
@@ -378,6 +390,113 @@ async fn create_kafka_user_and_acls(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to add group READ ACL: {}", stderr));
+    }
+
+    Ok(())
+}
+
+/// Delete a Kafka SCRAM user and remove all associated ACLs
+/// This function is idempotent - removing non-existent users/ACLs will not cause errors.
+async fn delete_kafka_user_and_acls(client_id: &str, broker: &str) -> Result<(), String> {
+    // Try to find the right command names
+    // Homebrew on macOS: kafka-configs, kafka-acls (no .sh)
+    // Docker container: kafka-configs.sh, kafka-acls.sh (with .sh)
+    let (configs_cli, acls_cli) = match which::which("kafka-configs") {
+        Ok(_) => {
+            // Found kafka-configs without .sh (Homebrew)
+            ("kafka-configs", "kafka-acls")
+        }
+        Err(_) => {
+            // Fall back to .sh version (Docker container)
+            ("kafka-configs.sh", "kafka-acls.sh")
+        }
+    };
+
+    // Delete SCRAM user credentials (idempotent: --delete will succeed even if user doesn't exist)
+    let output = Command::new(configs_cli)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--delete")
+        .arg("--entity-type")
+        .arg("users")
+        .arg("--entity-name")
+        .arg(client_id)
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Log the error but don't fail if the user doesn't exist
+        eprintln!(
+            "Note: SCRAM user deletion may have failed (user may not exist): {}",
+            stderr
+        );
+    }
+
+    // Remove all ACLs for this principal (idempotent: kafka-acls --remove ignores non-existent ACLs)
+    let output = Command::new(acls_cli)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--remove")
+        .arg("--allow-principal")
+        .arg(format!("User:{}", client_id))
+        .arg("--operation")
+        .arg("READ")
+        .arg("--topic")
+        .arg("babamul.")
+        .arg("--resource-pattern-type")
+        .arg("prefixed")
+        .arg("--force")
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Note: Failed to remove READ ACL: {}", stderr);
+    }
+
+    // Remove DESCRIBE permission ACLs
+    let output = Command::new(acls_cli)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--remove")
+        .arg("--allow-principal")
+        .arg(format!("User:{}", client_id))
+        .arg("--operation")
+        .arg("DESCRIBE")
+        .arg("--topic")
+        .arg("babamul.")
+        .arg("--resource-pattern-type")
+        .arg("prefixed")
+        .arg("--force")
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Note: Failed to remove DESCRIBE ACL: {}", stderr);
+    }
+
+    // Remove consumer group READ permission ACLs
+    let output = Command::new(acls_cli)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--remove")
+        .arg("--allow-principal")
+        .arg(format!("User:{}", client_id))
+        .arg("--operation")
+        .arg("READ")
+        .arg("--group")
+        .arg("babamul-")
+        .arg("--resource-pattern-type")
+        .arg("prefixed")
+        .arg("--force")
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Note: Failed to remove group READ ACL: {}", stderr);
     }
 
     Ok(())
@@ -446,7 +565,6 @@ pub struct BabamulActivateResponse {
 pub async fn post_babamul_activate(
     db: web::Data<Database>,
     body: web::Json<BabamulActivatePost>,
-    config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
     let email = body.email.trim().to_lowercase();
     let activation_code = body.activation_code.trim();
@@ -485,23 +603,8 @@ pub async fn post_babamul_activate(
                         }
                     };
 
-                    // CRITICAL: Create Kafka SCRAM user and ACLs BEFORE marking user as activated
-                    // This ensures we don't activate a user who can't access Kafka
-                    // The Kafka operations are idempotent, so retries are safe
-                    if let Err(e) = create_kafka_user_and_acls(
-                        &user.email,
-                        &password,
-                        &config.kafka.producer.server,
-                    )
-                    .await
-                    {
-                        eprintln!("Failed to create Kafka user/ACLs for {}: {}", user.email, e);
-                        return response::internal_error(
-                            "Failed to configure Kafka access. Please try again or contact support.",
-                        );
-                    }
-
-                    // Now that Kafka is configured, mark the user as activated in the database
+                    // Mark the user as activated in the database
+                    // Note: Kafka credentials are now created separately via /babamul/kafka-credentials endpoint
                     match babamul_users_collection
                         .update_one(
                             doc! { "_id": &user.id },
@@ -656,4 +759,243 @@ pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>
     };
     let user_public = BabamulUserPublic::from(current_user.into_inner().clone());
     response::ok("success", serde_json::to_value(user_public).unwrap())
+}
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct CreateKafkaCredentialPost {
+    pub name: String, // User-defined name for the credential
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct CreateKafkaCredentialResponse {
+    pub message: String,
+    pub credential: KafkaCredentialWithSecret, // Return the full credential including secret
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct KafkaCredentialWithSecret {
+    pub id: String,
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: String, // Only returned on creation
+    pub created_at: i64,
+}
+
+/// Create a new Kafka credential for the authenticated user
+#[utoipa::path(
+    post,
+    path = "/babamul/kafka-credentials",
+    request_body = CreateKafkaCredentialPost,
+    responses(
+        (status = 200, description = "Kafka credential created successfully", body = CreateKafkaCredentialResponse),
+        (status = 400, description = "Invalid request (e.g., empty name)"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error or Kafka configuration failed")
+    ),
+    tags=["Babamul"]
+)]
+#[post("/babamul/kafka-credentials")]
+pub async fn post_kafka_credentials(
+    db: web::Data<Database>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    body: web::Json<CreateKafkaCredentialPost>,
+    config: web::Data<crate::conf::AppConfig>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return response::bad_request("Credential name cannot be empty");
+    }
+
+    // Generate randomized credentials
+    let credential_id = uuid::Uuid::new_v4().to_string();
+    let client_id = format!("babamul-{}", uuid::Uuid::new_v4().to_string());
+    let client_secret = generate_random_string(32);
+
+    let kafka_credential = KafkaCredential {
+        id: credential_id.clone(),
+        name: name.to_string(),
+        client_id: client_id.clone(),
+        client_secret: client_secret.clone(),
+        created_at: flare::Time::now().to_utc().timestamp(),
+    };
+
+    // Create Kafka SCRAM user and ACLs
+    if let Err(e) =
+        create_kafka_user_and_acls(&client_id, &client_secret, &config.kafka.producer.server).await
+    {
+        eprintln!("Failed to create Kafka user/ACLs for {}: {}", client_id, e);
+        return response::internal_error(
+            "Failed to configure Kafka access. Please try again or contact support.",
+        );
+    }
+
+    // Add credential to user's list in the database
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    match babamul_users_collection
+        .update_one(
+            doc! { "_id": &current_user.id },
+            doc! {
+                "$push": {
+                    "kafka_credentials": mongodb::bson::to_bson(&kafka_credential).unwrap()
+                }
+            },
+        )
+        .await
+    {
+        Ok(_) => HttpResponse::Ok().json(CreateKafkaCredentialResponse {
+            message: "Kafka credential created successfully. Save the client_secret - it can be retrieved later but should be stored securely.".to_string(),
+            credential: KafkaCredentialWithSecret {
+                id: kafka_credential.id,
+                name: kafka_credential.name,
+                client_id: kafka_credential.client_id,
+                client_secret: kafka_credential.client_secret,
+                created_at: kafka_credential.created_at,
+            },
+        }),
+        Err(e) => {
+            eprintln!("Database error adding Kafka credential: {}", e);
+            response::internal_error("Failed to save Kafka credential")
+        }
+    }
+}
+
+/// List all Kafka credentials for the authenticated user
+#[utoipa::path(
+    get,
+    path = "/babamul/kafka-credentials",
+    responses(
+        (status = 200, description = "Kafka credentials retrieved successfully", body = Vec<KafkaCredential>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[get("/babamul/kafka-credentials")]
+pub async fn get_kafka_credentials(
+    current_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    response::ok_ser("success", &current_user.kafka_credentials)
+}
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct DeleteKafkaCredentialPath {
+    pub credential_id: String,
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct DeleteKafkaCredentialResponse {
+    pub message: String,
+    pub deleted: bool,
+}
+
+/// Delete a Kafka credential for the authenticated user
+/// This will disable the credential in Kafka and remove it from the user's credentials list
+#[utoipa::path(
+    delete,
+    path = "/babamul/kafka-credentials/{credential_id}",
+    responses(
+        (status = 200, description = "Kafka credential deleted successfully", body = DeleteKafkaCredentialResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Credential not found"),
+        (status = 500, description = "Internal server error or Kafka revocation failed")
+    ),
+    params(
+        ("credential_id" = String, Path, description = "ID of the Kafka credential to delete")
+    ),
+    tags=["Babamul"]
+)]
+#[delete("/babamul/kafka-credentials/{credential_id}")]
+pub async fn delete_kafka_credential(
+    db: web::Data<Database>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    path: web::Path<DeleteKafkaCredentialPath>,
+    config: web::Data<crate::conf::AppConfig>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let credential_id = &path.credential_id;
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    // Find the user and verify they own this credential
+    match babamul_users_collection
+        .find_one(doc! { "_id": &current_user.id })
+        .await
+    {
+        Ok(Some(user)) => {
+            // Find the credential to delete
+            let credential_to_delete = user
+                .kafka_credentials
+                .iter()
+                .find(|cred| cred.id == *credential_id);
+
+            match credential_to_delete {
+                Some(credential) => {
+                    // Delete from Kafka first
+                    if let Err(e) = delete_kafka_user_and_acls(
+                        &credential.client_id,
+                        &config.kafka.producer.server,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "Failed to delete Kafka user/ACLs for {}: {}",
+                            credential.client_id, e
+                        );
+                        return response::internal_error(
+                            "Failed to revoke Kafka access. Please try again or contact support.",
+                        );
+                    }
+
+                    // Remove the credential from the user's list in the database
+                    match babamul_users_collection
+                        .update_one(
+                            doc! { "_id": &current_user.id },
+                            doc! {
+                                "$pull": {
+                                    "kafka_credentials": { "id": credential_id }
+                                }
+                            },
+                        )
+                        .await
+                    {
+                        Ok(_) => HttpResponse::Ok().json(DeleteKafkaCredentialResponse {
+                            message: format!(
+                                "Kafka credential '{}' has been deleted and revoked in Kafka.",
+                                credential.name
+                            ),
+                            deleted: true,
+                        }),
+                        Err(e) => {
+                            eprintln!("Database error removing Kafka credential: {}", e);
+                            response::internal_error("Failed to remove credential from database")
+                        }
+                    }
+                }
+                None => response::not_found("Credential not found or does not belong to this user"),
+            }
+        }
+        Ok(None) => response::not_found("User not found"),
+        Err(e) => {
+            eprintln!("Database error fetching user: {}", e);
+            response::internal_error("Database error")
+        }
+    }
 }

@@ -311,7 +311,7 @@ pub struct ZtfAlertProperties {
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
-    pub multisurvey_photstats: PerBandProperties,
+    pub multisurvey_photstats: Option<PerBandProperties>,
 }
 
 /// ZTF alert ML classifier scores
@@ -610,7 +610,7 @@ impl ZtfEnrichmentWorker {
                 near_brightstar: is_near_brightstar,
                 stationary,
                 photstats,
-                multisurvey_photstats,
+                multisurvey_photstats: Some(multisurvey_photstats),
             },
             all_bands_properties,
             programid,

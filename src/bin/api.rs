@@ -59,6 +59,9 @@ async fn main() -> std::io::Result<()> {
                     actix_web::web::scope("")
                         .wrap(from_fn(babamul_auth_middleware))
                         .service(routes::babamul::get_babamul_profile)
+                        .service(routes::babamul::post_kafka_credentials)
+                        .service(routes::babamul::get_kafka_credentials)
+                        .service(routes::babamul::delete_kafka_credential)
                         .service(routes::babamul::surveys::get_object)
                         .service(routes::babamul::surveys::get_alert_cutouts)
                         .service(routes::babamul::surveys::get_alerts),

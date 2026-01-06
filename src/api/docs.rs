@@ -93,6 +93,8 @@ pub struct ApiDoc;
         routes::babamul::post_babamul_activate,
         routes::babamul::post_babamul_auth,
         routes::babamul::get_babamul_profile,
+        routes::babamul::post_kafka_credentials,
+        routes::babamul::get_kafka_credentials,
         routes::babamul::surveys::schemas::get_babamul_schema,
         routes::babamul::surveys::objects::get_object,
         routes::babamul::surveys::alerts::get_alert_cutouts,
