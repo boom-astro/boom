@@ -53,6 +53,7 @@ mod tests {
                 activation_code: None,
                 is_activated: true,
                 created_at: 0,
+                kafka_credentials: vec![],
             };
 
             babamul_users_collection
