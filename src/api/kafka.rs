@@ -14,6 +14,20 @@ pub struct KafkaAclEntry {
 }
 
 pub fn get_acls(broker: &str) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
+    get_acls_internal(broker, None)
+}
+
+pub fn get_acls_for_client_id(
+    client_id: &str,
+    broker: &str,
+) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
+    get_acls_internal(broker, Some(client_id))
+}
+
+fn get_acls_internal(
+    broker: &str,
+    client_id: Option<&str>,
+) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
     fn parse_keyvals(segment: &str) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for part in segment.split(',') {
@@ -40,13 +54,16 @@ pub fn get_acls(broker: &str) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::
         "kafka-acls.sh"
     };
 
+    // Build the command to list ACLs, optionally filtered by principal
+    let mut cmd = Command::new(acls_cli);
+    cmd.arg("--bootstrap-server").arg(&broker).arg("--list");
+
+    if let Some(id) = client_id {
+        cmd.arg("--principal").arg(format!("User:{}", id));
+    }
+
     // Execute the Kafka CLI to list ACLs
-    match Command::new(acls_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--list")
-        .output()
-    {
+    match cmd.output() {
         Ok(output) => {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -155,22 +172,33 @@ pub fn get_acls(broker: &str) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::
                 Ok(entries)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                Err(format!(
-                    "Failed to retrieve Kafka ACLs (exit={:?}) via {} on {}: {}",
-                    output.status.code(),
-                    acls_cli,
-                    broker,
-                    stderr.trim()
-                )
-                .into())
+                let error_msg = if let Some(id) = client_id {
+                    format!(
+                        "Failed to retrieve Kafka ACLs for client {} (exit={:?}) via {} on {}: {}",
+                        id,
+                        output.status.code(),
+                        acls_cli,
+                        broker,
+                        stderr.trim()
+                    )
+                } else {
+                    format!(
+                        "Failed to retrieve Kafka ACLs (exit={:?}) via {} on {}: {}",
+                        output.status.code(),
+                        acls_cli,
+                        broker,
+                        stderr.trim()
+                    )
+                };
+                Err(error_msg.into())
             }
         }
         Err(e) => Err(format!("Error executing {}: {}", acls_cli, e).into()),
     }
 }
 
-pub fn delete_acls_for_user(
-    user_email: &str,
+pub fn delete_acls_for_client_id(
+    client_id: &str,
     broker: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Try to find the right command name
@@ -180,12 +208,8 @@ pub fn delete_acls_for_user(
         "kafka-acls.sh"
     };
 
-    // Fetch all ACLs and filter for ones matching the user
-    let acls = get_acls(broker)?;
-    let user_acls: Vec<KafkaAclEntry> = acls
-        .into_iter()
-        .filter(|entry| entry.principal == format!("User:{}", user_email))
-        .collect();
+    // Fetch ACLs for this specific client using the new method
+    let user_acls = get_acls_for_client_id(client_id, broker)?;
 
     let mut errors: Vec<String> = Vec::new();
     for acl in user_acls {
@@ -231,7 +255,7 @@ pub fn delete_acls_for_user(
             .arg(&broker)
             .arg("--remove")
             .arg(permission_flag)
-            .arg(format!("User:{}", user_email))
+            .arg(format!("User:{}", client_id))
             .arg("--operation")
             .arg(acl.operation)
             .arg(resource_flag)
@@ -262,13 +286,49 @@ pub fn delete_acls_for_user(
 
     if !errors.is_empty() {
         let combined = errors.join("; ");
-        eprintln!("Error deleting ACLs for user {}: {}", user_email, combined);
-        return Err(format!(
-            "Failed to delete ACLs for user {}: {}",
-            user_email, combined
-        )
-        .into());
+        eprintln!("Error deleting ACLs for user {}: {}", client_id, combined);
+        return Err(format!("Failed to delete ACLs for user {}: {}", client_id, combined).into());
     }
 
+    Ok(())
+}
+
+// let's add a delete client id function that deletes both SCRAM credentials and ACLs
+pub fn delete_kafka_credentials_and_acls(
+    client_id: &str,
+    broker: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // First delete SCRAM credentials
+    {
+        // Try to find the right command name
+        let configs_cli = if which::which("kafka-configs").is_ok() {
+            "kafka-configs"
+        } else {
+            "kafka-configs.sh"
+        };
+
+        let output = Command::new(configs_cli)
+            .arg("--bootstrap-server")
+            .arg(&broker)
+            .arg("--alter")
+            .arg("--entity-type")
+            .arg("users")
+            .arg("--entity-name")
+            .arg(client_id)
+            .arg("--delete-config")
+            .arg("SCRAM-SHA-512")
+            .output()
+            .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Log the error but don't fail if the user doesn't exist
+            eprintln!(
+                "Note: SCRAM user deletion may have failed (user may not exist): {}",
+                stderr
+            );
+        }
+    }
+    // Then delete ACLs
+    delete_acls_for_client_id(client_id, broker)?;
     Ok(())
 }

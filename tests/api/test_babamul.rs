@@ -7,7 +7,6 @@ mod tests {
     use boom::api::auth::{babamul_auth_middleware, get_test_auth};
     use boom::api::db::get_test_db_api;
     use boom::api::email::EmailService;
-    use boom::api::kafka::delete_acls_for_user;
     use boom::api::routes;
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
@@ -372,9 +371,6 @@ mod tests {
             .delete_one(doc! { "email": &test_email })
             .await
             .unwrap();
-
-        // Clean up: delete Kafka ACLs for the user
-        delete_acls_for_user(&test_email, &config.kafka.producer.server).unwrap();
     }
 
     /// Test that invalid emails are rejected
@@ -850,6 +846,417 @@ mod tests {
             resp.status(),
             StatusCode::NOT_FOUND,
             "Should return 404 for non-existent object"
+        );
+    }
+
+    /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
+    /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
+    #[actix_rt::test]
+    async fn test_create_kafka_credential() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(
+            &database,
+            &auth_app_data,
+            &format!("kafka_cred_{}", unique_suffix()),
+        )
+        .await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(config.clone()))
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(babamul_auth_middleware))
+                .service(routes::babamul::post_kafka_credentials)
+                .service(routes::babamul::get_kafka_credentials)
+                .service(routes::babamul::delete_kafka_credential),
+        )
+        .await;
+
+        // Create a Kafka credential with a valid name
+        let credential_name = "My Test Kafka Credential";
+        let req = test::TestRequest::post()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": credential_name
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully create Kafka credential (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(
+            body["message"].is_string(),
+            "Response should contain message"
+        );
+        assert!(
+            body["credential"].is_object(),
+            "Response should contain credential object"
+        );
+
+        // Verify credential structure
+        let credential = &body["credential"];
+        assert!(credential["id"].is_string(), "Credential should have id");
+        assert_eq!(
+            credential["name"].as_str().unwrap(),
+            credential_name,
+            "Credential name should match"
+        );
+        assert!(
+            credential["client_id"].is_string(),
+            "Credential should have client_id"
+        );
+        assert!(
+            credential["client_secret"].is_string(),
+            "Credential should have client_secret"
+        );
+        assert!(
+            credential["created_at"].is_i64(),
+            "Credential should have created_at timestamp"
+        );
+
+        // Verify client_id starts with "babamul-"
+        let client_id = credential["client_id"].as_str().unwrap();
+        assert!(
+            client_id.starts_with("babamul-"),
+            "Client ID should start with 'babamul-'"
+        );
+
+        // Verify client_secret is 32 characters
+        let client_secret = credential["client_secret"].as_str().unwrap();
+        assert_eq!(
+            client_secret.len(),
+            32,
+            "Client secret should be 32 characters"
+        );
+
+        let credential_id = credential["id"].as_str().unwrap();
+
+        // Verify credential was added to user in database
+        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let user = babamul_users_collection
+            .find_one(doc! { "_id": &test_user.user.id })
+            .await
+            .unwrap()
+            .expect("User should exist");
+
+        assert_eq!(
+            user.kafka_credentials.len(),
+            1,
+            "User should have 1 Kafka credential"
+        );
+        assert_eq!(
+            user.kafka_credentials[0].id, credential_id,
+            "Credential ID should match"
+        );
+        assert_eq!(
+            user.kafka_credentials[0].name, credential_name,
+            "Credential name should match"
+        );
+
+        // Clean up: delete the Kafka credential (which also deletes Kafka user/ACLs)
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/kafka-credentials/{}", credential_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully delete Kafka credential"
+        );
+
+        // Test creating credential with invalid names:
+        // - empty name
+        let req = test::TestRequest::post()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": ""
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject empty credential name"
+        );
+
+        // - whitespace-only name
+        let req = test::TestRequest::post()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "   "
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject whitespace-only credential name"
+        );
+    }
+
+    /// Test GET /babamul/kafka-credentials - List all credentials
+    /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
+    #[actix_rt::test]
+    async fn test_list_kafka_credentials() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(
+            &database,
+            &auth_app_data,
+            &format!("kafka_list_{}", unique_suffix()),
+        )
+        .await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(config.clone()))
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(babamul_auth_middleware))
+                .service(routes::babamul::post_kafka_credentials)
+                .service(routes::babamul::get_kafka_credentials)
+                .service(routes::babamul::delete_kafka_credential),
+        )
+        .await;
+
+        // Initially, the user should have no Kafka credentials
+        let req = test::TestRequest::get()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve credentials list"
+        );
+
+        let body = read_json_response(resp).await;
+        let credentials = body["data"].as_array().unwrap();
+        assert_eq!(
+            credentials.len(),
+            0,
+            "User should initially have no credentials"
+        );
+
+        // Create two Kafka credentials
+        let req = test::TestRequest::post()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Credential 1"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body1 = read_json_response(resp).await;
+        let credential_id_1 = body1["credential"]["id"].as_str().unwrap();
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Credential 2"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body2 = read_json_response(resp).await;
+        let credential_id_2 = body2["credential"]["id"].as_str().unwrap();
+
+        // Now list should show 2 credentials
+        let req = test::TestRequest::get()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let credentials = body["data"].as_array().unwrap();
+        assert_eq!(credentials.len(), 2, "User should have 2 credentials");
+
+        // Verify both credentials are present
+        let cred_ids: Vec<&str> = credentials
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(cred_ids.contains(&credential_id_1));
+        assert!(cred_ids.contains(&credential_id_2));
+
+        // Verify client_secret is included in the list (stored in DB)
+        for cred in credentials {
+            assert!(
+                cred["client_secret"].is_string(),
+                "Credential should include client_secret"
+            );
+            // Verify client_id starts with "babamul-"
+            assert!(cred["client_id"].as_str().unwrap().starts_with("babamul-"));
+        }
+
+        // Clean up: delete both credentials
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/kafka-credentials/{}", credential_id_1))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        test::call_service(&app, req).await;
+
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/kafka-credentials/{}", credential_id_2))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        test::call_service(&app, req).await;
+    }
+
+    /// Test DELETE /babamul/kafka-credentials/{credential_id}
+    /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
+    #[actix_rt::test]
+    async fn test_delete_kafka_credential() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(
+            &database,
+            &auth_app_data,
+            &format!("kafka_delete_{}", unique_suffix()),
+        )
+        .await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(config.clone()))
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(babamul_auth_middleware))
+                .service(routes::babamul::post_kafka_credentials)
+                .service(routes::babamul::get_kafka_credentials)
+                .service(routes::babamul::delete_kafka_credential),
+        )
+        .await;
+
+        // Create a Kafka credential
+        let req = test::TestRequest::post()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Credential to Delete"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let credential_id = body["credential"]["id"].as_str().unwrap();
+
+        // Verify credential exists before deletion
+        let req = test::TestRequest::get()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        let body = read_json_response(resp).await;
+        let credentials = body["data"].as_array().unwrap();
+        assert_eq!(credentials.len(), 1);
+
+        // Delete the credential
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/kafka-credentials/{}", credential_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully delete credential (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["deleted"].as_bool().unwrap(),
+            true,
+            "Response should indicate deletion"
+        );
+        assert!(
+            body["message"].is_string(),
+            "Response should contain message"
+        );
+
+        // Verify credential was removed from database
+        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let user = babamul_users_collection
+            .find_one(doc! { "_id": &test_user.user.id })
+            .await
+            .unwrap()
+            .expect("User should exist");
+
+        assert_eq!(
+            user.kafka_credentials.len(),
+            0,
+            "User should have no credentials after deletion"
+        );
+
+        // Verify GET list also shows no credentials
+        let req = test::TestRequest::get()
+            .uri("/babamul/kafka-credentials")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        let body = read_json_response(resp).await;
+        let credentials = body["data"].as_array().unwrap();
+        assert_eq!(credentials.len(), 0);
+
+        // Try to delete a non-existent credential
+        let fake_credential_id = uuid::Uuid::new_v4().to_string();
+        let req = test::TestRequest::delete()
+            .uri(&format!(
+                "/babamul/kafka-credentials/{}",
+                fake_credential_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Should return 404 for non-existent credential"
         );
     }
 }

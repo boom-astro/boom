@@ -1,8 +1,8 @@
 pub mod surveys;
 
-use crate::api::auth::AuthProvider;
 use crate::api::email::EmailService;
 use crate::api::models::response;
+use crate::api::{auth::AuthProvider, kafka::delete_kafka_credentials_and_acls};
 use actix_web::{delete, get, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -390,113 +390,6 @@ async fn create_kafka_user_and_acls(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to add group READ ACL: {}", stderr));
-    }
-
-    Ok(())
-}
-
-/// Delete a Kafka SCRAM user and remove all associated ACLs
-/// This function is idempotent - removing non-existent users/ACLs will not cause errors.
-async fn delete_kafka_user_and_acls(client_id: &str, broker: &str) -> Result<(), String> {
-    // Try to find the right command names
-    // Homebrew on macOS: kafka-configs, kafka-acls (no .sh)
-    // Docker container: kafka-configs.sh, kafka-acls.sh (with .sh)
-    let (configs_cli, acls_cli) = match which::which("kafka-configs") {
-        Ok(_) => {
-            // Found kafka-configs without .sh (Homebrew)
-            ("kafka-configs", "kafka-acls")
-        }
-        Err(_) => {
-            // Fall back to .sh version (Docker container)
-            ("kafka-configs.sh", "kafka-acls.sh")
-        }
-    };
-
-    // Delete SCRAM user credentials (idempotent: --delete will succeed even if user doesn't exist)
-    let output = Command::new(configs_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--delete")
-        .arg("--entity-type")
-        .arg("users")
-        .arg("--entity-name")
-        .arg(client_id)
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Log the error but don't fail if the user doesn't exist
-        eprintln!(
-            "Note: SCRAM user deletion may have failed (user may not exist): {}",
-            stderr
-        );
-    }
-
-    // Remove all ACLs for this principal (idempotent: kafka-acls --remove ignores non-existent ACLs)
-    let output = Command::new(acls_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--remove")
-        .arg("--allow-principal")
-        .arg(format!("User:{}", client_id))
-        .arg("--operation")
-        .arg("READ")
-        .arg("--topic")
-        .arg("babamul.")
-        .arg("--resource-pattern-type")
-        .arg("prefixed")
-        .arg("--force")
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("Note: Failed to remove READ ACL: {}", stderr);
-    }
-
-    // Remove DESCRIBE permission ACLs
-    let output = Command::new(acls_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--remove")
-        .arg("--allow-principal")
-        .arg(format!("User:{}", client_id))
-        .arg("--operation")
-        .arg("DESCRIBE")
-        .arg("--topic")
-        .arg("babamul.")
-        .arg("--resource-pattern-type")
-        .arg("prefixed")
-        .arg("--force")
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("Note: Failed to remove DESCRIBE ACL: {}", stderr);
-    }
-
-    // Remove consumer group READ permission ACLs
-    let output = Command::new(acls_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--remove")
-        .arg("--allow-principal")
-        .arg(format!("User:{}", client_id))
-        .arg("--operation")
-        .arg("READ")
-        .arg("--group")
-        .arg("babamul-")
-        .arg("--resource-pattern-type")
-        .arg("prefixed")
-        .arg("--force")
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("Note: Failed to remove group READ ACL: {}", stderr);
     }
 
     Ok(())
@@ -949,12 +842,10 @@ pub async fn delete_kafka_credential(
             match credential_to_delete {
                 Some(credential) => {
                     // Delete from Kafka first
-                    if let Err(e) = delete_kafka_user_and_acls(
+                    if let Err(e) = delete_kafka_credentials_and_acls(
                         &credential.client_id,
                         &config.kafka.producer.server,
-                    )
-                    .await
-                    {
+                    ) {
                         eprintln!(
                             "Failed to delete Kafka user/ACLs for {}: {}",
                             credential.client_id, e

@@ -1,10 +1,21 @@
 //! Routes for managing BOOM's Kafka cluster.
 
-use crate::api::kafka::delete_acls_for_user;
-use crate::api::models::response;
 use crate::api::routes::users::User;
+use crate::api::{kafka::delete_kafka_credentials_and_acls, models::response};
 use actix_web::{delete, get, web, HttpResponse};
-use std::str;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+#[derive(Deserialize)]
+pub struct DeleteKafkaCredentialsPath {
+    pub client_id: String,
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct DeleteKafkaCredentialsResponse {
+    pub message: String,
+    pub deleted: bool,
+}
 
 /// Get Kafka ACLs
 #[utoipa::path(
@@ -33,18 +44,24 @@ pub async fn get_kafka_acls(
     }
 }
 
-/// Delete Kafka ACLs for a given user by email
+/// Delete Kafka credentials for a given client ID
+/// This will delete the SCRAM user credentials and remove all associated ACLs
 #[utoipa::path(
     delete,
-    path = "/kafka/acls/{user_email}",
+    path = "/kafka/credentials/{client_id}",
     responses(
-        (status = 200, description = "Kafka ACLs deleted successfully"),
+        (status = 200, description = "Kafka credentials deleted successfully", body = DeleteKafkaCredentialsResponse),
+        (status = 403, description = "Access denied: Admins only"),
+        (status = 500, description = "Internal server error"),
+    ),
+    params(
+        ("client_id" = String, Path, description = "Kafka client ID to delete credentials for")
     ),
     tags=["Kafka"]
 )]
-#[delete("/kafka/acls/{user_email}")]
-pub async fn delete_kafka_acls_for_user(
-    user_email: web::Path<String>,
+#[delete("/kafka/credentials/{client_id}")]
+pub async fn delete_kafka_credentials(
+    path: web::Path<DeleteKafkaCredentialsPath>,
     current_user: web::ReqData<User>,
     config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
@@ -53,14 +70,21 @@ pub async fn delete_kafka_acls_for_user(
         return response::forbidden("Access denied: Admins only");
     }
 
-    let user_email = user_email.into_inner();
+    let client_id = &path.client_id;
 
-    // Call the function to delete ACLs for the user
-    match delete_acls_for_user(&user_email, &config.kafka.producer.server) {
-        Ok(_) => response::ok(
-            "Kafka ACLs deleted successfully",
-            serde_json::json!({ "user": user_email }),
-        ),
-        Err(e) => response::internal_error(&format!("Error deleting Kafka ACLs: {}", e)),
+    // Delete Kafka credentials and ACLs
+    if let Err(e) = delete_kafka_credentials_and_acls(client_id, &config.kafka.producer.server) {
+        return response::internal_error(&format!("Error deleting Kafka credentials: {}", e));
     }
+
+    response::ok_ser(
+        "Kafka credentials deleted successfully",
+        DeleteKafkaCredentialsResponse {
+            message: format!(
+                "Kafka credentials for client '{}' have been deleted and revoked.",
+                client_id
+            ),
+            deleted: true,
+        },
+    )
 }
