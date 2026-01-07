@@ -558,6 +558,7 @@ dependencies = [
  "futures",
  "hifitime",
  "indicatif",
+ "itertools",
  "jsonwebtoken",
  "lettre",
  "mongodb",
