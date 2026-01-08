@@ -87,7 +87,7 @@ services:
       # controller metadata or internal admin ops can be unauthorized and cause the process to exit.
       # (Alternative: secure internal listener with SASL and drop ANONYMOUS.)
       KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
-      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
+      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf -Djava.security.egd=file:/dev/./urandom"
     volumes:
       - kafka_data:/var/lib/kafka/data
       - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
