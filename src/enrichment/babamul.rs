@@ -19,6 +19,23 @@ const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 #[derive(Debug, serde::Deserialize)]
 pub struct CutoutBytes(Vec<u8>);
 
+// Wrapper for cross_matches that implements AvroSchemaComponent as a no-op
+// since we don't want to serialize it to Avro
+#[derive(Debug, Clone, Default)]
+pub struct CrossMatchesWrapper(
+    pub Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+);
+
+impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
+    fn get_schema_in_ctxt(
+        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
+        _enclosing_namespace: &apache_avro::schema::Namespace,
+    ) -> apache_avro::Schema {
+        // Return null schema since this field is never serialized
+        apache_avro::Schema::Null
+    }
+}
+
 impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
     fn get_schema_in_ctxt(
         _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
@@ -56,7 +73,10 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
-    pub cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+    // Not serialized - kept in memory for category computation only
+    #[serde(skip)]
+    #[allow(dead_code)] // Would show up unused erroneously
+    pub cross_matches: CrossMatchesWrapper,
 }
 
 impl EnrichedLsstAlert {
@@ -66,8 +86,8 @@ impl EnrichedLsstAlert {
         cutout_template: Option<Vec<u8>>,
         cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
-        cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
     ) -> Self {
+        let cross_matches = CrossMatchesWrapper(alert.cross_matches);
         EnrichedLsstAlert {
             candid: alert.candid,
             object_id: alert.object_id,
@@ -85,14 +105,15 @@ impl EnrichedLsstAlert {
 
     pub fn compute_babamul_category(&self) -> String {
         // Check if we have LSSG cross-matches
-        if let Some(xmatches) = &self.cross_matches {
+        if let Some(xmatches) = &self.cross_matches.0 {
             if let Some(lssg_matches) = xmatches.get("LSSG") {
                 if !lssg_matches.is_empty() {
                     // Rule 1: Check if nearest match is within distance threshold and score > 0.5
                     if let Some(nearest) = lssg_matches.first() {
-                        let distance_arcsec = nearest.get("distance_arcsec");
-                        let score = nearest.get("score");
-                        // If distance and score are Some, check thresholds
+                        let distance_arcsec =
+                            nearest.get("distance_arcsec").and_then(|v| v.as_f64());
+                        let score = nearest.get("score").and_then(|v| v.as_f64());
+                        // If distance and score are not None, check thresholds
                         if let (Some(distance_arcsec), Some(score)) = (distance_arcsec, score) {
                             if distance_arcsec <= IS_STELLAR_DISTANCE_THRESH_ARCSEC
                                 && score > IS_HOSTED_SCORE_THRESH
@@ -103,10 +124,11 @@ impl EnrichedLsstAlert {
                     }
 
                     // Rule 2: Check if any match has score below threshold
-                    if lssg_matches
-                        .iter()
-                        .any(|m| m.get("score") < IS_HOSTED_SCORE_THRESH)
-                    {
+                    if lssg_matches.iter().any(|m| {
+                        m.get("score")
+                            .and_then(|v| v.as_f64())
+                            .map_or(false, |s| s < IS_HOSTED_SCORE_THRESH)
+                    }) {
                         return "hosted".to_string();
                     }
 

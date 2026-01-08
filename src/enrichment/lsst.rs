@@ -302,14 +302,12 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                 let cutouts = candid_to_cutouts
                     .remove(&candid)
                     .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-                let cross_matches = alert.cross_matches.clone();
                 let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
                     alert,
                     Some(cutouts.cutout_science),
                     Some(cutouts.cutout_template),
                     Some(cutouts.cutout_difference),
                     properties,
-                    cross_matches,
                 );
                 enriched_alerts.push(enriched_alert);
             }
