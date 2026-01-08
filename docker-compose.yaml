@@ -241,6 +241,7 @@ services:
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
       - ${PWD}/data/models:/app/data/models
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:
       - /app/scheduler
       - ztf
@@ -265,6 +266,7 @@ services:
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
       - ${PWD}/data/models:/app/data/models
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:
       - /app/scheduler
       - lsst

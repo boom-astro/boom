@@ -8,10 +8,64 @@ use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
+use cdshealpix::nested::get;
+use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
+use moc::moc::range::RangeMOC;
+use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
+use moc::qty::Hpx;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use tracing::{info, instrument};
 
 pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
+const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
+const MOC_DEPTH: u8 = 11;
+
+// Lazy-loaded footprint MOC
+static FOOTPRINT_MOC: OnceLock<Option<RangeMOC<u64, Hpx<u64>>>> = OnceLock::new();
+
+fn load_footprint_moc() -> Option<RangeMOC<u64, Hpx<u64>>> {
+    let file = match std::fs::File::open(MOC_FOOTPRINT_PATH) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("Failed to open footprint MOC file: {}", e);
+            return None;
+        }
+    };
+
+    let reader = std::io::BufReader::new(file);
+    match from_fits_ivoa(reader) {
+        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
+            Some(RangeMOC::new(moc.depth_max(), moc.collect()))
+        }
+        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
+            let depth = cell_moc.depth_max();
+            let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
+            Some(RangeMOC::new(depth, ranges))
+        }
+        Ok(_) => {
+            tracing::warn!("Unexpected MOC type");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Failed to parse footprint MOC: {}", e);
+            None
+        }
+    }
+}
+
+fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
+    let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
+    if let Some(moc) = moc {
+        let ra_rad = ra_deg.to_radians();
+        let dec_rad = dec_deg.to_radians();
+        let layer = get(MOC_DEPTH);
+        let cell = layer.hash(ra_rad, dec_rad);
+        moc.contains_cell(MOC_DEPTH, cell)
+    } else {
+        false
+    }
+}
 
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
@@ -121,7 +175,18 @@ impl EnrichedLsstAlert {
         if let Some(xmatches) = &self.cross_matches.0 {
             if let Some(lssg_matches) = xmatches.get("LSSG") {
                 if !lssg_matches.is_empty() {
-                    // Check if any non-stellar match has score below threshold
+                    // Check for stellar matches: distance ≤ 1.0 arcsec AND score > 0.5
+                    if lssg_matches.iter().any(|m| {
+                        let distance = m
+                            .get("distance_arcsec")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(f64::MAX);
+                        let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        distance <= 1.0 && score > IS_HOSTED_SCORE_THRESH
+                    }) {
+                        return category + "stellar";
+                    }
+                    // Check if any match has score below threshold (hosted)
                     if lssg_matches.iter().any(|m| {
                         m.get("score")
                             .and_then(|v| v.as_f64())
@@ -136,7 +201,8 @@ impl EnrichedLsstAlert {
         }
 
         // No matches: check if in footprint
-        let in_footprint = false; // TODO: Implement real footprint check
+        let in_footprint =
+            is_in_footprint(self.candidate.dia_source.ra, self.candidate.dia_source.dec);
         if in_footprint {
             category + "hostless"
         } else {

@@ -41,8 +41,8 @@ fn create_lssg_cross_matches(
     let mut matches = std::collections::HashMap::new();
     let mut lssg_matches = vec![json!({
         "_id": 1001,
-        "ra": 180.001,
-        "dec": 0.002,
+        "ra": 150.001,
+        "dec": 30.002,
         "distance_arcsec": distance,
         "score": score,
         "magwhite": 18.3
@@ -53,16 +53,16 @@ fn create_lssg_cross_matches(
         lssg_matches.extend(vec![
             json!({
                 "_id": 1002,
-                "ra": 180.02,
-                "dec": 0.05,
+                "ra": 150.02,
+                "dec": 30.05,
                 "distance_arcsec": 1.5,  // Beyond stellar threshold
                 "score": 0.75,           // Above hosted threshold
                 "magwhite": 19.1
             }),
             json!({
                 "_id": 1003,
-                "ra": 180.25,
-                "dec": 0.10,
+                "ra": 150.25,
+                "dec": 30.10,
                 "distance_arcsec": 5.0,  // Far match
                 "score": 0.45,           // Below hosted threshold
                 "magwhite": 20.2
@@ -79,8 +79,8 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
     // Create a minimal Candidate and ZtfCandidate using defaults
     let mut inner_candidate = Candidate::default();
     inner_candidate.candid = candid;
-    inner_candidate.ra = 180.0;
-    inner_candidate.dec = 0.0;
+    inner_candidate.ra = 150.0;
+    inner_candidate.dec = 30.0;
     inner_candidate.magpsf = 18.5;
     inner_candidate.sigmapsf = 0.1;
     inner_candidate.fid = 1; // g-band
@@ -151,8 +151,8 @@ fn create_mock_enriched_lsst_alert_with_matches(
     dia_source.detector = 1;
     dia_source.dia_object_id = Some(987654321);
     dia_source.midpoint_mjd_tai = 60000.5;
-    dia_source.ra = 180.0;
-    dia_source.dec = 0.0;
+    dia_source.ra = 150.0;
+    dia_source.dec = 30.0;
     dia_source.psf_flux = Some(1000.0);
     dia_source.psf_flux_err = Some(10.0);
     dia_source.ap_flux = Some(1100.0);
@@ -325,7 +325,7 @@ fn test_compute_babamul_category() {
         "Alert with distant, high-score match should be hostless"
     );
 
-    // Test case 4: No ZTF match + no matches → "no-ztf-match.unknown"
+    // Test case 4: No ZTF match + no matches + in footprint → "no-ztf-match.hostless"
     let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
         9876543213,
         "LSST24aaaaaad",
@@ -337,8 +337,8 @@ fn test_compute_babamul_category() {
     );
     let category = alert_no_matches.compute_babamul_category();
     assert_eq!(
-        category, "no-ztf-match.unknown",
-        "Alert with no matches should be unknown"
+        category, "no-ztf-match.hostless",
+        "Alert with no matches but in footprint should be hostless"
     );
 
     // Test case 5: ZTF match + stellar LSSG → "ztf-match.stellar"
@@ -444,8 +444,8 @@ fn test_compute_babamul_category() {
     );
     let category = alert_ztf_unknown.compute_babamul_category();
     assert_eq!(
-        category, "ztf-match.unknown",
-        "Alert with ZTF match but no LSSG should be ztf-match.unknown"
+        category, "ztf-match.hostless",
+        "Alert with ZTF match but no LSSG and in footprint should be ztf-match.hostless"
     );
 }
 
@@ -483,7 +483,7 @@ async fn test_babamul_process_lsst_alerts() {
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
-    let topic = "babamul.lsst.no-ztf-match.unknown";
+    let topic = "babamul.lsst.no-ztf-match.hostless";
 
     // Delete the topic before the test to ensure a clean state
     delete_kafka_topic(topic, &config).await;
@@ -604,7 +604,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let topic = "babamul.lsst.ztf-match.unknown";
+    let topic = "babamul.lsst.ztf-match.hostless";
 
     let db = boom::conf::get_test_db().await;
     // Ensure the LSSG catalog collection exists for Babamul validation
@@ -717,8 +717,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         dia_source.detector = 1;
         dia_source.dia_object_id = Some(987654321);
         dia_source.midpoint_mjd_tai = 60000.5;
-        dia_source.ra = 180.0;
-        dia_source.dec = 0.0;
+        dia_source.ra = 150.0;
+        dia_source.dec = 30.0;
         dia_source.psf_flux = Some(1000.0);
         dia_source.psf_flux_err = Some(10.0);
         dia_source.ap_flux = Some(1100.0);
@@ -981,8 +981,8 @@ async fn test_babamul_ztf_with_lsst_match() {
         dia.detector = 1;
         dia.dia_object_id = Some(42);
         dia.midpoint_mjd_tai = 60000.5;
-        dia.ra = 180.0;
-        dia.dec = 0.0;
+        dia.ra = 150.0;
+        dia.dec = 30.0;
         dia.psf_flux = Some(1200.0);
         dia.psf_flux_err = Some(12.0);
         dia.ap_flux = Some(1250.0);
