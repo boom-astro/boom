@@ -1,6 +1,6 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
+use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert, IS_HOSTED_SCORE_THRESH};
 use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
@@ -16,6 +16,8 @@ use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
 use std::collections::HashMap;
 use tracing::{error, instrument, warn};
+
+pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
 
 fn default_lsst_zp() -> Option<f64> {
     Some(8.9)
@@ -337,8 +339,28 @@ impl LsstEnrichmentWorker {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
 
-        // TODO: Determine if this is a star based on LSSG cross-matches
-        let is_star = false;
+        // Determine if this is a star based on LSSG cross-matches
+        let mut is_star = false;
+        if let Some(xmatches) = alert.cross_matches.as_ref() {
+            if let Some(lssg_matches) = xmatches.get("LSSG") {
+                if !lssg_matches.is_empty() {
+                    // Check if nearest match is within distance threshold and score is above threshold
+                    if let Some(nearest) = lssg_matches.first() {
+                        let distance_arcsec =
+                            nearest.get("distance_arcsec").and_then(|v| v.as_f64());
+                        let score = nearest.get("score").and_then(|v| v.as_f64());
+                        // If distance and score are not None, check thresholds
+                        if let (Some(distance_arcsec), Some(score)) = (distance_arcsec, score) {
+                            if distance_arcsec <= IS_STELLAR_DISTANCE_THRESH_ARCSEC
+                                && score > IS_HOSTED_SCORE_THRESH
+                            {
+                                is_star = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates

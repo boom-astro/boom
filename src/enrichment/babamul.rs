@@ -11,8 +11,7 @@ use apache_avro_macros::serdavro;
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
-const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
-const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
+pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
@@ -115,26 +114,14 @@ impl EnrichedLsstAlert {
         } else {
             "no-ztf-match.".to_string()
         };
+        if self.properties.star {
+            return category + "stellar";
+        }
         // Check if we have LSSG cross-matches
         if let Some(xmatches) = &self.cross_matches.0 {
             if let Some(lssg_matches) = xmatches.get("LSSG") {
                 if !lssg_matches.is_empty() {
-                    // Rule 1: Check if nearest match is within distance threshold and score > 0.5
-                    if let Some(nearest) = lssg_matches.first() {
-                        let distance_arcsec =
-                            nearest.get("distance_arcsec").and_then(|v| v.as_f64());
-                        let score = nearest.get("score").and_then(|v| v.as_f64());
-                        // If distance and score are not None, check thresholds
-                        if let (Some(distance_arcsec), Some(score)) = (distance_arcsec, score) {
-                            if distance_arcsec <= IS_STELLAR_DISTANCE_THRESH_ARCSEC
-                                && score > IS_HOSTED_SCORE_THRESH
-                            {
-                                return category + "stellar";
-                            }
-                        }
-                    }
-
-                    // Rule 2: Check if any match has score below threshold
+                    // Check if any non-stellar match has score below threshold
                     if lssg_matches.iter().any(|m| {
                         m.get("score")
                             .and_then(|v| v.as_f64())
@@ -142,8 +129,7 @@ impl EnrichedLsstAlert {
                     }) {
                         return category + "hosted";
                     }
-
-                    // Rule 3: Matches exist but none of the above
+                    // Matches exist but none are stellar or hosted
                     return category + "hostless";
                 }
             }
