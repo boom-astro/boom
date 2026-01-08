@@ -98,10 +98,10 @@ services:
         timeout 5s /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server broker:29092 describe --status >/dev/null 2>&1 && \
         timeout 5s /opt/kafka/bin/kafka-configs.sh --bootstrap-server broker:29092 --entity-type users --describe >/dev/null 2>&1 && \
         timeout 5s /opt/kafka/bin/kafka-acls.sh --bootstrap-server broker:29092 --list >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 25s
-      retries: 6
-      start_period: 30s
+      interval: 8s
+      timeout: 30s
+      retries: 10
+      start_period: 45s
     labels:
       - autoheal=true
       - traefik.enable=true
@@ -126,7 +126,12 @@ services:
     volumes:
       - ./scripts/init_kafka_acls.sh:/init_kafka_acls.sh:ro
     entrypoint: ["bash","/init_kafka_acls.sh"]
-    restart: "no"
+    restart: on-failure
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
   api:
     image: boom-astro/boom:latest
     hostname: api
