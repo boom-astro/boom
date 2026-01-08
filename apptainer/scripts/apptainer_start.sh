@@ -123,8 +123,6 @@ if start_service "kafka" "$2"; then
 
     echo "$(current_datetime) - Initializing Kafka ACLs"
     apptainer exec --env-file .env \
-      --env KAFKA_ADMIN_PASSWORD="${KAFKA_ADMIN_PASSWORD}" \
-      --env KAFKA_READONLY_PASSWORD="${KAFKA_READONLY_PASSWORD}" \
       --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
       "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
   fi
