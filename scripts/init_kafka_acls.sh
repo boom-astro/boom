@@ -48,8 +48,8 @@ wait_for_broker_network() {
   start=$(date +%s)
   until nc -z "$host" "$port" 2>/dev/null || timeout 1 bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null; do
     if (( $(date +%s) - $start > $max_wait )); then
-      kafka_log "WARNING: Could not connect to $BROKER after ${max_wait}s, but will try Kafka commands anyway"
-      break
+      kafka_log "ERROR: Could not connect to $BROKER after ${max_wait} s"
+      exit 1
     fi
     sleep 2
   done
