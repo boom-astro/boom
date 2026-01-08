@@ -244,10 +244,10 @@ async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
 }
 
 #[test]
-fn test_compute_babamul_category_stellar() {
-    // Create an alert with LSSG matches that should be classified as stellar
+fn test_compute_babamul_category() {
+    // Test case 1: Stellar classification - high score and close distance
     let cross_matches = create_lssg_cross_matches();
-    let alert = create_mock_enriched_lsst_alert_with_matches(
+    let alert_stellar = create_mock_enriched_lsst_alert_with_matches(
         9876543210,
         "LSST24aaaaaaa",
         0.8,
@@ -255,57 +255,28 @@ fn test_compute_babamul_category_stellar() {
         false,
         Some(cross_matches),
     );
-
-    // The first match has score 0.95 and distance 0.5 arcsec, should be "stellar"
-    let category = alert.compute_babamul_category();
+    let category = alert_stellar.compute_babamul_category();
     assert_eq!(
         category, "no-ztf-match.stellar",
         "Alert with high score match should be stellar"
     );
-}
 
-#[test]
-fn test_compute_babamul_category_hosted() {
-    // Create an alert with LSSG matches that should be classified as hosted
-    let cross_matches = create_lssg_cross_matches();
-    let alert = create_mock_enriched_lsst_alert_with_matches(
-        9876543210,
-        "LSST24aaaaaaa",
-        0.8,
-        false,
-        false,
-        Some(cross_matches),
-    );
-
-    // The third match has score 0.45 (below 0.5 threshold), so should be "hosted"
-    let category = alert.compute_babamul_category();
-    // Note: The first match has score > 0.5, so it will be stellar.
-    // Let's modify to test hosted properly
-    assert_eq!(
-        category, "no-ztf-match.stellar",
-        "First match has high score"
-    );
-}
-
-#[test]
-fn test_compute_babamul_category_no_matches() {
-    // Create an alert with no cross_matches
-    let alert = create_mock_enriched_lsst_alert_with_matches(
-        9876543210,
-        "LSST24aaaaaaa",
+    // Test case 2: No matches - should be unknown (footprint calculation not implemented)
+    let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
+        9876543211,
+        "LSST24aaaaaab",
         0.8,
         false,
         false,
         None,
     );
-
-    let category = alert.compute_babamul_category();
-    // Should be "unknown" since we don't have footprint calculation
-    assert!(
-        category == "no-ztf-match.unknown",
-        "Alert with no matches should be hostless or unknown, got: {}",
+    let category = alert_no_matches.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.unknown",
+        "Alert with no matches should be unknown, got: {}",
         category
     );
+    // TODO: Cover all cases
 }
 
 #[tokio::test]
