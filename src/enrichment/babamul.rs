@@ -104,6 +104,17 @@ impl EnrichedLsstAlert {
     }
 
     pub fn compute_babamul_category(&self) -> String {
+        // If we have a ZTF match, category starts with "ztf-match."
+        // Otherwise, "no-ztf-match."
+        let category = if let Some(survey_matches) = &self.survey_matches {
+            if survey_matches.ztf.is_some() {
+                "ztf-match.".to_string()
+            } else {
+                "no-ztf-match.".to_string()
+            }
+        } else {
+            "no-ztf-match.".to_string()
+        };
         // Check if we have LSSG cross-matches
         if let Some(xmatches) = &self.cross_matches.0 {
             if let Some(lssg_matches) = xmatches.get("LSSG") {
@@ -118,7 +129,7 @@ impl EnrichedLsstAlert {
                             if distance_arcsec <= IS_STELLAR_DISTANCE_THRESH_ARCSEC
                                 && score > IS_HOSTED_SCORE_THRESH
                             {
-                                return "stellar".to_string();
+                                return category + "stellar";
                             }
                         }
                     }
@@ -129,21 +140,21 @@ impl EnrichedLsstAlert {
                             .and_then(|v| v.as_f64())
                             .map_or(false, |s| s < IS_HOSTED_SCORE_THRESH)
                     }) {
-                        return "hosted".to_string();
+                        return category + "hosted";
                     }
 
                     // Rule 3: Matches exist but none of the above
-                    return "hostless".to_string();
+                    return category + "hostless";
                 }
             }
         }
 
-        // No matches: check if in footprint (for now, randomly assign)
-        let in_footprint = rand::random::<bool>();
+        // No matches: check if in footprint
+        let in_footprint = false; // TODO: Implement real footprint check
         if in_footprint {
-            "hostless".to_string()
+            category + "hostless"
         } else {
-            "unknown".to_string()
+            category + "unknown"
         }
     }
 }
