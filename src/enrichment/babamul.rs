@@ -2,7 +2,7 @@
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
-use crate::enrichment::lsst::{CrossMatch, LsstAlertForEnrichment, LsstAlertProperties};
+use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
@@ -10,6 +10,9 @@ use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use std::collections::HashMap;
 use tracing::{info, instrument};
+
+const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
+const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
@@ -53,7 +56,7 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
-    pub cross_matches: Option<std::collections::HashMap<String, Vec<CrossMatch>>>,
+    pub cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
 }
 
 impl EnrichedLsstAlert {
@@ -63,7 +66,7 @@ impl EnrichedLsstAlert {
         cutout_template: Option<Vec<u8>>,
         cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
-        cross_matches: Option<std::collections::HashMap<String, Vec<CrossMatch>>>,
+        cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
     ) -> Self {
         EnrichedLsstAlert {
             candid: alert.candid,
@@ -81,33 +84,29 @@ impl EnrichedLsstAlert {
     }
 
     pub fn compute_babamul_category(&self) -> String {
-        const DISTANCE_THRESHOLD_ARCSEC: f64 = 1.0;
-        const SCORE_THRESHOLD: f64 = 0.5;
-
         // Check if we have LSSG cross-matches
         if let Some(xmatches) = &self.cross_matches {
             if let Some(lssg_matches) = xmatches.get("LSSG") {
                 if !lssg_matches.is_empty() {
                     // Rule 1: Check if nearest match is within distance threshold and score > 0.5
                     if let Some(nearest) = lssg_matches.first() {
-                        // Convert distance from radians to arcseconds if needed
-                        let distance_arcsec = if nearest.distance > 1.0 {
-                            // Assume already in arcseconds
-                            nearest.distance
-                        } else {
-                            // Assume in radians, convert to arcseconds
-                            nearest.distance * 206265.0
-                        };
-
-                        if distance_arcsec <= DISTANCE_THRESHOLD_ARCSEC
-                            && nearest.score > SCORE_THRESHOLD
-                        {
-                            return "stellar".to_string();
+                        let distance_arcsec = nearest.get("distance_arcsec");
+                        let score = nearest.get("score");
+                        // If distance and score are Some, check thresholds
+                        if let (Some(distance_arcsec), Some(score)) = (distance_arcsec, score) {
+                            if distance_arcsec <= IS_STELLAR_DISTANCE_THRESH_ARCSEC
+                                && score > IS_HOSTED_SCORE_THRESH
+                            {
+                                return "stellar".to_string();
+                            }
                         }
                     }
 
-                    // Rule 2: Check if any match has score < 0.5
-                    if lssg_matches.iter().any(|m| m.score < SCORE_THRESHOLD) {
+                    // Rule 2: Check if any match has score below threshold
+                    if lssg_matches
+                        .iter()
+                        .any(|m| m.get("score") < IS_HOSTED_SCORE_THRESH)
+                    {
                         return "hosted".to_string();
                     }
 

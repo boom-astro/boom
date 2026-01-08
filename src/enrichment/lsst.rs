@@ -17,13 +17,6 @@ use schemars::JsonSchema;
 use std::collections::HashMap;
 use tracing::{error, instrument, warn};
 
-#[serdavro]
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct CrossMatch {
-    pub distance: f64,
-    pub score: f64,
-}
-
 fn default_lsst_zp() -> Option<f64> {
     Some(8.9)
 }
@@ -151,7 +144,7 @@ pub struct LsstAlertForEnrichment {
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
-    pub cross_matches: Option<HashMap<String, Vec<CrossMatch>>>,
+    pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
