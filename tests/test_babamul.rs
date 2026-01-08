@@ -17,37 +17,59 @@ use rdkafka::{
 };
 use std::time::Duration;
 
-/// Create realistic LSSG cross-matches similar to what would come from the database
-fn create_lssg_cross_matches() -> std::collections::HashMap<String, Vec<serde_json::Value>> {
+/// Create realistic LSSG cross-matches with configurable distance and score for testing
+///
+/// # Arguments
+/// * `distance_arcsec` - Distance to nearest match (default: 0.5 for stellar)
+/// * `score` - Score of nearest match (default: 0.95 for stellar)
+/// * `single_match` - If true, only include the nearest match (useful for hostless testing)
+///
+/// # Thresholds for reference
+/// * Stellar: distance ≤ 1.0 arcsec AND score > 0.5
+/// * Hosted: any match has score < 0.5
+/// * Hostless: matches exist but neither stellar nor hosted
+fn create_lssg_cross_matches(
+    distance_arcsec: Option<f64>,
+    score: Option<f64>,
+    single_match: bool,
+) -> std::collections::HashMap<String, Vec<serde_json::Value>> {
     use serde_json::json;
 
+    let distance = distance_arcsec.unwrap_or(0.5); // Default: stellar distance
+    let score = score.unwrap_or(0.95); // Default: stellar score
+
     let mut matches = std::collections::HashMap::new();
-    let lssg_matches = vec![
-        json!({
-            "_id": 1001,
-            "ra": 180.001,
-            "dec": 0.002,
-            "distance_arcsec": 0.5,  // Within stellar threshold (1.0 arcsec)
-            "score": 0.95,           // Above hosted threshold (0.5)
-            "magwhite": 18.3
-        }),
-        json!({
-            "_id": 1002,
-            "ra": 180.02,
-            "dec": 0.05,
-            "distance_arcsec": 1.5,  // Beyond stellar threshold
-            "score": 0.75,           // Above hosted threshold
-            "magwhite": 19.1
-        }),
-        json!({
-            "_id": 1003,
-            "ra": 180.25,
-            "dec": 0.10,
-            "distance_arcsec": 5.0,  // Far match
-            "score": 0.45,           // Below hosted threshold
-            "magwhite": 20.2
-        }),
-    ];
+    let mut lssg_matches = vec![json!({
+        "_id": 1001,
+        "ra": 180.001,
+        "dec": 0.002,
+        "distance_arcsec": distance,
+        "score": score,
+        "magwhite": 18.3
+    })];
+
+    // Add additional matches unless single_match is true
+    if !single_match {
+        lssg_matches.extend(vec![
+            json!({
+                "_id": 1002,
+                "ra": 180.02,
+                "dec": 0.05,
+                "distance_arcsec": 1.5,  // Beyond stellar threshold
+                "score": 0.75,           // Above hosted threshold
+                "magwhite": 19.1
+            }),
+            json!({
+                "_id": 1003,
+                "ra": 180.25,
+                "dec": 0.10,
+                "distance_arcsec": 5.0,  // Far match
+                "score": 0.45,           // Below hosted threshold
+                "magwhite": 20.2
+            }),
+        ]);
+    }
+
     matches.insert("LSSG".to_string(), lssg_matches);
     matches
 }
@@ -247,8 +269,11 @@ async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
 
 #[test]
 fn test_compute_babamul_category() {
+    use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
+
     // Test case 1: No ZTF match + stellar LSSG → "no-ztf-match.stellar"
-    let cross_matches = create_lssg_cross_matches();
+    // distance ≤ 1.0 AND score > 0.5
+    let cross_matches = create_lssg_cross_matches(Some(0.5), Some(0.95), false);
     let alert_stellar = create_mock_enriched_lsst_alert_with_matches(
         9876543210,
         "LSST24aaaaaaa",
@@ -261,13 +286,49 @@ fn test_compute_babamul_category() {
     let category = alert_stellar.compute_babamul_category();
     assert_eq!(
         category, "no-ztf-match.stellar",
-        "Alert with high score match should be stellar"
+        "Alert with close, high-score match should be stellar"
     );
 
-    // Test case 2: No ZTF match + no matches → "no-ztf-match.unknown"
-    let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
+    // Test case 2: No ZTF match + hosted LSSG → "no-ztf-match.hosted"
+    // nearest match has score < 0.5
+    let cross_matches = create_lssg_cross_matches(Some(2.0), Some(0.3), false);
+    let alert_hosted = create_mock_enriched_lsst_alert_with_matches(
         9876543211,
         "LSST24aaaaaab",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        None,
+    );
+    let category = alert_hosted.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.hosted",
+        "Alert with low-score match should be hosted"
+    );
+
+    // Test case 3: No ZTF match + hostless LSSG → "no-ztf-match.hostless"
+    // distance > 1.0 AND all scores > 0.5 (no hosted criteria met)
+    let cross_matches = create_lssg_cross_matches(Some(2.5), Some(0.8), true);
+    let alert_hostless = create_mock_enriched_lsst_alert_with_matches(
+        9876543212,
+        "LSST24aaaaaac",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        None,
+    );
+    let category = alert_hostless.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.hostless",
+        "Alert with distant, high-score match should be hostless"
+    );
+
+    // Test case 4: No ZTF match + no matches → "no-ztf-match.unknown"
+    let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
+        9876543213,
+        "LSST24aaaaaad",
         0.8,
         false,
         false,
@@ -277,13 +338,11 @@ fn test_compute_babamul_category() {
     let category = alert_no_matches.compute_babamul_category();
     assert_eq!(
         category, "no-ztf-match.unknown",
-        "Alert with no matches should be unknown, got: {}",
-        category
+        "Alert with no matches should be unknown"
     );
 
-    // Test case 3: ZTF match + stellar LSSG → "stellar"
-    use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
-    let cross_matches = create_lssg_cross_matches();
+    // Test case 5: ZTF match + stellar LSSG → "ztf-match.stellar"
+    let cross_matches = create_lssg_cross_matches(Some(0.5), Some(0.95), false);
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaaa".to_string(),
@@ -295,8 +354,8 @@ fn test_compute_babamul_category() {
         }),
     });
     let alert_ztf_stellar = create_mock_enriched_lsst_alert_with_matches(
-        9876543212,
-        "LSST24aaaaaac",
+        9876543214,
+        "LSST24aaaaaae",
         0.8,
         false,
         false,
@@ -309,10 +368,64 @@ fn test_compute_babamul_category() {
         "Alert with ZTF match and stellar LSSG should be ztf-match.stellar"
     );
 
-    // Test case 4: ZTF match + no LSSG → "ztf-match.unknown"
+    // Test case 6: ZTF match + hosted LSSG → "ztf-match.hosted"
+    let cross_matches = create_lssg_cross_matches(Some(2.0), Some(0.3), false);
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaab".to_string(),
+            ra: 180.1,
+            dec: 0.1,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_hosted = create_mock_enriched_lsst_alert_with_matches(
+        9876543215,
+        "LSST24aaaaaaf",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches,
+    );
+    let category = alert_ztf_hosted.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.hosted",
+        "Alert with ZTF match and hosted LSSG should be ztf-match.hosted"
+    );
+
+    // Test case 7: ZTF match + hostless LSSG → "ztf-match.hostless"
+    let cross_matches = create_lssg_cross_matches(Some(2.5), Some(0.8), true);
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaac".to_string(),
+            ra: 180.2,
+            dec: 0.2,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_hostless = create_mock_enriched_lsst_alert_with_matches(
+        9876543216,
+        "LSST24aaaaaag",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches,
+    );
+    let category = alert_ztf_hostless.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.hostless",
+        "Alert with ZTF match and hostless LSSG should be ztf-match.hostless"
+    );
+
+    // Test case 8: ZTF match + no LSSG → "ztf-match.unknown"
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaad".to_string(),
             ra: 180.5,
             dec: 0.5,
             prv_candidates: vec![],
@@ -321,8 +434,8 @@ fn test_compute_babamul_category() {
         }),
     });
     let alert_ztf_unknown = create_mock_enriched_lsst_alert_with_matches(
-        9876543213,
-        "LSST24aaaaaad",
+        9876543217,
+        "LSST24aaaaaah",
         0.8,
         false,
         false,
