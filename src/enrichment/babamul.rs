@@ -22,49 +22,37 @@ const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
 const MOC_DEPTH: u8 = 11;
 
 // Lazy-loaded footprint MOC
-static FOOTPRINT_MOC: OnceLock<Option<RangeMOC<u64, Hpx<u64>>>> = OnceLock::new();
+static FOOTPRINT_MOC: OnceLock<RangeMOC<u64, Hpx<u64>>> = OnceLock::new();
 
-fn load_footprint_moc() -> Option<RangeMOC<u64, Hpx<u64>>> {
-    let file = match std::fs::File::open(MOC_FOOTPRINT_PATH) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!("Failed to open footprint MOC file: {}", e);
-            return None;
-        }
-    };
+fn load_footprint_moc() -> RangeMOC<u64, Hpx<u64>> {
+    let file = std::fs::File::open(MOC_FOOTPRINT_PATH).expect("Failed to open footprint MOC file");
 
     let reader = std::io::BufReader::new(file);
     match from_fits_ivoa(reader) {
         Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
-            Some(RangeMOC::new(moc.depth_max(), moc.collect()))
+            RangeMOC::new(moc.depth_max(), moc.collect())
         }
         Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
             let depth = cell_moc.depth_max();
             let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
-            Some(RangeMOC::new(depth, ranges))
+            RangeMOC::new(depth, ranges)
         }
         Ok(_) => {
-            tracing::warn!("Unexpected MOC type");
-            None
+            panic!("Unexpected MOC type in footprint MOC file");
         }
         Err(e) => {
-            tracing::warn!("Failed to parse footprint MOC: {}", e);
-            None
+            panic!("Failed to parse footprint MOC: {}", e);
         }
     }
 }
 
 fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
     let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
-    if let Some(moc) = moc {
-        let ra_rad = ra_deg.to_radians();
-        let dec_rad = dec_deg.to_radians();
-        let layer = get(MOC_DEPTH);
-        let cell = layer.hash(ra_rad, dec_rad);
-        moc.contains_cell(MOC_DEPTH, cell)
-    } else {
-        false
-    }
+    let ra_rad = ra_deg.to_radians();
+    let dec_rad = dec_deg.to_radians();
+    let layer = get(MOC_DEPTH);
+    let cell = layer.hash(ra_rad, dec_rad);
+    moc.contains_cell(MOC_DEPTH, cell)
 }
 
 // Wrapper around cutout bytes, so we can implement
