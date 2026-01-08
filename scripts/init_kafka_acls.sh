@@ -32,7 +32,7 @@ wait_for_broker_network() {
   local host="${BROKER%%:*}"  # Extract hostname from broker:port
   local port="${BROKER##*:}"  # Extract port
   local start=$(date +%s)
-  local max_wait=60
+  local max_wait=$TIMEOUT
 
   kafka_log "Waiting for broker DNS resolution: $host"
   until getent hosts "$host" >/dev/null 2>&1; do
