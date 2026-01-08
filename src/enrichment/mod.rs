@@ -11,6 +11,7 @@ pub use base::{
 pub use decam::DecamEnrichmentWorker;
 pub use lsst::{
     LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker, LsstMatch, LsstPhotometry,
+    LsstSurveyMatches,
 };
 pub use ztf::{
     ZtfAlertClassifications, ZtfAlertForEnrichment, ZtfAlertProperties, ZtfEnrichmentWorker,

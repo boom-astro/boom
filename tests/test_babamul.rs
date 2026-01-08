@@ -109,6 +109,7 @@ fn create_mock_enriched_lsst_alert(
         pixel_flags,
         is_rock,
         None,
+        None,
     )
 }
 
@@ -119,6 +120,7 @@ fn create_mock_enriched_lsst_alert_with_matches(
     pixel_flags: bool,
     is_rock: bool,
     cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+    survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
 ) -> EnrichedLsstAlert {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
@@ -165,7 +167,7 @@ fn create_mock_enriched_lsst_alert_with_matches(
         cutout_science: None,
         cutout_template: None,
         cutout_difference: None,
-        survey_matches: None,
+        survey_matches,
         cross_matches: boom::enrichment::babamul::CrossMatchesWrapper(cross_matches),
     }
 }
@@ -245,7 +247,7 @@ async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
 
 #[test]
 fn test_compute_babamul_category() {
-    // Test case 1: Stellar classification - high score and close distance
+    // Test case 1: No ZTF match + stellar LSSG → "no-ztf-match.stellar"
     let cross_matches = create_lssg_cross_matches();
     let alert_stellar = create_mock_enriched_lsst_alert_with_matches(
         9876543210,
@@ -254,6 +256,7 @@ fn test_compute_babamul_category() {
         false,
         false,
         Some(cross_matches),
+        None, // No ZTF survey match
     );
     let category = alert_stellar.compute_babamul_category();
     assert_eq!(
@@ -261,7 +264,7 @@ fn test_compute_babamul_category() {
         "Alert with high score match should be stellar"
     );
 
-    // Test case 2: No matches - should be unknown (footprint calculation not implemented)
+    // Test case 2: No ZTF match + no matches → "no-ztf-match.unknown"
     let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
         9876543211,
         "LSST24aaaaaab",
@@ -269,6 +272,7 @@ fn test_compute_babamul_category() {
         false,
         false,
         None,
+        None, // No ZTF survey match
     );
     let category = alert_no_matches.compute_babamul_category();
     assert_eq!(
@@ -276,7 +280,60 @@ fn test_compute_babamul_category() {
         "Alert with no matches should be unknown, got: {}",
         category
     );
-    // TODO: Cover all cases
+
+    // Test case 3: ZTF match + stellar LSSG → "stellar"
+    use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
+    let cross_matches = create_lssg_cross_matches();
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaaa".to_string(),
+            ra: 180.0,
+            dec: 0.0,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_stellar = create_mock_enriched_lsst_alert_with_matches(
+        9876543212,
+        "LSST24aaaaaac",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches,
+    );
+    let category = alert_ztf_stellar.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.stellar",
+        "Alert with ZTF match and stellar LSSG should be ztf-match.stellar"
+    );
+
+    // Test case 4: ZTF match + no LSSG → "ztf-match.unknown"
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaab".to_string(),
+            ra: 180.5,
+            dec: 0.5,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_unknown = create_mock_enriched_lsst_alert_with_matches(
+        9876543213,
+        "LSST24aaaaaad",
+        0.8,
+        false,
+        false,
+        None, // No LSSG cross-matches
+        survey_matches,
+    );
+    let category = alert_ztf_unknown.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.unknown",
+        "Alert with ZTF match but no LSSG should be ztf-match.unknown"
+    );
 }
 
 #[tokio::test]
