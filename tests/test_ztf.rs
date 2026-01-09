@@ -345,12 +345,14 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(properties.get_bool("star").unwrap(), true);
     assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
     assert_eq!(properties.get_bool("stationary").unwrap(), true);
+
     // the properties also include "photstats, a document with bands as keys and
     // as values the rate of evolution (mag/day) before and after peak
     let photstats = properties.get_document("photstats").unwrap();
+
+    // check the values for the g band
     assert!(photstats.contains_key("g"));
     let g_stats = photstats.get_document("g").unwrap();
-    println!("g_stats: {:?}", g_stats);
     let peak_mag = g_stats.get_f64("peak_mag").unwrap();
     let peak_jd = g_stats.get_f64("peak_jd").unwrap();
     let rising = g_stats.get_document("rising").unwrap();
@@ -366,6 +368,7 @@ async fn test_enrich_ztf_alert() {
     assert!((rising_red_chi2 - 82.419838).abs() < 1e-6); // bad fit
     assert!((fading_red_chi2 - 1.654092).abs() < 1e-6); // decent fit
 
+    // check the values for the r band
     assert!(photstats.contains_key("r"));
     let r_stats = photstats.get_document("r").unwrap();
     println!("r_stats: {:?}", r_stats);

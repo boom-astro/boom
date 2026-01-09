@@ -540,7 +540,7 @@ mod tests {
         // let r_squared = rising_stats.r_squared;
         let nb_data = rising_stats.nb_data;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!((red_chi2.is_nan())); // for 2 data points, red_chi2 is NaN
+        assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(nb_data, 2);
 
         // the all band properties should also just match the one data point we have
@@ -697,7 +697,6 @@ mod tests {
         ];
         prepare_photometry(&mut data);
         let (results, all_bands_props, stationary) = analyze_photometry(&data);
-        println!("Results: {:?}", results);
 
         // Verify results
         assert_eq!(stationary, true);
@@ -740,7 +739,7 @@ mod tests {
         let fading_rate = fading_stats.rate;
         let fading_red_chi2 = fading_stats.red_chi2;
         let fading_nb_data = fading_stats.nb_data;
-        assert!((fading_rate - 1.0).abs() < 1e-6); // should be -1 mag/day
+        assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
         assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(fading_nb_data, 2);
 
