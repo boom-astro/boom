@@ -69,6 +69,7 @@ services:
     command: ["cargo", "watch", "-x", "run --bin api"]
     volumes:
       - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
       - ./Cargo.toml:/app/Cargo.toml
       - ./Cargo.lock:/app/Cargo.lock
       - cargo-registry:/usr/local/cargo/registry
