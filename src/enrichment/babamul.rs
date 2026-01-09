@@ -155,7 +155,7 @@ impl EnrichedLsstAlert {
                 label = "hosted";
             }
         }
-        return category + label;
+        category + label
     }
 }
 
