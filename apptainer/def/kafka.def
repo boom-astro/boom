@@ -5,7 +5,7 @@ From: apache/kafka:latest
     export PATH=/opt/kafka/bin:$PATH
     export KAFKA_BROKER_ID=1
     export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
-    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:29092,PLAINTEXT_HOST://127.0.0.1:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9093
+    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:29092,PLAINTEXT_HOST://127.0.0.1:9092,EXTERNAL://localhost:9093
     export KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
     export KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
     export KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
@@ -28,3 +28,7 @@ From: apache/kafka:latest
     # (Alternative=secure internal listener with SASL and drop ANONYMOUS.)
     export KAFKA_SUPER_USERS="User:admin;User:ANONYMOUS"
     export KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
+
+%runscript
+    export KAFKA_ADVERTISED_LISTENERS="${KAFKA_ADVERTISED_LISTENERS/localhost:9093/${KAFKA_EXTERNAL_HOST:-localhost}:9093}"
+    exec /etc/kafka/docker/run
