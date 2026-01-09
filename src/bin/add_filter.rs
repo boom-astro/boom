@@ -1,10 +1,10 @@
+use boom::conf::{load_dotenv, AppConfig};
+use boom::filter::{Filter, FilterVersion};
+use boom::utils::enums::Survey;
 use clap::Parser;
-use mongodb::bson::doc;
+use std::collections::HashMap;
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
-
-use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::enums::Survey;
 
 #[derive(Parser)]
 struct Cli {
@@ -14,6 +14,17 @@ struct Cli {
     name: String,
     #[arg(help = "Path to the JSON file containing the filter")]
     filter_file: String,
+    #[arg(
+        long,
+        help = "Optional description of the filter.",
+        default_value = "Added via CLI"
+    )]
+    description: String,
+}
+
+fn now_jd() -> f64 {
+    use chrono::Utc;
+    (Utc::now().timestamp() as f64) / 86400.0 + 2440587.5
 }
 
 #[tokio::main]
@@ -28,6 +39,8 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args = Cli::parse();
+    let name = args.name;
+    let description = args.description;
     let survey = args.survey;
     let filter_file = args.filter_file;
 
@@ -44,22 +57,24 @@ async fn main() {
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
     let filter_id: String = uuid::Uuid::new_v4().to_string();
 
-    let filter = doc! {
-        "_id": filter_id.clone(),
-        "name": args.name,
-        "active": true,
-        "user_id": "cli",
-        "catalog": format!("{}_alerts", survey),
-        "permissions": {
-            "ZTF": [1, 2, 3],
-        },
-        "fv": [
-            {
-                "fid": "v2e0fs",
-                "pipeline": filter_pipeline
-            }
-        ],
-        "active_fid": "v2e0fs",
+    let permissions = HashMap::from([(Survey::Ztf, vec![1, 2, 3])]);
+    let filter = Filter {
+        id: filter_id.clone(),
+        name: name,
+        description: Some(description),
+        active: true,
+        user_id: "cli".to_string(),
+        survey: survey,
+        permissions: permissions,
+        fv: vec![FilterVersion {
+            fid: "v2e0fs".to_string(),
+            pipeline: filter_pipeline,
+            created_at: now_jd(),
+            changelog: Some("Initial version added via CLI".to_string()),
+        }],
+        active_fid: "v2e0fs".to_string(),
+        created_at: now_jd(),
+        updated_at: now_jd(),
     };
 
     // insert the filter into the database
@@ -73,7 +88,7 @@ async fn main() {
         }
     };
 
-    let collection = db.collection::<mongodb::bson::Document>("filters");
+    let collection = db.collection::<Filter>("filters");
 
     match collection.insert_one(filter).await {
         Ok(_) => {
