@@ -98,10 +98,10 @@ services:
         timeout 5s /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server broker:29092 describe --status >/dev/null 2>&1 && \
         timeout 5s /opt/kafka/bin/kafka-configs.sh --bootstrap-server broker:29092 --entity-type users --describe >/dev/null 2>&1 && \
         timeout 5s /opt/kafka/bin/kafka-acls.sh --bootstrap-server broker:29092 --list >/dev/null 2>&1"]
-      interval: 8s
+      interval: 10s
       timeout: 30s
-      retries: 10
-      start_period: 45s
+      retries: 15
+      start_period: 60s
     labels:
       - autoheal=true
       - traefik.enable=true

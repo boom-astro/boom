@@ -60,7 +60,10 @@ services:
       - "9093:9093"
     environment:
       # Limit heap + use G1GC with fewer threads (auto-tuned based on heap size)
-      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+      # Increase timeouts for slower CI environments
+      KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: 30000
+      KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: 60000
   api:
     env_file:
       - .env
