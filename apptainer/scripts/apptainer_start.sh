@@ -8,7 +8,7 @@
 #      - consumer    : starts the consumer process
 #      - scheduler   : starts the scheduler process
 #      - mongo       : starts the MongoDB instance
-#      - kafka      : starts the kafka kafka instance
+#      - kafka       : starts the kafka instance
 #      - valkey      : starts the Valkey instance
 #      - prometheus  : starts the Prometheus instance
 #      - otel        : starts OpenTelemetry Collector process
@@ -122,8 +122,7 @@ if start_service "kafka" "$2"; then
     "$HEALTHCHECK_DIR/kafka-healthcheck.sh"
 
     echo "$(current_datetime) - Initializing Kafka ACLs"
-    apptainer exec --env-file .env \
-      --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
+    apptainer exec --bind "$BOOM_DIR/scripts/apptainer_init_kafka_acls.sh:/apptainer_init_kafka_acls.sh" \
       "$SIF_DIR/kafka.sif" /bin/bash /apptainer_init_kafka_acls.sh
   fi
 fi
