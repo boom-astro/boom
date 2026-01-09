@@ -2,58 +2,17 @@
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
-use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
+use crate::enrichment::lsst::{
+    is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
+    IS_STELLAR_DISTANCE_THRESH_ARCSEC,
+};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
-use cdshealpix::nested::get;
-use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
-use moc::moc::range::RangeMOC;
-use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
-use moc::qty::Hpx;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use tracing::{info, instrument};
-
-pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
-const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
-const MOC_DEPTH: u8 = 11;
-
-// Lazy-loaded footprint MOC
-static FOOTPRINT_MOC: OnceLock<RangeMOC<u64, Hpx<u64>>> = OnceLock::new();
-
-fn load_footprint_moc() -> RangeMOC<u64, Hpx<u64>> {
-    let file = std::fs::File::open(MOC_FOOTPRINT_PATH).expect("Failed to open footprint MOC file");
-
-    let reader = std::io::BufReader::new(file);
-    match from_fits_ivoa(reader) {
-        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
-            RangeMOC::new(moc.depth_max(), moc.collect())
-        }
-        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
-            let depth = cell_moc.depth_max();
-            let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
-            RangeMOC::new(depth, ranges)
-        }
-        Ok(_) => {
-            panic!("Unexpected MOC type in footprint MOC file");
-        }
-        Err(e) => {
-            panic!("Failed to parse footprint MOC: {}", e);
-        }
-    }
-}
-
-fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
-    let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
-    let ra_rad = ra_deg.to_radians();
-    let dec_rad = dec_deg.to_radians();
-    let layer = get(MOC_DEPTH);
-    let cell = layer.hash(ra_rad, dec_rad);
-    moc.contains_cell(MOC_DEPTH, cell)
-}
 
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
@@ -147,55 +106,56 @@ impl EnrichedLsstAlert {
     pub fn compute_babamul_category(&self) -> String {
         // If we have a ZTF match, category starts with "ztf-match."
         // Otherwise, "no-ztf-match."
-        let category = if let Some(survey_matches) = &self.survey_matches {
-            if survey_matches.ztf.is_some() {
-                "ztf-match.".to_string()
-            } else {
-                "no-ztf-match.".to_string()
-            }
-        } else {
-            "no-ztf-match.".to_string()
+        let category = match &self.survey_matches {
+            Some(survey_matches) => match &survey_matches.ztf {
+                Some(_) => "ztf-match.".to_string(),
+                None => "no-ztf-match.".to_string(),
+            },
+            None => "no-ztf-match.".to_string(),
         };
-        if self.properties.star {
+
+        // already classified as stellar (by the enrichment worker), return that
+        if self.properties.star.unwrap_or(false) {
             return category + "stellar";
         }
-        // Check if we have LSSG cross-matches
-        if let Some(xmatches) = &self.cross_matches.0 {
-            if let Some(lssg_matches) = xmatches.get("LSSG") {
-                if !lssg_matches.is_empty() {
-                    // Check for stellar matches: distance ≤ 1.0 arcsec AND score > 0.5
-                    if lssg_matches.iter().any(|m| {
-                        let distance = m
-                            .get("distance_arcsec")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(f64::MAX);
-                        let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        distance <= 1.0 && score > IS_HOSTED_SCORE_THRESH
-                    }) {
-                        return category + "stellar";
-                    }
-                    // Check if any match has score below threshold (hosted)
-                    if lssg_matches.iter().any(|m| {
-                        m.get("score")
-                            .and_then(|v| v.as_f64())
-                            .map_or(false, |s| s < IS_HOSTED_SCORE_THRESH)
-                    }) {
-                        return category + "hosted";
-                    }
-                    // Matches exist but none are stellar or hosted
-                    return category + "hostless";
-                }
-            }
-        }
+
+        // Check if we have LSPSC cross-matches
+        let empty_vec = vec![];
+        let lspsc_matches = self
+            .cross_matches
+            .0
+            .as_ref()
+            .and_then(|xmatches| xmatches.get("LSPSC"))
+            .unwrap_or(&empty_vec);
 
         // No matches: check if in footprint
-        let in_footprint =
-            is_in_footprint(self.candidate.dia_source.ra, self.candidate.dia_source.dec);
-        if in_footprint {
-            category + "hostless"
-        } else {
-            category + "unknown"
+        if lspsc_matches.is_empty() {
+            return if is_in_footprint(self.candidate.dia_source.ra, self.candidate.dia_source.dec) {
+                category + "hostless"
+            } else {
+                category + "unknown"
+            };
         }
+
+        // Evaluate matches (stellar > hosted > hostless)
+        let mut label = "hostless";
+        for m in lspsc_matches {
+            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                Some(d) => d,
+                None => continue,
+            };
+            let score = match m.get("score").and_then(|v| v.as_f64()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                label = "stellar";
+                break;
+            } else if score < IS_HOSTED_SCORE_THRESH {
+                label = "hosted";
+            }
+        }
+        return category + label;
     }
 }
 

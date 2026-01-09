@@ -17,7 +17,7 @@ use rdkafka::{
 };
 use std::time::Duration;
 
-/// Create realistic LSSG cross-matches with configurable distance and score for testing
+/// Create realistic LSPSC cross-matches with configurable distance and score for testing
 ///
 /// # Arguments
 /// * `distance_arcsec` - Distance to nearest match (default: 0.5 for stellar)
@@ -28,7 +28,7 @@ use std::time::Duration;
 /// * Stellar: distance ≤ 1.0 arcsec AND score > 0.5
 /// * Hosted: any match has score < 0.5
 /// * Hostless: matches exist but neither stellar nor hosted
-fn create_lssg_cross_matches(
+fn create_lspsc_cross_matches(
     distance_arcsec: Option<f64>,
     score: Option<f64>,
     single_match: bool,
@@ -39,7 +39,7 @@ fn create_lssg_cross_matches(
     let score = score.unwrap_or(0.95); // Default: stellar score
 
     let mut matches = std::collections::HashMap::new();
-    let mut lssg_matches = vec![json!({
+    let mut lspsc_matches = vec![json!({
         "_id": 1001,
         "ra": 150.001,
         "dec": 30.002,
@@ -50,7 +50,7 @@ fn create_lssg_cross_matches(
 
     // Add additional matches unless single_match is true
     if !single_match {
-        lssg_matches.extend(vec![
+        lspsc_matches.extend(vec![
             json!({
                 "_id": 1002,
                 "ra": 150.02,
@@ -70,7 +70,7 @@ fn create_lssg_cross_matches(
         ]);
     }
 
-    matches.insert("LSSG".to_string(), lssg_matches);
+    matches.insert("LSPSC".to_string(), lspsc_matches);
     matches
 }
 
@@ -182,7 +182,7 @@ fn create_mock_enriched_lsst_alert_with_matches(
         fp_hists: vec![],
         properties: LsstAlertProperties {
             rock: is_rock,
-            star: false,
+            star: Some(false),
             stationary: false,
             photstats: PerBandProperties::default(),
         },
@@ -271,9 +271,9 @@ async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
 fn test_compute_babamul_category() {
     use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
 
-    // Test case 1: No ZTF match + stellar LSSG → "no-ztf-match.stellar"
+    // Test case 1: No ZTF match + stellar LSPSC → "no-ztf-match.stellar"
     // distance ≤ 1.0 AND score > 0.5
-    let cross_matches = create_lssg_cross_matches(Some(0.5), Some(0.95), false);
+    let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
     let alert_stellar = create_mock_enriched_lsst_alert_with_matches(
         9876543210,
         "LSST24aaaaaaa",
@@ -289,9 +289,9 @@ fn test_compute_babamul_category() {
         "Alert with close, high-score match should be stellar"
     );
 
-    // Test case 2: No ZTF match + hosted LSSG → "no-ztf-match.hosted"
+    // Test case 2: No ZTF match + hosted LSPSC → "no-ztf-match.hosted"
     // nearest match has score < 0.5
-    let cross_matches = create_lssg_cross_matches(Some(2.0), Some(0.3), false);
+    let cross_matches = create_lspsc_cross_matches(Some(2.0), Some(0.3), false);
     let alert_hosted = create_mock_enriched_lsst_alert_with_matches(
         9876543211,
         "LSST24aaaaaab",
@@ -307,9 +307,9 @@ fn test_compute_babamul_category() {
         "Alert with low-score match should be hosted"
     );
 
-    // Test case 3: No ZTF match + hostless LSSG → "no-ztf-match.hostless"
+    // Test case 3: No ZTF match + hostless LSPSC → "no-ztf-match.hostless"
     // distance > 1.0 AND all scores > 0.5 (no hosted criteria met)
-    let cross_matches = create_lssg_cross_matches(Some(2.5), Some(0.8), true);
+    let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
     let alert_hostless = create_mock_enriched_lsst_alert_with_matches(
         9876543212,
         "LSST24aaaaaac",
@@ -341,8 +341,8 @@ fn test_compute_babamul_category() {
         "Alert with no matches but in footprint should be hostless"
     );
 
-    // Test case 5: ZTF match + stellar LSSG → "ztf-match.stellar"
-    let cross_matches = create_lssg_cross_matches(Some(0.5), Some(0.95), false);
+    // Test case 5: ZTF match + stellar LSPSC → "ztf-match.stellar"
+    let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaaa".to_string(),
@@ -365,11 +365,11 @@ fn test_compute_babamul_category() {
     let category = alert_ztf_stellar.compute_babamul_category();
     assert_eq!(
         category, "ztf-match.stellar",
-        "Alert with ZTF match and stellar LSSG should be ztf-match.stellar"
+        "Alert with ZTF match and stellar LSPSC should be ztf-match.stellar"
     );
 
-    // Test case 6: ZTF match + hosted LSSG → "ztf-match.hosted"
-    let cross_matches = create_lssg_cross_matches(Some(2.0), Some(0.3), false);
+    // Test case 6: ZTF match + hosted LSPSC → "ztf-match.hosted"
+    let cross_matches = create_lspsc_cross_matches(Some(2.0), Some(0.3), false);
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaab".to_string(),
@@ -392,11 +392,11 @@ fn test_compute_babamul_category() {
     let category = alert_ztf_hosted.compute_babamul_category();
     assert_eq!(
         category, "ztf-match.hosted",
-        "Alert with ZTF match and hosted LSSG should be ztf-match.hosted"
+        "Alert with ZTF match and hosted LSPSC should be ztf-match.hosted"
     );
 
-    // Test case 7: ZTF match + hostless LSSG → "ztf-match.hostless"
-    let cross_matches = create_lssg_cross_matches(Some(2.5), Some(0.8), true);
+    // Test case 7: ZTF match + hostless LSPSC → "ztf-match.hostless"
+    let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaac".to_string(),
@@ -419,10 +419,10 @@ fn test_compute_babamul_category() {
     let category = alert_ztf_hostless.compute_babamul_category();
     assert_eq!(
         category, "ztf-match.hostless",
-        "Alert with ZTF match and hostless LSSG should be ztf-match.hostless"
+        "Alert with ZTF match and hostless LSPSC should be ztf-match.hostless"
     );
 
-    // Test case 8: ZTF match + no LSSG → "ztf-match.unknown"
+    // Test case 8: ZTF match + no LSPSC → "ztf-match.unknown"
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaad".to_string(),
@@ -439,13 +439,13 @@ fn test_compute_babamul_category() {
         0.8,
         false,
         false,
-        None, // No LSSG cross-matches
+        None, // No LSPSC cross-matches
         survey_matches,
     );
     let category = alert_ztf_unknown.compute_babamul_category();
     assert_eq!(
         category, "ztf-match.hostless",
-        "Alert with ZTF match but no LSSG and in footprint should be ztf-match.hostless"
+        "Alert with ZTF match but no LSPSC and in footprint should be ztf-match.hostless"
     );
 }
 
@@ -607,8 +607,8 @@ async fn test_babamul_lsst_with_ztf_match() {
     let topic = "babamul.lsst.ztf-match.hostless";
 
     let db = boom::conf::get_test_db().await;
-    // Ensure the LSSG catalog collection exists for Babamul validation
-    db.collection::<mongodb::bson::Document>("LSSG")
+    // Ensure the LSPSC catalog collection exists for Babamul validation
+    db.collection::<mongodb::bson::Document>("LSPSC")
         .insert_one(doc! {"_init": true})
         .await
         .ok();
