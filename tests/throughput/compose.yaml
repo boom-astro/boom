@@ -166,4 +166,5 @@ services:
         condition: service_healthy
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-      - ${PWD}/data/models:/app/data/models
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
