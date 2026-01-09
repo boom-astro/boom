@@ -350,29 +350,39 @@ async fn test_enrich_ztf_alert() {
     let photstats = properties.get_document("photstats").unwrap();
     assert!(photstats.contains_key("g"));
     let g_stats = photstats.get_document("g").unwrap();
+    println!("g_stats: {:?}", g_stats);
     let peak_mag = g_stats.get_f64("peak_mag").unwrap();
     let peak_jd = g_stats.get_f64("peak_jd").unwrap();
     let rising = g_stats.get_document("rising").unwrap();
     let fading = g_stats.get_document("fading").unwrap();
     let rising_rate = rising.get_f64("rate").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
+    let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
+    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     assert!((peak_mag - 15.6940).abs() < 1e-6);
     assert!((peak_jd - 2460441.971956).abs() < 1e-6);
-    assert!((rising_rate + 0.20024).abs() < 1e-6);
-    assert!((fading_rate - 0.037152).abs() < 1e-6);
+    assert!((rising_rate + 0.086736).abs() < 1e-6);
+    assert!((fading_rate - 0.038436).abs() < 1e-6);
+    assert!((rising_red_chi2 - 82.419838).abs() < 1e-6); // bad fit
+    assert!((fading_red_chi2 - 1.654092).abs() < 1e-6); // decent fit
 
     assert!(photstats.contains_key("r"));
     let r_stats = photstats.get_document("r").unwrap();
+    println!("r_stats: {:?}", r_stats);
     let peak_mag = r_stats.get_f64("peak_mag").unwrap();
     let peak_jd = r_stats.get_f64("peak_jd").unwrap();
     let rising = r_stats.get_document("rising").unwrap();
     let fading = r_stats.get_document("fading").unwrap();
     let rising_rate = rising.get_f64("rate").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
+    let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
+    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     assert!((peak_mag - 14.3987).abs() < 1e-6);
     assert!((peak_jd - 2460441.922303).abs() < 1e-6);
-    assert!((rising_rate + 0.13846).abs() < 1e-6);
+    assert!((rising_rate + 0.023725).abs() < 1e-6);
     assert!((fading_rate - 0.063829).abs() < 1e-6);
+    assert!((rising_red_chi2 - 70.454292).abs() < 1e-6); // bad fit
+    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
 }
 
 #[tokio::test]
