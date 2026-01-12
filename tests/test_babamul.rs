@@ -200,8 +200,14 @@ fn create_mock_enriched_lsst_alert_with_matches(
     }
 }
 
-/// Consume messages from a Kafka topic for testing
-async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>> {
+/// Consume messages from a Kafka topic and process them with a predicate function.
+/// Returns true if a matching message was found, false if timeout occurred.
+/// The predicate function is called on each message's payload; if it returns true,
+/// consumption stops and the function returns early.
+async fn consume_kafka_messages<F>(topic: &str, config: &AppConfig, mut predicate: F) -> bool
+where
+    F: FnMut(&[u8]) -> bool,
+{
     let group_id = uuid::Uuid::new_v4().to_string();
     let consumer: StreamConsumer = rdkafka::config::ClientConfig::new()
         .set("bootstrap.servers", &config.kafka.producer.server)
@@ -215,7 +221,6 @@ async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>>
         .subscribe(&[topic])
         .expect("Failed to subscribe to topic");
 
-    let mut messages = Vec::new();
     let timeout = Duration::from_secs(8);
     let start = std::time::Instant::now();
 
@@ -225,7 +230,9 @@ async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>>
         match tokio::time::timeout(timeout - start.elapsed(), consumer.recv()).await {
             Ok(Ok(message)) => {
                 if let Some(payload) = message.payload() {
-                    messages.push(payload.to_vec());
+                    if predicate(payload) {
+                        return true;
+                    }
                 }
             }
             Ok(Err(e)) => {
@@ -242,7 +249,7 @@ async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>>
         }
     }
 
-    messages
+    false
 }
 
 // Delete a Kafka topic; tolerate "unknown topic" errors to avoid flakiness
@@ -867,18 +874,9 @@ async fn test_babamul_lsst_with_ztf_match() {
     // Verify that the Babamul message was published - since the alert passed enrichment
     // with good reliability and no pixel flags or rock flag, it should be sent to Babamul
     // Fetch a few messages to tolerate leftover topic data and search for our alert
-    let messages = consume_kafka_messages(topic, &config).await;
-    assert!(
-        !messages.is_empty(),
-        "Expected at least one Babamul message with enriched alert containing matches"
-    );
-
-    // Decode the Avro message to verify matches are present
     let schema = EnrichedLsstAlert::get_schema();
-    // Read all records from all messages and check for matches on our alert
-    let mut found_match = false;
-    'outer: for msg in messages {
-        let reader = apache_avro::Reader::with_schema(&schema, &msg[..])
+    let found_match = consume_kafka_messages(topic, &config, |msg| {
+        let reader = apache_avro::Reader::with_schema(&schema, msg)
             .expect("Failed to create Avro reader");
 
         for record_result in reader {
@@ -907,12 +905,11 @@ async fn test_babamul_lsst_with_ztf_match() {
                                     if let apache_avro::types::Value::Record(obj_fields) =
                                         &**ztf_boxed
                                     {
-                                        found_match = obj_fields.iter().any(|(field_name, field_value)| {
+                                        if obj_fields.iter().any(|(field_name, field_value)| {
                                             field_name == "object_id"
                                                 && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
-                                        });
-                                        if found_match {
-                                            break 'outer;
+                                        }) {
+                                            return true;
                                         }
                                     }
                                 }
@@ -922,7 +919,9 @@ async fn test_babamul_lsst_with_ztf_match() {
                 }
             }
         }
-    }
+        false
+    })
+    .await;
 
     assert!(
         found_match,
@@ -1092,18 +1091,9 @@ async fn test_babamul_ztf_with_lsst_match() {
     );
 
     // Verify that the Babamul message was published
-    let messages = consume_kafka_messages("babamul.ztf.none", &config).await;
-    assert!(
-        !messages.is_empty(),
-        "Expected at least one Babamul message with enriched alert containing matches"
-    );
-
-    // Decode the Avro message to verify matches are present
     let schema = EnrichedZtfAlert::get_schema();
-    // Read all records from all messages and check for matches on our alert
-    let mut found_match = false;
-    'outer: for msg in messages {
-        let reader = apache_avro::Reader::with_schema(&schema, &msg[..])
+    let found_match = consume_kafka_messages("babamul.ztf.none", &config, |msg| {
+        let reader = apache_avro::Reader::with_schema(&schema, msg)
             .expect("Failed to create Avro reader");
 
         for record_result in reader {
@@ -1133,12 +1123,11 @@ async fn test_babamul_ztf_with_lsst_match() {
                                     if let apache_avro::types::Value::Record(obj_fields) =
                                         &**lsst_boxed
                                     {
-                                        found_match = obj_fields.iter().any(|(field_name, field_value)| {
+                                        if obj_fields.iter().any(|(field_name, field_value)| {
                                             field_name == "object_id"
                                                 && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
-                                        });
-                                        if found_match {
-                                            break 'outer;
+                                        }) {
+                                            return true;
                                         }
                                     }
                                 }
@@ -1148,7 +1137,9 @@ async fn test_babamul_ztf_with_lsst_match() {
                 }
             }
         }
-    }
+        false
+    })
+    .await;
 
     assert!(
         found_match,
