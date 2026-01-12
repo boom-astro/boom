@@ -2,7 +2,10 @@
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
-use crate::enrichment::lsst::{LsstAlertForEnrichment, LsstAlertProperties};
+use crate::enrichment::lsst::{
+    is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
+    IS_STELLAR_DISTANCE_THRESH_ARCSEC,
+};
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
@@ -15,6 +18,23 @@ use tracing::{info, instrument};
 // AvroSchemaComponent for it, to serialize as bytes in Avro
 #[derive(Debug, serde::Deserialize)]
 pub struct CutoutBytes(Vec<u8>);
+
+// Wrapper for cross_matches that implements AvroSchemaComponent as a no-op
+// since we don't want to serialize it to Avro
+#[derive(Debug, Clone, Default)]
+pub struct CrossMatchesWrapper(
+    pub Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+);
+
+impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
+    fn get_schema_in_ctxt(
+        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
+        _enclosing_namespace: &apache_avro::schema::Namespace,
+    ) -> apache_avro::Schema {
+        // Return null schema since this field is never serialized
+        apache_avro::Schema::Null
+    }
+}
 
 impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
     fn get_schema_in_ctxt(
@@ -53,6 +73,10 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
+    // Not serialized - kept in memory for category computation only
+    #[serde(skip)]
+    #[allow(dead_code)] // Would show up unused erroneously
+    pub cross_matches: CrossMatchesWrapper,
 }
 
 impl EnrichedLsstAlert {
@@ -63,6 +87,7 @@ impl EnrichedLsstAlert {
         cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
     ) -> Self {
+        let cross_matches = CrossMatchesWrapper(alert.cross_matches);
         EnrichedLsstAlert {
             candid: alert.candid,
             object_id: alert.object_id,
@@ -74,7 +99,63 @@ impl EnrichedLsstAlert {
             cutout_template: cutout_template.map(CutoutBytes),
             cutout_difference: cutout_difference.map(CutoutBytes),
             survey_matches: alert.survey_matches,
+            cross_matches,
         }
+    }
+
+    pub fn compute_babamul_category(&self) -> String {
+        // If we have a ZTF match, category starts with "ztf-match."
+        // Otherwise, "no-ztf-match."
+        let category = match &self.survey_matches {
+            Some(survey_matches) => match &survey_matches.ztf {
+                Some(_) => "ztf-match.".to_string(),
+                None => "no-ztf-match.".to_string(),
+            },
+            None => "no-ztf-match.".to_string(),
+        };
+
+        // already classified as stellar (by the enrichment worker), return that
+        if self.properties.star.unwrap_or(false) {
+            return category + "stellar";
+        }
+
+        // Check if we have LSPSC cross-matches
+        let empty_vec = vec![];
+        let lspsc_matches = self
+            .cross_matches
+            .0
+            .as_ref()
+            .and_then(|xmatches| xmatches.get("LSPSC"))
+            .unwrap_or(&empty_vec);
+
+        // No matches: check if in footprint
+        if lspsc_matches.is_empty() {
+            return if is_in_footprint(self.candidate.dia_source.ra, self.candidate.dia_source.dec) {
+                category + "hostless"
+            } else {
+                category + "unknown"
+            };
+        }
+
+        // Evaluate matches (stellar > hosted > hostless)
+        let mut label = "hostless";
+        for m in lspsc_matches {
+            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                Some(d) => d,
+                None => continue,
+            };
+            let score = match m.get("score").and_then(|v| v.as_f64()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                label = "stellar";
+                break;
+            } else if score < IS_HOSTED_SCORE_THRESH {
+                label = "hosted";
+            }
+        }
+        category + label
     }
 }
 
@@ -253,8 +334,6 @@ impl Babamul {
         alerts: Vec<EnrichedLsstAlert>,
     ) -> Result<(), EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
-        // For now, we will just send all alerts to "babamul.none"
-        // In the future, we will determine the topic based on the alert properties
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
@@ -279,11 +358,8 @@ impl Babamul {
                 continue;
             }
 
-            // Determine which topic this alert should go to
-            // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
-            // TODO: Get this implemented
-            // For now, all LSST alerts go to "babamul.lsst.none"
-            let category: String = "none".to_string();
+            // Compute the category for this alert to determine the topic
+            let category = alert.compute_babamul_category();
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
