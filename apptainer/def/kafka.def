@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: apache/kafka:latest
+From: apache/kafka:4.1.1
 
 %environment
     export PATH=/opt/kafka/bin:$PATH
@@ -27,7 +27,7 @@ From: apache/kafka:latest
     # controller metadata or internal admin ops can be unauthorized and cause the process to exit.
     # (Alternative=secure internal listener with SASL and drop ANONYMOUS.)
     export KAFKA_SUPER_USERS="User:admin;User:ANONYMOUS"
-    export KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
+    export KAFKA_OPTS="-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf -Djava.security.egd=file:/dev/./urandom"
 
 %runscript
     export KAFKA_ADVERTISED_LISTENERS="${KAFKA_ADVERTISED_LISTENERS/localhost:9093/${KAFKA_EXTERNAL_HOST:-localhost}:9093}"
