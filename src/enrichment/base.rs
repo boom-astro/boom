@@ -78,6 +78,8 @@ pub enum EnrichmentWorkerError {
     Serialization(String),
     #[error("kafka error: {0}")]
     Kafka(String),
+    #[error("configuration error: {0}")]
+    ConfigurationError(String),
 }
 
 #[async_trait::async_trait]
