@@ -19,7 +19,7 @@ use opentelemetry::{
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, error, instrument};
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -78,6 +78,8 @@ pub enum EnrichmentWorkerError {
     Serialization(String),
     #[error("kafka error: {0}")]
     Kafka(String),
+    #[error("configuration error: {0}")]
+    ConfigurationError(String),
 }
 
 #[async_trait::async_trait]

@@ -1,44 +1,111 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
-use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
+use crate::enrichment::{
+    fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
-use apache_avro::{Schema, Writer};
+use crate::utils::db::mongify;
+use crate::utils::enums::Survey;
+use crate::utils::lightcurves::{
+    analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
+};
+use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
+use cdshealpix::nested::get;
+use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
+use moc::moc::range::RangeMOC;
+use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
+use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use schemars::JsonSchema;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
 
-// Avro schema for enriched LSST alerts sent to Babamul
-// TODO: This is just a placeholder for now and needs to be defined properly
-const ENRICHED_LSST_ALERT_SCHEMA: &str = r#"
-{
-    "type": "record",
-    "name": "EnrichedLsstAlert",
-    "fields": [
-        {"name": "candid", "type": "long"},
-        {"name": "objectId", "type": "string"},
-        {"name": "candidate", "type": "string"},
-        {"name": "prv_candidates", "type": "string"},
-        {"name": "fp_hists", "type": "string"},
-        {"name": "properties", "type": "string"}
-    ]
+pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
+pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
+const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
+const MOC_DEPTH: u8 = 11;
+
+// Lazy-loaded footprint MOC
+static FOOTPRINT_MOC: OnceLock<RangeMOC<u64, Hpx<u64>>> = OnceLock::new();
+
+fn load_footprint_moc() -> RangeMOC<u64, Hpx<u64>> {
+    let file = std::fs::File::open(MOC_FOOTPRINT_PATH).expect("Failed to open footprint MOC file");
+
+    let reader = std::io::BufReader::new(file);
+    match from_fits_ivoa(reader) {
+        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
+            RangeMOC::new(moc.depth_max(), moc.collect())
+        }
+        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
+            let depth = cell_moc.depth_max();
+            let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
+            RangeMOC::new(depth, ranges)
+        }
+        Ok(_) => {
+            panic!("Unexpected MOC type in footprint MOC file");
+        }
+        Err(e) => {
+            panic!("Failed to parse footprint MOC: {}", e);
+        }
+    }
 }
-"#;
+
+pub fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
+    let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
+    let ra_rad = ra_deg.to_radians();
+    let dec_rad = dec_deg.to_radians();
+    let layer = get(MOC_DEPTH);
+    let cell = layer.hash(ra_rad, dec_rad);
+    moc.contains_cell(MOC_DEPTH, cell)
+}
+
+fn default_lsst_zp() -> Option<f64> {
+    Some(8.9)
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsstPhotometry {
+    pub jd: f64,
+    pub magpsf: Option<f32>,
+    pub sigmapsf: Option<f32>,
+    pub diffmaglim: f32,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    // Set a default if missing
+    #[serde(default = "default_lsst_zp")]
+    pub zp: Option<f64>,
+    pub ra: Option<f64>,
+    pub dec: Option<f64>,
+    pub snr: Option<f64>,
+}
+
+impl LsstPhotometry {
+    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
+        // If the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+        match (self.snr, self.magpsf, self.sigmapsf) {
+            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
+                time: self.jd,
+                mag,
+                mag_err: sig,
+                band: self.band.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {
                 "_id": {"$in": []}
-            }
-        },
-        doc! {
-            "$project": {
-                "objectId": 1,
-                "candidate": 1,
             }
         },
         doc! {
@@ -50,196 +117,62 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
-            "$project": doc! {
-                "objectId": 1,
-                "candidate": 1,
-                "prv_candidates": fetch_timeseries_op(
-                    "aux.prv_candidates",
-                    "candidate.jd",
-                    365,
-                    None
-                ),
-                "fp_hists": fetch_timeseries_op(
-                    "aux.fp_hists",
-                    "candidate.jd",
-                    365,
-                    Some(vec![doc! {
-                        "$gte": [
-                            "$$x.snr",
-                            3.0
-                        ]
-                    }]),
-                ),
-                "aliases": get_array_element("aux.aliases"),
+            "$unwind": {
+                "path": "$aux",
+                "preserveNullAndEmptyArrays": false
             }
         },
         doc! {
-            "$project": doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "aux.aliases.ZTF.0",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        },
+        doc! {
+            "$project": {
                 "objectId": 1,
                 "candidate": 1,
-                "prv_candidates.jd": 1,
-                "prv_candidates.magpsf": 1,
-                "prv_candidates.sigmapsf": 1,
-                "prv_candidates.band": 1,
-                "fp_hists.jd": 1,
-                "fp_hists.magpsf": 1,
-                "fp_hists.sigmapsf": 1,
-                "fp_hists.band": 1,
+                "prv_candidates": "$aux.prv_candidates",
+                "fp_hists": "$aux.fp_hists",
+                "cross_matches": "$aux.cross_matches",
+                "survey_matches": {
+                    "ztf": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
+                            "then": {
+                                "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
+                                "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    }
+                }
             }
         },
     ]
 }
 
-pub struct Babamul {
-    kafka_producer: rdkafka::producer::FutureProducer,
-    avro_schema: Schema,
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+pub struct LsstSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
 }
 
-impl Babamul {
-    fn new(config: &AppConfig) -> Self {
-        // Read Kafka producer config from kafka: producer in the config
-        let kafka_producer_host = &config.kafka.producer.server;
-
-        // Create Kafka producer
-        let kafka_producer: rdkafka::producer::FutureProducer =
-            rdkafka::config::ClientConfig::new()
-                // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
-                // .set("debug", "broker,topic,msg")
-                .set("bootstrap.servers", kafka_producer_host)
-                .set("message.timeout.ms", "5000")
-                // it's best to increase batch.size if the cluster
-                // is running on another machine. Locally, lower means less
-                // latency, since we are not limited by network speed anyways
-                .set("batch.size", "16384")
-                .set("linger.ms", "5")
-                .set("acks", "1")
-                .set("max.in.flight.requests.per.connection", "5")
-                .set("retries", "3")
-                .create()
-                .expect("Failed to create Babamul Kafka producer");
-
-        // Parse the Avro schema
-        let avro_schema =
-            Schema::parse_str(ENRICHED_LSST_ALERT_SCHEMA).expect("Failed to parse Avro schema");
-
-        Babamul {
-            kafka_producer,
-            avro_schema,
-        }
-    }
-
-    /// Convert an enriched LSST alert to Avro bytes
-    fn to_avro_bytes(&self, alert: &EnrichedLsstAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
-        // Serialize complex fields to JSON strings for the Avro schema
-        let candidate_json = serde_json::to_string(&alert.candidate)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let prv_candidates_json = serde_json::to_string(&alert.prv_candidates)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let fp_hists_json = serde_json::to_string(&alert.fp_hists)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-        let properties_json = serde_json::to_string(&alert.properties)
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-
-        // Create a simplified structure for Avro encoding
-        let avro_record = serde_json::json!({
-            "candid": alert.candid,
-            "objectId": alert.object_id,
-            "candidate": candidate_json,
-            "prv_candidates": prv_candidates_json,
-            "fp_hists": fp_hists_json,
-            "properties": properties_json,
-        });
-
-        let mut writer =
-            Writer::with_codec(&self.avro_schema, Vec::new(), apache_avro::Codec::Snappy);
-        writer
-            .append_ser(avro_record)
-            .inspect_err(|e| {
-                error!("Failed to serialize alert to Avro: {}", e);
-            })
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-
-        let encoded = writer
-            .into_inner()
-            .inspect_err(|e| {
-                error!("Failed to finalize Avro writer: {}", e);
-            })
-            .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-
-        Ok(encoded)
-    }
-
-    async fn process_alerts(
-        &self,
-        alerts: Vec<EnrichedLsstAlert>,
-    ) -> Result<(), EnrichmentWorkerError> {
-        // Create a hash map for alerts to send to each topic
-        // For now, we will just send all alerts to "babamul.none"
-        // In the future, we will determine the topic based on the alert properties
-        let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
-
-        // Determine if this alert is worth sending to Babamul
-        let min_reliability = 0.5;
-        let sso = false;
-
-        // Iterate over the alerts
-        for alert in alerts {
-            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < min_reliability
-                || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
-                || alert.properties.rock == sso
-            {
-                // Skip this alert, it doesn't meet the criteria
-                continue;
-            }
-
-            // Determine which topic this alert should go to
-            // Is it a star, galaxy, or none, and does it have a ZTF crossmatch?
-            // TODO: Get this implemented
-            // For now, all LSST alerts go to "babamul.none"
-            let category: String = "none".to_string();
-            let topic_name = format!("babamul.{}", category);
-            alerts_by_topic
-                .entry(topic_name)
-                .or_insert_with(Vec::new)
-                .push(alert);
-        }
-
-        // Now iterate over topic, alerts vectors to send them to Kafka
-        for (topic_name, alerts) in alerts_by_topic {
-            println!("Sending {} alerts to topic {}", alerts.len(), topic_name);
-
-            // Convert all alerts to Avro format first (to avoid lifetime issues)
-            let mut payloads = Vec::new();
-            for alert in &alerts {
-                let payload = self.to_avro_bytes(alert)?;
-                payloads.push(payload);
-            }
-
-            // Send all messages to Kafka without awaiting (allows batching)
-            let mut send_futures = Vec::new();
-            for payload in &payloads {
-                // Create Kafka record
-                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
-
-                // Send to Kafka (non-blocking) and collect the future
-                let future = self
-                    .kafka_producer
-                    .send(record, std::time::Duration::from_secs(5));
-                send_futures.push(future);
-            }
-
-            // Now await all the sends
-            // This allows Kafka to batch them efficiently based on batch.size and linger.ms settings
-            for send_result in send_futures {
-                send_result.await.map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
-                })?;
-            }
-        }
-
-        Ok(())
-    }
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+pub struct LsstMatch {
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
 }
 
 /// LSST alert structure used to deserialize alerts
@@ -251,47 +184,22 @@ pub struct LsstAlertForEnrichment {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
+    pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
+    pub survey_matches: Option<LsstSurveyMatches>,
 }
 
-/// LSST alert properties computed during enrichment
-/// and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+/// LSST alert properties computed during enrichment and inserted back into the alert document
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
+    pub star: Option<bool>,
     pub photstats: PerBandProperties,
-}
-
-/// LSST with propertied (i.e., it's enriched)
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct EnrichedLsstAlert {
-    #[serde(rename = "_id")]
-    pub candid: i64,
-    #[serde(rename = "objectId")]
-    pub object_id: String,
-    pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
-    pub properties: LsstAlertProperties,
-}
-
-impl EnrichedLsstAlert {
-    pub fn from_alert_and_properties(
-        alert: LsstAlertForEnrichment,
-        properties: LsstAlertProperties,
-    ) -> Self {
-        EnrichedLsstAlert {
-            candid: alert.candid,
-            object_id: alert.object_id,
-            candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            fp_hists: alert.fp_hists,
-            properties,
-        }
-    }
 }
 
 pub struct LsstEnrichmentWorker {
@@ -299,6 +207,7 @@ pub struct LsstEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
+    alert_cutout_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
 }
@@ -311,12 +220,42 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
+        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
 
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
         // Detect if Babamul is enabled from the config
-        let babamul: Option<Babamul> = if config.babamul.enabled {
+        let babamul_enabled = config.babamul.enabled;
+        // If enabled, we need to ensure we have LSPSC cross-matches configured
+        // and that the catalog exists in the database
+        if babamul_enabled {
+            // Require LSST cross-match config to include LSPSC
+            let Some(lsst_crossmatch_config) = config.crossmatch.get(&Survey::Lsst) else {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but no LSST cross-match configuration is present"
+                        .to_string(),
+                ));
+            };
+            let lspsc_found = lsst_crossmatch_config
+                .iter()
+                .any(|xmatch_config| xmatch_config.catalog == "LSPSC");
+            if !lspsc_found {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but LSPSC cross-match is not configured for LSST alerts"
+                        .to_string(),
+                ));
+            }
+            // Also require the LSPSC catalog collection to exist in the database
+            let collections = db.list_collection_names().await?;
+            if !collections.contains(&"LSPSC".to_string()) {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but the LSPSC catalog does not exist in the database"
+                        .to_string(),
+                ));
+            }
+        }
+        let babamul: Option<Babamul> = if babamul_enabled {
             Some(Babamul::new(&config))
         } else {
             None
@@ -327,6 +266,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
+            alert_cutout_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
         })
@@ -360,16 +300,30 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             return Ok(vec![]);
         }
 
+        let mut candid_to_cutouts = if self.babamul.is_some() {
+            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?
+        } else {
+            HashMap::new()
+        };
+
+        if candid_to_cutouts.len() != alerts.len() {
+            warn!(
+                "only {} cutouts fetched from {} candids",
+                candid_to_cutouts.len(),
+                alerts.len()
+            );
+        }
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<EnrichedLsstAlert> = Vec::new();
-        for i in 0..alerts.len() {
-            let candid = alerts[i].candid;
+        for alert in alerts {
+            let candid = alert.candid;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let properties = self.get_alert_properties(&alerts[i]).await?;
+            let properties = self.get_alert_properties(&alert).await?;
 
             let update_alert_document = doc! {
                 "$set": {
@@ -390,8 +344,16 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert =
-                    EnrichedLsstAlert::from_alert_and_properties(alerts[i].clone(), properties);
+                let cutouts = candid_to_cutouts
+                    .remove(&candid)
+                    .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
+                let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
+                    alert,
+                    Some(cutouts.cutout_science),
+                    Some(cutouts.cutout_template),
+                    Some(cutouts.cutout_difference),
+                    properties,
+                );
                 enriched_alerts.push(enriched_alert);
             }
         }
@@ -401,7 +363,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // Send to Babamul for batch processing
         match self.babamul.as_ref() {
             Some(babamul) => {
-                if let Err(e) = babamul.process_alerts(enriched_alerts).await {
+                if let Err(e) = babamul.process_lsst_alerts(enriched_alerts).await {
                     error!("Failed to process enriched alerts in Babamul: {}", e);
                 }
             }
@@ -418,12 +380,52 @@ impl LsstEnrichmentWorker {
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
-        let candidate = &alert.candidate;
+        let is_rock = alert.ss_object_id.is_some();
 
-        let is_rock = candidate.is_sso;
+        // Determine if this is a star based on LSPSC cross-matches
+        let mut is_star = Some(false);
 
-        let prv_candidates = alert.prv_candidates.clone();
-        let fp_hists = alert.fp_hists.clone();
+        let empty_vec = vec![];
+        let lspsc_matches = alert
+            .cross_matches
+            .as_ref()
+            .and_then(|xmatches| xmatches.get("LSPSC"))
+            .unwrap_or(&empty_vec);
+        if lspsc_matches.is_empty() {
+            if !is_in_footprint(
+                alert.candidate.dia_source.ra,
+                alert.candidate.dia_source.dec,
+            ) {
+                is_star = None;
+            }
+        } else {
+            // Check each LSPSC match for a nearby stellar-like object
+            for m in lspsc_matches {
+                let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let score = match m.get("score").and_then(|v| v.as_f64()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                    is_star = Some(true);
+                    break;
+                }
+            }
+        }
+
+        let prv_candidates: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .filter_map(|p| p.to_photometry_mag())
+            .collect();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .filter_map(|p| p.to_photometry_mag())
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
@@ -433,6 +435,7 @@ impl LsstEnrichmentWorker {
 
         Ok(LsstAlertProperties {
             rock: is_rock,
+            star: is_star,
             stationary,
             photstats,
         })

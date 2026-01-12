@@ -1,6 +1,6 @@
-use crate::api::auth::AuthProvider;
 use crate::api::email::EmailService;
 use crate::api::models::response;
+use crate::{api::auth::AuthProvider, utils::enums::Survey};
 use actix_web::{post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -8,6 +8,25 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::process::Command;
 use utoipa::ToSchema;
+
+pub struct BabamulAvroSchemas {
+    lsst_schema: serde_json::Value,
+    ztf_schema: serde_json::Value,
+}
+
+impl BabamulAvroSchemas {
+    pub fn new() -> Self {
+        use apache_avro::AvroSchema;
+        let lsst_schema = crate::enrichment::babamul::EnrichedLsstAlert::get_schema();
+        let ztf_schema = crate::enrichment::babamul::EnrichedZtfAlert::get_schema();
+        let lsst_schema = serde_json::to_value(&lsst_schema).unwrap();
+        let ztf_schema = serde_json::to_value(&ztf_schema).unwrap();
+        Self {
+            lsst_schema,
+            ztf_schema,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUser {
@@ -547,5 +566,31 @@ pub async fn post_babamul_auth(
             eprintln!("Database error fetching user: {}", e);
             response::internal_error("Database error")
         }
+    }
+}
+
+/// Get the Avro schema used by Babamul for the specified survey (lsst or ztf)
+#[utoipa::path(
+    get,
+    path = "/babamul/schema/{survey}",
+    responses(
+        (status = 200, description = "Schema retrieved successfully", body = String),
+        (status = 400, description = "Invalid survey"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("survey" = String, Path, description = "Survey name (lsst or ztf)")
+    ),
+    tags=["Babamul"]
+)]
+#[actix_web::get("/babamul/schema/{survey}")]
+pub async fn get_babamul_schema(
+    survey: web::Path<Survey>,
+    babamul_avro_schemas: web::Data<BabamulAvroSchemas>,
+) -> HttpResponse {
+    match survey.into_inner() {
+        Survey::Lsst => HttpResponse::Ok().json(babamul_avro_schemas.lsst_schema.clone()),
+        Survey::Ztf => HttpResponse::Ok().json(babamul_avro_schemas.ztf_schema.clone()),
+        _ => response::bad_request("Invalid survey specified"),
     }
 }

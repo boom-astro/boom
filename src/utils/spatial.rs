@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use crate::{conf, utils::o11y::logging::as_error};
-
 use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
+use itertools::Itertools;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
@@ -181,10 +180,40 @@ pub async fn xmatch(
             .expect("this should never panic, the doc was derived from the catalogs");
 
         if !xmatch_config.use_distance {
+            // to each document, add a distance_arcsec field
+            // and limit the number of results to max_results if specified
+            let matches_cloned: Vec<mongodb::bson::Document> = matches
+                .iter()
+                .filter_map(|m| m.as_document().cloned())
+                .filter_map(|mut m| {
+                    let xmatch_ra = match get_f64_from_doc(&m, "ra") {
+                        Some(v) => v,
+                        None => {
+                            return None;
+                        }
+                    };
+                    let xmatch_dec = match get_f64_from_doc(&m, "dec") {
+                        Some(v) => v,
+                        None => {
+                            return None;
+                        }
+                    };
+                    let distance_arcsec =
+                        great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0; // convert to arcsec
+                    m.insert("distance_arcsec", distance_arcsec);
+                    Some(m)
+                })
+                .sorted_by(|a, b| {
+                    let da = get_f64_from_doc(a, "distance_arcsec").unwrap_or(f64::INFINITY);
+                    let db = get_f64_from_doc(b, "distance_arcsec").unwrap_or(f64::INFINITY);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .take(xmatch_config.max_results.unwrap_or(usize::MAX))
+                .collect();
             xmatch_results
                 .get_mut(catalog)
                 .unwrap()
-                .extend(matches.iter().filter_map(|m| m.as_document().cloned()));
+                .extend(matches_cloned);
         } else {
             let distance_key = xmatch_config
                 .distance_key
@@ -247,6 +276,30 @@ pub async fn xmatch(
                     matches_filtered.push(xmatch_doc);
                 }
             }
+            // sort to have nearby galaxies (distance_kpc = -1.0) first, sorted by distance_arcsec
+            // then those with distance_kpc != -1.0 sorted by distance_kpc and distance_arcsec
+            matches_filtered.sort_by(|a, b| {
+                let da_arcsec = get_f64_from_doc(a, "distance_arcsec").unwrap_or(f64::INFINITY);
+                let db_arcsec = get_f64_from_doc(b, "distance_arcsec").unwrap_or(f64::INFINITY);
+                let da_kpc = get_f64_from_doc(a, "distance_kpc").unwrap_or(f64::INFINITY);
+                let db_kpc = get_f64_from_doc(b, "distance_kpc").unwrap_or(f64::INFINITY);
+
+                // First sort by distance_kpc, treating -1.0 as smaller than any positive value
+                if da_kpc == -1.0 && db_kpc != -1.0 {
+                    std::cmp::Ordering::Less
+                } else if da_kpc != -1.0 && db_kpc == -1.0 {
+                    std::cmp::Ordering::Greater
+                } else if da_kpc != db_kpc {
+                    da_kpc
+                        .partial_cmp(&db_kpc)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    // If distance_kpc are equal, sort by distance_arcsec
+                    da_arcsec
+                        .partial_cmp(&db_arcsec)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            });
             xmatch_results
                 .get_mut(catalog)
                 .unwrap()

@@ -10,7 +10,7 @@ use crate::filter::{
     validate_filter_pipeline, Alert, Classification, FilterError, FilterResults, FilterWorker,
     FilterWorkerError, LoadedFilter, Origin, Photometry,
 };
-use crate::utils::db::{fetch_timeseries_op, get_array_element};
+use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 const ZTF_ZP: f64 = 23.9;
@@ -448,11 +448,11 @@ pub async fn build_ztf_filter_pipeline(
     if use_cross_matches_index.is_some() {
         aux_add_fields.insert(
             "cross_matches".to_string(),
-            get_array_element("aux.cross_matches"),
+            get_array_dict_element("aux.cross_matches"),
         );
     }
     if use_aliases_index.is_some() {
-        aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
+        aux_add_fields.insert("aliases".to_string(), get_array_dict_element("aux.aliases"));
     }
 
     let mut insert_aux_pipeline = use_prv_candidates_index.is_some()

@@ -45,7 +45,7 @@ impl BtsBotModel {
     #[instrument(skip_all, err)]
     pub fn get_metadata(
         &self,
-        alerts: &[ZtfAlertForEnrichment],
+        alerts: &[&ZtfAlertForEnrichment],
         alert_properties: &[AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);

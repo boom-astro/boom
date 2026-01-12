@@ -10,6 +10,8 @@ RUN apt-get update && \
 # this way we skip dependencies build when only the source code changes
 RUN cargo init app
 COPY Cargo.toml Cargo.lock /app/
+COPY apache-avro-macros /app/apache-avro-macros
+# Now we build only the dependencies
 RUN cd app && cargo build --release && \
     rm -rf app/src
 

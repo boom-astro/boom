@@ -153,10 +153,10 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        for i in 0..alerts.len() {
-            let candid = alerts[i].candid;
+        for alert in alerts {
+            let candid = alert.candid;
 
-            let properties = self.get_alert_properties(&alerts[i]).await?;
+            let properties = self.get_alert_properties(&alert).await?;
 
             let update_alert_document = doc! {
                 "$set": {

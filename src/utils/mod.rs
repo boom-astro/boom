@@ -1,5 +1,6 @@
 pub mod data;
 pub mod db;
+pub mod derive_avro_schema;
 pub mod enums;
 pub mod fits;
 pub mod lightcurves;

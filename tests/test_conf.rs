@@ -56,7 +56,7 @@ fn test_load_xmatch_config() {
         .get(&boom::utils::enums::Survey::Ztf)
         .cloned()
         .unwrap_or_default();
-    assert!(crossmatch_config_ztf.len() > 0);
+    assert!(crossmatch_config_ztf.len() == 4);
     for crossmatch in crossmatch_config_ztf.iter() {
         assert!(crossmatch.catalog.len() > 0);
         assert!(crossmatch.radius > 0.0);
@@ -70,6 +70,7 @@ fn test_load_xmatch_config() {
     assert_eq!(first.distance_key, None);
     assert_eq!(first.distance_max, None);
     assert_eq!(first.distance_max_near, None);
+    assert_eq!(first.max_results, None);
     let projection = &first.projection;
     // test reading a few of the expected fields
     assert_eq!(projection.get("_id").unwrap().as_i64().unwrap(), 1);
@@ -78,6 +79,22 @@ fn test_load_xmatch_config() {
         projection.get("gMeanPSFMagErr").unwrap().as_i64().unwrap(),
         1
     );
+
+    let crossmatch_config_lsst = config
+        .crossmatch
+        .get(&boom::utils::enums::Survey::Lsst)
+        .cloned()
+        .unwrap_or_default();
+    assert!(crossmatch_config_lsst.len() == 1);
+    let first = &crossmatch_config_lsst[0];
+    assert_eq!(first.catalog, "LSPSC");
+    // configured to get the 3 nearest neighbors within 30 arcsec
+    assert_eq!(first.radius, 30.0 * std::f64::consts::PI / 180.0 / 3600.0);
+    assert_eq!(first.use_distance, false);
+    assert_eq!(first.distance_key, None);
+    assert_eq!(first.distance_max, None);
+    assert_eq!(first.distance_max_near, None);
+    assert_eq!(first.max_results, Some(3));
 }
 
 #[test]

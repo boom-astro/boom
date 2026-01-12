@@ -59,7 +59,10 @@ jobs:
         EXIT_CODE=$(docker wait "$CID")
         echo "kafka-acl-init exited with code $EXIT_CODE"
         if [ "$EXIT_CODE" != "0" ]; then
+          echo "--- kafka-acl-init logs: ---"
           docker compose logs kafka-acl-init || true
+          echo "--- broker logs: ---"
+          docker compose logs broker || true
           exit 1
         fi
         echo "kafka-acl-init completed successfully."
