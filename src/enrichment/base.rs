@@ -252,6 +252,13 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             })?;
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
+        if processed_alerts.is_empty() {
+            let attributes = &ok_attrs;
+            ACTIVE.add(-1, &active_attrs);
+            BATCH_PROCESSED.add(1, attributes);
+            ALERT_PROCESSED.add(candids.len() as u64, attributes);
+            continue;
+        }
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await
             .inspect_err(|_| {
