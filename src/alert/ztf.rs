@@ -21,6 +21,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
 use tracing::{instrument, warn};
+use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
@@ -57,9 +58,7 @@ pub struct Cutout {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct PrvCandidate {
     pub jd: f64,
@@ -109,7 +108,7 @@ pub struct PrvCandidate {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ZtfPrvCandidate {
     #[serde(flatten)]
     pub prv_candidate: PrvCandidate,
@@ -199,9 +198,7 @@ where
 /// avro alert schema
 #[serde_as]
 #[skip_serializing_none]
-#[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct FpHist {
     pub field: Option<i32>,
@@ -240,7 +237,7 @@ where
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ZtfForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
@@ -300,9 +297,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 /// avro alert schema
 #[serde_as]
 #[skip_serializing_none]
-#[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct Candidate {
     pub jd: f64,
@@ -445,7 +440,7 @@ where
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ZtfCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
@@ -586,7 +581,7 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, AvroSchema, utoipa::ToSchema, Default)]
+#[derive(Debug, Deserialize, Serialize, AvroSchema, ToSchema, Default)]
 pub struct ZtfAliases {
     #[serde(rename = "LSST")]
     pub lsst: Vec<String>,

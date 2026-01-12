@@ -25,6 +25,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
 use tracing::instrument;
+use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "LSST";
 pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
@@ -45,7 +46,7 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, utoipa::ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 #[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
@@ -201,7 +202,7 @@ pub struct DiaSource {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
@@ -460,9 +461,7 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(
-    Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
@@ -501,7 +500,7 @@ pub struct DiaForcedSource {
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
 pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
@@ -643,7 +642,7 @@ where
 }
 
 #[serdavro]
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema, Default)]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Default)]
 pub struct LsstAliases {
     #[serde(rename = "ZTF")]
     pub ztf: Vec<String>,
