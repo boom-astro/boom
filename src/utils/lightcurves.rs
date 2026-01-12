@@ -63,7 +63,8 @@ pub struct PhotometryMag {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandRateProperties {
     pub rate: f32,
-    pub r_squared: f32,
+    pub rate_error: f32,
+    pub red_chi2: f32,
     pub nb_data: i32,
 }
 
@@ -111,6 +112,82 @@ pub struct AllBandsProperties {
     pub last_jd: f64,
 }
 
+/// Performs weighted least squares fit for y = a*x + b (centered for numerical stability)
+/// Returns None if the fit cannot be performed (e.g., not enough data points)
+/// or if the matrix is singular
+fn weighted_least_squares_centered(
+    x: &[f64],
+    y: &[f64],
+    sigma: &[f64],
+) -> Option<BandRateProperties> {
+    let n = x.len();
+
+    if n < 2 || y.len() != n || sigma.len() != n {
+        return None;
+    }
+
+    let mut sum_w = 0.0;
+    let mut sum_wx = 0.0;
+    let mut sum_wy = 0.0;
+
+    for i in 0..n {
+        if sigma[i] <= 0.0 || !sigma[i].is_finite() {
+            return None;
+        }
+        let w = 1.0 / (sigma[i] * sigma[i]);
+        if !w.is_finite() {
+            return None;
+        }
+
+        sum_w += w;
+        sum_wx += w * x[i];
+        sum_wy += w * y[i];
+    }
+
+    let x_mean = sum_wx / sum_w;
+    let y_mean = sum_wy / sum_w;
+
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+
+    for i in 0..n {
+        let w = 1.0 / (sigma[i] * sigma[i]);
+        let dx = x[i] - x_mean;
+        let dy = y[i] - y_mean;
+
+        sxx += w * dx * dx;
+        sxy += w * dx * dy;
+    }
+
+    if sxx.abs() < 1e-10 {
+        return None;
+    }
+
+    let a = sxy / sxx;
+    let b = y_mean - a * x_mean;
+    let a_err = (1.0 / sxx).sqrt();
+
+    let mut chi2 = 0.0;
+    for i in 0..n {
+        let residual = y[i] - (a * x[i] + b);
+        chi2 += (residual / sigma[i]).powi(2);
+    }
+
+    let reduced_chi2 = if n > 2 {
+        chi2 / (n - 2) as f64
+    } else {
+        f64::NAN
+    };
+
+    Some(BandRateProperties {
+        rate: a as f32,
+        rate_error: a_err as f32,
+        red_chi2: reduced_chi2 as f32,
+        nb_data: n as i32,
+    })
+}
+
+/// Prepares photometry data by sorting and removing duplicates
 pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
     // sort by time
     photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
@@ -244,14 +321,14 @@ pub fn analyze_photometry(
                 before_mag_err.clear();
             }
 
-            let linear_fit_before = linear_fit(before_time, before_mag, before_mag_err);
-            if let Some(lfb) = linear_fit_before {
-                rising_properties = Some(BandRateProperties {
-                    rate: lfb.slope,
-                    r_squared: lfb.r_squared,
-                    nb_data: lfb.nb_data,
-                });
-            }
+            rising_properties = weighted_least_squares_centered(
+                &before_time.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
+                &before_mag.iter().map(|&y| y as f64).collect::<Vec<f64>>(),
+                &before_mag_err
+                    .iter()
+                    .map(|&s| s as f64)
+                    .collect::<Vec<f64>>(),
+            );
         }
 
         // same for after
@@ -288,14 +365,14 @@ pub fn analyze_photometry(
                 after_mag_err.clear();
             }
 
-            let linear_fit_after = linear_fit(after_time, after_mag, after_mag_err);
-            if let Some(lfa) = linear_fit_after {
-                fading_properties = Some(BandRateProperties {
-                    rate: lfa.slope,
-                    r_squared: lfa.r_squared,
-                    nb_data: lfa.nb_data,
-                });
-            }
+            fading_properties = weighted_least_squares_centered(
+                &after_time.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
+                &after_mag.iter().map(|&y| y as f64).collect::<Vec<f64>>(),
+                &after_mag_err
+                    .iter()
+                    .map(|&s| s as f64)
+                    .collect::<Vec<f64>>(),
+            );
         }
 
         let band_properties = BandProperties {
@@ -329,45 +406,6 @@ pub fn analyze_photometry(
     };
 
     (results, all_bands_properties, stationary)
-}
-
-struct LinearFitResult {
-    slope: f32,
-    // intercept: f32,
-    r_squared: f32,
-    nb_data: i32,
-}
-
-// have a version of linear_fit that takes time, mag, and mag_err as separate vectors
-fn linear_fit(time: Vec<f32>, mag: Vec<f32>, mag_err: Vec<f32>) -> Option<LinearFitResult> {
-    if time.len() < 2 || mag.len() < 2 || mag_err.len() < 2 {
-        return None; // not enough data for a fit
-    }
-
-    let n = time.len() as f32;
-    let sum_x: f32 = time.iter().sum();
-    let sum_y: f32 = mag.iter().sum();
-    let sum_xy: f32 = time.iter().zip(mag.iter()).map(|(x, y)| x * y).sum();
-    let sum_xx: f32 = time.iter().map(|x| x.powi(2)).sum();
-
-    let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x.powi(2));
-    let intercept = (sum_y - slope * sum_x) / n;
-
-    // calculate r-squared
-    let ss_total: f32 = mag.iter().map(|y| (y - (sum_y / n)).powi(2)).sum();
-    let ss_residual: f32 = mag
-        .iter()
-        .zip(time.iter())
-        .map(|(y, x)| (y - (slope * x + intercept)).powi(2))
-        .sum();
-    let r_squared = 1.0 - (ss_residual / ss_total);
-
-    Some(LinearFitResult {
-        slope,
-        // intercept,
-        r_squared,
-        nb_data: n as i32,
-    })
 }
 
 #[cfg(test)]
@@ -497,10 +535,12 @@ mod tests {
         assert_eq!(r_stats.fading.is_none(), true);
         let rising_stats = r_stats.rising.clone().unwrap();
         let rising_rate = rising_stats.rate;
-        let r_squared = rising_stats.r_squared;
+        // let rising_rate_error = rising_stats.rate_error;
+        let red_chi2 = rising_stats.red_chi2;
+        // let r_squared = rising_stats.r_squared;
         let nb_data = rising_stats.nb_data;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!((r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(nb_data, 2);
 
         // the all band properties should also just match the one data point we have
@@ -544,10 +584,10 @@ mod tests {
         assert_eq!(r_stats.fading.is_some(), true);
         let fading_stats = r_stats.fading.clone().unwrap();
         let fading_rate = fading_stats.rate;
-        let r_squared = fading_stats.r_squared;
+        let red_chi2 = fading_stats.red_chi2;
         let nb_data = fading_stats.nb_data;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!((r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(nb_data, 2);
         // the all band properties should also just match the one data point we have
         let peak_jd = all_bands_props.peak_jd;
@@ -596,18 +636,20 @@ mod tests {
         assert_eq!(r_stats.fading.is_some(), true);
         let rising_stats = r_stats.rising.clone().unwrap();
         let rising_rate = rising_stats.rate;
-        let rising_r_squared = rising_stats.r_squared;
+        let rising_red_chi2 = rising_stats.red_chi2;
         let rising_nb_data = rising_stats.nb_data;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!((rising_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(rising_nb_data, 2);
+
         let fading_stats = r_stats.fading.clone().unwrap();
         let fading_rate = fading_stats.rate;
-        let fading_r_squared = fading_stats.r_squared;
+        let fading_red_chi2 = fading_stats.red_chi2;
         let fading_nb_data = fading_stats.nb_data;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!((fading_r_squared - 1.0).abs() < 1e-6); // perfect fit
+        assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(fading_nb_data, 2);
+
         // the all band properties should also just match the one data point we have
         let peak_jd = all_bands_props.peak_jd;
         let peak_mag = all_bands_props.peak_mag;
@@ -636,19 +678,19 @@ mod tests {
             },
             PhotometryMag {
                 time: 2459002.5,
-                mag: 20.0,
+                mag: 18.0,
                 mag_err: 0.1,
                 band: Band::R,
             },
             PhotometryMag {
                 time: 2459000.5,
-                mag: 21.0,
+                mag: 20.0,
                 mag_err: 0.1,
                 band: Band::G,
             },
             PhotometryMag {
                 time: 2459001.5,
-                mag: 20.0,
+                mag: 21.0,
                 mag_err: 0.1,
                 band: Band::G,
             },
@@ -665,27 +707,21 @@ mod tests {
         let r_peak_mag_err = r_stats.peak_mag_err;
         // the original array was sorted and deduplicated,
         // so the r-band peak is now at index 2 (not 1)
-        assert!((data[2].time - r_peak_jd).abs() < 1e-6);
-        assert!((data[2].mag - r_peak_mag).abs() < 1e-6);
-        assert!((data[2].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((data[4].time - r_peak_jd).abs() < 1e-6);
+        assert!((data[4].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[4].mag_err - r_peak_mag_err).abs() < 1e-6);
         assert_eq!(r_stats.rising.is_some(), true);
-        assert_eq!(r_stats.fading.is_some(), true);
+        assert_eq!(r_stats.fading.is_none(), true);
+
         // check the rising stats in r band
         let rising_stats = r_stats.rising.clone().unwrap();
         let rising_rate = rising_stats.rate;
-        let rising_r_squared = rising_stats.r_squared;
+        let rising_red_chi2 = rising_stats.red_chi2;
         let rising_nb_data = rising_stats.nb_data;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!((rising_r_squared - 1.0).abs() < 1e-6); // perfect fit
-        assert_eq!(rising_nb_data, 2);
-        // check the fading stats in r band
-        let fading_stats = r_stats.fading.clone().unwrap();
-        let fading_rate = fading_stats.rate;
-        let fading_r_squared = fading_stats.r_squared;
-        let fading_nb_data = fading_stats.nb_data;
-        assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!((fading_r_squared - 1.0).abs() < 1e-6); // perfect fit
-        assert_eq!(fading_nb_data, 2);
+        assert!(rising_red_chi2.abs() < 1e-6); // perfect fit
+        assert_eq!(rising_nb_data, 3);
+
         // g band
         let g_stats = results.g.unwrap();
         let g_peak_jd = g_stats.peak_jd;
@@ -693,29 +729,29 @@ mod tests {
         let g_peak_mag_err = g_stats.peak_mag_err;
         // the original array was sorted and deduplicated,
         // so the g-band peak is now at index 3 (not 4)
-        assert!((data[3].time - g_peak_jd).abs() < 1e-6);
-        assert!((data[3].mag - g_peak_mag).abs() < 1e-6);
-        assert!((data[3].mag_err - g_peak_mag_err).abs() < 1e-6);
-        assert_eq!(g_stats.rising.is_some(), true);
-        assert_eq!(g_stats.fading.is_some(), false);
-        // check the rising stats in g band
-        let rising_stats = g_stats.rising.clone().unwrap();
-        let rising_rate = rising_stats.rate;
-        let rising_r_squared = rising_stats.r_squared;
-        let rising_nb_data = rising_stats.nb_data;
-        assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!((rising_r_squared - 1.0).abs() < 1e-6); // perfect fit
-        assert_eq!(rising_nb_data, 2);
+        assert!((data[1].time - g_peak_jd).abs() < 1e-6);
+        assert!((data[1].mag - g_peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - g_peak_mag_err).abs() < 1e-6);
+        assert_eq!(g_stats.rising.is_some(), false);
+        assert_eq!(g_stats.fading.is_some(), true);
+        // check the fading stats in g band
+        let fading_stats = g_stats.fading.clone().unwrap();
+        let fading_rate = fading_stats.rate;
+        let fading_red_chi2 = fading_stats.red_chi2;
+        let fading_nb_data = fading_stats.nb_data;
+        assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
+        assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert_eq!(fading_nb_data, 2);
 
         // the all band properties should match the peak in r band
         let peak_jd = all_bands_props.peak_jd;
         let peak_mag = all_bands_props.peak_mag;
         let peak_mag_err = all_bands_props.peak_mag_err;
         let peak_band = all_bands_props.peak_band;
-        assert!((data[2].time - peak_jd).abs() < 1e-6);
-        assert!((data[2].mag - peak_mag).abs() < 1e-6);
-        assert!((data[2].mag_err - peak_mag_err).abs() < 1e-6);
-        assert_eq!(data[2].band, peak_band);
+        assert!((data[4].time - peak_jd).abs() < 1e-6);
+        assert!((data[4].mag - peak_mag).abs() < 1e-6);
+        assert!((data[4].mag_err - peak_mag_err).abs() < 1e-6);
+        assert_eq!(data[4].band, peak_band);
 
         // Edge case 1: duplicated points (same time and band, different mag)
         let mut data = vec![
