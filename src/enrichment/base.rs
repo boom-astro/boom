@@ -80,6 +80,8 @@ pub enum EnrichmentWorkerError {
     Kafka(String),
     #[error("configuration error: {0}")]
     ConfigurationError(String),
+    #[error("Bad processing status code: {0}")]
+    BadProcstatus(String),
 }
 
 #[async_trait::async_trait]

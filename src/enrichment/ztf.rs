@@ -20,7 +20,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
-use tracing::{debug, instrument, warn};
+use tracing::{instrument, trace, warn};
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -113,10 +113,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
         ))?;
         // TODO: accept all "acceptable" procstatus (if not just "0")
         if procstatus != "0" {
-            return Err(EnrichmentWorkerError::Serialization(format!(
-                "Invalid procstatus: {}",
-                procstatus
-            )));
+            return Err(EnrichmentWorkerError::BadProcstatus(procstatus));
         }
 
         Ok(ZtfPhotometry {
@@ -178,10 +175,18 @@ where
                 .filter_map(|p| {
                     ZtfPhotometry::try_from(p)
                         .map_err(|e| {
-                            debug!(
-                                "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
-                                e
-                            );
+                            // log badprocstatus at trace level to avoid flooding logs
+                            if let EnrichmentWorkerError::BadProcstatus(_) = e {
+                                trace!(
+                                    "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
+                                    e
+                                );
+                            } else {
+                                warn!(
+                                    "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
+                                    e
+                                );
+                            }
                         })
                         .ok()
                 })
