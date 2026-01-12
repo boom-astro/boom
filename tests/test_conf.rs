@@ -87,7 +87,7 @@ fn test_load_xmatch_config() {
         .unwrap_or_default();
     assert!(crossmatch_config_lsst.len() == 1);
     let first = &crossmatch_config_lsst[0];
-    assert_eq!(first.catalog, "LSSG");
+    assert_eq!(first.catalog, "LSPSC");
     // configured to get the 3 nearest neighbors within 30 arcsec
     assert_eq!(first.radius, 30.0 * std::f64::consts::PI / 180.0 / 3600.0);
     assert_eq!(first.use_distance, false);

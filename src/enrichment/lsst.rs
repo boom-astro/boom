@@ -5,15 +5,61 @@ use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
 use crate::utils::db::mongify;
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
+use cdshealpix::nested::get;
+use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
+use moc::moc::range::RangeMOC;
+use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
+use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
+
+pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
+pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
+const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
+const MOC_DEPTH: u8 = 11;
+
+// Lazy-loaded footprint MOC
+static FOOTPRINT_MOC: OnceLock<RangeMOC<u64, Hpx<u64>>> = OnceLock::new();
+
+fn load_footprint_moc() -> RangeMOC<u64, Hpx<u64>> {
+    let file = std::fs::File::open(MOC_FOOTPRINT_PATH).expect("Failed to open footprint MOC file");
+
+    let reader = std::io::BufReader::new(file);
+    match from_fits_ivoa(reader) {
+        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
+            RangeMOC::new(moc.depth_max(), moc.collect())
+        }
+        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
+            let depth = cell_moc.depth_max();
+            let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
+            RangeMOC::new(depth, ranges)
+        }
+        Ok(_) => {
+            panic!("Unexpected MOC type in footprint MOC file");
+        }
+        Err(e) => {
+            panic!("Failed to parse footprint MOC: {}", e);
+        }
+    }
+}
+
+pub fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
+    let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
+    let ra_rad = ra_deg.to_radians();
+    let dec_rad = dec_deg.to_radians();
+    let layer = get(MOC_DEPTH);
+    let cell = layer.hash(ra_rad, dec_rad);
+    moc.contains_cell(MOC_DEPTH, cell)
+}
 
 fn default_lsst_zp() -> Option<f64> {
     Some(8.9)
@@ -89,6 +135,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
+                "cross_matches": "$aux.cross_matches",
                 "survey_matches": {
                     "ztf": {
                         "$cond": {
@@ -141,6 +188,7 @@ pub struct LsstAlertForEnrichment {
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
+    pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
@@ -149,6 +197,7 @@ pub struct LsstAlertForEnrichment {
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
+    pub star: Option<bool>,
     pub photstats: PerBandProperties,
 }
 
@@ -176,7 +225,36 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let output_queue = "LSST_alerts_filter_queue".to_string();
 
         // Detect if Babamul is enabled from the config
-        let babamul: Option<Babamul> = if config.babamul.enabled {
+        let babamul_enabled = config.babamul.enabled;
+        // If enabled, we need to ensure we have LSPSC cross-matches configured
+        // and that the catalog exists in the database
+        if babamul_enabled {
+            // Require LSST cross-match config to include LSPSC
+            let Some(lsst_crossmatch_config) = config.crossmatch.get(&Survey::Lsst) else {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but no LSST cross-match configuration is present"
+                        .to_string(),
+                ));
+            };
+            let lspsc_found = lsst_crossmatch_config
+                .iter()
+                .any(|xmatch_config| xmatch_config.catalog == "LSPSC");
+            if !lspsc_found {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but LSPSC cross-match is not configured for LSST alerts"
+                        .to_string(),
+                ));
+            }
+            // Also require the LSPSC catalog collection to exist in the database
+            let collections = db.list_collection_names().await?;
+            if !collections.contains(&"LSPSC".to_string()) {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "Babamul is enabled but the LSPSC catalog does not exist in the database"
+                        .to_string(),
+                ));
+            }
+        }
+        let babamul: Option<Babamul> = if babamul_enabled {
             Some(Babamul::new(&config))
         } else {
             None
@@ -303,6 +381,40 @@ impl LsstEnrichmentWorker {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
 
+        // Determine if this is a star based on LSPSC cross-matches
+        let mut is_star = Some(false);
+
+        let empty_vec = vec![];
+        let lspsc_matches = alert
+            .cross_matches
+            .as_ref()
+            .and_then(|xmatches| xmatches.get("LSPSC"))
+            .unwrap_or(&empty_vec);
+        if lspsc_matches.is_empty() {
+            if !is_in_footprint(
+                alert.candidate.dia_source.ra,
+                alert.candidate.dia_source.dec,
+            ) {
+                is_star = None;
+            }
+        } else {
+            // Check each LSPSC match for a nearby stellar-like object
+            for m in lspsc_matches {
+                let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let score = match m.get("score").and_then(|v| v.as_f64()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                    is_star = Some(true);
+                    break;
+                }
+            }
+        }
+
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
@@ -322,6 +434,7 @@ impl LsstEnrichmentWorker {
 
         Ok(LsstAlertProperties {
             rock: is_rock,
+            star: is_star,
             stationary,
             photstats,
         })

@@ -58,6 +58,12 @@ services:
     ports:
       - "9092:9092"
       - "9093:9093"
+    environment:
+      # Limit heap + use G1GC with fewer threads (auto-tuned based on heap size)
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+      # Increase timeouts for slower CI environments
+      KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: 30000
+      KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: 60000
   api:
     env_file:
       - .env
@@ -69,6 +75,7 @@ services:
     command: ["cargo", "watch", "-x", "run --bin api"]
     volumes:
       - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
       - ./Cargo.toml:/app/Cargo.toml
       - ./Cargo.lock:/app/Cargo.lock
       - cargo-registry:/usr/local/cargo/registry
