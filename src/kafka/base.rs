@@ -598,11 +598,27 @@ pub async fn consumer(
                 break;
             }
             Some(Err(e)) => {
+                if exit_on_eof {
+                    if let rdkafka::error::KafkaError::MessageConsumption(
+                        rdkafka::error::RDKafkaErrorCode::UnknownTopicOrPartition,
+                    ) = e
+                    {
+                        info!("Topic or partition unknown, exiting consumer {}", id);
+                        return Ok(());
+                    }
+                }
                 error!("Error during initial poll: {:?}", e);
                 // sleep and retry
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;
             }
             None => {
+                if exit_on_eof {
+                    info!(
+                        "No messages available during initial poll, exiting consumer {}",
+                        id
+                    );
+                    return Ok(());
+                }
                 debug!("No message received yet, polling again...");
                 // sleep and retry
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;
