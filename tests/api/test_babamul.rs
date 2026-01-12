@@ -915,31 +915,31 @@ mod tests {
             "Credential name should match"
         );
         assert!(
-            credential["client_id"].is_string(),
-            "Credential should have client_id"
+            credential["kafka_username"].is_string(),
+            "Credential should have kafka_username"
         );
         assert!(
-            credential["client_secret"].is_string(),
-            "Credential should have client_secret"
+            credential["kafka_password"].is_string(),
+            "Credential should have kafka_password"
         );
         assert!(
             credential["created_at"].is_i64(),
             "Credential should have created_at timestamp"
         );
 
-        // Verify client_id starts with "babamul-"
-        let client_id = credential["client_id"].as_str().unwrap();
+        // Verify kafka_username starts with "babamul-"
+        let kafka_username = credential["kafka_username"].as_str().unwrap();
         assert!(
-            client_id.starts_with("babamul-"),
-            "Client ID should start with 'babamul-'"
+            kafka_username.starts_with("babamul-"),
+            "Kafka username should start with 'babamul-'"
         );
 
-        // Verify client_secret is 32 characters
-        let client_secret = credential["client_secret"].as_str().unwrap();
+        // Verify kafka_password is 32 characters
+        let kafka_password = credential["kafka_password"].as_str().unwrap();
         assert_eq!(
-            client_secret.len(),
+            kafka_password.len(),
             32,
-            "Client secret should be 32 characters"
+            "Kafka password should be 32 characters"
         );
 
         let credential_id = credential["id"].as_str().unwrap();
@@ -1112,14 +1112,17 @@ mod tests {
         assert!(cred_ids.contains(&credential_id_1));
         assert!(cred_ids.contains(&credential_id_2));
 
-        // Verify client_secret is included in the list (stored in DB)
+        // Verify kafka_password is included in the list (stored in DB)
         for cred in credentials {
             assert!(
-                cred["client_secret"].is_string(),
-                "Credential should include client_secret"
+                cred["kafka_password"].is_string(),
+                "Credential should include kafka_password"
             );
-            // Verify client_id starts with "babamul-"
-            assert!(cred["client_id"].as_str().unwrap().starts_with("babamul-"));
+            // Verify kafka_username starts with "babamul-"
+            assert!(cred["kafka_username"]
+                .as_str()
+                .unwrap()
+                .starts_with("babamul-"));
         }
 
         // Clean up: delete both credentials

@@ -587,7 +587,7 @@ async fn test_babamul_filters_low_reliability() {
     );
 
     // No messages should be sent
-    let topic = "babamul.lsst.none";
+    let topic = "babamul.lsst.no-ztf-match.hostless";
     let messages = consume_kafka_messages(topic, 0, &config).await;
     assert_eq!(
         messages.len(),

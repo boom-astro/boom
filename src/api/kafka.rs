@@ -17,16 +17,16 @@ pub fn get_acls(broker: &str) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::
     get_acls_internal(broker, None)
 }
 
-pub fn get_acls_for_client_id(
-    client_id: &str,
+pub fn get_acls_for_username(
+    kafka_username: &str,
     broker: &str,
 ) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
-    get_acls_internal(broker, Some(client_id))
+    get_acls_internal(broker, Some(kafka_username))
 }
 
 fn get_acls_internal(
     broker: &str,
-    client_id: Option<&str>,
+    kafka_username: Option<&str>,
 ) -> Result<Vec<KafkaAclEntry>, Box<dyn std::error::Error>> {
     fn parse_keyvals(segment: &str) -> HashMap<String, String> {
         let mut map = HashMap::new();
@@ -58,8 +58,8 @@ fn get_acls_internal(
     let mut cmd = Command::new(acls_cli);
     cmd.arg("--bootstrap-server").arg(&broker).arg("--list");
 
-    if let Some(id) = client_id {
-        cmd.arg("--principal").arg(format!("User:{}", id));
+    if let Some(username) = kafka_username {
+        cmd.arg("--principal").arg(format!("User:{}", username));
     }
 
     // Execute the Kafka CLI to list ACLs
@@ -172,10 +172,10 @@ fn get_acls_internal(
                 Ok(entries)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let error_msg = if let Some(id) = client_id {
+                let error_msg = if let Some(username) = kafka_username {
                     format!(
-                        "Failed to retrieve Kafka ACLs for client {} (exit={:?}) via {} on {}: {}",
-                        id,
+                        "Failed to retrieve Kafka ACLs for {} (exit={:?}) via {} on {}: {}",
+                        username,
                         output.status.code(),
                         acls_cli,
                         broker,
@@ -197,8 +197,8 @@ fn get_acls_internal(
     }
 }
 
-pub fn delete_acls_for_client_id(
-    client_id: &str,
+pub fn delete_acls_for_username(
+    kafka_username: &str,
     broker: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Try to find the right command name
@@ -209,7 +209,7 @@ pub fn delete_acls_for_client_id(
     };
 
     // Fetch ACLs for this specific client using the new method
-    let user_acls = get_acls_for_client_id(client_id, broker)?;
+    let user_acls = get_acls_for_username(kafka_username, broker)?;
 
     let mut errors: Vec<String> = Vec::new();
     for acl in user_acls {
@@ -255,7 +255,7 @@ pub fn delete_acls_for_client_id(
             .arg(&broker)
             .arg("--remove")
             .arg(permission_flag)
-            .arg(format!("User:{}", client_id))
+            .arg(format!("User:{}", kafka_username))
             .arg("--operation")
             .arg(acl.operation)
             .arg(resource_flag)
@@ -286,8 +286,15 @@ pub fn delete_acls_for_client_id(
 
     if !errors.is_empty() {
         let combined = errors.join("; ");
-        eprintln!("Error deleting ACLs for user {}: {}", client_id, combined);
-        return Err(format!("Failed to delete ACLs for user {}: {}", client_id, combined).into());
+        eprintln!(
+            "Error deleting ACLs for user {}: {}",
+            kafka_username, combined
+        );
+        return Err(format!(
+            "Failed to delete ACLs for user {}: {}",
+            kafka_username, combined
+        )
+        .into());
     }
 
     Ok(())
@@ -295,7 +302,7 @@ pub fn delete_acls_for_client_id(
 
 // let's add a delete client id function that deletes both SCRAM credentials and ACLs
 pub fn delete_kafka_credentials_and_acls(
-    client_id: &str,
+    kafka_username: &str,
     broker: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // First delete SCRAM credentials
@@ -314,7 +321,7 @@ pub fn delete_kafka_credentials_and_acls(
             .arg("--entity-type")
             .arg("users")
             .arg("--entity-name")
-            .arg(client_id)
+            .arg(kafka_username)
             .arg("--delete-config")
             .arg("SCRAM-SHA-512")
             .output()
@@ -329,6 +336,6 @@ pub fn delete_kafka_credentials_and_acls(
         }
     }
     // Then delete ACLs
-    delete_acls_for_client_id(client_id, broker)?;
+    delete_acls_for_username(kafka_username, broker)?;
     Ok(())
 }

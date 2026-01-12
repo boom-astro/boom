@@ -13,11 +13,11 @@ use utoipa::ToSchema;
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct KafkaCredential {
-    pub id: String,            // Unique ID for this credential
-    pub name: String,          // User-defined name for this credential
-    pub client_id: String,     // Randomized Kafka username
-    pub client_secret: String, // Randomized Kafka password (stored in plain text)
-    pub created_at: i64,       // Unix timestamp
+    pub id: String,             // Unique ID for this credential
+    pub name: String,           // User-defined name for this credential
+    pub kafka_username: String, // Randomized Kafka username
+    pub kafka_password: String, // Randomized Kafka password (stored in plain text)
+    pub created_at: i64,        // Unix timestamp
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -292,8 +292,8 @@ fn is_valid_email(email: &str) -> bool {
 /// This function is idempotent - it can be called multiple times safely.
 /// kafka-acls --add operations will silently succeed if the ACL already exists.
 async fn create_kafka_user_and_acls(
-    client_id: &str,
-    client_secret: &str,
+    kafka_username: &str,
+    kafka_password: &str,
     broker: &str,
 ) -> Result<(), String> {
     // Try to find the right command names
@@ -310,6 +310,23 @@ async fn create_kafka_user_and_acls(
         }
     };
 
+    // if there is already a user with this name, we throw an error
+    // (users should be unique)
+    let output = Command::new(configs_cli)
+        .arg("--bootstrap-server")
+        .arg(&broker)
+        .arg("--describe")
+        .arg("--entity-type")
+        .arg("users")
+        .arg("--entity-name")
+        .arg(kafka_username)
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains(&format!("User: {}", kafka_username)) {
+        return Err(format!("Kafka user '{}' already exists", kafka_username));
+    }
+
     // Create or update SCRAM user credentials (idempotent: --alter will create or update)
     let output = Command::new(configs_cli)
         .arg("--bootstrap-server")
@@ -318,9 +335,9 @@ async fn create_kafka_user_and_acls(
         .arg("--entity-type")
         .arg("users")
         .arg("--entity-name")
-        .arg(client_id)
+        .arg(kafka_username)
         .arg("--add-config")
-        .arg(format!("SCRAM-SHA-512=[password={}]", client_secret))
+        .arg(format!("SCRAM-SHA-512=[password={}]", kafka_password))
         .output()
         .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
 
@@ -334,7 +351,7 @@ async fn create_kafka_user_and_acls(
         .arg("--bootstrap-server")
         .arg(&broker)
         .arg("--allow-principal")
-        .arg(format!("User:{}", client_id))
+        .arg(format!("User:{}", kafka_username))
         .arg("--add")
         .arg("--operation")
         .arg("READ")
@@ -355,7 +372,7 @@ async fn create_kafka_user_and_acls(
         .arg("--bootstrap-server")
         .arg(&broker)
         .arg("--allow-principal")
-        .arg(format!("User:{}", client_id))
+        .arg(format!("User:{}", kafka_username))
         .arg("--add")
         .arg("--operation")
         .arg("DESCRIBE")
@@ -376,7 +393,7 @@ async fn create_kafka_user_and_acls(
         .arg("--bootstrap-server")
         .arg(&broker)
         .arg("--allow-principal")
-        .arg(format!("User:{}", client_id))
+        .arg(format!("User:{}", kafka_username))
         .arg("--add")
         .arg("--operation")
         .arg("READ")
@@ -669,8 +686,8 @@ pub struct CreateKafkaCredentialResponse {
 pub struct KafkaCredentialWithSecret {
     pub id: String,
     pub name: String,
-    pub client_id: String,
-    pub client_secret: String, // Only returned on creation
+    pub kafka_username: String,
+    pub kafka_password: String, // Only returned on creation
     pub created_at: i64,
 }
 
@@ -708,22 +725,29 @@ pub async fn post_kafka_credentials(
 
     // Generate randomized credentials
     let credential_id = uuid::Uuid::new_v4().to_string();
-    let client_id = format!("babamul-{}", uuid::Uuid::new_v4().to_string());
-    let client_secret = generate_random_string(32);
+    let kafka_username = format!("babamul-{}", uuid::Uuid::new_v4().to_string());
+    let kafka_password = generate_random_string(32);
 
     let kafka_credential = KafkaCredential {
         id: credential_id.clone(),
         name: name.to_string(),
-        client_id: client_id.clone(),
-        client_secret: client_secret.clone(),
+        kafka_username: kafka_username.clone(),
+        kafka_password: kafka_password.clone(),
         created_at: flare::Time::now().to_utc().timestamp(),
     };
 
     // Create Kafka SCRAM user and ACLs
-    if let Err(e) =
-        create_kafka_user_and_acls(&client_id, &client_secret, &config.kafka.producer.server).await
+    if let Err(e) = create_kafka_user_and_acls(
+        &kafka_username,
+        &kafka_password,
+        &config.kafka.producer.server,
+    )
+    .await
     {
-        eprintln!("Failed to create Kafka user/ACLs for {}: {}", client_id, e);
+        eprintln!(
+            "Failed to create Kafka user/ACLs for {}: {}",
+            kafka_username, e
+        );
         return response::internal_error(
             "Failed to configure Kafka access. Please try again or contact support.",
         );
@@ -743,12 +767,12 @@ pub async fn post_kafka_credentials(
         .await
     {
         Ok(_) => HttpResponse::Ok().json(CreateKafkaCredentialResponse {
-            message: "Kafka credential created successfully. Save the client_secret - it can be retrieved later but should be stored securely.".to_string(),
+            message: "Kafka credential created successfully. Save the kafka_password - it can be retrieved later but should be stored securely.".to_string(),
             credential: KafkaCredentialWithSecret {
                 id: kafka_credential.id,
                 name: kafka_credential.name,
-                client_id: kafka_credential.client_id,
-                client_secret: kafka_credential.client_secret,
+                kafka_username: kafka_credential.kafka_username,
+                kafka_password: kafka_credential.kafka_password,
                 created_at: kafka_credential.created_at,
             },
         }),
@@ -843,12 +867,12 @@ pub async fn delete_kafka_credential(
                 Some(credential) => {
                     // Delete from Kafka first
                     if let Err(e) = delete_kafka_credentials_and_acls(
-                        &credential.client_id,
+                        &credential.kafka_username,
                         &config.kafka.producer.server,
                     ) {
                         eprintln!(
                             "Failed to delete Kafka user/ACLs for {}: {}",
-                            credential.client_id, e
+                            credential.kafka_username, e
                         );
                         return response::internal_error(
                             "Failed to revoke Kafka access. Please try again or contact support.",
