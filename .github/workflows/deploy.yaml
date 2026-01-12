@@ -24,6 +24,7 @@ jobs:
       ENVIRONMENT: production
       DOMAIN: ${{ vars.DOMAIN }}
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
+      BOOM_BABAMUL__WEBAPP_URL: ${{ vars.BOOM_BABAMUL__WEBAPP_URL }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
