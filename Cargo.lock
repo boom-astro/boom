@@ -542,6 +542,7 @@ version = "0.1.0"
 dependencies = [
  "actix-rt",
  "actix-web",
+ "anyhow",
  "apache-avro",
  "apache-avro-derive",
  "apache-avro-macros",

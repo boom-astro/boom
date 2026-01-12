@@ -31,7 +31,9 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
 }
 
 #[apache_avro_macros::serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema)]
+#[derive(
+    Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, schemars::JsonSchema, PartialOrd, Ord,
+)]
 pub enum Band {
     #[serde(rename = "g")]
     G,

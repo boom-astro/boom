@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 actix-rt = "2.11.0"
 actix-web = "4.11.0"
+anyhow = "1.0.100"
 apache-avro = { version = "0.21.0", features = ["snappy", "derive"] }
 apache-avro-derive = "0.21.0"
 apache-avro-macros = { version = "1", path = "apache-avro-macros" }
