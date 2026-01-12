@@ -252,30 +252,6 @@ where
     false
 }
 
-// Delete a Kafka topic; tolerate "unknown topic" errors to avoid flakiness
-async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
-    use rdkafka::admin::{AdminClient, AdminOptions};
-
-    let admin: AdminClient<_> = rdkafka::config::ClientConfig::new()
-        .set("bootstrap.servers", &config.kafka.producer.server)
-        .create()
-        .expect("Failed to create Kafka admin client");
-
-    // Best effort delete; UnknownTopicOrPartition is fine
-    if let Ok(results) = admin.delete_topics(&[topic], &AdminOptions::new()).await {
-        for res in results {
-            if let Err((_, e)) = res {
-                // Ignore if topic does not exist; surface other errors
-                if format!("{:?}", e).contains("UnknownTopicOrPartition") {
-                    eprintln!("Topic {} did not exist before test (ignored)", topic);
-                } else {
-                    eprintln!("Failed to delete topic {}: {:?}", topic, e);
-                }
-            }
-        }
-    }
-}
-
 #[test]
 fn test_compute_babamul_category() {
     use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
@@ -517,9 +493,6 @@ async fn test_babamul_process_ztf_alerts() {
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
 
-    // Delete the topic before the test to ensure a clean state
-    delete_kafka_topic("babamul.ztf.none", &config).await;
-
     // Create mock enriched ZTF alerts
     let alert1 = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
     let alert2 = create_mock_enriched_ztf_alert(1234567891, "ZTF21aaaaaab", false);
@@ -536,10 +509,6 @@ async fn test_babamul_process_lsst_alerts() {
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
-    let topic = "babamul.lsst.no-ztf-match.hostless";
-
-    // Delete the topic before the test to ensure a clean state
-    delete_kafka_topic(topic, &config).await;
 
     // Create mock enriched LSST alerts with good reliability and no flags
     let alert1 =
@@ -654,7 +623,6 @@ async fn test_babamul_lsst_with_ztf_match() {
         .await
         .ok();
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    delete_kafka_topic(topic, &config).await;
     let now = Time::now().to_jd();
 
     // Use unique IDs based on current timestamp to avoid collisions
@@ -964,7 +932,6 @@ async fn test_babamul_ztf_with_lsst_match() {
     let db = boom::conf::get_test_db().await;
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let mut ztf_alert_worker = boom::utils::testing::ztf_alert_worker().await;
-    delete_kafka_topic("babamul.ztf.none", &config).await;
     let now = Time::now().to_jd();
 
     // Use unique ID based on current timestamp
