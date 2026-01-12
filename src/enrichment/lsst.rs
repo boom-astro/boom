@@ -384,6 +384,7 @@ impl LsstEnrichmentWorker {
 
         // Determine if this is a star based on LSPSC cross-matches
         let mut is_star = Some(false);
+
         let empty_vec = vec![];
         let lspsc_matches = alert
             .cross_matches
@@ -398,17 +399,19 @@ impl LsstEnrichmentWorker {
                 is_star = None;
             }
         } else {
-            // Check if nearest match is within distance threshold and score is above threshold
-            if let Some(nearest) = lspsc_matches.first() {
-                let distance_arcsec = nearest.get("distance_arcsec").and_then(|v| v.as_f64());
-                let score = nearest.get("score").and_then(|v| v.as_f64());
-                // If distance and score are not None, check thresholds
-                if let (Some(distance_arcsec), Some(score)) = (distance_arcsec, score) {
-                    if distance_arcsec <= IS_STELLAR_DISTANCE_THRESH_ARCSEC
-                        && score > IS_HOSTED_SCORE_THRESH
-                    {
-                        is_star = Some(true);
-                    }
+            // Check each LSPSC match for a nearby stellar-like object
+            for m in lspsc_matches {
+                let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let score = match m.get("score").and_then(|v| v.as_f64()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                    is_star = Some(true);
+                    break;
                 }
             }
         }

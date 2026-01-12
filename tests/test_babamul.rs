@@ -123,6 +123,8 @@ fn create_mock_enriched_lsst_alert(
     reliability: f64,
     pixel_flags: bool,
     is_rock: bool,
+    ra_override: Option<f64>,
+    dec_override: Option<f64>,
 ) -> EnrichedLsstAlert {
     create_mock_enriched_lsst_alert_with_matches(
         candid,
@@ -132,6 +134,8 @@ fn create_mock_enriched_lsst_alert(
         is_rock,
         None,
         None,
+        ra_override,
+        dec_override,
     )
 }
 
@@ -143,6 +147,8 @@ fn create_mock_enriched_lsst_alert_with_matches(
     is_rock: bool,
     cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
     survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
+    ra_override: Option<f64>,
+    dec_override: Option<f64>,
 ) -> EnrichedLsstAlert {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
@@ -151,8 +157,8 @@ fn create_mock_enriched_lsst_alert_with_matches(
     dia_source.detector = 1;
     dia_source.dia_object_id = Some(987654321);
     dia_source.midpoint_mjd_tai = 60000.5;
-    dia_source.ra = 150.0;
-    dia_source.dec = 30.0;
+    dia_source.ra = ra_override.unwrap_or(150.0);
+    dia_source.dec = dec_override.unwrap_or(30.0);
     dia_source.psf_flux = Some(1000.0);
     dia_source.psf_flux_err = Some(10.0);
     dia_source.ap_flux = Some(1100.0);
@@ -282,6 +288,8 @@ fn test_compute_babamul_category() {
         false,
         Some(cross_matches),
         None, // No ZTF survey match
+        None,
+        None,
     );
     let category = alert_stellar.compute_babamul_category();
     assert_eq!(
@@ -299,6 +307,8 @@ fn test_compute_babamul_category() {
         false,
         false,
         Some(cross_matches),
+        None,
+        None,
         None,
     );
     let category = alert_hosted.compute_babamul_category();
@@ -318,6 +328,8 @@ fn test_compute_babamul_category() {
         false,
         Some(cross_matches),
         None,
+        None,
+        None,
     );
     let category = alert_hostless.compute_babamul_category();
     assert_eq!(
@@ -334,6 +346,8 @@ fn test_compute_babamul_category() {
         false,
         None,
         None, // No ZTF survey match
+        None,
+        None,
     );
     let category = alert_no_matches.compute_babamul_category();
     assert_eq!(
@@ -361,6 +375,8 @@ fn test_compute_babamul_category() {
         false,
         Some(cross_matches),
         survey_matches,
+        None,
+        None,
     );
     let category = alert_ztf_stellar.compute_babamul_category();
     assert_eq!(
@@ -388,6 +404,8 @@ fn test_compute_babamul_category() {
         false,
         Some(cross_matches),
         survey_matches,
+        None,
+        None,
     );
     let category = alert_ztf_hosted.compute_babamul_category();
     assert_eq!(
@@ -415,6 +433,8 @@ fn test_compute_babamul_category() {
         false,
         Some(cross_matches),
         survey_matches,
+        None,
+        None,
     );
     let category = alert_ztf_hostless.compute_babamul_category();
     assert_eq!(
@@ -422,7 +442,7 @@ fn test_compute_babamul_category() {
         "Alert with ZTF match and hostless LSPSC should be ztf-match.hostless"
     );
 
-    // Test case 8: ZTF match + no LSPSC → "ztf-match.unknown"
+    // Test case 8: ZTF match + no LSPSC + in footprint → "ztf-match.hostless"
     let survey_matches = Some(LsstSurveyMatches {
         ztf: Some(ZtfMatch {
             object_id: "ZTF24aaaaaad".to_string(),
@@ -441,11 +461,49 @@ fn test_compute_babamul_category() {
         false,
         None, // No LSPSC cross-matches
         survey_matches,
+        None,
+        None,
     );
     let category = alert_ztf_unknown.compute_babamul_category();
     assert_eq!(
         category, "ztf-match.hostless",
         "Alert with ZTF match but no LSPSC and in footprint should be ztf-match.hostless"
+    );
+
+    // Test case 9: No LSPSC + no ZTF match + out of footprint → "unknown"
+    let alert_unknown = create_mock_enriched_lsst_alert_with_matches(
+        9876543218,
+        "LSST24aaaaaai",
+        0.8,
+        false,
+        false,
+        Some(std::collections::HashMap::new()), // No matches
+        None,                                   // No ZTF survey match
+        Some(265.05),                           // RA out of footprint
+        Some(-32.25),                           // Dec out of footprint
+    );
+    let category = alert_unknown.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.unknown",
+        "Alert with no matches and no ZTF match should be unknown"
+    );
+
+    // Test case 10: LSPSC exists but empty + no ZTF match + out of footprint → "unknown"
+    let alert_empty_lspsc = create_mock_enriched_lsst_alert_with_matches(
+        9876543219,
+        "LSST24aaaaaaj",
+        0.8,
+        false,
+        false,
+        Some(std::collections::HashMap::new()), // Empty LSPSC matches
+        None,                                   // No ZTF survey match
+        Some(265.05),                           // RA out of footprint
+        Some(-32.25),                           // Dec out of footprint
+    );
+    let category = alert_empty_lspsc.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.unknown",
+        "Alert with empty LSPSC matches and no ZTF match should be unknown"
     );
 }
 
@@ -489,8 +547,10 @@ async fn test_babamul_process_lsst_alerts() {
     delete_kafka_topic(topic, &config).await;
 
     // Create mock enriched LSST alerts with good reliability and no flags
-    let alert1 = create_mock_enriched_lsst_alert(9876543210, "LSST24aaaaaaa", 0.8, false, false);
-    let alert2 = create_mock_enriched_lsst_alert(9876543211, "LSST24aaaaaab", 0.9, false, false);
+    let alert1 =
+        create_mock_enriched_lsst_alert(9876543210, "LSST24aaaaaaa", 0.8, false, false, None, None);
+    let alert2 =
+        create_mock_enriched_lsst_alert(9876543211, "LSST24aaaaaab", 0.9, false, false, None, None);
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -513,8 +573,10 @@ async fn test_babamul_filters_low_reliability() {
     let babamul = Babamul::new(&config);
 
     // Create alerts with low reliability (should be filtered out)
-    let alert1 = create_mock_enriched_lsst_alert(9876543212, "LSST24aaaaaac", 0.3, false, false);
-    let alert2 = create_mock_enriched_lsst_alert(9876543213, "LSST24aaaaaad", 0.4, false, false);
+    let alert1 =
+        create_mock_enriched_lsst_alert(9876543212, "LSST24aaaaaac", 0.3, false, false, None, None);
+    let alert2 =
+        create_mock_enriched_lsst_alert(9876543213, "LSST24aaaaaad", 0.4, false, false, None, None);
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -544,7 +606,8 @@ async fn test_babamul_filters_rocks() {
 
     // Create alerts marked as rocks (should be filtered out)
     let ztf_rock = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", true);
-    let lsst_rock = create_mock_enriched_lsst_alert(9876543214, "LSST24aaaaaae", 0.9, false, true);
+    let lsst_rock =
+        create_mock_enriched_lsst_alert(9876543214, "LSST24aaaaaae", 0.9, false, true, None, None);
 
     // Process the alerts
     let ztf_result = babamul.process_ztf_alerts(vec![ztf_rock]).await;
@@ -577,7 +640,8 @@ async fn test_babamul_filters_pixel_flags() {
     let babamul = Babamul::new(&config);
 
     // Create LSST alert with pixel_flags set (should be filtered out)
-    let alert = create_mock_enriched_lsst_alert(9876543215, "LSST24aaaaaaf", 0.9, true, false);
+    let alert =
+        create_mock_enriched_lsst_alert(9876543215, "LSST24aaaaaaf", 0.9, true, false, None, None);
 
     let result = babamul.process_lsst_alerts(vec![alert]).await;
     assert!(result.is_ok());
