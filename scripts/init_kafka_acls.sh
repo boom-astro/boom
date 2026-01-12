@@ -14,15 +14,27 @@ set -euo pipefail
 #
 # NOTE: Broker requires no explicit JAAS file for SCRAM; credentials are stored in metadata log.
 
-# Allow overriding the bootstrap address (useful in CI); default to internal broker listener
-BROKER="${KAFKA_BOOTSTRAP_SERVER:-broker:29092}"  # Use internal PLAINTEXT inter-broker listener for administrative operations
+# This script can be run in different platforms (Docker, Apptainer)
+PLATFORM="${1:-docker}"
+if [ "$PLATFORM" = "apptainer" ]; then
+  NETWORK="localhost"
+elif [ "$PLATFORM" = "docker" ]; then
+  NETWORK="broker"
+else
+  echo "ERROR: Unknown platform '$PLATFORM' (expected: docker or apptainer)" >&2
+  exit 1
+fi
+
+# Allow overriding the bootstrap address (useful in CI); default to internal broker listener or localhost on Apptainer
+BROKER="${KAFKA_BOOTSTRAP_SERVER:-$NETWORK:29092}" # Use internal PLAINTEXT inter-broker listener for administrative operations
 ADMIN_USER="admin"
 ADMIN_PWD="${KAFKA_ADMIN_PASSWORD}"
 READ_USER="readonly"
 READ_PWD="${KAFKA_READONLY_PASSWORD}"
 TIMEOUT=60 # seconds
+start
 
-# KAFKA_OPTS with JAAS is set at container level (docker-compose).
+# KAFKA_OPTS with JAAS is set at container level (docker-compose/kafka.def)
 
 kafka_log() { echo "[init-kafka] $*"; }
 
@@ -31,7 +43,7 @@ kafka_log() { echo "[init-kafka] $*"; }
 wait_for_broker_network() {
   local host="${BROKER%%:*}"  # Extract hostname from broker:port
   local port="${BROKER##*:}"  # Extract port
-  local start=$(date +%s)
+  start=$(date +%s)
   local max_wait=$TIMEOUT
 
   kafka_log "Waiting for broker DNS resolution: $host"
@@ -57,7 +69,7 @@ wait_for_broker_network() {
 }
 
 wait_for_kafka() {
-  local start=$(date +%s)
+  start=$(date +%s)
   kafka_log "Waiting for Kafka at $BROKER (cluster-id)"
   until /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server "$BROKER" >/dev/null 2>&1; do
     if (( $(date +%s) - $start > $TIMEOUT )); then
@@ -66,7 +78,7 @@ wait_for_kafka() {
     sleep 3
   done
 
-  local start=$(date +%s)
+  start=$(date +%s)
   kafka_log "Waiting for metadata quorum readiness"
   until /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server "$BROKER" describe --status >/dev/null 2>&1; do
     if (( $(date +%s) - $start > $TIMEOUT )); then
@@ -75,7 +87,7 @@ wait_for_kafka() {
     sleep 3
   done
 
-  local start=$(date +%s)
+  start=$(date +%s)
   kafka_log "Waiting for configs API (users --describe)"
   until /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" --entity-type users --describe >/dev/null 2>&1; do
     if (( $(date +%s) - $start > $TIMEOUT )); then
@@ -84,7 +96,7 @@ wait_for_kafka() {
     sleep 3
   done
 
-  local start=$(date +%s)
+  start=$(date +%s)
   kafka_log "Waiting for authorizer (acls --list)"
   until /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$BROKER" --list >/dev/null 2>&1; do
     if (( $(date +%s) - $start > $TIMEOUT )); then
