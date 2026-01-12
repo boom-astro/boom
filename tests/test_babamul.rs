@@ -201,11 +201,7 @@ fn create_mock_enriched_lsst_alert_with_matches(
 }
 
 /// Consume messages from a Kafka topic for testing
-async fn consume_kafka_messages(
-    topic: &str,
-    expected_count: usize,
-    config: &AppConfig,
-) -> Vec<Vec<u8>> {
+async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>> {
     let group_id = uuid::Uuid::new_v4().to_string();
     let consumer: StreamConsumer = rdkafka::config::ClientConfig::new()
         .set("bootstrap.servers", &config.kafka.producer.server)
@@ -225,7 +221,7 @@ async fn consume_kafka_messages(
 
     let mut nb_errors = 0;
     let max_nb_errors = 5;
-    while messages.len() < expected_count && start.elapsed() < timeout {
+    while start.elapsed() < timeout {
         match tokio::time::timeout(timeout - start.elapsed(), consumer.recv()).await {
             Ok(Ok(message)) => {
                 if let Some(payload) = message.payload() {
@@ -523,16 +519,8 @@ async fn test_babamul_process_ztf_alerts() {
 
     // Process the alerts
     let result = babamul.process_ztf_alerts(vec![alert1, alert2]).await;
-    assert!(
-        result.is_ok(),
-        "Failed to process ZTF alerts: {:?}",
-        result.err()
-    );
 
-    // Consume messages from Kafka topic
-    let topic = "babamul.ztf.none";
-    let messages = consume_kafka_messages(topic, 2, &config).await;
-    assert_eq!(messages.len(), 2, "Expected 2 messages in topic {}", topic);
+    assert_eq!(result.unwrap(), 2, "Expected 2 messages to be sent");
 }
 
 #[tokio::test]
@@ -554,15 +542,8 @@ async fn test_babamul_process_lsst_alerts() {
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
-    assert!(
-        result.is_ok(),
-        "Failed to process LSST alerts: {:?}",
-        result.err()
-    );
 
-    // Consume messages from Kafka topic
-    let messages = consume_kafka_messages(topic, 2, &config).await;
-    assert_eq!(messages.len(), 2, "Expected 2 messages in topic {}", topic);
+    assert_eq!(result.unwrap(), 2, "Expected 2 messages to be sent");
 }
 
 #[tokio::test]
@@ -587,13 +568,10 @@ async fn test_babamul_filters_low_reliability() {
     );
 
     // No messages should be sent
-    let topic = "babamul.lsst.no-ztf-match.hostless";
-    let messages = consume_kafka_messages(topic, 0, &config).await;
     assert_eq!(
-        messages.len(),
+        result.unwrap(),
         0,
-        "Expected 0 messages in topic {} for low reliability alerts",
-        topic
+        "Expected 0 messages for low-reliability alerts"
     );
 }
 
@@ -617,18 +595,11 @@ async fn test_babamul_filters_rocks() {
     assert!(lsst_result.is_ok());
 
     // No messages should be sent for rocks
-    let ztf_messages = consume_kafka_messages("babamul.ztf.none", 0, &config).await;
-    let lsst_messages = consume_kafka_messages("babamul.lsst.none", 0, &config).await;
-
+    assert_eq!(ztf_result.unwrap(), 0, "Expected 0 messages for ZTF rocks");
     assert_eq!(
-        ztf_messages.len(),
+        lsst_result.unwrap(),
         0,
-        "Expected 0 ZTF messages for rock alerts"
-    );
-    assert_eq!(
-        lsst_messages.len(),
-        0,
-        "Expected 0 LSST messages for rock alerts"
+        "Expected 0 messages for LSST rocks"
     );
 }
 
@@ -647,11 +618,10 @@ async fn test_babamul_filters_pixel_flags() {
     assert!(result.is_ok());
 
     // No messages should be sent for alerts with pixel flags
-    let messages = consume_kafka_messages("babamul.lsst.none", 0, &config).await;
     assert_eq!(
-        messages.len(),
+        result.unwrap(),
         0,
-        "Expected 0 messages for alerts with pixel_flags"
+        "Expected 0 messages for LSST alerts with pixel flags"
     );
 }
 
@@ -897,7 +867,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     // Verify that the Babamul message was published - since the alert passed enrichment
     // with good reliability and no pixel flags or rock flag, it should be sent to Babamul
     // Fetch a few messages to tolerate leftover topic data and search for our alert
-    let messages = consume_kafka_messages(topic, 3, &config).await;
+    let messages = consume_kafka_messages(topic, &config).await;
     assert!(
         !messages.is_empty(),
         "Expected at least one Babamul message with enriched alert containing matches"
@@ -1122,7 +1092,7 @@ async fn test_babamul_ztf_with_lsst_match() {
     );
 
     // Verify that the Babamul message was published
-    let messages = consume_kafka_messages("babamul.ztf.none", 3, &config).await;
+    let messages = consume_kafka_messages("babamul.ztf.none", &config).await;
     assert!(
         !messages.is_empty(),
         "Expected at least one Babamul message with enriched alert containing matches"

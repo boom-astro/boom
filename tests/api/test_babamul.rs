@@ -31,21 +31,11 @@ mod tests {
         async fn create(
             database: &Database,
             auth_app_data: &boom::api::auth::AuthProvider,
-            email_suffix: &str,
         ) -> Self {
-            let test_email = format!("test+{}@babamul.example.com", email_suffix);
-            let babamul_users_collection: mongodb::Collection<
-                boom::api::routes::babamul::BabamulUser,
-            > = database.collection("babamul_users");
-
-            // Clean up any existing user with this email
-            babamul_users_collection
-                .delete_one(doc! { "email": &test_email })
-                .await
-                .ok();
-
+            let id = uuid::Uuid::new_v4().to_string();
+            let test_email = format!("test+{}@babamul.example.com", id);
             let test_user = boom::api::routes::babamul::BabamulUser {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: id.clone(),
                 username: "testuser".to_string(),
                 email: test_email.clone(),
                 password_hash: "hash".to_string(),
@@ -55,6 +45,9 @@ mod tests {
                 kafka_credentials: vec![],
             };
 
+            let babamul_users_collection: mongodb::Collection<
+                boom::api::routes::babamul::BabamulUser,
+            > = database.collection("babamul_users");
             babamul_users_collection
                 .insert_one(&test_user)
                 .await
@@ -481,12 +474,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("cutouts_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         // Insert test cutout data with unique ID
         let cutouts_collection =
@@ -568,12 +556,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("objects_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
             App::new()
@@ -635,12 +618,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("objects_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
             App::new()
@@ -701,12 +679,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("object_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let mut alert_worker = lsst_alert_worker().await;
         let (candid, object_id, _, _, bytes_content) =
@@ -779,12 +752,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("object_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let mut alert_worker = ztf_alert_worker().await;
         let (candid, object_id, _, _, bytes_content) =
@@ -859,12 +827,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("kafka_cred_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
             App::new()
@@ -1024,12 +987,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("kafka_list_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
             App::new()
@@ -1149,12 +1107,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
         // Create a test user
-        let test_user = TestUser::create(
-            &database,
-            &auth_app_data,
-            &format!("kafka_delete_{}", unique_suffix()),
-        )
-        .await;
+        let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
             App::new()
