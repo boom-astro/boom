@@ -725,7 +725,7 @@ pub async fn post_kafka_credentials(
 
     // Generate randomized credentials
     let credential_id = uuid::Uuid::new_v4().to_string();
-    let kafka_username = format!("babamul-{}", uuid::Uuid::new_v4().to_string());
+    let kafka_username = format!("babamul-{}", credential_id);
     let kafka_password = generate_random_string(32);
 
     let kafka_credential = KafkaCredential {
