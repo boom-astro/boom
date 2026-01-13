@@ -81,9 +81,7 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let db_conf = &conf.database;
-
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
     let prefix = match db_conf.srv {
         true => "mongodb+srv://",
         false => "mongodb://",
@@ -126,6 +124,13 @@ async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError
 }
 
 #[instrument(skip_all, err)]
+async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+    let db_conf = &conf.database;
+
+    _build_db(db_conf).await
+}
+
+#[instrument(skip_all, err)]
 async fn build_redis(
     conf: &AppConfig,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
@@ -154,37 +159,44 @@ async fn build_cutout_storage(
     survey: &Survey,
     conf: &AppConfig,
 ) -> Result<CutoutStorage, BoomConfigError> {
-    let access_key = conf.cutouts_s3_storage.access_key.clone();
-    let secret_key = conf.cutouts_s3_storage.secret_key.clone();
+    match &conf.cutouts_storage {
+        CutoutsStorage::S3(s3_conf) => {
+            println!("Building S3 cutout storage for survey {:?}", survey);
+            let credentials_static_str = string_to_static_str(s3_conf.credentials_provider.clone());
+            let credentials = aws_sdk_s3::config::Credentials::new(
+                s3_conf.access_key.clone(),
+                s3_conf.secret_key.clone(),
+                None,
+                None,
+                credentials_static_str,
+            );
+            let region = aws_sdk_s3::config::Region::new(s3_conf.region.clone());
 
-    let credentials = aws_sdk_s3::config::Credentials::new(
-        access_key,
-        secret_key,
-        None,
-        None,
-        conf.cutouts_s3_storage.credentials_provider,
-    );
-    let region = aws_sdk_s3::config::Region::new(conf.cutouts_s3_storage.region.clone());
+            let s3_config = aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
+                .region(region)
+                .credentials_provider(credentials)
+                .endpoint_url(s3_conf.endpoint_url.clone())
+                .load()
+                .await;
 
-    let s3_config = aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
-        .region(region)
-        .credentials_provider(credentials)
-        .endpoint_url(conf.cutouts_s3_storage.endpoint_url.clone())
-        .load()
-        .await;
-
-    let rustfs_client = aws_sdk_s3::Client::from_conf(
-        aws_sdk_s3::Config::from(&s3_config)
-            .to_builder()
-            .force_path_style(true)
-            .build(),
-    );
-    let bucket_name = format!("{}-cutouts", survey.to_string().to_lowercase());
-    let storage = CutoutStorage::new(rustfs_client, bucket_name, None)
-        .await
-        .inspect_err(as_error!("failed to create cutout storage"))?;
-
-    Ok(storage)
+            let rustfs_client = aws_sdk_s3::Client::from_conf(
+                aws_sdk_s3::Config::from(&s3_config)
+                    .to_builder()
+                    .force_path_style(true)
+                    .build(),
+            );
+            let bucket_name = format!("{}-cutouts", survey.to_string().to_lowercase());
+            let storage = CutoutStorage::from_s3(rustfs_client, bucket_name, None)
+                .await
+                .inspect_err(as_error!("failed to create cutout storage"))?;
+            Ok(storage)
+        }
+        CutoutsStorage::Mongo(mongo_conf) => {
+            let db = _build_db(&mongo_conf).await?;
+            let storage = CutoutStorage::from_mongo(db, survey).await;
+            Ok(storage)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -327,86 +339,20 @@ impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CutoutsS3StorageConfig {
+#[derive(Deserialize, Debug, Clone)]
+pub struct S3CutoutsStorageConfig {
     pub region: String,
     pub endpoint_url: String,
     pub access_key: String,
     pub secret_key: String,
-    pub credentials_provider: &'static str,
+    pub credentials_provider: String,
 }
 
-impl CutoutsS3StorageConfig {
-    pub fn new(
-        region: &str,
-        endpoint_url: &str,
-        access_key: &str,
-        secret_key: &str,
-        credentials_provider: &str,
-    ) -> CutoutsS3StorageConfig {
-        CutoutsS3StorageConfig {
-            region: region.to_string(),
-            endpoint_url: endpoint_url.to_string(),
-            access_key: access_key.to_string(),
-            secret_key: secret_key.to_string(),
-            credentials_provider: string_to_static_str(credentials_provider.to_string()),
-        }
-    }
-
-    #[instrument(skip_all, err)]
-    pub fn from_config(config_value: Value) -> Result<CutoutsS3StorageConfig, BoomConfigError> {
-        let hashmap_storage = config_value.into_table()?;
-
-        let region = hashmap_storage
-            .get("region")
-            .ok_or(BoomConfigError::MissingKeyError("region".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let endpoint_url = hashmap_storage
-            .get("endpoint_url")
-            .ok_or(BoomConfigError::MissingKeyError("endpoint_url".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let access_key = hashmap_storage
-            .get("access_key")
-            .ok_or(BoomConfigError::MissingKeyError("access_key".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let secret_key = hashmap_storage
-            .get("secret_key")
-            .ok_or(BoomConfigError::MissingKeyError("secret_key".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let credentials_provider = hashmap_storage
-            .get("credentials_provider")
-            .ok_or(BoomConfigError::MissingKeyError(
-                "credentials_provider".to_string(),
-            ))?
-            .clone()
-            .into_string()?;
-
-        Ok(CutoutsS3StorageConfig::new(
-            &region,
-            &endpoint_url,
-            &access_key,
-            &secret_key,
-            &credentials_provider,
-        ))
-    }
-}
-
-impl<'de> Deserialize<'de> for CutoutsS3StorageConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        CutoutsS3StorageConfig::from_config(v).map_err(serde::de::Error::custom)
-    }
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum CutoutsStorage {
+    S3(S3CutoutsStorageConfig),
+    Mongo(DatabaseConfig),
 }
 
 fn default_kafka_server() -> String {
@@ -520,7 +466,7 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
-    pub cutouts_s3_storage: CutoutsS3StorageConfig,
+    pub cutouts_storage: CutoutsStorage,
 }
 
 impl AppConfig {

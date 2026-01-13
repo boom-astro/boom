@@ -74,7 +74,9 @@ async fn test_process_lsst_alert() {
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 0);
 
-    drop_alert_from_collections(candid, "LSST").await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Lsst)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

@@ -1,4 +1,6 @@
+use crate::utils::enums::Survey;
 use futures::stream::{self, StreamExt};
+use serde::{de::Deserializer, Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 
@@ -12,13 +14,15 @@ pub enum CutoutStorageError {
     CutoutInsertFailed,
     #[error("cutout retrieve failed")]
     CutoutRetrieveFailed,
+    #[error("cutout delete failed")]
+    CutoutDeleteFailed,
     #[error("bincode serialization error: {0}")]
     BincodeError(#[from] bincode::error::EncodeError),
     #[error("bincode deserialization error: {0}")]
     BincodeDecodeError(#[from] bincode::error::DecodeError),
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AlertCutout {
     pub candid: i64,
     pub object_id: String,
@@ -30,26 +34,55 @@ pub struct AlertCutout {
     pub difference: Vec<u8>,
 }
 
-pub struct CutoutStorage {
-    s3_client: aws_sdk_s3::Client,
-    bucket_name: String,
-    // Limit concurrency to avoid overwhelming the S3-compatible service
-    concurrency_limit: usize,
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MongoAlertCutout {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    #[serde(rename = "cutoutScience")]
+    #[serde(serialize_with = "serialize_cutout")]
+    #[serde(deserialize_with = "deserialize_cutout")]
+    pub cutout_science: Vec<u8>,
+    #[serde(serialize_with = "serialize_cutout")]
+    #[serde(deserialize_with = "deserialize_cutout")]
+    #[serde(rename = "cutoutTemplate")]
+    pub cutout_template: Vec<u8>,
+    #[serde(serialize_with = "serialize_cutout")]
+    #[serde(deserialize_with = "deserialize_cutout")]
+    #[serde(rename = "cutoutDifference")]
+    pub cutout_difference: Vec<u8>,
 }
 
-impl CutoutStorage {
-    pub async fn new(
-        s3_client: aws_sdk_s3::Client,
-        bucket_name: String,
-        concurrency_limit: Option<usize>,
-    ) -> Result<Self, CutoutStorageError> {
-        // Ensure the bucket exists
-        create_bucket_if_not_exists(&bucket_name, &s3_client).await?;
-        Ok(Self {
-            s3_client,
-            bucket_name,
-            concurrency_limit: concurrency_limit.unwrap_or(1),
-        })
+fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let binary = <mongodb::bson::Binary as Deserialize>::deserialize(deserializer)?;
+    Ok(binary.bytes)
+}
+
+fn serialize_cutout<S>(cutout: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let binary = mongodb::bson::Binary {
+        subtype: mongodb::bson::spec::BinarySubtype::Generic,
+        bytes: cutout.clone(),
+    };
+    binary.serialize(serializer)
+}
+
+// implement From for MongoAlertCutout to AlertCutout
+impl From<MongoAlertCutout> for AlertCutout {
+    fn from(mongo_cutout: MongoAlertCutout) -> Self {
+        AlertCutout {
+            candid: mongo_cutout.candid,
+            object_id: mongo_cutout.object_id,
+            science: mongo_cutout.cutout_science,
+            template: mongo_cutout.cutout_template,
+            difference: mongo_cutout.cutout_difference,
+        }
     }
 }
 
@@ -159,9 +192,78 @@ async fn retrieve_alert_cutouts(
     Ok(cutout_data)
 }
 
-impl CutoutStorage {
+#[instrument(skip_all, err)]
+async fn delete_alert_cutouts(
+    candid: i64,
+    bucket_name: &str,
+    s3_client: &aws_sdk_s3::Client,
+) -> Result<(), CutoutStorageError> {
+    let key = format!("{}.cutouts", candid);
+
+    match s3_client
+        .delete_object()
+        .bucket(bucket_name)
+        .key(&key)
+        .send()
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            println!("Failed to delete cutout for candid {}: {:?}", candid, e);
+            Err(CutoutStorageError::CutoutDeleteFailed)
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait CutoutStorageBackend {
+    async fn insert_cutouts(
+        &self,
+        candid: i64,
+        object_id: &str,
+        cutout_science: Vec<u8>,
+        cutout_template: Vec<u8>,
+        cutout_difference: Vec<u8>,
+    ) -> Result<(), CutoutStorageError>;
+
+    async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError>;
+
+    async fn retrieve_multiple_cutouts(
+        &self,
+        candids: &[i64],
+    ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError>;
+
+    async fn delete_cutouts(&self, candid: i64) -> Result<(), CutoutStorageError>;
+}
+
+pub struct S3CutoutStorage {
+    s3_client: aws_sdk_s3::Client,
+    bucket_name: String,
+    // Limit concurrency to avoid overwhelming the S3-compatible service
+    concurrency_limit: usize,
+}
+
+impl S3CutoutStorage {
     #[instrument(skip_all, err)]
-    pub async fn insert_cutouts(
+    pub async fn new(
+        s3_client: aws_sdk_s3::Client,
+        bucket_name: String,
+        concurrency_limit: Option<usize>,
+    ) -> Result<Self, CutoutStorageError> {
+        // Ensure the bucket exists
+        create_bucket_if_not_exists(&bucket_name, &s3_client).await?;
+        Ok(Self {
+            s3_client,
+            bucket_name,
+            concurrency_limit: concurrency_limit.unwrap_or(1),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl CutoutStorageBackend for S3CutoutStorage {
+    #[instrument(skip_all, err)]
+    async fn insert_cutouts(
         &self,
         candid: i64,
         object_id: &str,
@@ -182,12 +284,12 @@ impl CutoutStorage {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
+    async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
         retrieve_alert_cutouts(candid, &self.bucket_name, &self.s3_client).await
     }
 
     #[instrument(skip_all, err)]
-    pub async fn retrieve_multiple_cutouts(
+    async fn retrieve_multiple_cutouts(
         &self,
         candids: &[i64],
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
@@ -212,5 +314,186 @@ impl CutoutStorage {
         }
 
         Ok(cutouts)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn delete_cutouts(&self, candid: i64) -> Result<(), CutoutStorageError> {
+        delete_alert_cutouts(candid, &self.bucket_name, &self.s3_client).await
+    }
+}
+
+pub struct MongoCutoutStorage {
+    // Placeholder for MongoDB client and collection
+    collection: mongodb::Collection<MongoAlertCutout>,
+}
+
+impl MongoCutoutStorage {
+    pub fn new(db: mongodb::Database, survey: &Survey) -> Self {
+        let collection_name = format!("{}_alerts_cutouts", survey);
+        let collection = db.collection::<MongoAlertCutout>(&collection_name);
+        Self { collection }
+    }
+}
+
+#[async_trait::async_trait]
+impl CutoutStorageBackend for MongoCutoutStorage {
+    #[instrument(skip_all, err)]
+    async fn insert_cutouts(
+        &self,
+        candid: i64,
+        object_id: &str,
+        cutout_science: Vec<u8>,
+        cutout_template: Vec<u8>,
+        cutout_difference: Vec<u8>,
+    ) -> Result<(), CutoutStorageError> {
+        println!(
+            "Inserting cutouts for candid {} into MongoDB (collection: {})",
+            candid,
+            self.collection.name()
+        );
+        let alert_cutout = MongoAlertCutout {
+            candid,
+            object_id: object_id.to_string(),
+            cutout_science,
+            cutout_template,
+            cutout_difference,
+        };
+
+        match self.collection.insert_one(alert_cutout).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                println!("Failed to insert cutout for candid {}: {:?}", candid, e);
+                Err(CutoutStorageError::CutoutInsertFailed)
+            }
+        }
+    }
+
+    #[instrument(skip_all, err)]
+    async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
+        let filter = mongodb::bson::doc! { "_id": candid };
+        match self.collection.find_one(filter).await {
+            Ok(Some(cutout)) => Ok(cutout.into()),
+            Ok(None) => Err(CutoutStorageError::CutoutRetrieveFailed),
+            Err(e) => {
+                println!("Failed to retrieve cutout for candid {}: {:?}", candid, e);
+                Err(CutoutStorageError::CutoutRetrieveFailed)
+            }
+        }
+    }
+
+    #[instrument(skip_all, err)]
+    async fn retrieve_multiple_cutouts(
+        &self,
+        candids: &[i64],
+    ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
+        println!(
+            "Retrieving multiple cutouts for candids: {:?} (from MongoDB)",
+            candids
+        );
+        let filter = mongodb::bson::doc! { "_id": { "$in": candids } };
+        let mut cursor = self
+            .collection
+            .find(filter)
+            .await
+            .map_err(|_| CutoutStorageError::CutoutRetrieveFailed)?;
+
+        let mut cutouts = HashMap::new();
+        while let Some(cutout) = cursor.next().await {
+            match cutout {
+                Ok(c) => {
+                    cutouts.insert(c.candid, c.into());
+                }
+                Err(e) => {
+                    println!("Failed to retrieve a cutout: {:?}", e);
+                }
+            }
+        }
+        Ok(cutouts)
+    }
+
+    #[instrument(skip_all, err)]
+    async fn delete_cutouts(&self, candid: i64) -> Result<(), CutoutStorageError> {
+        let filter = mongodb::bson::doc! { "_id": candid };
+        match self.collection.delete_one(filter).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                println!("Failed to delete cutout for candid {}: {:?}", candid, e);
+                Err(CutoutStorageError::CutoutDeleteFailed)
+            }
+        }
+    }
+}
+
+pub enum CutoutStorage {
+    S3(S3CutoutStorage),
+    Mongo(MongoCutoutStorage),
+}
+
+impl CutoutStorage {
+    pub async fn insert_cutouts(
+        &self,
+        candid: i64,
+        object_id: &str,
+        cutout_science: Vec<u8>,
+        cutout_template: Vec<u8>,
+        cutout_difference: Vec<u8>,
+    ) -> Result<(), CutoutStorageError> {
+        match self {
+            CutoutStorage::S3(storage) => {
+                storage
+                    .insert_cutouts(
+                        candid,
+                        object_id,
+                        cutout_science,
+                        cutout_template,
+                        cutout_difference,
+                    )
+                    .await
+            }
+            CutoutStorage::Mongo(storage) => {
+                storage
+                    .insert_cutouts(
+                        candid,
+                        object_id,
+                        cutout_science,
+                        cutout_template,
+                        cutout_difference,
+                    )
+                    .await
+            }
+        }
+    }
+    pub async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
+        match self {
+            CutoutStorage::S3(storage) => storage.retrieve_cutouts(candid).await,
+            CutoutStorage::Mongo(storage) => storage.retrieve_cutouts(candid).await,
+        }
+    }
+    pub async fn retrieve_multiple_cutouts(
+        &self,
+        candids: &[i64],
+    ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
+        match self {
+            CutoutStorage::S3(storage) => storage.retrieve_multiple_cutouts(candids).await,
+            CutoutStorage::Mongo(storage) => storage.retrieve_multiple_cutouts(candids).await,
+        }
+    }
+    pub async fn delete_cutouts(&self, candid: i64) -> Result<(), CutoutStorageError> {
+        match self {
+            CutoutStorage::S3(storage) => storage.delete_cutouts(candid).await,
+            CutoutStorage::Mongo(storage) => storage.delete_cutouts(candid).await,
+        }
+    }
+    pub async fn from_s3(
+        s3_client: aws_sdk_s3::Client,
+        bucket_name: String,
+        concurrency_limit: Option<usize>,
+    ) -> Result<Self, CutoutStorageError> {
+        let s3_storage = S3CutoutStorage::new(s3_client, bucket_name, concurrency_limit).await?;
+        Ok(CutoutStorage::S3(s3_storage))
+    }
+    pub async fn from_mongo(db: mongodb::Database, survey: &Survey) -> Self {
+        let mongo_storage = MongoCutoutStorage::new(db, survey);
+        CutoutStorage::Mongo(mongo_storage)
     }
 }

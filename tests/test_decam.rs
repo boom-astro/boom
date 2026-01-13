@@ -63,5 +63,7 @@ async fn test_process_decam_alert() {
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 59);
 
-    drop_alert_from_collections(candid, "DECAM").await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Decam)
+        .await
+        .unwrap();
 }

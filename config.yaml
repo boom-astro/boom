@@ -36,12 +36,20 @@ kafka:
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
-cutouts_s3_storage:
-  region: local
-  endpoint_url: http://127.0.0.1:9000
-  access_key: rustfsadmin
-  secret_key: rustfsadminsecret
-  credentials_provider: rustfs
+cutouts_storage:
+  # region: local
+  # endpoint_url: http://127.0.0.1:9000
+  # access_key: rustfsadmin
+  # secret_key: rustfsadminsecret
+  # credentials_provider: rustfs
+  host: localhost
+  port: 27017
+  name: boom_cutouts
+  max_pool_size: 200
+  replica_set: null
+  username: mongoadmin
+  password: "" # Set via BOOM_CUTOUTS_STORAGE__PASSWORD environment variable
+  srv: false
 workers:
   ztf:
     command_interval: 500

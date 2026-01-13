@@ -75,7 +75,9 @@ async fn test_process_ztf_alert() {
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 10);
 
-    drop_alert_from_collections(candid, "ZTF").await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

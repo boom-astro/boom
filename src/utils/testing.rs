@@ -67,13 +67,13 @@ pub async fn drop_alert_collections(
 
 pub async fn drop_alert_from_collections(
     candid: i64,
-    stream_name: &str,
+    survey: &Survey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
     let db = config.build_db().await?;
-    let alert_collection_name = format!("{}_alerts", stream_name);
-    let alert_cutout_collection_name = format!("{}_alerts_cutouts", stream_name);
-    let alert_aux_collection_name = format!("{}_alerts_aux", stream_name);
+    let alert_collection_name = format!("{}_alerts", survey);
+    let alert_cutout_storage = config.build_cutout_storage(survey).await?;
+    let alert_aux_collection_name = format!("{}_alerts_aux", survey);
 
     let filter = doc! {"_id": candid};
     let alert = db
@@ -87,10 +87,7 @@ pub async fn drop_alert_from_collections(
             .delete_one(filter.clone())
             .await?;
 
-        // delete the alert from the cutouts collection
-        db.collection::<mongodb::bson::Document>(&alert_cutout_collection_name)
-            .delete_one(filter.clone())
-            .await?;
+        alert_cutout_storage.delete_cutouts(candid).await?;
 
         // delete the object from the aux collection
         let object_id = alert.get_str("objectId")?;

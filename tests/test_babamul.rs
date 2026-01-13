@@ -694,7 +694,10 @@ async fn test_babamul_lsst_with_ztf_match() {
     let ztf_aux_collection = db.collection::<ZtfObject>("ZTF_alerts_aux");
     let lsst_alerts_collection = db.collection::<LsstAlert>("LSST_alerts");
     let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
-    let lsst_cutouts_collection = db.collection::<AlertCutout>("LSST_alerts_cutouts");
+    let lsst_cutout_storage = config
+        .build_cutout_storage(&boom::utils::enums::Survey::Lsst)
+        .await
+        .expect("Failed to build LSST cutout storage");
 
     ztf_aux_collection
         .delete_many(doc! {"_id": {"$in": [&ztf_match_id]}})
@@ -708,8 +711,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         .delete_many(doc! {"_id": {"$in": [&lsst_object_id]}})
         .await
         .expect("Failed to cleanup LSST aux fixture");
-    lsst_cutouts_collection
-        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+    lsst_cutout_storage
+        .delete_cutouts(lsst_alert_id)
         .await
         .expect("Failed to cleanup LSST cutouts fixture");
 
