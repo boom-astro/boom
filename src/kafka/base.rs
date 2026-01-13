@@ -585,6 +585,18 @@ pub async fn consumer(
         .subscribe(&[topic])
         .inspect_err(as_error!("failed to subscribe to topic"))?;
 
+    if exit_on_eof {
+        // check how many messages are in the topic
+        let nb_messages = count_messages(&server, topic)?;
+        if let Some(0) = nb_messages {
+            info!(
+                "No messages available in topic {}, exiting consumer {}",
+                topic, id
+            );
+            return Ok(());
+        }
+    }
+
     // Wait for initial assignment
     debug!("Waiting for partition assignment...");
 
@@ -612,13 +624,6 @@ pub async fn consumer(
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;
             }
             None => {
-                if exit_on_eof {
-                    info!(
-                        "No messages available during initial poll, exiting consumer {}",
-                        id
-                    );
-                    return Ok(());
-                }
                 debug!("No message received yet, polling again...");
                 // sleep and retry
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;
