@@ -87,7 +87,7 @@ services:
       timeout: 5s
       retries: 3
   broker:
-    image: apache/kafka:latest
+    image: apache/kafka:4.1.1
     hostname: broker
     networks:
       - boom
@@ -118,7 +118,7 @@ services:
       # controller metadata or internal admin ops can be unauthorized and cause the process to exit.
       # (Alternative: secure internal listener with SASL and drop ANONYMOUS.)
       KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
-      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
+      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf -Djava.security.egd=file:/dev/./urandom"
     volumes:
       - kafka_data:/var/lib/kafka/data
       - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
@@ -130,9 +130,9 @@ services:
         timeout 5s /opt/kafka/bin/kafka-configs.sh --bootstrap-server broker:29092 --entity-type users --describe >/dev/null 2>&1 && \
         timeout 5s /opt/kafka/bin/kafka-acls.sh --bootstrap-server broker:29092 --list >/dev/null 2>&1"]
       interval: 10s
-      timeout: 25s
-      retries: 6
-      start_period: 30s
+      timeout: 30s
+      retries: 15
+      start_period: 60s
     labels:
       - autoheal=true
       - traefik.enable=true
@@ -144,7 +144,7 @@ services:
       # Uncomment to enable TLS passthrough (requires EXTERNAL listener to use SSL)
       # - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.tls.passthrough=true
   kafka-acl-init:
-    image: apache/kafka:latest
+    image: apache/kafka:4.1.1
     hostname: kafka-acl-init
     depends_on:
       broker:
@@ -157,7 +157,12 @@ services:
     volumes:
       - ./scripts/init_kafka_acls.sh:/init_kafka_acls.sh:ro
     entrypoint: ["bash","/init_kafka_acls.sh"]
-    restart: "no"
+    restart: on-failure
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
   api:
     image: boom-astro/boom:latest
     hostname: api
@@ -271,7 +276,8 @@ services:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
-      - ${PWD}/data/models:/app/data/models
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:
       - /app/scheduler
       - ztf
@@ -295,7 +301,8 @@ services:
       - prod
     volumes:
       - ${PWD}/config.yaml:/app/config.yaml
-      - ${PWD}/data/models:/app/data/models
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:
       - /app/scheduler
       - lsst

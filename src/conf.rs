@@ -196,6 +196,7 @@ pub struct CatalogXmatchConfig {
     pub distance_key: Option<String>,        // name of the field to use for distance
     pub distance_max: Option<f64>,           // maximum distance in kpc
     pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
+    pub max_results: Option<usize>,          // maximum number of results to return
 }
 
 impl CatalogXmatchConfig {
@@ -207,6 +208,7 @@ impl CatalogXmatchConfig {
         distance_key: Option<String>,
         distance_max: Option<f64>,
         distance_max_near: Option<f64>,
+        max_results: Option<usize>,
     ) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
@@ -216,6 +218,7 @@ impl CatalogXmatchConfig {
             distance_key,
             distance_max,
             distance_max_near,
+            max_results,
         }
     }
 
@@ -284,6 +287,22 @@ impl CatalogXmatchConfig {
             }
         }
 
+        let max_results = match hashmap_xmatch.get("max_results") {
+            Some(max_results) => {
+                let value = max_results.clone().into_int()?;
+                if value <= 0 {
+                    panic!("max_results must be greater than 0");
+                }
+                Some(value as usize)
+            }
+            None => None,
+        };
+
+        // for now, we don't want to support max_results + distance filtering together
+        if max_results.is_some() && use_distance {
+            panic!("cannot use max_results with distance filtering");
+        }
+
         Ok(CatalogXmatchConfig::new(
             &catalog,
             radius,
@@ -292,6 +311,7 @@ impl CatalogXmatchConfig {
             distance_key,
             distance_max,
             distance_max_near,
+            max_results,
         ))
     }
 }

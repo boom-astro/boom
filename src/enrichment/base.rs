@@ -80,6 +80,8 @@ pub enum EnrichmentWorkerError {
     Kafka(String),
     #[error("cutout storage error")]
     CutoutStorageError(#[from] CutoutStorageError),
+    #[error("configuration error: {0}")]
+    ConfigurationError(String),
 }
 
 #[async_trait::async_trait]

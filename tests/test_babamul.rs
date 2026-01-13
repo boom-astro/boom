@@ -18,13 +18,70 @@ use rdkafka::{
 };
 use std::time::Duration;
 
+/// Create realistic LSPSC cross-matches with configurable distance and score for testing
+///
+/// # Arguments
+/// * `distance_arcsec` - Distance to nearest match (default: 0.5 for stellar)
+/// * `score` - Score of nearest match (default: 0.95 for stellar)
+/// * `single_match` - If true, only include the nearest match (useful for hostless testing)
+///
+/// # Thresholds for reference
+/// * Stellar: distance ≤ 1.0 arcsec AND score > 0.5
+/// * Hosted: any match has score < 0.5
+/// * Hostless: matches exist but neither stellar nor hosted
+fn create_lspsc_cross_matches(
+    distance_arcsec: Option<f64>,
+    score: Option<f64>,
+    single_match: bool,
+) -> std::collections::HashMap<String, Vec<serde_json::Value>> {
+    use serde_json::json;
+
+    let distance = distance_arcsec.unwrap_or(0.5); // Default: stellar distance
+    let score = score.unwrap_or(0.95); // Default: stellar score
+
+    let mut matches = std::collections::HashMap::new();
+    let mut lspsc_matches = vec![json!({
+        "_id": 1001,
+        "ra": 150.001,
+        "dec": 30.002,
+        "distance_arcsec": distance,
+        "score": score,
+        "magwhite": 18.3
+    })];
+
+    // Add additional matches unless single_match is true
+    if !single_match {
+        lspsc_matches.extend(vec![
+            json!({
+                "_id": 1002,
+                "ra": 150.02,
+                "dec": 30.05,
+                "distance_arcsec": 1.5,  // Beyond stellar threshold
+                "score": 0.75,           // Above hosted threshold
+                "magwhite": 19.1
+            }),
+            json!({
+                "_id": 1003,
+                "ra": 150.25,
+                "dec": 30.10,
+                "distance_arcsec": 5.0,  // Far match
+                "score": 0.45,           // Below hosted threshold
+                "magwhite": 20.2
+            }),
+        ]);
+    }
+
+    matches.insert("LSPSC".to_string(), lspsc_matches);
+    matches
+}
+
 /// Create a mock enriched ZTF alert for testing
 fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -> EnrichedZtfAlert {
     // Create a minimal Candidate and ZtfCandidate using defaults
     let mut inner_candidate = Candidate::default();
     inner_candidate.candid = candid;
-    inner_candidate.ra = 180.0;
-    inner_candidate.dec = 0.0;
+    inner_candidate.ra = 150.0;
+    inner_candidate.dec = 30.0;
     inner_candidate.magpsf = 18.5;
     inner_candidate.sigmapsf = 0.1;
     inner_candidate.fid = 1; // g-band
@@ -67,6 +124,32 @@ fn create_mock_enriched_lsst_alert(
     reliability: f64,
     pixel_flags: bool,
     is_rock: bool,
+    ra_override: Option<f64>,
+    dec_override: Option<f64>,
+) -> EnrichedLsstAlert {
+    create_mock_enriched_lsst_alert_with_matches(
+        candid,
+        object_id,
+        reliability,
+        pixel_flags,
+        is_rock,
+        None,
+        None,
+        ra_override,
+        dec_override,
+    )
+}
+
+fn create_mock_enriched_lsst_alert_with_matches(
+    candid: i64,
+    object_id: &str,
+    reliability: f64,
+    pixel_flags: bool,
+    is_rock: bool,
+    cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+    survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
+    ra_override: Option<f64>,
+    dec_override: Option<f64>,
 ) -> EnrichedLsstAlert {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
@@ -75,8 +158,8 @@ fn create_mock_enriched_lsst_alert(
     dia_source.detector = 1;
     dia_source.dia_object_id = Some(987654321);
     dia_source.midpoint_mjd_tai = 60000.5;
-    dia_source.ra = 180.0;
-    dia_source.dec = 0.0;
+    dia_source.ra = ra_override.unwrap_or(150.0);
+    dia_source.dec = dec_override.unwrap_or(30.0);
     dia_source.psf_flux = Some(1000.0);
     dia_source.psf_flux_err = Some(10.0);
     dia_source.ap_flux = Some(1100.0);
@@ -106,13 +189,15 @@ fn create_mock_enriched_lsst_alert(
         fp_hists: vec![],
         properties: LsstAlertProperties {
             rock: is_rock,
+            star: Some(false),
             stationary: false,
             photstats: PerBandProperties::default(),
         },
         cutout_science: None,
         cutout_template: None,
         cutout_difference: None,
-        survey_matches: None,
+        survey_matches,
+        cross_matches: boom::enrichment::babamul::CrossMatchesWrapper(cross_matches),
     }
 }
 
@@ -189,6 +274,240 @@ async fn delete_kafka_topic(topic: &str, config: &AppConfig) {
     }
 }
 
+#[test]
+fn test_compute_babamul_category() {
+    use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
+
+    // Test case 1: No ZTF match + stellar LSPSC → "no-ztf-match.stellar"
+    // distance ≤ 1.0 AND score > 0.5
+    let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
+    let alert_stellar = create_mock_enriched_lsst_alert_with_matches(
+        9876543210,
+        "LSST24aaaaaaa",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        None, // No ZTF survey match
+        None,
+        None,
+    );
+    let category = alert_stellar.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.stellar",
+        "Alert with close, high-score match should be stellar"
+    );
+
+    // Test case 2: No ZTF match + hosted LSPSC → "no-ztf-match.hosted"
+    // nearest match has score < 0.5
+    let cross_matches = create_lspsc_cross_matches(Some(2.0), Some(0.3), false);
+    let alert_hosted = create_mock_enriched_lsst_alert_with_matches(
+        9876543211,
+        "LSST24aaaaaab",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        None,
+        None,
+        None,
+    );
+    let category = alert_hosted.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.hosted",
+        "Alert with low-score match should be hosted"
+    );
+
+    // Test case 3: No ZTF match + hostless LSPSC → "no-ztf-match.hostless"
+    // distance > 1.0 AND all scores > 0.5 (no hosted criteria met)
+    let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
+    let alert_hostless = create_mock_enriched_lsst_alert_with_matches(
+        9876543212,
+        "LSST24aaaaaac",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        None,
+        None,
+        None,
+    );
+    let category = alert_hostless.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.hostless",
+        "Alert with distant, high-score match should be hostless"
+    );
+
+    // Test case 4: No ZTF match + no matches + in footprint → "no-ztf-match.hostless"
+    let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
+        9876543213,
+        "LSST24aaaaaad",
+        0.8,
+        false,
+        false,
+        None,
+        None, // No ZTF survey match
+        None,
+        None,
+    );
+    let category = alert_no_matches.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.hostless",
+        "Alert with no matches but in footprint should be hostless"
+    );
+
+    // Test case 5: ZTF match + stellar LSPSC → "ztf-match.stellar"
+    let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaaa".to_string(),
+            ra: 180.0,
+            dec: 0.0,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_stellar = create_mock_enriched_lsst_alert_with_matches(
+        9876543214,
+        "LSST24aaaaaae",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches,
+        None,
+        None,
+    );
+    let category = alert_ztf_stellar.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.stellar",
+        "Alert with ZTF match and stellar LSPSC should be ztf-match.stellar"
+    );
+
+    // Test case 6: ZTF match + hosted LSPSC → "ztf-match.hosted"
+    let cross_matches = create_lspsc_cross_matches(Some(2.0), Some(0.3), false);
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaab".to_string(),
+            ra: 180.1,
+            dec: 0.1,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_hosted = create_mock_enriched_lsst_alert_with_matches(
+        9876543215,
+        "LSST24aaaaaaf",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches,
+        None,
+        None,
+    );
+    let category = alert_ztf_hosted.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.hosted",
+        "Alert with ZTF match and hosted LSPSC should be ztf-match.hosted"
+    );
+
+    // Test case 7: ZTF match + hostless LSPSC → "ztf-match.hostless"
+    let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaac".to_string(),
+            ra: 180.2,
+            dec: 0.2,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_hostless = create_mock_enriched_lsst_alert_with_matches(
+        9876543216,
+        "LSST24aaaaaag",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches,
+        None,
+        None,
+    );
+    let category = alert_ztf_hostless.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.hostless",
+        "Alert with ZTF match and hostless LSPSC should be ztf-match.hostless"
+    );
+
+    // Test case 8: ZTF match + no LSPSC + in footprint → "ztf-match.hostless"
+    let survey_matches = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaad".to_string(),
+            ra: 180.5,
+            dec: 0.5,
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let alert_ztf_unknown = create_mock_enriched_lsst_alert_with_matches(
+        9876543217,
+        "LSST24aaaaaah",
+        0.8,
+        false,
+        false,
+        None, // No LSPSC cross-matches
+        survey_matches,
+        None,
+        None,
+    );
+    let category = alert_ztf_unknown.compute_babamul_category();
+    assert_eq!(
+        category, "ztf-match.hostless",
+        "Alert with ZTF match but no LSPSC and in footprint should be ztf-match.hostless"
+    );
+
+    // Test case 9: No LSPSC + no ZTF match + out of footprint → "unknown"
+    let alert_unknown = create_mock_enriched_lsst_alert_with_matches(
+        9876543218,
+        "LSST24aaaaaai",
+        0.8,
+        false,
+        false,
+        Some(std::collections::HashMap::new()), // No matches
+        None,                                   // No ZTF survey match
+        Some(265.05),                           // RA out of footprint
+        Some(-32.25),                           // Dec out of footprint
+    );
+    let category = alert_unknown.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.unknown",
+        "Alert with no matches and no ZTF match should be unknown"
+    );
+
+    // Test case 10: LSPSC exists but empty + no ZTF match + out of footprint → "unknown"
+    let alert_empty_lspsc = create_mock_enriched_lsst_alert_with_matches(
+        9876543219,
+        "LSST24aaaaaaj",
+        0.8,
+        false,
+        false,
+        Some(std::collections::HashMap::new()), // Empty LSPSC matches
+        None,                                   // No ZTF survey match
+        Some(265.05),                           // RA out of footprint
+        Some(-32.25),                           // Dec out of footprint
+    );
+    let category = alert_empty_lspsc.compute_babamul_category();
+    assert_eq!(
+        category, "no-ztf-match.unknown",
+        "Alert with empty LSPSC matches and no ZTF match should be unknown"
+    );
+}
+
 #[tokio::test]
 async fn test_babamul_process_ztf_alerts() {
     use boom::enrichment::babamul::Babamul;
@@ -223,13 +542,16 @@ async fn test_babamul_process_lsst_alerts() {
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
+    let topic = "babamul.lsst.no-ztf-match.hostless";
 
     // Delete the topic before the test to ensure a clean state
-    delete_kafka_topic("babamul.lsst.none", &config).await;
+    delete_kafka_topic(topic, &config).await;
 
     // Create mock enriched LSST alerts with good reliability and no flags
-    let alert1 = create_mock_enriched_lsst_alert(9876543210, "LSST24aaaaaaa", 0.8, false, false);
-    let alert2 = create_mock_enriched_lsst_alert(9876543211, "LSST24aaaaaab", 0.9, false, false);
+    let alert1 =
+        create_mock_enriched_lsst_alert(9876543210, "LSST24aaaaaaa", 0.8, false, false, None, None);
+    let alert2 =
+        create_mock_enriched_lsst_alert(9876543211, "LSST24aaaaaab", 0.9, false, false, None, None);
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -240,7 +562,6 @@ async fn test_babamul_process_lsst_alerts() {
     );
 
     // Consume messages from Kafka topic
-    let topic = "babamul.lsst.none";
     let messages = consume_kafka_messages(topic, 2, &config).await;
     assert_eq!(messages.len(), 2, "Expected 2 messages in topic {}", topic);
 }
@@ -253,8 +574,10 @@ async fn test_babamul_filters_low_reliability() {
     let babamul = Babamul::new(&config);
 
     // Create alerts with low reliability (should be filtered out)
-    let alert1 = create_mock_enriched_lsst_alert(9876543212, "LSST24aaaaaac", 0.3, false, false);
-    let alert2 = create_mock_enriched_lsst_alert(9876543213, "LSST24aaaaaad", 0.4, false, false);
+    let alert1 =
+        create_mock_enriched_lsst_alert(9876543212, "LSST24aaaaaac", 0.3, false, false, None, None);
+    let alert2 =
+        create_mock_enriched_lsst_alert(9876543213, "LSST24aaaaaad", 0.4, false, false, None, None);
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -284,7 +607,8 @@ async fn test_babamul_filters_rocks() {
 
     // Create alerts marked as rocks (should be filtered out)
     let ztf_rock = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", true);
-    let lsst_rock = create_mock_enriched_lsst_alert(9876543214, "LSST24aaaaaae", 0.9, false, true);
+    let lsst_rock =
+        create_mock_enriched_lsst_alert(9876543214, "LSST24aaaaaae", 0.9, false, true, None, None);
 
     // Process the alerts
     let ztf_result = babamul.process_ztf_alerts(vec![ztf_rock]).await;
@@ -317,7 +641,8 @@ async fn test_babamul_filters_pixel_flags() {
     let babamul = Babamul::new(&config);
 
     // Create LSST alert with pixel_flags set (should be filtered out)
-    let alert = create_mock_enriched_lsst_alert(9876543215, "LSST24aaaaaaf", 0.9, true, false);
+    let alert =
+        create_mock_enriched_lsst_alert(9876543215, "LSST24aaaaaaf", 0.9, true, false, None, None);
 
     let result = babamul.process_lsst_alerts(vec![alert]).await;
     assert!(result.is_ok());
@@ -344,9 +669,16 @@ async fn test_babamul_lsst_with_ztf_match() {
     use mongodb::bson::doc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    let topic = "babamul.lsst.ztf-match.hostless";
+
     let db = boom::conf::get_test_db().await;
+    // Ensure the LSPSC catalog collection exists for Babamul validation
+    db.collection::<mongodb::bson::Document>("LSPSC")
+        .insert_one(doc! {"_init": true})
+        .await
+        .ok();
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    delete_kafka_topic("babamul.lsst.none", &config).await;
+    delete_kafka_topic(topic, &config).await;
     let now = Time::now().to_jd();
 
     // Use unique IDs based on current timestamp to avoid collisions
@@ -450,8 +782,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         dia_source.detector = 1;
         dia_source.dia_object_id = Some(987654321);
         dia_source.midpoint_mjd_tai = 60000.5;
-        dia_source.ra = 180.0;
-        dia_source.dec = 0.0;
+        dia_source.ra = 150.0;
+        dia_source.dec = 30.0;
         dia_source.psf_flux = Some(1000.0);
         dia_source.psf_flux_err = Some(10.0);
         dia_source.ap_flux = Some(1100.0);
@@ -577,7 +909,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     // Verify that the Babamul message was published - since the alert passed enrichment
     // with good reliability and no pixel flags or rock flag, it should be sent to Babamul
     // Fetch a few messages to tolerate leftover topic data and search for our alert
-    let messages = consume_kafka_messages("babamul.lsst.none", 3, &config).await;
+    let messages = consume_kafka_messages(topic, 3, &config).await;
     assert!(
         !messages.is_empty(),
         "Expected at least one Babamul message with enriched alert containing matches"
@@ -716,8 +1048,8 @@ async fn test_babamul_ztf_with_lsst_match() {
         dia.detector = 1;
         dia.dia_object_id = Some(42);
         dia.midpoint_mjd_tai = 60000.5;
-        dia.ra = 180.0;
-        dia.dec = 0.0;
+        dia.ra = 150.0;
+        dia.dec = 30.0;
         dia.psf_flux = Some(1200.0);
         dia.psf_flux_err = Some(12.0);
         dia.ap_flux = Some(1250.0);

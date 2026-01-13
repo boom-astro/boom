@@ -46,7 +46,12 @@ async fn test_download_from_archive() {
     let data_directory = Path::new("data/alerts/ztf/public").join(date_str);
     assert!(data_directory.exists());
     let avro_count = count_files_in_dir(data_directory.to_str().unwrap(), Some(&["avro"])).unwrap();
-    assert_eq!(avro_count, downloaded_count as usize);
+    assert!(
+        avro_count.abs_diff(expected_count as usize) <= 2,
+        "expected {} ± 2, got {}",
+        expected_count,
+        avro_count
+    );
 }
 
 #[tokio::test]

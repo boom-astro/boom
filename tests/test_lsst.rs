@@ -163,6 +163,7 @@ async fn test_enrich_lsst_alert() {
     let properties = alert.get_document("properties").unwrap();
     assert_eq!(properties.get_bool("rock").unwrap(), false);
     assert_eq!(properties.get_bool("stationary").unwrap(), false);
+    assert_eq!(properties.get_bool("star").is_ok(), true);
     // the properties also include "photstats, a document with bands as keys and
     // as values the rate of evolution (mag/day) before and after peak
     let photstats = properties.get_document("photstats").unwrap();

@@ -92,7 +92,7 @@ services:
       timeout: 5s
       retries: 3
   broker:
-    image: apache/kafka:latest
+    image: apache/kafka:4.1.1
     hostname: broker
     ports:
       - "9092:9092"
@@ -117,6 +117,9 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 15
+      # Limit heap + use G1GC with fewer threads (auto-tuned based on heap size)
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+      KAFKA_OPTS: "-Djava.security.egd=file:/dev/./urandom"
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
@@ -199,4 +202,5 @@ services:
         condition: service_healthy
     volumes:
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-      - ${PWD}/data/models:/app/data/models
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
