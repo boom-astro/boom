@@ -82,9 +82,39 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     const [domain, setDomain] = useState(initialDomain);
     useEffect(() => setDomain(initialDomain), [initialDomain.x0, initialDomain.x1, initialDomain.y0, initialDomain.y1]);
 
-    // hover state from legend (same semantics as centroid plot)
-    const [hoveredBand, setHoveredBand] = useState<string | null>(null);
+    const [hiddenBands, setHiddenBands] = useState<Set<string>>(new Set());
     const [dialogOpen, setDialogOpen] = useState(false);
+
+    const handleLegendClick = (band: string) => {
+        setHiddenBands(prev => {
+            const next = new Set(prev);
+            if (next.has(band)) {
+                next.delete(band);
+            } else {
+                next.add(band);
+            }
+            return next;
+        });
+    };
+
+    const handleLegendDoubleClick = (band: string) => {
+        const visibleBands = bands.filter(b => !hiddenBands.has(b));
+        if (visibleBands.length === 1 && visibleBands[0] === band) {
+            // reset to show all bands
+            setHiddenBands(new Set());
+        } else {
+            // Hide all bands except this one
+            setHiddenBands(new Set(bands.filter(b => b !== band)));
+        }
+    };
+
+    // helper to get band state
+    const getBandState = (band: string | undefined) => {
+        const bandKey = String(band ?? 'default').toLowerCase();
+        const isHidden = hiddenBands.has(bandKey);
+        const color = toColor(band);
+        return { bandKey, isHidden, color };
+    };
 
     // sizing
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -270,21 +300,18 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                     <div className="flex items-center justify-between">
                         <div className="text-sm font-medium pb-2">Photometry</div>
                         <div className="flex items-center gap-3">
-                            {bands.map(b => {
-                                const isActiveLegend = !hoveredBand || hoveredBand === b;
-                                return (
+                            {bands.map(b =>
                                 <div
                                     key={`legend-${b}`}
                                     className="flex items-center gap-2 text-xs cursor-pointer select-none"
-                                    onMouseEnter={() => setHoveredBand(b)}
-                                    onMouseLeave={() => setHoveredBand(null)}
-                                    style={{ opacity: isActiveLegend ? 1 : 0.12, transition: 'opacity 200ms ease' }}
+                                    onClick={() => handleLegendClick(b)}
+                                    onDoubleClick={() => handleLegendDoubleClick(b)}
+                                    style={{ opacity: hiddenBands.has(b) ? 0.12 : 1, transition: 'opacity 200ms ease' }}
                                 >
                                     <div className="w-3 h-3 rounded" style={{ backgroundColor: toColor(b) }} />
                                     <div className="text-xs text-gray-600 dark:text-gray-300">{b.toUpperCase()}</div>
                                 </div>
-                                );
-                            })}
+                            )}
                             <button onClick={() => setDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
                                 <Maximize2 className="w-4 h-4 text-gray-600" />
                             </button>
@@ -337,36 +364,34 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                         {/* points: detections - error bars with clipping */}
                         <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
                             {detections.map((pt, i) => {
+                                const { bandKey, isHidden, color } = getBandState(pt.band);
+                                if (isHidden) return null;
                                 const px = xToPixel(pt.t);
-                                const bandKey = String(pt.band ?? 'default').toLowerCase();
-                                const isActive = !hoveredBand || hoveredBand === bandKey;
                                 const sigma = Number(pt.sigma);
                                 const hasSigma = Number.isFinite(sigma) && sigma > 0;
-                                const color = toColor(pt.band);
                                 const capW = 6;
                                 return hasSigma ? (
                                     <g key={`errbar-${i}-${bandKey}`}>
-                                        <line x1={px} x2={px} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag - sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag + sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                        <line x1={px} x2={px} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag - sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag + sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
                                     </g>
                                 ) : null;
                             })}
 
                             {/* non-detections as downward triangles */}
                             {nondetectionsSeries.map((pt, i) => {
+                                const { bandKey, isHidden, color } = getBandState(pt.band);
+                                if (isHidden) return null;
                                 const px = xToPixel(pt.t);
                                 const py = yToPixel(pt.mag);
-                                const bandKey = String(pt.band ?? 'default').toLowerCase();
-                                const isActive = !hoveredBand || hoveredBand === bandKey;
-                                const sizeTri = isActive ? 5 : 4;
-                                const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                                const path = `${px - 5},${py - 1} ${px + 5},${py - 1} ${px},${py + 5}`;
                                 return (
                                     <polygon
                                         key={`nd-vis-${i}-${bandKey}`}
                                         points={path}
-                                        fill={toColor(pt.band)}
-                                        style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease' }}
+                                        fill={color}
+                                        style={{ opacity: 0.95, transition: 'opacity 200ms ease' }}
                                     />
                                 );
                             })}
@@ -386,11 +411,10 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
 
                         {/* Interactive circles and polygons - rendered after overlay so they're on top */}
                         {detections.map((pt, i) => {
+                            const { bandKey, isHidden, color } = getBandState(pt.band);
+                            if (isHidden) return null;
                             const px = xToPixel(pt.t);
                             const py = yToPixel(pt.mag);
-                            const bandKey = String(pt.band ?? 'default').toLowerCase();
-                            const isActive = !hoveredBand || hoveredBand === bandKey;
-                            const color = toColor(pt.band);
                             return (
                                 <g key={`d-hit-${i}-${bandKey}`}>
                                     {/* invisible hit area */}
@@ -422,9 +446,9 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     <circle
                                         cx={px}
                                         cy={py}
-                                        r={isActive ? 4 : 2}
+                                        r={4}
                                         fill={color}
-                                        style={{ opacity: isActive ? 1 : 0.12, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
+                                        style={{ opacity: 1, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
                                     />
                                 </g>
                             );
@@ -432,12 +456,11 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
 
                         {/* Interactive non-detection polygons */}
                         {nondetectionsSeries.map((pt, i) => {
+                            const { bandKey, isHidden, color } = getBandState(pt.band);
+                            if (isHidden) return null;
                             const px = xToPixel(pt.t);
                             const py = yToPixel(pt.mag);
-                            const bandKey = String(pt.band ?? 'default').toLowerCase();
-                            const isActive = !hoveredBand || hoveredBand === bandKey;
-                            const sizeTri = isActive ? 5 : 4;
-                            const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                            const path = `${px - 5},${py - 1} ${px + 5},${py - 1} ${px},${py + 5}`;
                             return (
                                 <g key={`nd-hit-${i}-${bandKey}`}>
                                     {/* invisible hit area */}
@@ -468,8 +491,8 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     {/* visible polygon */}
                                     <polygon
                                         points={path}
-                                        fill={toColor(pt.band)}
-                                        style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
+                                        fill={color}
+                                        style={{ opacity: 0.95, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
                                     />
                                 </g>
                             );
@@ -512,7 +535,6 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             const dialogH = 600;
                             const dialogPlotW = dialogW - dialogPad.left - dialogPad.right;
                             const dialogPlotH = dialogH - dialogPad.top - dialogPad.bottom;
-                            
                             const xToPixelDialog = (t: number) => dialogPad.left + ((t - domain.x0) / (domain.x1 - domain.x0)) * dialogPlotW;
                             const yToPixelDialog = (mag: number) => dialogPad.top + ((mag - domain.y0) / (domain.y1 - domain.y0)) * dialogPlotH;
 
@@ -551,57 +573,53 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     {/* error bars */}
                                     <g clipPath="url(#plot-area-dialog)" style={{ pointerEvents: 'none' }}>
                                         {detections.map((pt, i) => {
+                                            const { bandKey, isHidden, color } = getBandState(pt.band);
+                                            if (isHidden) return null;
                                             const px = xToPixelDialog(pt.t);
-                                            const bandKey = String(pt.band ?? 'default').toLowerCase();
-                                            const isActive = !hoveredBand || hoveredBand === bandKey;
                                             const sigma = Number(pt.sigma);
                                             const hasSigma = Number.isFinite(sigma) && sigma > 0;
-                                            const color = toColor(pt.band);
                                             const capW = 8;
                                             return hasSigma ? (
                                                 <g key={`errbar-${i}-${bandKey}`}>
-                                                    <line x1={px} x2={px} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag - sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
-                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag + sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: isActive ? 0.9 : 0.12, transition: 'opacity 200ms ease' }} />
+                                                    <line x1={px} x2={px} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag - sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag + sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
                                                 </g>
                                             ) : null;
                                         })}
 
                                         {nondetectionsSeries.map((pt, i) => {
+                                            const { bandKey, isHidden, color } = getBandState(pt.band);
+                                            if (isHidden) return null;
                                             const px = xToPixelDialog(pt.t);
                                             const py = yToPixelDialog(pt.mag);
-                                            const bandKey = String(pt.band ?? 'default').toLowerCase();
-                                            const isActive = !hoveredBand || hoveredBand === bandKey;
-                                            const sizeTri = isActive ? 6 : 5;
-                                            const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                                            const path = `${px - 6},${py - 1} ${px + 6},${py - 1} ${px},${py + 6}`;
                                             return (
-                                                <polygon key={`nd-vis-${i}-${bandKey}`} points={path} fill={toColor(pt.band)} style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease' }} />
+                                                <polygon key={`nd-vis-${i}-${bandKey}`} points={path} fill={color} style={{ opacity: 0.95, transition: 'opacity 200ms ease' }} />
                                             );
                                         })}
                                     </g>
 
                                     {/* detection points */}
                                     {detections.map((pt, i) => {
+                                        const { bandKey, isHidden, color } = getBandState(pt.band);
+                                        if (isHidden) return null;
                                         const px = xToPixelDialog(pt.t);
                                         const py = yToPixelDialog(pt.mag);
-                                        const bandKey = String(pt.band ?? 'default').toLowerCase();
-                                        const isActive = !hoveredBand || hoveredBand === bandKey;
-                                        const color = toColor(pt.band);
                                         return (
-                                            <circle key={`d-${i}-${bandKey}`} cx={px} cy={py} r={isActive ? 5 : 3} fill={color} style={{ opacity: isActive ? 1 : 0.12, transition: 'opacity 200ms ease, r 120ms ease' }} />
+                                            <circle key={`d-${i}-${bandKey}`} cx={px} cy={py} r={5} fill={color} style={{ opacity: 1, transition: 'opacity 200ms ease, r 120ms ease' }} />
                                         );
                                     })}
 
                                     {/* non-detection points */}
                                     {nondetectionsSeries.map((pt, i) => {
+                                        const { bandKey, isHidden, color } = getBandState(pt.band);
+                                        if (isHidden) return null;
                                         const px = xToPixelDialog(pt.t);
                                         const py = yToPixelDialog(pt.mag);
-                                        const bandKey = String(pt.band ?? 'default').toLowerCase();
-                                        const isActive = !hoveredBand || hoveredBand === bandKey;
-                                        const sizeTri = isActive ? 6 : 5;
-                                        const path = `${px - sizeTri},${py - 1} ${px + sizeTri},${py - 1} ${px},${py + sizeTri}`;
+                                        const path = `${px - 6},${py - 1} ${px + 6},${py - 1} ${px},${py + 6}`;
                                         return (
-                                            <polygon key={`nd-${i}-${bandKey}`} points={path} fill={toColor(pt.band)} style={{ opacity: isActive ? 0.95 : 0.12, transition: 'opacity 200ms ease' }} />
+                                            <polygon key={`nd-${i}-${bandKey}`} points={path} fill={color} style={{ opacity: 0.95, transition: 'opacity 200ms ease' }} />
                                         );
                                     })}
                                 </>
