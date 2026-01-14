@@ -85,15 +85,6 @@ mod tests {
         }
     }
 
-    /// Helper function to generate a unique timestamp-based suffix
-    fn unique_suffix() -> String {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            .to_string()
-    }
-
     /// Test POST /babamul/signup
     #[actix_rt::test]
     async fn test_babamul_signup() {
@@ -112,7 +103,8 @@ mod tests {
         .await;
 
         // Generate a unique test email
-        let test_email = format!("test+{}@babamul.example.com", unique_suffix());
+        let id = uuid::Uuid::new_v4().to_string();
+        let test_email = format!("test+{}@babamul.example.com", id);
 
         // Create a signup request
         let req = test::TestRequest::post()
@@ -232,7 +224,8 @@ mod tests {
         .await;
 
         // Generate a unique test email
-        let test_email = format!("test+{}@babamul.example.com", unique_suffix());
+        let id = uuid::Uuid::new_v4().to_string();
+        let test_email = format!("test+{}@babamul.example.com", id);
 
         // First, sign up
         let req = test::TestRequest::post()
@@ -479,7 +472,7 @@ mod tests {
         // Insert test cutout data with unique ID
         let cutouts_collection =
             database.collection::<boom::alert::AlertCutout>("ZTF_alerts_cutouts");
-        let test_candid: i64 = unique_suffix().parse::<i64>().unwrap() + 99999;
+        let test_candid: i64 = uuid::Uuid::new_v4().as_u128() as i64;
 
         let cutout = boom::alert::AlertCutout {
             candid: test_candid,

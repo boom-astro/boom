@@ -305,7 +305,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             HashMap::new()
         };
 
-        if candid_to_cutouts.len() != alerts.len() {
+        if self.babamul.is_some() && candid_to_cutouts.len() != alerts.len() {
             warn!(
                 "only {} cutouts fetched from {} candids",
                 candid_to_cutouts.len(),
