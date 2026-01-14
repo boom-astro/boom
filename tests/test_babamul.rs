@@ -488,15 +488,15 @@ fn test_compute_babamul_category() {
 fn test_compute_babamul_category_ztf() {
     use boom::enrichment::ZtfSurveyMatches;
 
-    // Test case 1: No LSST match + not stellar + sgscore1 > 0.5 → "no-lsst-match.unknown"
+    // Test case 1: No LSST match + not stellar + sgscore1 > 0.5 → "no-lsst-match.hostless"
     let mut alert_no_lsst = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
     alert_no_lsst.survey_matches = None;
     alert_no_lsst.properties.star = false;
     alert_no_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
     let category = alert_no_lsst.compute_babamul_category();
     assert_eq!(
-        category, "no-lsst-match.unknown",
-        "ZTF alert with no LSST match, not stellar, and high sgscore should be no-lsst-match.unknown"
+        category, "no-lsst-match.hostless",
+        "ZTF alert with no LSST match, not stellar, and high sgscore should be no-lsst-match.hostless"
     );
 
     // Test case 2: No LSST match + stellar → "no-lsst-match.stellar"
@@ -510,7 +510,7 @@ fn test_compute_babamul_category_ztf() {
         "ZTF alert with no LSST match and stellar should be no-lsst-match.stellar"
     );
 
-    // Test case 3: LSST match + not stellar + sgscore1 > 0.5 → "lsst-match.unknown"
+    // Test case 3: LSST match + not stellar + sgscore1 > 0.5 → "lsst-match.hostless"
     let mut alert_lsst = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", false);
     alert_lsst.survey_matches = Some(ZtfSurveyMatches {
         lsst: Some(boom::enrichment::LsstMatch {
@@ -525,8 +525,8 @@ fn test_compute_babamul_category_ztf() {
     alert_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
     let category = alert_lsst.compute_babamul_category();
     assert_eq!(
-        category, "lsst-match.unknown",
-        "ZTF alert with LSST match, not stellar, and high sgscore should be lsst-match.unknown"
+        category, "lsst-match.hostless",
+        "ZTF alert with LSST match, not stellar, and high sgscore should be lsst-match.hostless"
     );
 
     // Test case 4: LSST match + stellar → "lsst-match.stellar"
@@ -577,15 +577,29 @@ fn test_compute_babamul_category_ztf() {
         "ZTF alert with LSST match, not stellar, and low sgscore should be lsst-match.hosted"
     );
 
-    // Test case 7: No sgscore1 (None) → defaults to unknown
-    let mut alert_no_sgscore = create_mock_enriched_ztf_alert(1234567896, "ZTF21aaaaaag", false);
-    alert_no_sgscore.survey_matches = None;
-    alert_no_sgscore.properties.star = false;
-    alert_no_sgscore.candidate.candidate.sgscore1 = None;
-    let category = alert_no_sgscore.compute_babamul_category();
+    // Test case 7: Negative sgscore (placeholder) should be ignored → "no-lsst-match.hostless"
+    let mut alert_neg_sgscore = create_mock_enriched_ztf_alert(1234567896, "ZTF21aaaaaag", false);
+    alert_neg_sgscore.survey_matches = None;
+    alert_neg_sgscore.properties.star = false;
+    alert_neg_sgscore.candidate.candidate.sgscore1 = Some(-99.0); // Placeholder value
+    alert_neg_sgscore.candidate.candidate.sgscore2 = Some(-99.0);
+    alert_neg_sgscore.candidate.candidate.sgscore3 = Some(-99.0);
+    let category = alert_neg_sgscore.compute_babamul_category();
     assert_eq!(
-        category, "no-lsst-match.unknown",
-        "ZTF alert with no sgscore1 should default to unknown"
+        category, "no-lsst-match.hostless",
+        "ZTF alert with negative sgscores (placeholders) should be hostless"
+    );
+
+    // Test case 8: sgscore2 or sgscore3 < 0.5 should mark as hosted
+    let mut alert_sgscore2 = create_mock_enriched_ztf_alert(1234567897, "ZTF21aaaaaah", false);
+    alert_sgscore2.survey_matches = None;
+    alert_sgscore2.properties.star = false;
+    alert_sgscore2.candidate.candidate.sgscore1 = Some(0.8); // High score (not hosted by sgscore1)
+    alert_sgscore2.candidate.candidate.sgscore2 = Some(0.3); // Low score (hosted)
+    let category = alert_sgscore2.compute_babamul_category();
+    assert_eq!(
+        category, "no-lsst-match.hosted",
+        "ZTF alert with low sgscore2 should be hosted even if sgscore1 is high"
     );
 }
 
@@ -598,7 +612,7 @@ async fn test_babamul_process_ztf_alerts() {
     let babamul = Babamul::new(&config);
 
     // Expected topic for non-stellar ZTF alerts without LSST match
-    let topic = "babamul.ztf.no-lsst-match.unknown";
+    let topic = "babamul.ztf.no-lsst-match.hostless";
 
     // Create unique objectIds to avoid matching stale messages
     let ts = SystemTime::now()

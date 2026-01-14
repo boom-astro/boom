@@ -219,15 +219,25 @@ impl EnrichedZtfAlert {
             return category + "stellar";
         }
 
-        // Use star-galaxy score to determine if hosted
-        // sgscore1 <= 0.5 suggests galaxy-like, indicating the alert is likely hosted
-        let sgscore1 = self.candidate.candidate.sgscore1.unwrap_or(1.0);
-        if sgscore1 <= 0.5 {
-            return category + "hosted";
+        // Check star-galaxy scores (sgscore1, sgscore2, sgscore3) to determine if hosted
+        // TODO: Confirm the catalog has full ZTF footprint coverage
+        // Scores < 0.5 (and >= 0) indicate galaxy-like objects (hosted transients)
+        // Negative values (-99, etc.) are ZTF pipeline placeholders for "no match"
+        let sgscores = [
+            self.candidate.candidate.sgscore1,
+            self.candidate.candidate.sgscore2,
+            self.candidate.candidate.sgscore3,
+        ];
+
+        for score in sgscores.iter().flatten() {
+            // Only consider valid scores (>= 0)
+            if *score >= 0.0 && *score < 0.5 {
+                return category + "hosted";
+            }
         }
 
-        // Otherwise, we can't definitively classify it
-        category + "unknown"
+        // Not a star and no valid sgscores, so classify as hostless
+        category + "hostless"
     }
 }
 
