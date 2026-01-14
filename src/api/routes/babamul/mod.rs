@@ -312,34 +312,50 @@ async fn create_kafka_user_and_acls(
 
     // if there is already a user with this name, we throw an error
     // (users should be unique)
-    let output = Command::new(configs_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--describe")
-        .arg("--entity-type")
-        .arg("users")
-        .arg("--entity-name")
-        .arg(kafka_username)
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
+    // Use spawn_blocking to prevent blocking the async runtime
+    let configs_cli_str = configs_cli.to_string();
+    let broker_str = broker.to_string();
+    let kafka_username_str = kafka_username.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(&configs_cli_str)
+            .arg("--bootstrap-server")
+            .arg(&broker_str)
+            .arg("--describe")
+            .arg("--entity-type")
+            .arg("users")
+            .arg("--entity-name")
+            .arg(&kafka_username_str)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("Failed to join task: {}", e))?
+    .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.contains(&format!("User: {}", kafka_username)) {
         return Err(format!("Kafka user '{}' already exists", kafka_username));
     }
 
     // Create or update SCRAM user credentials (idempotent: --alter will create or update)
-    let output = Command::new(configs_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--alter")
-        .arg("--entity-type")
-        .arg("users")
-        .arg("--entity-name")
-        .arg(kafka_username)
-        .arg("--add-config")
-        .arg(format!("SCRAM-SHA-512=[password={}]", kafka_password))
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
+    let configs_cli_str = configs_cli.to_string();
+    let broker_str = broker.to_string();
+    let kafka_username_str = kafka_username.to_string();
+    let kafka_password_str = kafka_password.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(&configs_cli_str)
+            .arg("--bootstrap-server")
+            .arg(&broker_str)
+            .arg("--alter")
+            .arg("--entity-type")
+            .arg("users")
+            .arg("--entity-name")
+            .arg(&kafka_username_str)
+            .arg("--add-config")
+            .arg(format!("SCRAM-SHA-512=[password={}]", &kafka_password_str))
+            .output()
+    })
+    .await
+    .map_err(|e| format!("Failed to join task: {}", e))?
+    .map_err(|e| format!("Failed to execute {}: {}", configs_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -347,20 +363,27 @@ async fn create_kafka_user_and_acls(
     }
 
     // Grant READ permission on babamul.* topics (idempotent: kafka-acls --add ignores duplicates)
-    let output = Command::new(acls_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--allow-principal")
-        .arg(format!("User:{}", kafka_username))
-        .arg("--add")
-        .arg("--operation")
-        .arg("READ")
-        .arg("--topic")
-        .arg("babamul.")
-        .arg("--resource-pattern-type")
-        .arg("prefixed")
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
+    let acls_cli_str = acls_cli.to_string();
+    let broker_str = broker.to_string();
+    let kafka_username_str = kafka_username.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(&acls_cli_str)
+            .arg("--bootstrap-server")
+            .arg(&broker_str)
+            .arg("--allow-principal")
+            .arg(format!("User:{}", &kafka_username_str))
+            .arg("--add")
+            .arg("--operation")
+            .arg("READ")
+            .arg("--topic")
+            .arg("babamul.")
+            .arg("--resource-pattern-type")
+            .arg("prefixed")
+            .output()
+    })
+    .await
+    .map_err(|e| format!("Failed to join task: {}", e))?
+    .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -368,20 +391,27 @@ async fn create_kafka_user_and_acls(
     }
 
     // Grant DESCRIBE permission on babamul.* topics (idempotent)
-    let output = Command::new(acls_cli)
-        .arg("--bootstrap-server")
-        .arg(&broker)
-        .arg("--allow-principal")
-        .arg(format!("User:{}", kafka_username))
-        .arg("--add")
-        .arg("--operation")
-        .arg("DESCRIBE")
-        .arg("--topic")
-        .arg("babamul.")
-        .arg("--resource-pattern-type")
-        .arg("prefixed")
-        .output()
-        .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
+    let acls_cli_str = acls_cli.to_string();
+    let broker_str = broker.to_string();
+    let kafka_username_str = kafka_username.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(&acls_cli_str)
+            .arg("--bootstrap-server")
+            .arg(&broker_str)
+            .arg("--allow-principal")
+            .arg(format!("User:{}", &kafka_username_str))
+            .arg("--add")
+            .arg("--operation")
+            .arg("DESCRIBE")
+            .arg("--topic")
+            .arg("babamul.")
+            .arg("--resource-pattern-type")
+            .arg("prefixed")
+            .output()
+    })
+    .await
+    .map_err(|e| format!("Failed to join task: {}", e))?
+    .map_err(|e| format!("Failed to execute {}: {}", acls_cli, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -869,7 +899,9 @@ pub async fn delete_kafka_credential(
                     if let Err(e) = delete_kafka_credentials_and_acls(
                         &credential.kafka_username,
                         &config.kafka.producer.server,
-                    ) {
+                    )
+                    .await
+                    {
                         eprintln!(
                             "Failed to delete Kafka user/ACLs for {}: {}",
                             credential.kafka_username, e

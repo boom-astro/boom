@@ -35,7 +35,7 @@ pub async fn get_kafka_acls(
     if !current_user.is_admin {
         return response::forbidden("Access denied: Admins only");
     }
-    match crate::api::kafka::get_acls(&config.kafka.producer.server) {
+    match crate::api::kafka::get_acls(&config.kafka.producer.server).await {
         Ok(entries) => response::ok(
             "Kafka ACLs retrieved successfully",
             serde_json::to_value(entries).unwrap(),
@@ -73,7 +73,8 @@ pub async fn delete_kafka_credentials(
     let kafka_username = &path.kafka_username;
 
     // Delete Kafka credentials and ACLs
-    if let Err(e) = delete_kafka_credentials_and_acls(kafka_username, &config.kafka.producer.server)
+    if let Err(e) =
+        delete_kafka_credentials_and_acls(kafka_username, &config.kafka.producer.server).await
     {
         return response::internal_error(&format!("Error deleting Kafka credentials: {}", e));
     }
