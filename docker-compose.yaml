@@ -58,7 +58,7 @@ services:
     networks:
       - boom
     volumes:
-      - rustfs_data:/data
+      - ${BOOM_OBJECT_STORAGE_VOLUME:-rustfs_data}:/data
     healthcheck:
       test:
         [
