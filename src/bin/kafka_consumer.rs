@@ -57,6 +57,11 @@ struct Cli {
     #[arg(long, env = "BOOM_CONSUMER_INSTANCE_ID")]
     instance_id: Option<Uuid>,
 
+    /// Exit on end of file (for testing purposes)
+    /// Not used in production
+    #[arg(long, default_value_t = false)]
+    exit_on_eof: bool,
+
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
     deployment_env: String,
@@ -79,6 +84,12 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     .and_utc()
     .timestamp();
 
+    let exit_on_eof = if args.deployment_env == "dev" {
+        args.exit_on_eof
+    } else {
+        false
+    };
+
     match args.survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
@@ -92,7 +103,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    false,
+                    exit_on_eof,
                     &args.config,
                 )
                 .await
@@ -113,7 +124,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    false,
+                    exit_on_eof,
                     &args.config,
                 )
                 .await
@@ -134,7 +145,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    false,
+                    exit_on_eof,
                     &args.config,
                 )
                 .await
