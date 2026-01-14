@@ -10,8 +10,11 @@ apache-avro = { version = "0.21.0", features = ["snappy", "derive"] }
 apache-avro-derive = "0.21.0"
 apache-avro-macros = { version = "1", path = "apache-avro-macros" }
 async-trait = "0.1.89"
+aws-config = "1.8.11"
+aws-sdk-s3 = "1.116.0"
 base64 = "0.22.1"
 bcrypt = "0.17.1"
+bincode = { version = "2.0.1", features = ["serde"] }
 cdshealpix = "0.7.3"
 chrono = "0.4.42"
 clap = { version = "4", features = ["derive", "env"] }
@@ -38,6 +41,7 @@ redis = { version = "0.32.7", features = ["tokio-comp"] }
 reqwest = { version = "0.12.24", features = ["json", "stream"] }
 schemars = "1.0.4"
 serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11.19"
 serde_json = "1.0.145"
 serde_with = "3.15.0"
 tempfile = "3.23.0"

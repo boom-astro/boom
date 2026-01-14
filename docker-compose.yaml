@@ -2,6 +2,7 @@ volumes:
   mongodb:
   valkey:
   kafka_data:
+  rustfs_data:
 
 networks:
   boom:
@@ -39,6 +40,36 @@ services:
       test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
       interval: 10s
       start_period: 20s
+  rustfs:
+    image: rustfs/rustfs:latest
+    hostname: rustfs
+    restart: unless-stopped
+    expose:
+      - "9000"
+      - "9001"
+    environment:
+      - RUSTFS_STORAGE_PATH=/data
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadminsecret
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_SERVER_DOMAINS=rustfs
+      - RUSTFS_CONSOLE_ENABLE=true
+    networks:
+      - boom
+    volumes:
+      - ${BOOM_OBJECT_STORAGE_VOLUME:-rustfs_data}:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh", "-c",
+          "curl -f http://0.0.0.0:9000/health && curl -f http://0.0.0.0:9001/rustfs/console/health"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
   valkey:
     image: valkey/valkey:7.2.6
     environment:

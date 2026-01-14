@@ -1,6 +1,6 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus, LSST_ZTF_XMATCH_RADIUS, ZTF_DEC_RANGE},
-    conf::get_test_db,
+    conf::{get_test_cutout_storage, get_test_db},
     enrichment::{EnrichmentWorker, LsstEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, LsstFilterWorker},
     utils::{
@@ -46,18 +46,10 @@ async fn test_process_lsst_alert() {
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
-    let cutout_collection_name = "LSST_alerts_cutouts";
-    let cutouts = db
-        .collection::<mongodb::bson::Document>(cutout_collection_name)
-        .find_one(filter.clone())
-        .await
-        .unwrap();
-    assert!(cutouts.is_some());
-    let cutouts = cutouts.unwrap();
-    assert_eq!(cutouts.get_i64("_id").unwrap(), candid);
-    assert!(cutouts.contains_key("cutoutScience"));
-    assert!(cutouts.contains_key("cutoutTemplate"));
-    assert!(cutouts.contains_key("cutoutDifference"));
+    let cutout_storage = get_test_cutout_storage(&Survey::Lsst).await;
+    let cutouts = cutout_storage.retrieve_cutouts(candid).await.unwrap();
+    assert_eq!(cutouts.candid, candid);
+    assert_eq!(cutouts.object_id, object_id);
 
     // check that the aux collection was inserted
     let aux_collection_name = "LSST_alerts_aux";
@@ -82,7 +74,9 @@ async fn test_process_lsst_alert() {
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 0);
 
-    drop_alert_from_collections(candid, "LSST").await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Lsst)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

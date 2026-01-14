@@ -1,17 +1,18 @@
+use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
-use crate::enrichment::LsstMatch;
-use crate::utils::db::mongify;
-use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag,
+use crate::enrichment::{
+    babamul::{Babamul, EnrichedZtfAlert},
+    fetch_alerts,
+    models::{AcaiModel, BtsBotModel, Model},
+    EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
-use crate::{
-    alert::ZtfCandidate,
-    enrichment::{
-        fetch_alert_cutouts, fetch_alerts,
-        models::{AcaiModel, BtsBotModel, Model},
-        EnrichmentWorker, EnrichmentWorkerError,
+use crate::utils::{
+    cutouts::CutoutStorage,
+    db::mongify,
+    enums::Survey,
+    lightcurves::{
+        analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
+        PhotometryMag,
     },
 };
 use apache_avro_derive::AvroSchema;
@@ -337,7 +338,7 @@ pub struct ZtfEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
     acai_h_model: AcaiModel,
     acai_n_model: AcaiModel,
@@ -356,7 +357,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
-        let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
@@ -383,7 +384,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             alert_pipeline: create_ztf_alert_pipeline(),
             acai_h_model,
             acai_n_model,
@@ -422,8 +423,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             return Ok(vec![]);
         }
 
-        let mut candid_to_cutouts =
-            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
+        let mut candid_to_cutouts = self
+            .alert_cutout_storage
+            .retrieve_multiple_cutouts(candids)
+            .await?;
 
         if candid_to_cutouts.len() != alerts.len() {
             warn!(
@@ -496,9 +499,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             if self.babamul.is_some() {
                 let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
                     alert,
-                    Some(cutouts.cutout_science),
-                    Some(cutouts.cutout_template),
-                    Some(cutouts.cutout_difference),
+                    Some(cutouts.science),
+                    Some(cutouts.template),
+                    Some(cutouts.difference),
                     properties,
                 );
                 enriched_alerts.push(enriched_alert);

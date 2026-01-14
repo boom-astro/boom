@@ -1,9 +1,10 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
 use crate::enrichment::{
-    fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
+    babamul::{Babamul, EnrichedLsstAlert},
+    fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
+use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
@@ -207,7 +208,7 @@ pub struct LsstEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
 }
@@ -220,7 +221,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let db = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("LSST_alerts");
-        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Lsst).await?;
 
         let input_queue = "LSST_alerts_enrichment_queue".to_string();
         let output_queue = "LSST_alerts_filter_queue".to_string();
@@ -266,7 +267,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
         })
@@ -301,7 +302,9 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         }
 
         let mut candid_to_cutouts = if self.babamul.is_some() {
-            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?
+            self.alert_cutout_storage
+                .retrieve_multiple_cutouts(candids)
+                .await?
         } else {
             HashMap::new()
         };
@@ -349,9 +352,9 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                     .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
                 let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
                     alert,
-                    Some(cutouts.cutout_science),
-                    Some(cutouts.cutout_template),
-                    Some(cutouts.cutout_difference),
+                    Some(cutouts.science),
+                    Some(cutouts.template),
+                    Some(cutouts.difference),
                     properties,
                 );
                 enriched_alerts.push(enriched_alert);

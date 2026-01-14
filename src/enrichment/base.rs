@@ -1,8 +1,8 @@
 use crate::{
-    alert::AlertCutout,
     conf::{self, AppConfig},
     enrichment::models::ModelError,
     utils::{
+        cutouts::CutoutStorageError,
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
@@ -78,6 +78,8 @@ pub enum EnrichmentWorkerError {
     Serialization(String),
     #[error("kafka error: {0}")]
     Kafka(String),
+    #[error("cutout storage error")]
+    CutoutStorageError(#[from] CutoutStorageError),
     #[error("configuration error: {0}")]
     ConfigurationError(String),
     #[error("Bad processing status code: {0}")]
@@ -137,51 +139,6 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
     }
 
     Ok(alerts)
-}
-
-#[instrument(skip_all, err)]
-pub async fn fetch_alert_cutouts(
-    candids: &[i64],
-    alert_cutout_collection: &mongodb::Collection<Document>,
-) -> Result<std::collections::HashMap<i64, AlertCutout>, EnrichmentWorkerError> {
-    let filter = doc! {
-        "_id": {"$in": candids}
-    };
-    let mut cursor = alert_cutout_collection.find(filter).await?;
-
-    let mut cutouts_map: std::collections::HashMap<i64, AlertCutout> =
-        std::collections::HashMap::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(document) => {
-                let candid = document.get_i64("_id")?;
-                let cutout_science = document
-                    .get_binary_generic("cutoutScience")
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-                let cutout_template = document
-                    .get_binary_generic("cutoutTemplate")
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-                let cutout_difference = document
-                    .get_binary_generic("cutoutDifference")
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-                let alert_cutout = AlertCutout {
-                    candid,
-                    cutout_science,
-                    cutout_template,
-                    cutout_difference,
-                };
-                cutouts_map.insert(candid, alert_cutout);
-            }
-            _ => {
-                continue;
-            }
-        }
-    }
-
-    Ok(cutouts_map)
 }
 
 #[tokio::main]

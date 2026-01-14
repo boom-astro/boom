@@ -1,8 +1,3 @@
-use futures::stream::StreamExt;
-use mongodb::bson::{doc, Document};
-use std::collections::HashMap;
-use tracing::{info, instrument};
-
 use crate::conf::AppConfig;
 use crate::filter::{
     build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
@@ -10,8 +5,13 @@ use crate::filter::{
     Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
     Origin, Photometry,
 };
+use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
 use crate::utils::enums::Survey;
+use futures::stream::StreamExt;
+use mongodb::bson::{doc, Document};
+use std::collections::HashMap;
+use tracing::{info, instrument};
 
 /// For a filter running on another survey (e.g., ZTF), determine if we need to
 /// fetch LSST auxiliary data (prv_candidates, fp_hists) based on the fields
@@ -113,6 +113,7 @@ pub fn insert_lsst_aux_pipeline_if_needed(
 pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
     alert_collection: &mongodb::Collection<Document>,
+    alert_cutout_storage: &CutoutStorage,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
@@ -139,14 +140,6 @@ pub async fn build_lsst_alerts(
             }
         },
         doc! {
-            "$lookup": {
-                "from": "LSST_alerts_cutouts",
-                "localField": "_id",
-                "foreignField": "_id",
-                "as": "cutouts"
-            }
-        },
-        doc! {
             "$project": {
                 "objectId": 1,
                 "jd": 1,
@@ -154,12 +147,14 @@ pub async fn build_lsst_alerts(
                 "dec": 1,
                 "prv_candidates": get_array_element("aux.prv_candidates"),
                 "fp_hists": get_array_element("aux.fp_hists"),
-                "cutoutScience": get_array_element("cutouts.cutoutScience"),
-                "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
-                "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
             }
         },
     ];
+
+    let mut candid_to_cutouts = alert_cutout_storage
+        .retrieve_multiple_cutouts(&candids)
+        .await
+        .unwrap();
 
     // Execute the aggregation pipeline
     let mut cursor = alert_collection.aggregate(pipeline).await?;
@@ -172,13 +167,6 @@ pub async fn build_lsst_alerts(
         let jd = alert_document.get_f64("jd")?;
         let ra = alert_document.get_f64("ra")?;
         let dec = alert_document.get_f64("dec")?;
-        let cutout_science = alert_document.get_binary_generic("cutoutScience")?.to_vec();
-        let cutout_template = alert_document
-            .get_binary_generic("cutoutTemplate")?
-            .to_vec();
-        let cutout_difference = alert_document
-            .get_binary_generic("cutoutDifference")?
-            .to_vec();
 
         // let's create the array of photometry
 
@@ -247,6 +235,8 @@ pub async fn build_lsst_alerts(
             });
         }
 
+        let cutouts = candid_to_cutouts.remove(&candid).unwrap();
+
         let alert = Alert {
             candid,
             object_id,
@@ -259,9 +249,9 @@ pub async fn build_lsst_alerts(
                 .unwrap_or_else(Vec::new),
             classifications,
             photometry,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
+            cutout_science: cutouts.science,
+            cutout_template: cutouts.template,
+            cutout_difference: cutouts.difference,
             survey: Survey::Lsst,
         };
         alerts_output.push(alert);
@@ -407,6 +397,7 @@ pub async fn build_lsst_filter_pipeline(
 
 pub struct LsstFilterWorker {
     alert_collection: mongodb::Collection<Document>,
+    alert_cutout_storage: CutoutStorage,
     input_queue: String,
     output_topic: String,
     filters: Vec<LoadedFilter>,
@@ -423,6 +414,7 @@ impl FilterWorker for LsstFilterWorker {
         let db: mongodb::Database = config.build_db().await?;
         let alert_collection = db.collection("LSST_alerts");
         let filter_collection = db.collection("filters");
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Lsst).await?;
 
         let input_queue = "LSST_alerts_filter_queue".to_string();
         let output_topic = "LSST_alerts_results".to_string();
@@ -431,6 +423,7 @@ impl FilterWorker for LsstFilterWorker {
 
         Ok(LsstFilterWorker {
             alert_collection,
+            alert_cutout_storage,
             input_queue,
             output_topic,
             filters,
@@ -504,7 +497,12 @@ impl FilterWorker for LsstFilterWorker {
             }
         }
 
-        let alerts = build_lsst_alerts(&results_map, &self.alert_collection).await?;
+        let alerts = build_lsst_alerts(
+            &results_map,
+            &self.alert_collection,
+            &self.alert_cutout_storage,
+        )
+        .await?;
         alerts_output.extend(alerts);
 
         Ok(alerts_output)
