@@ -588,7 +588,7 @@ impl ZtfEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
-        // make a multisurvey lightcurve if we have LSST matches
+        // make a multisurvey lightcurve if we have matches with other surveys (LSST for now)
         let multisurvey_photstats = if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
                 let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
