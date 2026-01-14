@@ -2,7 +2,7 @@ use crate::utils::enums::Survey;
 use futures::stream::{self, StreamExt};
 use serde::{de::Deserializer, Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum CutoutStorageError {
@@ -12,6 +12,8 @@ pub enum CutoutStorageError {
     BucketCreateFailed,
     #[error("cutout insert failed")]
     CutoutInsertFailed,
+    #[error("cutout already exists for candid {0}")]
+    CutoutAlreadyExists(i64),
     #[error("cutout retrieve failed")]
     CutoutRetrieveFailed,
     #[error("cutout delete failed")]
@@ -94,7 +96,7 @@ async fn create_bucket_if_not_exists(
     let buckets = match s3_client.list_buckets().send().await {
         Ok(b) => b,
         Err(e) => {
-            println!("Failed to list buckets: {:?}", e);
+            error!("Failed to list buckets: {:?}", e);
             return Err(CutoutStorageError::BucketListFailed);
         }
     };
@@ -159,7 +161,7 @@ async fn insert_alert_cutouts(
     {
         Ok(_) => Ok(()),
         Err(e) => {
-            println!("Failed to insert cutout for candid {}: {:?}", candid, e);
+            error!("Failed to insert cutout for candid {}: {:?}", candid, e);
             Err(CutoutStorageError::CutoutInsertFailed)
         }
     }
@@ -209,7 +211,7 @@ async fn delete_alert_cutouts(
     {
         Ok(_) => Ok(()),
         Err(e) => {
-            println!("Failed to delete cutout for candid {}: {:?}", candid, e);
+            error!("Failed to delete cutout for candid {}: {:?}", candid, e);
             Err(CutoutStorageError::CutoutDeleteFailed)
         }
     }
@@ -346,11 +348,6 @@ impl CutoutStorageBackend for MongoCutoutStorage {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
     ) -> Result<(), CutoutStorageError> {
-        println!(
-            "Inserting cutouts for candid {} into MongoDB (collection: {})",
-            candid,
-            self.collection.name()
-        );
         let alert_cutout = MongoAlertCutout {
             candid,
             object_id: object_id.to_string(),
@@ -361,10 +358,17 @@ impl CutoutStorageBackend for MongoCutoutStorage {
 
         match self.collection.insert_one(alert_cutout).await {
             Ok(_) => Ok(()),
-            Err(e) => {
-                println!("Failed to insert cutout for candid {}: {:?}", candid, e);
-                Err(CutoutStorageError::CutoutInsertFailed)
-            }
+            Err(e) => match *e.kind {
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )) if write_error.code == 11000 => {
+                    Err(CutoutStorageError::CutoutAlreadyExists(candid))
+                }
+                _ => {
+                    error!("Failed to insert cutout for candid {}: {:?}", candid, e);
+                    Err(CutoutStorageError::CutoutInsertFailed)
+                }
+            },
         }
     }
 
@@ -375,7 +379,7 @@ impl CutoutStorageBackend for MongoCutoutStorage {
             Ok(Some(cutout)) => Ok(cutout.into()),
             Ok(None) => Err(CutoutStorageError::CutoutRetrieveFailed),
             Err(e) => {
-                println!("Failed to retrieve cutout for candid {}: {:?}", candid, e);
+                error!("Failed to retrieve cutout for candid {}: {:?}", candid, e);
                 Err(CutoutStorageError::CutoutRetrieveFailed)
             }
         }
@@ -386,7 +390,7 @@ impl CutoutStorageBackend for MongoCutoutStorage {
         &self,
         candids: &[i64],
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
-        println!(
+        error!(
             "Retrieving multiple cutouts for candids: {:?} (from MongoDB)",
             candids
         );
@@ -404,7 +408,10 @@ impl CutoutStorageBackend for MongoCutoutStorage {
                     cutouts.insert(c.candid, c.into());
                 }
                 Err(e) => {
-                    println!("Failed to retrieve a cutout: {:?}", e);
+                    warn!(
+                        "Failed to retrieve a cutout (when retrieving a batch): {:?}",
+                        e
+                    );
                 }
             }
         }
@@ -417,7 +424,7 @@ impl CutoutStorageBackend for MongoCutoutStorage {
         match self.collection.delete_one(filter).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                println!("Failed to delete cutout for candid {}: {:?}", candid, e);
+                error!("Failed to delete cutout for candid {}: {:?}", candid, e);
                 Err(CutoutStorageError::CutoutDeleteFailed)
             }
         }

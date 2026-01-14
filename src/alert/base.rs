@@ -527,7 +527,9 @@ pub trait AlertWorker {
             .await
         {
             Ok(_) => Ok(ProcessAlertStatus::Added(candid)),
-            // TODO, handle existing cutouts case
+            Err(CutoutStorageError::CutoutAlreadyExists(_)) => {
+                Ok(ProcessAlertStatus::Exists(candid))
+            }
             Err(e) => Err(AlertError::from(e)),
         }
     }
