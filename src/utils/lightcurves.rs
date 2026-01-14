@@ -436,6 +436,86 @@ mod tests {
     }
 
     #[test]
+    fn test_weighted_least_squares_centered() {
+        // Test case 1: simple linear data (approximately y = 2x) with small errors
+        // => expecting a good fit
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.1, 6.0, 8.1, 10.2];
+        let sigma = vec![0.1, 0.1, 0.1, 0.1, 0.1];
+
+        let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
+        assert!((result.rate - 2.04).abs() < 1e-2);
+        assert!((result.rate_error - 0.031623).abs() < 1e-6);
+        assert!((result.red_chi2 - 0.400001).abs() < 1e-6);
+        assert_eq!(result.nb_data, 5);
+        assert!((result.dt - 4.0).abs() < 1e-5);
+
+        // Test case 2: insufficient data points
+        // => should return None
+        let x = vec![1.0];
+        let y = vec![2.0];
+        let sigma = vec![0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma);
+        assert!(result.is_none());
+
+        // Test case 3: singular matrix (all x values are the same)
+        // => should return None
+        let x = vec![1.0, 1.0, 1.0];
+        let y = vec![2.0, 2.1, 1.9];
+        let sigma = vec![0.1, 0.1, 0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma);
+        assert!(result.is_none());
+
+        // Test case 4: mismatched input lengths
+        // => should return None
+        let x = vec![1.0, 2.0];
+        let y = vec![2.0, 4.0, 6.0];
+        let sigma = vec![0.1, 0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma);
+        assert!(result.is_none());
+
+        // Test case 5: zero or negative sigma values
+        // => should return None
+        let x = vec![1.0, 2.0, 3.0];
+        let y = vec![2.0, 4.0, 6.0];
+        let sigma = vec![0.1, 0.0, -0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma);
+        assert!(result.is_none());
+
+        // Test case 6: non-finite sigma values
+        let x = vec![1.0, 2.0, 3.0];
+        let y = vec![2.0, 4.0, 6.0];
+        let sigma = vec![0.1, f32::NAN, 0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma);
+        assert!(result.is_none());
+
+        // Test case 7: non-finite weights due to very small sigma
+        let x = vec![1.0, 2.0, 3.0];
+        let y = vec![2.0, 4.0, 6.0];
+        let sigma = vec![1e-40, 1e-40, 1e-40];
+        let result = weighted_least_squares_centered(&x, &y, &sigma);
+        assert!(result.is_none());
+
+        // Test case 8: bad fit due to large scatter
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 8.0, 1.0, 7.0, 3.0];
+        let sigma = vec![0.1, 0.1, 0.1, 0.1, 0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
+        assert!((result.red_chi2 - 1290.0).abs() < 1e-1);
+
+        // Test case 9: exactly two data points
+        let x = vec![1.0, 2.0];
+        let y = vec![2.0, 4.0];
+        let sigma = vec![0.1, 0.1];
+        let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
+        assert!((result.rate - 2.0).abs() < 1e-6);
+        assert!((result.rate_error - 0.141421).abs() < 1e-6);
+        assert!(result.red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert_eq!(result.nb_data, 2);
+        assert!((result.dt - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_prepare_photometry() {
         let mut photometry = vec![
             PhotometryMag {
@@ -481,9 +561,11 @@ mod tests {
         let r_peak_jd = r_stats.peak_jd;
         let r_peak_mag = r_stats.peak_mag;
         let r_peak_mag_err = r_stats.peak_mag_err;
+        let r_dt = r_stats.dt;
         assert!((data[0].time - r_peak_jd).abs() < 1e-6);
         assert!((data[0].mag - r_peak_mag).abs() < 1e-6);
         assert!((data[0].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((r_dt - 0.0).abs() < 1e-6);
         assert_eq!(r_stats.rising.is_some(), false);
         assert_eq!(r_stats.fading.is_some(), false);
 
@@ -521,20 +603,23 @@ mod tests {
         let r_peak_jd = r_stats.peak_jd;
         let r_peak_mag = r_stats.peak_mag;
         let r_peak_mag_err = r_stats.peak_mag_err;
+        let r_dt = r_stats.dt;
         assert!((data[1].time - r_peak_jd).abs() < 1e-6);
         assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
         assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((r_dt - 1.0).abs() < 1e-6);
         assert_eq!(r_stats.rising.is_some(), true);
         assert_eq!(r_stats.fading.is_none(), true);
+
         let rising_stats = r_stats.rising.clone().unwrap();
         let rising_rate = rising_stats.rate;
-        // let rising_rate_error = rising_stats.rate_error;
-        let red_chi2 = rising_stats.red_chi2;
-        // let r_squared = rising_stats.r_squared;
-        let nb_data = rising_stats.nb_data;
+        let rising_red_chi2 = rising_stats.red_chi2;
+        let rising_nb_data = rising_stats.nb_data;
+        let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
-        assert_eq!(nb_data, 2);
+        assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert_eq!(rising_nb_data, 2);
+        assert!((rising_dt - 1.0).abs() < 1e-6);
 
         // the all band properties should also just match the one data point we have
         let peak_jd = all_bands_props.peak_jd;
@@ -570,18 +655,22 @@ mod tests {
         let r_peak_jd = r_stats.peak_jd;
         let r_peak_mag = r_stats.peak_mag;
         let r_peak_mag_err = r_stats.peak_mag_err;
+        let r_dt = r_stats.dt;
         assert!((data[0].time - r_peak_jd).abs() < 1e-6);
         assert!((data[0].mag - r_peak_mag).abs() < 1e-6);
         assert!((data[0].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((r_dt - 1.0).abs() < 1e-6);
         assert_eq!(r_stats.rising.is_none(), true);
         assert_eq!(r_stats.fading.is_some(), true);
         let fading_stats = r_stats.fading.clone().unwrap();
         let fading_rate = fading_stats.rate;
         let red_chi2 = fading_stats.red_chi2;
-        let nb_data = fading_stats.nb_data;
+        let fading_nb_data = fading_stats.nb_data;
+        let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
         assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
-        assert_eq!(nb_data, 2);
+        assert_eq!(fading_nb_data, 2);
+        assert!((fading_dt - 1.0).abs() < 1e-6);
         // the all band properties should also just match the one data point we have
         let peak_jd = all_bands_props.peak_jd;
         let peak_mag = all_bands_props.peak_mag;
@@ -622,26 +711,32 @@ mod tests {
         let r_peak_jd = r_stats.peak_jd;
         let r_peak_mag = r_stats.peak_mag;
         let r_peak_mag_err = r_stats.peak_mag_err;
+        let r_dt = r_stats.dt;
         assert!((data[1].time - r_peak_jd).abs() < 1e-6);
         assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
         assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((r_dt - 2.0).abs() < 1e-6);
         assert_eq!(r_stats.rising.is_some(), true);
         assert_eq!(r_stats.fading.is_some(), true);
         let rising_stats = r_stats.rising.clone().unwrap();
         let rising_rate = rising_stats.rate;
         let rising_red_chi2 = rising_stats.red_chi2;
         let rising_nb_data = rising_stats.nb_data;
+        let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
         assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(rising_nb_data, 2);
+        assert!((rising_dt - 1.0).abs() < 1e-6);
 
         let fading_stats = r_stats.fading.clone().unwrap();
         let fading_rate = fading_stats.rate;
         let fading_red_chi2 = fading_stats.red_chi2;
         let fading_nb_data = fading_stats.nb_data;
+        let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
         assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(fading_nb_data, 2);
+        assert!((fading_dt - 1.0).abs() < 1e-6);
 
         // the all band properties should also just match the one data point we have
         let peak_jd = all_bands_props.peak_jd;
@@ -698,11 +793,13 @@ mod tests {
         let r_peak_jd = r_stats.peak_jd;
         let r_peak_mag = r_stats.peak_mag;
         let r_peak_mag_err = r_stats.peak_mag_err;
+        let r_dt = r_stats.dt;
         // the original array was sorted and deduplicated,
         // so the r-band peak is now at index 2 (not 1)
         assert!((data[4].time - r_peak_jd).abs() < 1e-6);
         assert!((data[4].mag - r_peak_mag).abs() < 1e-6);
         assert!((data[4].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((r_dt - 2.0).abs() < 1e-6);
         assert_eq!(r_stats.rising.is_some(), true);
         assert_eq!(r_stats.fading.is_none(), true);
 
@@ -711,20 +808,24 @@ mod tests {
         let rising_rate = rising_stats.rate;
         let rising_red_chi2 = rising_stats.red_chi2;
         let rising_nb_data = rising_stats.nb_data;
+        let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
         assert!(rising_red_chi2.abs() < 1e-6); // perfect fit
         assert_eq!(rising_nb_data, 3);
+        assert!((rising_dt - 2.0).abs() < 1e-6);
 
         // g band
         let g_stats = results.g.unwrap();
         let g_peak_jd = g_stats.peak_jd;
         let g_peak_mag = g_stats.peak_mag;
         let g_peak_mag_err = g_stats.peak_mag_err;
+        let g_dt = g_stats.dt;
         // the original array was sorted and deduplicated,
         // so the g-band peak is now at index 3 (not 4)
         assert!((data[1].time - g_peak_jd).abs() < 1e-6);
         assert!((data[1].mag - g_peak_mag).abs() < 1e-6);
         assert!((data[1].mag_err - g_peak_mag_err).abs() < 1e-6);
+        assert!((g_dt - 1.0).abs() < 1e-6);
         assert_eq!(g_stats.rising.is_some(), false);
         assert_eq!(g_stats.fading.is_some(), true);
         // check the fading stats in g band
@@ -732,9 +833,11 @@ mod tests {
         let fading_rate = fading_stats.rate;
         let fading_red_chi2 = fading_stats.red_chi2;
         let fading_nb_data = fading_stats.nb_data;
+        let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
         assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
         assert_eq!(fading_nb_data, 2);
+        assert!((fading_dt - 1.0).abs() < 1e-6);
 
         // the all band properties should match the peak in r band
         let peak_jd = all_bands_props.peak_jd;
@@ -775,12 +878,20 @@ mod tests {
         let r_stats = results.r.unwrap();
         let r_peak_jd = r_stats.peak_jd;
         let r_peak_mag = r_stats.peak_mag;
+        let r_peak_mag_err = r_stats.peak_mag_err;
+        let r_dt = r_stats.dt;
         // the original array was sorted and deduplicated,
         // so the r-band peak is now at index 1 (not 2)
         assert!((data[1].time - r_peak_jd).abs() < 1e-6);
         assert!((data[1].mag - r_peak_mag).abs() < 1e-6);
+        assert!((data[1].mag_err - r_peak_mag_err).abs() < 1e-6);
+        assert!((r_dt - 1.0).abs() < 1e-6);
+        assert_eq!(r_stats.rising.is_some(), true);
+        assert_eq!(r_stats.fading.is_none(), true);
         let rising_stats = r_stats.rising.clone().unwrap();
         let rising_nb_data = rising_stats.nb_data;
+        let rising_dt = rising_stats.dt;
         assert_eq!(rising_nb_data, 2);
+        assert!((rising_dt - 1.0).abs() < 1e-6);
     }
 }
