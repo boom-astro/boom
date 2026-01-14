@@ -23,17 +23,17 @@ pub enum XmatchError {
     AsDocumentError,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct GeoJsonPoint {
     r#type: String,
     coordinates: Vec<f64>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Coordinates {
     radec_geojson: GeoJsonPoint,
-    l: f64,
-    b: f64,
+    l: Option<f64>,
+    b: Option<f64>,
 }
 
 impl Coordinates {
@@ -44,8 +44,8 @@ impl Coordinates {
                 r#type: "Point".to_string(),
                 coordinates: vec![ra - 180.0, dec],
             },
-            l,
-            b,
+            l: Some(l),
+            b: Some(b),
         }
     }
 }

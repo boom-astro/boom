@@ -1,9 +1,9 @@
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
+use utoipa::ToSchema;
 
 pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitudes
 pub const SNT: f32 = 3.0; // Signal-to-noise threshold for detection
@@ -31,7 +31,7 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
 }
 
 #[apache_avro_macros::serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, ToSchema)]
 pub enum Band {
     #[serde(rename = "g")]
     G,
@@ -47,7 +47,7 @@ pub enum Band {
     U,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct PhotometryMag {
     #[serde(alias = "jd")]
     pub time: f64,
@@ -60,7 +60,7 @@ pub struct PhotometryMag {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandRateProperties {
     pub rate: f32,
     pub rate_error: f32,
@@ -74,7 +74,7 @@ pub struct BandRateProperties {
 // (this needs to be fixed in the apache_avro-related crates)
 // #[serde_as]
 // #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
@@ -90,7 +90,7 @@ pub struct BandProperties {
 // #[serde_as]
 // #[skip_serializing_none]
 #[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, JsonSchema, Default)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,

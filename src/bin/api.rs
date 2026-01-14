@@ -1,6 +1,7 @@
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
-use boom::api::auth::{auth_middleware, get_auth};
+use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
+use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
@@ -13,8 +14,9 @@ async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
     let config = AppConfig::from_default_path().unwrap();
-    let database = config.build_db().await.unwrap();
+    let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
+    let port = config.api.port;
 
     // Initialize email service
     let email_service = EmailService::new();
@@ -35,6 +37,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         let mut app = App::new()
+            .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
@@ -44,16 +47,25 @@ async fn main() -> std::io::Result<()> {
 
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {
-            let kafka_producer_config = config.kafka.producer.clone();
-            let babamul_avro_schemas = routes::babamul::BabamulAvroSchemas::new();
+            let babamul_avro_schemas = routes::babamul::surveys::BabamulAvroSchemas::new();
             app = app
-                .app_data(web::Data::new(kafka_producer_config.clone()))
                 .app_data(web::Data::new(babamul_avro_schemas))
                 .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
-                .service(routes::babamul::get_babamul_schema)
+                .service(routes::babamul::surveys::get_babamul_schema)
                 .service(routes::babamul::post_babamul_signup)
                 .service(routes::babamul::post_babamul_activate)
-                .service(routes::babamul::post_babamul_auth);
+                .service(routes::babamul::post_babamul_auth)
+                .service(
+                    actix_web::web::scope("")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::get_babamul_profile)
+                        .service(routes::babamul::post_kafka_credentials)
+                        .service(routes::babamul::get_kafka_credentials)
+                        .service(routes::babamul::delete_kafka_credential)
+                        .service(routes::babamul::surveys::get_object)
+                        .service(routes::babamul::surveys::get_alert_cutouts)
+                        .service(routes::babamul::surveys::get_alerts),
+                )
         }
 
         app.service(
@@ -61,8 +73,7 @@ async fn main() -> std::io::Result<()> {
                 .wrap(from_fn(auth_middleware))
                 .service(routes::info::get_db_info)
                 .service(routes::kafka::get_kafka_acls)
-                .service(routes::kafka::delete_kafka_acls_for_user)
-                .service(routes::surveys::get_object)
+                .service(routes::kafka::delete_kafka_credentials)
                 .service(routes::filters::post_filter)
                 .service(routes::filters::patch_filter)
                 .service(routes::filters::get_filters)
@@ -85,7 +96,7 @@ async fn main() -> std::io::Result<()> {
         )
         .wrap(Logger::default())
     })
-    .bind(("0.0.0.0", config.api.port))?
+    .bind(("0.0.0.0", port))?
     .run()
     .await
 }

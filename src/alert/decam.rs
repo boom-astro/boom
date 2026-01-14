@@ -53,7 +53,7 @@ pub struct FpHist {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Candidate {
     pub mjd: f64,
     pub forcediffimflux: f64,
@@ -70,7 +70,7 @@ pub struct Candidate {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DecamCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
@@ -149,7 +149,7 @@ pub struct DecamRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DecamAliases {
     #[serde(rename = "ZTF")]
     pub ztf: Vec<String>,
@@ -170,7 +170,7 @@ pub struct DecamObject {
     pub updated_at: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct DecamAlert {
     #[serde(rename = "_id")]
     pub candid: i64,
