@@ -79,6 +79,7 @@ pub struct BandProperties {
     pub peak_jd: f64,
     pub peak_mag: f32,
     pub peak_mag_err: f32,
+    pub dt: f32,
     pub rising: Option<BandRateProperties>,
     pub fading: Option<BandRateProperties>,
 }
@@ -365,10 +366,12 @@ pub fn analyze_photometry(
                 weighted_least_squares_centered(&after_time, &after_mag, &after_mag_err);
         }
 
+        let dt = (mags.last().unwrap().time - mags.first().unwrap().time) as f32;
         let band_properties = BandProperties {
             peak_jd,
             peak_mag,
             peak_mag_err,
+            dt,
             rising: rising_properties,
             fading: fading_properties,
         };
