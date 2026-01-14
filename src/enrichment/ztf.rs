@@ -18,7 +18,6 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
 use tracing::{instrument, trace, warn};
 
@@ -311,18 +310,18 @@ pub struct ZtfAlertForEnrichment {
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
-    pub multisurvey_photstats: PerBandProperties,
+    pub multisurvey_photstats: Option<PerBandProperties>,
 }
 
 /// ZTF alert ML classifier scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
     pub acai_h: f32,
     pub acai_n: f32,
@@ -621,7 +620,7 @@ impl ZtfEnrichmentWorker {
                 near_brightstar: is_near_brightstar,
                 stationary,
                 photstats,
-                multisurvey_photstats,
+                multisurvey_photstats: Some(multisurvey_photstats),
             },
             all_bands_properties,
             programid,

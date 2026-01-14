@@ -254,10 +254,11 @@ impl Babamul {
         &self,
         alerts_by_topic: HashMap<String, Vec<T>>,
         to_enriched: F,
-    ) -> Result<(), EnrichmentWorkerError>
+    ) -> Result<usize, EnrichmentWorkerError>
     where
         for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
     {
+        let mut total_sent: usize = 0;
         for (topic_name, alerts) in alerts_by_topic {
             tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
@@ -290,10 +291,11 @@ impl Babamul {
                 send_result.await.map_err(|(e, _)| {
                     EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
                 })?;
+                total_sent += 1;
             }
         }
 
-        Ok(())
+        Ok(total_sent)
     }
 
     #[instrument(skip_all, err)]
@@ -332,7 +334,7 @@ impl Babamul {
     pub async fn process_lsst_alerts(
         &self,
         alerts: Vec<EnrichedLsstAlert>,
-    ) -> Result<(), EnrichmentWorkerError> {
+    ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
 
@@ -370,7 +372,7 @@ impl Babamul {
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
             info!("No LSST alerts to send to Babamul");
-            return Ok(());
+            return Ok(0);
         }
 
         // Send all grouped alerts using shared helper
@@ -382,7 +384,7 @@ impl Babamul {
     pub async fn process_ztf_alerts(
         &self,
         alerts: Vec<EnrichedZtfAlert>,
-    ) -> Result<(), EnrichmentWorkerError> {
+    ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         // For now, we will just send all alerts to "babamul.none"
         // In the future, we will determine the topic based on the alert properties
@@ -420,7 +422,7 @@ impl Babamul {
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
             info!("No ZTF alerts to send to Babamul");
-            return Ok(());
+            return Ok(0);
         }
 
         // Send all grouped alerts using shared helper

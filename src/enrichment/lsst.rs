@@ -18,7 +18,6 @@ use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
 use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
@@ -194,7 +193,7 @@ pub struct LsstAlertForEnrichment {
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
@@ -307,7 +306,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             HashMap::new()
         };
 
-        if candid_to_cutouts.len() != alerts.len() {
+        if self.babamul.is_some() && candid_to_cutouts.len() != alerts.len() {
             warn!(
                 "only {} cutouts fetched from {} candids",
                 candid_to_cutouts.len(),
