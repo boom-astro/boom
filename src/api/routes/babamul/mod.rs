@@ -11,13 +11,85 @@ use serde_with::{serde_as, skip_serializing_none};
 use std::process::Command;
 use utoipa::ToSchema;
 
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    AeadCore, Aes256Gcm, Nonce,
+};
+use base64::{engine::general_purpose, Engine as _};
+
+// Generate a random nonce for each encryption
+fn encrypt_password(
+    password: &str,
+    secret_key: &[u8; 32],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cipher = Aes256Gcm::new(secret_key.into());
+
+    // Generate random 96-bit nonce
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+    let ciphertext = cipher
+        .encrypt(&nonce, password.as_bytes())
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+
+    // Combine nonce + ciphertext for storage
+    let mut combined = nonce.to_vec();
+    combined.extend_from_slice(&ciphertext);
+
+    Ok(general_purpose::STANDARD.encode(combined))
+}
+
+fn decrypt_password(
+    encrypted: &str,
+    secret_key: &[u8; 32],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cipher = Aes256Gcm::new(secret_key.into());
+
+    let combined = general_purpose::STANDARD.decode(encrypted)?;
+
+    let (nonce_bytes, ciphertext) = combined.split_at(12);
+
+    let nonce_array: &[u8; 12] = nonce_bytes.try_into()?;
+    let nonce = Nonce::from(*nonce_array);
+
+    let plaintext = cipher
+        .decrypt(&nonce, ciphertext)
+        .map_err(|e| format!("Decryption failed: {}", e))?;
+
+    Ok(String::from_utf8(plaintext)?)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct KafkaCredentialEncrypted {
+    pub id: String,                       // Unique ID for this credential
+    pub name: String,                     // User-defined name for this credential
+    pub kafka_username: String,           // Randomized Kafka username
+    pub kafka_password_encrypted: String, // Randomized Kafka password (encrypted with server key, using AES-256-GCM)
+    pub created_at: i64,                  // Unix timestamp
+}
+
+#[derive(Serialize, Clone, ToSchema)]
 pub struct KafkaCredential {
-    pub id: String,             // Unique ID for this credential
-    pub name: String,           // User-defined name for this credential
-    pub kafka_username: String, // Randomized Kafka username
-    pub kafka_password: String, // Randomized Kafka password (stored in plain text)
-    pub created_at: i64,        // Unix timestamp
+    pub id: String,
+    pub name: String,
+    pub kafka_username: String,
+    pub kafka_password: String, // Only returned on creation
+    pub created_at: i64,
+}
+
+impl KafkaCredentialEncrypted {
+    pub fn decrypt(
+        &self,
+        secret_key: &[u8; 32],
+    ) -> Result<KafkaCredential, Box<dyn std::error::Error>> {
+        let decrypted_password = decrypt_password(&self.kafka_password_encrypted, secret_key)?;
+        Ok(KafkaCredential {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            kafka_username: self.kafka_username.clone(),
+            kafka_password: decrypted_password,
+            created_at: self.created_at,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -32,7 +104,7 @@ pub struct BabamulUser {
     pub is_activated: bool,
     pub created_at: i64, // Unix timestamp
     #[serde(default)]
-    pub kafka_credentials: Vec<KafkaCredential>, // List of Kafka credentials
+    pub kafka_credentials: Vec<KafkaCredentialEncrypted>, // List of Kafka credentials (w/ encrypted passwords)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -622,11 +694,6 @@ pub async fn post_babamul_auth(
 
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
-    println!(
-        "Authenticating Babamul user: {} (password: {})",
-        email, password
-    );
-
     // Find user by email
     match babamul_users_collection
         .find_one(doc! { "email": &email })
@@ -709,16 +776,7 @@ pub struct CreateKafkaCredentialPost {
 #[derive(Serialize, Clone, ToSchema)]
 pub struct CreateKafkaCredentialResponse {
     pub message: String,
-    pub credential: KafkaCredentialWithSecret, // Return the full credential including secret
-}
-
-#[derive(Serialize, Clone, ToSchema)]
-pub struct KafkaCredentialWithSecret {
-    pub id: String,
-    pub name: String,
-    pub kafka_username: String,
-    pub kafka_password: String, // Only returned on creation
-    pub created_at: i64,
+    pub credential: KafkaCredential, // Return the full credential including the decrypted password
 }
 
 /// Create a new Kafka credential for the authenticated user
@@ -758,11 +816,21 @@ pub async fn post_kafka_credentials(
     let kafka_username = format!("babamul-{}", credential_id);
     let kafka_password = generate_random_string(32);
 
-    let kafka_credential = KafkaCredential {
+    // let's encrypt the password before storing it in the database
+    let kafka_password_encrypted =
+        match encrypt_password(&kafka_password, &config.api.auth.get_hashed_secret_key()) {
+            Ok(enc) => enc,
+            Err(e) => {
+                eprintln!("Failed to encrypt Kafka password: {}", e);
+                return response::internal_error("Failed to encrypt Kafka credential");
+            }
+        };
+
+    let kafka_credential = KafkaCredentialEncrypted {
         id: credential_id.clone(),
         name: name.to_string(),
         kafka_username: kafka_username.clone(),
-        kafka_password: kafka_password.clone(),
+        kafka_password_encrypted: kafka_password_encrypted,
         created_at: flare::Time::now().to_utc().timestamp(),
     };
 
@@ -798,11 +866,11 @@ pub async fn post_kafka_credentials(
     {
         Ok(_) => HttpResponse::Ok().json(CreateKafkaCredentialResponse {
             message: "Kafka credential created successfully. Save the kafka_password - it can be retrieved later but should be stored securely.".to_string(),
-            credential: KafkaCredentialWithSecret {
+            credential: KafkaCredential {
                 id: kafka_credential.id,
                 name: kafka_credential.name,
                 kafka_username: kafka_credential.kafka_username,
-                kafka_password: kafka_credential.kafka_password,
+                kafka_password,
                 created_at: kafka_credential.created_at,
             },
         }),
@@ -826,6 +894,7 @@ pub async fn post_kafka_credentials(
 )]
 #[get("/babamul/kafka-credentials")]
 pub async fn get_kafka_credentials(
+    config: web::Data<crate::conf::AppConfig>,
     current_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
     let current_user = match current_user {
@@ -834,7 +903,18 @@ pub async fn get_kafka_credentials(
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
     };
-    response::ok_ser("success", &current_user.kafka_credentials)
+    let mut decrypted_credentials = Vec::new();
+    let secret_key = &config.api.auth.get_hashed_secret_key();
+    for cred in &current_user.kafka_credentials {
+        match cred.decrypt(secret_key) {
+            Ok(decrypted) => decrypted_credentials.push(decrypted),
+            Err(e) => {
+                eprintln!("Failed to decrypt Kafka credential {}: {}", cred.id, e);
+                return response::internal_error("Failed to decrypt Kafka credentials");
+            }
+        }
+    }
+    response::ok_ser("success", decrypted_credentials)
 }
 
 #[derive(Deserialize, Clone, ToSchema)]
