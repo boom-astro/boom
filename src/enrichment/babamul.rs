@@ -219,43 +219,15 @@ impl EnrichedZtfAlert {
             return category + "stellar";
         }
 
-        // Check if we have LSPSC cross-matches
-        let empty_vec = vec![];
-        let lspsc_matches = self
-            .cross_matches
-            .0
-            .as_ref()
-            .and_then(|xmatches| xmatches.get("LSPSC"))
-            .unwrap_or(&empty_vec);
-
-        // No matches: check if in footprint
-        if lspsc_matches.is_empty() {
-            return if is_in_footprint(self.candidate.dia_source.ra, self.candidate.dia_source.dec) {
-                category + "hostless"
-            } else {
-                category + "unknown"
-            };
+        // Use star-galaxy score to determine if hosted
+        // sgscore1 <= 0.5 suggests galaxy-like, indicating the alert is likely hosted
+        let sgscore1 = self.candidate.candidate.sgscore1.unwrap_or(1.0);
+        if sgscore1 <= 0.5 {
+            return category + "hosted";
         }
 
-        // Evaluate matches (stellar > hosted > hostless)
-        let mut label = "hostless";
-        for m in lspsc_matches {
-            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
-                Some(d) => d,
-                None => continue,
-            };
-            let score = match m.get("score").and_then(|v| v.as_f64()) {
-                Some(s) => s,
-                None => continue,
-            };
-            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
-                label = "stellar";
-                break;
-            } else if score < IS_HOSTED_SCORE_THRESH {
-                label = "hosted";
-            }
-        }
-        category + label
+        // Otherwise, we can't definitively classify it
+        category + "unknown"
     }
 }
 

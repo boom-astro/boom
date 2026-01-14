@@ -507,6 +507,111 @@ fn test_compute_babamul_category() {
     );
 }
 
+#[test]
+fn test_compute_babamul_category_ztf() {
+    use boom::enrichment::ZtfSurveyMatches;
+
+    // Test case 1: No LSST match + not stellar + sgscore1 > 0.5 → "no-lsst-match.unknown"
+    let mut alert_no_lsst = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
+    alert_no_lsst.survey_matches = None;
+    alert_no_lsst.properties.star = false;
+    alert_no_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
+    let category = alert_no_lsst.compute_babamul_category();
+    assert_eq!(
+        category, "no-lsst-match.unknown",
+        "ZTF alert with no LSST match, not stellar, and high sgscore should be no-lsst-match.unknown"
+    );
+
+    // Test case 2: No LSST match + stellar → "no-lsst-match.stellar"
+    let mut alert_no_lsst_stellar =
+        create_mock_enriched_ztf_alert(1234567891, "ZTF21aaaaaab", false);
+    alert_no_lsst_stellar.survey_matches = None;
+    alert_no_lsst_stellar.properties.star = true;
+    let category = alert_no_lsst_stellar.compute_babamul_category();
+    assert_eq!(
+        category, "no-lsst-match.stellar",
+        "ZTF alert with no LSST match and stellar should be no-lsst-match.stellar"
+    );
+
+    // Test case 3: LSST match + not stellar + sgscore1 > 0.5 → "lsst-match.unknown"
+    let mut alert_lsst = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", false);
+    alert_lsst.survey_matches = Some(ZtfSurveyMatches {
+        lsst: Some(boom::enrichment::LsstMatch {
+            object_id: "LSST24aaaaaaa".to_string(),
+            ra: 150.0,
+            dec: 30.0,
+            prv_candidates: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    alert_lsst.properties.star = false;
+    alert_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
+    let category = alert_lsst.compute_babamul_category();
+    assert_eq!(
+        category, "lsst-match.unknown",
+        "ZTF alert with LSST match, not stellar, and high sgscore should be lsst-match.unknown"
+    );
+
+    // Test case 4: LSST match + stellar → "lsst-match.stellar"
+    let mut alert_lsst_stellar = create_mock_enriched_ztf_alert(1234567893, "ZTF21aaaaaad", false);
+    alert_lsst_stellar.survey_matches = Some(ZtfSurveyMatches {
+        lsst: Some(boom::enrichment::LsstMatch {
+            object_id: "LSST24aaaaaab".to_string(),
+            ra: 150.0,
+            dec: 30.0,
+            prv_candidates: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    alert_lsst_stellar.properties.star = true;
+    let category = alert_lsst_stellar.compute_babamul_category();
+    assert_eq!(
+        category, "lsst-match.stellar",
+        "ZTF alert with LSST match and stellar should be lsst-match.stellar"
+    );
+
+    // Test case 5: No LSST match + not stellar + sgscore1 <= 0.5 → "no-lsst-match.hosted"
+    let mut alert_hosted = create_mock_enriched_ztf_alert(1234567894, "ZTF21aaaaaae", false);
+    alert_hosted.survey_matches = None;
+    alert_hosted.properties.star = false;
+    alert_hosted.candidate.candidate.sgscore1 = Some(0.3); // Galaxy-like
+    let category = alert_hosted.compute_babamul_category();
+    assert_eq!(
+        category, "no-lsst-match.hosted",
+        "ZTF alert with no LSST match, not stellar, and low sgscore should be no-lsst-match.hosted"
+    );
+
+    // Test case 6: LSST match + not stellar + sgscore1 <= 0.5 → "lsst-match.hosted"
+    let mut alert_lsst_hosted = create_mock_enriched_ztf_alert(1234567895, "ZTF21aaaaaaf", false);
+    alert_lsst_hosted.survey_matches = Some(ZtfSurveyMatches {
+        lsst: Some(boom::enrichment::LsstMatch {
+            object_id: "LSST24aaaaaac".to_string(),
+            ra: 150.0,
+            dec: 30.0,
+            prv_candidates: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    alert_lsst_hosted.properties.star = false;
+    alert_lsst_hosted.candidate.candidate.sgscore1 = Some(0.4); // Galaxy-like
+    let category = alert_lsst_hosted.compute_babamul_category();
+    assert_eq!(
+        category, "lsst-match.hosted",
+        "ZTF alert with LSST match, not stellar, and low sgscore should be lsst-match.hosted"
+    );
+
+    // Test case 7: No sgscore1 (None) → defaults to unknown
+    let mut alert_no_sgscore = create_mock_enriched_ztf_alert(1234567896, "ZTF21aaaaaag", false);
+    alert_no_sgscore.survey_matches = None;
+    alert_no_sgscore.properties.star = false;
+    alert_no_sgscore.candidate.candidate.sgscore1 = None;
+    let category = alert_no_sgscore.compute_babamul_category();
+    assert_eq!(
+        category, "no-lsst-match.unknown",
+        "ZTF alert with no sgscore1 should default to unknown"
+    );
+}
+
 #[tokio::test]
 async fn test_babamul_process_ztf_alerts() {
     use boom::enrichment::babamul::Babamul;
@@ -514,10 +619,13 @@ async fn test_babamul_process_ztf_alerts() {
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
 
-    // Delete the topic before the test to ensure a clean state
-    delete_kafka_topic("babamul.ztf.none", &config).await;
+    // Expected topic for non-stellar ZTF alerts without LSST match
+    let topic = "babamul.ztf.no-lsst-match.unknown";
 
-    // Create mock enriched ZTF alerts
+    // Delete the topic before the test to ensure a clean state
+    delete_kafka_topic(topic, &config).await;
+
+    // Create mock enriched ZTF alerts (not stellar, no LSST match)
     let alert1 = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
     let alert2 = create_mock_enriched_ztf_alert(1234567891, "ZTF21aaaaaab", false);
 
@@ -530,7 +638,6 @@ async fn test_babamul_process_ztf_alerts() {
     );
 
     // Consume messages from Kafka topic
-    let topic = "babamul.ztf.none";
     let messages = consume_kafka_messages(topic, 2, &config).await;
     assert_eq!(messages.len(), 2, "Expected 2 messages in topic {}", topic);
 }
@@ -995,7 +1102,8 @@ async fn test_babamul_ztf_with_lsst_match() {
     let db = boom::conf::get_test_db().await;
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let mut ztf_alert_worker = boom::utils::testing::ztf_alert_worker().await;
-    delete_kafka_topic("babamul.ztf.none", &config).await;
+    // ZTF alert with LSST match (non-stellar) should go to lsst-match.unknown
+    delete_kafka_topic("babamul.ztf.lsst-match.unknown", &config).await;
     let now = Time::now().to_jd();
 
     // Use unique ID based on current timestamp
@@ -1122,7 +1230,8 @@ async fn test_babamul_ztf_with_lsst_match() {
     );
 
     // Verify that the Babamul message was published
-    let messages = consume_kafka_messages("babamul.ztf.none", 3, &config).await;
+    // ZTF alert with LSST match (non-stellar) should go to lsst-match.unknown
+    let messages = consume_kafka_messages("babamul.ztf.lsst-match.unknown", 3, &config).await;
     assert!(
         !messages.is_empty(),
         "Expected at least one Babamul message with enriched alert containing matches"
