@@ -592,6 +592,7 @@ fn test_compute_babamul_category_ztf() {
 #[tokio::test]
 async fn test_babamul_process_ztf_alerts() {
     use boom::enrichment::babamul::Babamul;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
@@ -599,9 +600,17 @@ async fn test_babamul_process_ztf_alerts() {
     // Expected topic for non-stellar ZTF alerts without LSST match
     let topic = "babamul.ztf.no-lsst-match.unknown";
 
+    // Create unique objectIds to avoid matching stale messages
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let ztf_obj1 = format!("ZTF21aaaaaaa-{}", ts);
+    let ztf_obj2 = format!("ZTF21aaaaaab-{}", ts + 1);
+
     // Create mock enriched ZTF alerts (not stellar, no LSST match)
-    let alert1 = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
-    let alert2 = create_mock_enriched_ztf_alert(1234567891, "ZTF21aaaaaab", false);
+    let alert1 = create_mock_enriched_ztf_alert(1234567890, &ztf_obj1, false);
+    let alert2 = create_mock_enriched_ztf_alert(1234567891, &ztf_obj2, false);
 
     // Process the alerts
     let result = babamul.process_ztf_alerts(vec![alert1, alert2]).await;
@@ -611,30 +620,59 @@ async fn test_babamul_process_ztf_alerts() {
         result.err()
     );
 
-    // Consume messages from Kafka topic (will contain our messages plus any existing ones)
-    // We just verify we got at least the 2 new messages
+    // Consume messages from Kafka topic and verify our specific alerts are present
     let messages = consume_kafka_messages(topic, 10, &config).await;
+    let expected: std::collections::HashSet<String> =
+        [ztf_obj1.clone(), ztf_obj2.clone()].into_iter().collect();
+
+    let schema = boom::enrichment::babamul::EnrichedZtfAlert::get_schema();
+    let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in &messages {
+        if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
+            for record in reader.flatten() {
+                if let apache_avro::types::Value::Record(fields) = record {
+                    if let Some((_, apache_avro::types::Value::String(obj_id))) =
+                        fields.iter().find(|(n, _)| n == "objectId")
+                    {
+                        if expected.contains(obj_id) {
+                            found.insert(obj_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     assert!(
-        messages.len() >= 2,
-        "Expected at least 2 messages in topic {}, got {}",
+        found == expected,
+        "Did not find all expected ZTF objectIds in topic {}. Found: {:?}",
         topic,
-        messages.len()
+        found
     );
 }
 
 #[tokio::test]
 async fn test_babamul_process_lsst_alerts() {
     use boom::enrichment::babamul::Babamul;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
     let topic = "babamul.lsst.no-ztf-match.hostless";
 
+    // Create unique objectIds to avoid matching stale messages
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let lsst_obj1 = format!("LSST24aaaaaaa-{}", ts);
+    let lsst_obj2 = format!("LSST24aaaaaab-{}", ts + 1);
+
     // Create mock enriched LSST alerts with good reliability and no flags
     let alert1 =
-        create_mock_enriched_lsst_alert(9876543210, "LSST24aaaaaaa", 0.8, false, false, None, None);
+        create_mock_enriched_lsst_alert(9876543210, &lsst_obj1, 0.8, false, false, None, None);
     let alert2 =
-        create_mock_enriched_lsst_alert(9876543211, "LSST24aaaaaab", 0.9, false, false, None, None);
+        create_mock_enriched_lsst_alert(9876543211, &lsst_obj2, 0.9, false, false, None, None);
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -644,14 +682,34 @@ async fn test_babamul_process_lsst_alerts() {
         result.err()
     );
 
-    // Consume messages from Kafka topic (will contain our messages plus any existing ones)
-    // We just verify we got at least the 2 new messages
+    // Consume messages and verify our specific alerts are present via objectId
     let messages = consume_kafka_messages(topic, 10, &config).await;
+    let expected: std::collections::HashSet<String> =
+        [lsst_obj1.clone(), lsst_obj2.clone()].into_iter().collect();
+
+    let schema = boom::enrichment::babamul::EnrichedLsstAlert::get_schema();
+    let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in &messages {
+        if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
+            for record in reader.flatten() {
+                if let apache_avro::types::Value::Record(fields) = record {
+                    if let Some((_, apache_avro::types::Value::String(obj_id))) =
+                        fields.iter().find(|(n, _)| n == "objectId")
+                    {
+                        if expected.contains(obj_id) {
+                            found.insert(obj_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     assert!(
-        messages.len() >= 2,
-        "Expected at least 2 messages in topic {}, got {}",
+        found == expected,
+        "Did not find all expected LSST objectIds in topic {}. Found: {:?}",
         topic,
-        messages.len()
+        found
     );
 }
 
