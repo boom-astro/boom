@@ -1266,11 +1266,11 @@ async fn test_babamul_ztf_with_lsst_match() {
     );
 
     // Verify that the Babamul message was published to one of the lsst-match topics
-    // The exact topic depends on the alert's properties (stellar, sgscore1)
+    // The exact topic depends on the alert's properties (stellar, sgscore)
     let topics = vec![
         "babamul.ztf.lsst-match.stellar",
         "babamul.ztf.lsst-match.hosted",
-        "babamul.ztf.lsst-match.unknown",
+        "babamul.ztf.lsst-match.hostless",
     ];
 
     let mut messages = Vec::new();
