@@ -191,6 +191,7 @@ fn create_mock_enriched_lsst_alert_with_matches(
             star: Some(false),
             stationary: false,
             photstats: PerBandProperties::default(),
+            multisurvey_photstats: PerBandProperties::default(),
         },
         cutout_science: None,
         cutout_template: None,
