@@ -202,6 +202,61 @@ impl EnrichedZtfAlert {
             cutout_difference: cutout_difference.map(CutoutBytes),
         }
     }
+
+    pub fn compute_babamul_category(&self) -> String {
+        // If we have an LSST match, category starts with "lsst-match."
+        // Otherwise, "no-lsst-match."
+        let category = match &self.survey_matches {
+            Some(survey_matches) => match &survey_matches.lsst {
+                Some(_) => "lsst-match.".to_string(),
+                None => "no-lsst-match.".to_string(),
+            },
+            None => "no-lsst-match.".to_string(),
+        };
+
+        // Already classified as stellar (by the enrichment worker), return that
+        if self.properties.star {
+            return category + "stellar";
+        }
+
+        // Check if we have LSPSC cross-matches
+        let empty_vec = vec![];
+        let lspsc_matches = self
+            .cross_matches
+            .0
+            .as_ref()
+            .and_then(|xmatches| xmatches.get("LSPSC"))
+            .unwrap_or(&empty_vec);
+
+        // No matches: check if in footprint
+        if lspsc_matches.is_empty() {
+            return if is_in_footprint(self.candidate.dia_source.ra, self.candidate.dia_source.dec) {
+                category + "hostless"
+            } else {
+                category + "unknown"
+            };
+        }
+
+        // Evaluate matches (stellar > hosted > hostless)
+        let mut label = "hostless";
+        for m in lspsc_matches {
+            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                Some(d) => d,
+                None => continue,
+            };
+            let score = match m.get("score").and_then(|v| v.as_f64()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                label = "stellar";
+                break;
+            } else if score < IS_HOSTED_SCORE_THRESH {
+                label = "hosted";
+            }
+        }
+        category + label
+    }
 }
 
 enum EnrichedAlert<'a> {
@@ -402,10 +457,7 @@ impl Babamul {
             alert.fp_hists.retain(|p| p.programid == 1);
 
             // Determine which topic this alert should go to
-            // Is it a star, galaxy, or none, and does it have an LSST crossmatch?
-            // TODO: Get this implemented
-            // For now, all ZTF alerts go to "babamul.ztf.none"
-            let category: String = "none".to_string();
+            let category: String = alert.compute_babamul_category();
             let topic_name = format!("babamul.ztf.{}", category);
             alerts_by_topic
                 .entry(topic_name)
