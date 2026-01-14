@@ -1,4 +1,50 @@
-# React + TypeScript + Vite
+# Boom web
+
+A React + TypeScript + Vite front end for the BOOM application.
+
+## Local development
+
+### Prerequisites
+
+- Docker and Docker Compose installed
+- Environment variables configured (see below)
+
+### Setup
+
+1. Clone the front end repo:
+   ```bash
+   git clone https://github.com/boom-astro/boom-web.git
+   cd boom-web
+   ```
+
+1. Create a `.env` file for the front end:
+   ```bash
+   cp .env.example .env
+   ```
+
+1. Repeat the first two steps for the backend services
+   (https://github.com/boom-astro/boom)
+   and spin them up for local development:
+   ```bash
+   make dev
+   ```
+
+1. Build and start the front end development container:
+   ```bash
+   docker-compose up --build
+   ```
+   The app will be available at `http://localhost:5173`
+
+### Notes
+
+- `docker-compose.override.yaml` is automatically applied for local development
+  - It exposes port 5173 for local access
+  - It uses a local network instead of requiring an external Traefik network
+- For production deployments, only `docker-compose.yaml` is used by
+  explicitly specifying it with `docker compose -f docker-compose.yaml up`
+- Do not commit local `.env` files to version control
+
+## Template info
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
@@ -7,7 +53,7 @@ Currently, two official plugins are available:
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
 - [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-## Expanding the ESLint configuration
+### Expanding the ESLint configuration
 
 If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
 
