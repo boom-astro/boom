@@ -60,6 +60,7 @@ jobs:
           docker compose logs mongo || true
           exit 1
         fi
+        docker compose exec -T mongo mongosh localhost:27017/boom_test --quiet --eval "db.createCollection('LSPSC'); db.LSPSC.createIndex({'coordinates.radec_geojson': '2dsphere'});"
     - name: Wait for Kafka ACL initialization
       run: |
         echo "Waiting for kafka-acl-init container to start..."
