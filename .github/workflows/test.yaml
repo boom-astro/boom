@@ -27,8 +27,10 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
-    - name: Create default .env file
-      run: cp .env.example .env
+    - name: Create default .env file & enable Babamul
+      run: |
+        cp .env.example .env
+        sed -i 's/BOOM_BABAMUL__ENABLED=false/BOOM_BABAMUL__ENABLED=true/' .env
     - name: Install Kafka CLI tools
       run: |
         KAFKA_VERSION=4.1.1
