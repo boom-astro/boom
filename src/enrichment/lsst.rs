@@ -200,6 +200,7 @@ pub struct LsstAlertProperties {
     pub stationary: bool,
     pub star: Option<bool>,
     pub photstats: PerBandProperties,
+    pub multisurvey_photstats: PerBandProperties,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -433,11 +434,38 @@ impl LsstEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
+        // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
+        let mut has_matches = false;
+        if let Some(survey_matches) = &alert.survey_matches {
+            if let Some(ztf_match) = &survey_matches.ztf {
+                let ztf_prv_candidates: Vec<PhotometryMag> = ztf_match
+                    .prv_candidates
+                    .iter()
+                    .filter_map(|p| p.to_photometry_mag())
+                    .collect();
+                let ztf_fp_hists: Vec<PhotometryMag> = ztf_match
+                    .fp_hists
+                    .iter()
+                    .filter_map(|p| p.to_photometry_mag())
+                    .collect();
+                let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
+                prepare_photometry(&mut ztf_lightcurve);
+                lightcurve.extend(ztf_lightcurve);
+                has_matches = true;
+            }
+        }
+        let multisurvey_photstats = if has_matches {
+            analyze_photometry(&lightcurve).0
+        } else {
+            photstats.clone()
+        };
+
         Ok(LsstAlertProperties {
             rock: is_rock,
             star: is_star,
             stationary,
             photstats,
+            multisurvey_photstats,
         })
     }
 }
