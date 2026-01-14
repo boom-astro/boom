@@ -66,6 +66,7 @@ pub struct BandRateProperties {
     pub rate_error: f32,
     pub red_chi2: f32,
     pub nb_data: i32,
+    pub dt: f32,
 }
 
 // TODO: avro serialization fail when we use skip_serializing_none,
@@ -116,9 +117,9 @@ pub struct AllBandsProperties {
 /// Returns None if the fit cannot be performed (e.g., not enough data points)
 /// or if the matrix is singular
 fn weighted_least_squares_centered(
-    x: &[f64],
-    y: &[f64],
-    sigma: &[f64],
+    x: &[f32],
+    y: &[f32],
+    sigma: &[f32],
 ) -> Option<BandRateProperties> {
     let n = x.len();
 
@@ -174,16 +175,17 @@ fn weighted_least_squares_centered(
     }
 
     let reduced_chi2 = if n > 2 {
-        chi2 / (n - 2) as f64
+        chi2 / (n - 2) as f32
     } else {
-        f64::NAN
+        f32::NAN
     };
 
     Some(BandRateProperties {
-        rate: a as f32,
-        rate_error: a_err as f32,
-        red_chi2: reduced_chi2 as f32,
+        rate: a,
+        rate_error: a_err,
+        red_chi2: reduced_chi2,
         nb_data: n as i32,
+        dt: x[n - 1] - x[0],
     })
 }
 
@@ -321,14 +323,8 @@ pub fn analyze_photometry(
                 before_mag_err.clear();
             }
 
-            rising_properties = weighted_least_squares_centered(
-                &before_time.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
-                &before_mag.iter().map(|&y| y as f64).collect::<Vec<f64>>(),
-                &before_mag_err
-                    .iter()
-                    .map(|&s| s as f64)
-                    .collect::<Vec<f64>>(),
-            );
+            rising_properties =
+                weighted_least_squares_centered(&before_time, &before_mag, &before_mag_err);
         }
 
         // same for after
@@ -365,14 +361,8 @@ pub fn analyze_photometry(
                 after_mag_err.clear();
             }
 
-            fading_properties = weighted_least_squares_centered(
-                &after_time.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
-                &after_mag.iter().map(|&y| y as f64).collect::<Vec<f64>>(),
-                &after_mag_err
-                    .iter()
-                    .map(|&s| s as f64)
-                    .collect::<Vec<f64>>(),
-            );
+            fading_properties =
+                weighted_least_squares_centered(&after_time, &after_mag, &after_mag_err);
         }
 
         let band_properties = BandProperties {
