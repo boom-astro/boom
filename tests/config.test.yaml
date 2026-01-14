@@ -12,6 +12,7 @@ babamul:
   enabled: true # Enabled for testing
 api:
   port: 4000 # Set via BOOM_API__PORT environment variable
+  domain: localhost
   auth:
     secret_key: "1234"
     token_expiration: 604800
