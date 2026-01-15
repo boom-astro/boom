@@ -14,6 +14,8 @@ use apache_avro_macros::serdavro;
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
+const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
+
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
 #[derive(Debug, serde::Deserialize)]
@@ -231,7 +233,7 @@ impl EnrichedZtfAlert {
 
         for score in sgscores.iter().flatten() {
             // Only consider valid scores (>= 0)
-            if *score >= 0.0 && *score < 0.5 {
+            if *score >= 0.0 && *score < ZTF_HOSTED_SG_SCORE_THRESH {
                 return category + "hosted";
             }
         }
