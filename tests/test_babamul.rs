@@ -623,7 +623,10 @@ async fn test_babamul_process_ztf_alerts() {
     let alert2 = create_mock_enriched_ztf_alert(1234567891, &ztf_obj2, false);
 
     // Process the alerts
-    let _result = babamul.process_ztf_alerts(vec![alert1, alert2]).await;
+    let _result = babamul
+        .process_ztf_alerts(vec![alert1, alert2])
+        .await
+        .unwrap();
 
     // Consume messages from Kafka topic and verify our specific alerts are present
     let messages = consume_kafka_messages(topic, &config).await;
