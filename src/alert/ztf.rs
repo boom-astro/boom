@@ -738,10 +738,6 @@ impl ZtfAlertWorker {
             .map(|pc| mongify(pc))
             .collect();
 
-        println!(
-            "aliases to update for object_id {}: {:?}",
-            object_id, survey_matches
-        );
         let update_doc = doc! {
             "$push": {
                 "prv_candidates": { "$each": new_prv_candidates_docs },
