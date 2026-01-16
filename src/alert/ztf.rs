@@ -5,7 +5,7 @@ use crate::{
     },
     conf::{self, AppConfig},
     utils::{
-        db::{mongify, update_timeseries_op},
+        db::mongify,
         enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
         o11y::logging::as_error,
@@ -19,7 +19,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{instrument, warn};
 use utoipa::ToSchema;
 
@@ -37,6 +37,8 @@ pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 const ZTF_ZP: f32 = 23.9;
+
+const NB_AUX_RETRIES: usize = 5;
 
 fn fid2band(fid: i32) -> Result<Band, AlertError> {
     match fid {
@@ -622,10 +624,24 @@ pub struct ZtfAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
+    alert_aux_collection_doc: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LightcurveJdOnly {
+    pub jd: f64,
+}
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    pub prv_nondetections: Vec<LightcurveJdOnly>,
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    // version should have a default value of 0
+    pub version: Option<i32>,
 }
 
 impl ZtfAlertWorker {
@@ -656,11 +672,30 @@ impl ZtfAlertWorker {
         })
     }
 
+    async fn get_existing_aux(
+        &self,
+        object_id: String,
+    ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
+        Ok(self
+            .alert_aux_collection_doc
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .inspect_err(as_error!())?
+            .and_then(|doc| mongodb::bson::from_document(doc).ok()))
+    }
+
     #[instrument(
-        skip(self, prv_candidates, prv_nondetections, fp_hists, survey_matches),
+        skip(
+            self,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            survey_matches,
+            existing_alert_aux
+        ),
         err
     )]
-    async fn update_aux(
+    async fn update_aux_v2(
         self: &mut Self,
         object_id: &str,
         prv_candidates: &Vec<ZtfPrvCandidate>,
@@ -668,19 +703,142 @@ impl ZtfAlertWorker {
         fp_hists: &Vec<ZtfForcedPhot>,
         survey_matches: &Option<ZtfAliases>,
         now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
     ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
+        let existing_prv_candidate_jds: HashSet<u64> = existing_alert_aux
+            .prv_candidates
+            .iter()
+            .map(|pc| pc.jd.to_bits())
+            .collect::<HashSet<u64>>();
+        let existing_prv_nondetection_jds: HashSet<u64> = existing_alert_aux
+            .prv_nondetections
+            .iter()
+            .map(|pc| pc.jd.to_bits())
+            .collect::<HashSet<u64>>();
+        let existing_fp_hist_jds: HashSet<u64> = existing_alert_aux
+            .fp_hists
+            .iter()
+            .map(|pc| pc.jd.to_bits())
+            .collect::<HashSet<u64>>();
+        let current_version = existing_alert_aux.version;
+
+        let new_prv_candidates_docs: Vec<Document> = prv_candidates
+            .iter()
+            .filter(|pc| !existing_prv_candidate_jds.contains(&pc.prv_candidate.jd.to_bits()))
+            .map(|pc| mongify(pc))
+            .collect();
+        let new_prv_nondetections_docs: Vec<Document> = prv_nondetections
+            .iter()
+            .filter(|pc| !existing_prv_nondetection_jds.contains(&pc.prv_candidate.jd.to_bits()))
+            .map(|pc| mongify(pc))
+            .collect();
+        let new_fp_hists_docs: Vec<Document> = fp_hists
+            .iter()
+            .filter(|pc| !existing_fp_hist_jds.contains(&pc.fp_hist.jd.to_bits()))
+            .map(|pc| mongify(pc))
+            .collect();
+
+        println!(
+            "aliases to update for object_id {}: {:?}",
+            object_id, survey_matches
+        );
+        let update_doc = doc! {
+            "$push": {
+                "prv_candidates": { "$each": new_prv_candidates_docs },
+                "prv_nondetections": { "$each": new_prv_nondetections_docs },
+                "fp_hists": { "$each": new_fp_hists_docs },
+            },
             "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
+                "version": current_version.unwrap_or(0) + 1,
             }
-        }];
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
+        };
+        let find_doc = if let Some(version) = current_version {
+            doc! { "_id": object_id, "version": version }
+        } else {
+            doc! { "_id": object_id, "version": { "$exists": false } }
+        };
+        let update_result = self
+            .alert_aux_collection
+            .update_one(find_doc, update_doc)
             .await?;
+        if update_result.matched_count == 0 {
+            warn!(
+                "Concurrent modification detected for object_id {}. Update skipped.",
+                object_id
+            );
+            return Err(AlertError::ConcurrentModification);
+        }
+        Ok(())
+    }
+
+    #[instrument(
+        skip(
+            self,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            survey_matches,
+            existing_alert_aux
+        ),
+        err
+    )]
+    async fn update_aux_v2_with_retries(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates: &Vec<ZtfPrvCandidate>,
+        prv_nondetections: &Vec<ZtfPrvCandidate>,
+        fp_hists: &Vec<ZtfForcedPhot>,
+        survey_matches: &Option<ZtfAliases>,
+        now: f64,
+        mut existing_alert_aux: AlertAuxForUpdate,
+        n_retries: usize,
+    ) -> Result<(), AlertError> {
+        // here we call update_aux_v2 with retries
+        // at every retry, we fetch the existing alert aux again
+        for attempt in 0..=n_retries {
+            match self
+                .update_aux_v2(
+                    object_id,
+                    prv_candidates,
+                    prv_nondetections,
+                    fp_hists,
+                    survey_matches,
+                    now,
+                    &existing_alert_aux,
+                )
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(AlertError::ConcurrentModification) => {
+                    if attempt == n_retries {
+                        warn!(
+                            "Max retries reached for object_id {}. Update failed.",
+                            object_id
+                        );
+                        return Err(AlertError::ConcurrentModification);
+                    }
+                    warn!(
+                        "Retrying update for object_id {} (attempt {}/{})",
+                        object_id,
+                        attempt + 1,
+                        n_retries
+                    );
+                    // fetch the existing alert aux again
+                    let new_existing_alert_aux =
+                        self.get_existing_aux(object_id.to_string()).await?;
+                    if let Some(new_existing_alert_aux) = new_existing_alert_aux {
+                        // update existing_alert_aux for the next attempt
+                        existing_alert_aux = new_existing_alert_aux;
+                    } else {
+                        warn!("Alert aux document for object_id {} not found during retry. Update failed.", object_id);
+                        return Err(AlertError::ConcurrentModification);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 
@@ -723,6 +881,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_aux_collection_doc = db.collection::<Document>(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
@@ -741,6 +900,7 @@ impl AlertWorker for ZtfAlertWorker {
             schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
+            alert_aux_collection_doc,
         };
         Ok(worker)
     }
@@ -800,10 +960,7 @@ impl AlertWorker for ZtfAlertWorker {
             return Ok(cutout_status);
         }
 
-        let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
-            .await
-            .inspect_err(as_error!())?;
+        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
         let (prv_candidates, prv_nondetections) =
             self.format_prv_candidates(prv_candidates, &candidate);
@@ -814,7 +971,7 @@ impl AlertWorker for ZtfAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        if !alert_aux_exists {
+        if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
@@ -829,13 +986,21 @@ impl AlertWorker for ZtfAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                self.update_aux(
+                let existing_alert_aux: Option<AlertAuxForUpdate> = self
+                    .alert_aux_collection_doc
+                    .find_one(doc! { "_id": &object_id })
+                    .await
+                    .inspect_err(as_error!())?
+                    .and_then(|doc| mongodb::bson::from_document(doc).ok());
+                self.update_aux_v2_with_retries(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.prv_nondetections,
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
+                    existing_alert_aux.unwrap(),
+                    NB_AUX_RETRIES,
                 )
                 .await
                 .inspect_err(as_error!())?;
@@ -843,13 +1008,15 @@ impl AlertWorker for ZtfAlertWorker {
                 result.inspect_err(as_error!())?;
             }
         } else {
-            self.update_aux(
+            self.update_aux_v2_with_retries(
                 &object_id,
                 &prv_candidates,
                 &prv_nondetections,
                 &fp_hists,
                 &survey_matches,
                 now,
+                existing_alert_aux.unwrap(),
+                NB_AUX_RETRIES,
             )
             .await
             .inspect_err(as_error!())?;
