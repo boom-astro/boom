@@ -384,9 +384,22 @@ impl SchemaRegistry {
                 return Err(SchemaRegistryError::GithubFetchFailed);
             }
         };
-        let raw_url_base = github_fallback_url
-            .replace("github.com", "raw.githubusercontent.com")
-            .replace("/tree/", "/");
+        let raw_url_base = if github_fallback_url.contains("raw.githubusercontent.com") {
+            // Already a raw GitHub URL; use as-is.
+            github_fallback_url
+        } else if github_fallback_url.contains("github.com") {
+            // Convert a standard GitHub URL (e.g., with /tree/) to its raw equivalent.
+            github_fallback_url
+                .replace("github.com", "raw.githubusercontent.com")
+                .replace("/tree/", "/")
+        } else {
+            // Unknown pattern; return an error.
+            error!(
+                "GitHub fallback URL does not appear to be a valid GitHub URL: {}",
+                github_fallback_url
+            );
+            return Err(SchemaRegistryError::GithubFetchFailed);
+        };
 
         // Fetch the main alert schema file
         let schema_url = format!("{}/lsst.v{}_{}.alert.avsc", raw_url_base, major, minor);
@@ -396,6 +409,14 @@ impl SchemaRegistry {
             .send()
             .await
             .inspect_err(as_error!("failed to fetch alert schema from github"))?;
+        if !response.status().is_success() {
+            error!(
+                "Failed to fetch schema from GitHub URL: {}. HTTP status: {}",
+                schema_url,
+                response.status()
+            );
+            return Err(SchemaRegistryError::GithubFetchFailed);
+        }
         let schema_str = response
             .text()
             .await
@@ -428,6 +449,14 @@ impl SchemaRegistry {
                 .send()
                 .await
                 .inspect_err(as_error!("failed to fetch schema file from github"))?;
+            if !response.status().is_success() {
+                error!(
+                    "Failed to fetch schema file from GitHub URL: {}. HTTP status: {}",
+                    file_url,
+                    response.status()
+                );
+                return Err(SchemaRegistryError::GithubFetchFailed);
+            }
 
             let schema_str = response
                 .text()
