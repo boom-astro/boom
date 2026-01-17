@@ -1,7 +1,7 @@
 use crate::{
     alert::{
         AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_URL,
+        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -210,7 +210,10 @@ pub struct AlertRandomizer {
 impl AlertRandomizer {
     pub fn new(survey: Survey) -> Self {
         let schema_registry = match survey {
-            Survey::Lsst => Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+            Survey::Lsst => Some(SchemaRegistry::new(
+                LSST_SCHEMA_REGISTRY_URL,
+                Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
+            )),
             _ => None,
         };
         Self {
@@ -250,7 +253,10 @@ impl AlertRandomizer {
                     Some(Self::randomize_object_id(&survey)),
                     Some(payload),
                     None,
-                    Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+                    Some(SchemaRegistry::new(
+                        LSST_SCHEMA_REGISTRY_URL,
+                        Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
+                    )),
                 )
             }
         };

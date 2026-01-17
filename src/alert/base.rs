@@ -15,6 +15,7 @@ use crate::{
 use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
 
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
+use futures::future::join_all;
 use mongodb::{
     bson::{doc, Document},
     Collection,
@@ -175,6 +176,10 @@ pub enum SchemaRegistryError {
     InvalidRecordCount(usize),
     #[error("integer overflow")]
     IntegerOverflow,
+    #[error("failed to fetch schema from github")]
+    GithubFetchFailed,
+    #[error("failed to resolve schema references")]
+    SchemaResolutionFailed,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -228,17 +233,19 @@ pub struct SchemaRegistry {
     client: reqwest::Client,
     cache: HashMap<String, Schema>,
     url: String,
+    github_fallback_url: Option<String>,
 }
 
 impl SchemaRegistry {
     #[instrument]
-    pub fn new(url: &str) -> Self {
+    pub fn new(url: &str, github_fallback_url: Option<String>) -> Self {
         let client = reqwest::Client::new();
         let cache = HashMap::new();
         SchemaRegistry {
             client,
             cache,
             url: url.to_string(),
+            github_fallback_url,
         }
     }
 
@@ -322,6 +329,162 @@ impl SchemaRegistry {
         Ok(schema)
     }
 
+    /// Attempts to get a schema first from the schema registry, and falls back to GitHub if that fails.
+    ///
+    /// This is useful when the schema registry is temporarily unavailable. The fallback fetches
+    /// schemas from the LSST alert_packet repository on GitHub:
+    /// https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema/{major}/{minor}
+    /// where major and minor are derived from the version number.
+    async fn _get_schema_by_id_with_fallback(
+        &self,
+        subject: &str,
+        version: u32,
+    ) -> Result<Schema, SchemaRegistryError> {
+        // Try to get schema from registry first
+        match self._get_schema_by_id(subject, version).await {
+            Ok(schema) => Ok(schema),
+            Err(registry_error) => {
+                if self.github_fallback_url.is_none() {
+                    // if we have no github fallback url, return the registry error
+                    return Err(registry_error);
+                }
+
+                debug!(
+                    "Schema registry lookup failed for subject {} version {}, attempting GitHub fallback: {:?}",
+                    subject,
+                    version,
+                    registry_error
+                );
+                // let's split the version in major and minor, where minor is the last 2 digits
+                // If schema registry fails, try GitHub fallback
+                self.get_github_schema(version / 100, version % 100)
+                    .await
+                    .map_err(|github_error| {
+                        error!(
+                            ?registry_error,
+                            ?github_error,
+                            "Both schema registry and GitHub fallback failed"
+                        );
+                        SchemaRegistryError::GithubFetchFailed
+                    })
+            }
+        }
+    }
+
+    /// Fetches the LSST alert packet schema from GitHub and resolves all nested schema references.
+    #[instrument(skip(self), err)]
+    async fn get_github_schema(
+        &self,
+        major: u32,
+        minor: u32,
+    ) -> Result<Schema, SchemaRegistryError> {
+        // Build the RAW URL for the GitHub repository
+        let github_fallback_url = match &self.github_fallback_url {
+            Some(url) => format!("{}/{}/{}", url, major, minor),
+            None => {
+                return Err(SchemaRegistryError::GithubFetchFailed);
+            }
+        };
+        let raw_url_base = if github_fallback_url.contains("raw.githubusercontent.com") {
+            // Already a raw GitHub URL; use as-is.
+            github_fallback_url
+        } else if github_fallback_url.contains("github.com") {
+            // Convert a standard GitHub URL (e.g., with /tree/) to its raw equivalent.
+            github_fallback_url
+                .replace("github.com", "raw.githubusercontent.com")
+                .replace("/tree/", "/")
+        } else {
+            // Unknown pattern; return an error.
+            error!(
+                "GitHub fallback URL does not appear to be a valid GitHub URL: {}",
+                github_fallback_url
+            );
+            return Err(SchemaRegistryError::GithubFetchFailed);
+        };
+
+        // Fetch the main alert schema file
+        let schema_url = format!("{}/lsst.v{}_{}.alert.avsc", raw_url_base, major, minor);
+        let response = self
+            .client
+            .get(&schema_url)
+            .send()
+            .await
+            .inspect_err(as_error!("failed to fetch alert schema from github"))?;
+        if !response.status().is_success() {
+            error!(
+                "Failed to fetch schema from GitHub URL: {}. HTTP status: {}",
+                schema_url,
+                response.status()
+            );
+            return Err(SchemaRegistryError::GithubFetchFailed);
+        }
+        let schema_str = response
+            .text()
+            .await
+            .inspect_err(as_error!("failed to get schema text from github response"))?;
+
+        // Parse the schema to find all referenced schemas
+        let mut schema_files = vec![];
+        let schema_lines: Vec<&str> = schema_str.lines().collect();
+        for line in schema_lines {
+            if let Some(start_idx) = line.find(format!("lsst.v{}_{}.", major, minor).as_str()) {
+                let end_idx = line[start_idx..]
+                    .find('"')
+                    .map(|idx| start_idx + idx)
+                    .unwrap_or(line.len());
+                let schema_ref = &line[start_idx..end_idx];
+                let file_name = format!("{}.avsc", schema_ref);
+                if !schema_files.contains(&file_name) {
+                    schema_files.push(file_name);
+                }
+            }
+        }
+
+        // Fetch all referenced schemas concurrently
+        let fetch_futures: Vec<_> = schema_files
+            .iter()
+            .map(|file_name| {
+                let url = format!("{}/{}", raw_url_base, file_name);
+                let client = self.client.clone();
+                let url_for_logging = url.clone();
+                async move { (url_for_logging, client.get(&url).send().await) }
+            })
+            .collect();
+
+        let fetch_results = join_all(fetch_futures).await;
+        let mut schema_strs = vec![];
+
+        for (file_url, response_result) in fetch_results {
+            let response = response_result
+                .inspect_err(as_error!("failed to fetch schema file from github"))?;
+            if !response.status().is_success() {
+                error!(
+                    "Failed to fetch schema file from GitHub URL: {}. HTTP status: {}",
+                    file_url,
+                    response.status()
+                );
+                return Err(SchemaRegistryError::GithubFetchFailed);
+            }
+
+            let schema_str = response
+                .text()
+                .await
+                .inspect_err(as_error!("failed to get schema text from github response"))?;
+            schema_strs.push(schema_str);
+        }
+
+        // Finally, resolve all references to get the full - independent - canonical schema
+        let (schema, schemas) = apache_avro::schema::Schema::parse_str_with_list(
+            &schema_str,
+            schema_strs.iter().map(|s| s.as_str()),
+        )?;
+        let canonical_schema_str = schema.independent_canonical_form(&schemas)?;
+        let schema = Schema::parse_str(&canonical_schema_str).inspect_err(as_error!(
+            "failed to parse resolved alert schema from github"
+        ))?;
+        Ok(schema)
+    }
+
     #[instrument(skip(self), err)]
     pub async fn get_schema(
         &mut self,
@@ -330,7 +493,9 @@ impl SchemaRegistry {
     ) -> Result<&Schema, SchemaRegistryError> {
         let key = format!("{}:{}", subject, version);
         if !self.cache.contains_key(&key) {
-            let schema = self._get_schema_by_id(subject, version).await?;
+            let schema = self
+                ._get_schema_by_id_with_fallback(subject, version)
+                .await?;
             self.cache.insert(key.clone(), schema);
         }
         Ok(self.cache.get(&key).unwrap())
@@ -348,7 +513,6 @@ impl SchemaRegistry {
         let schema_id =
             u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
         let schema = self.get_schema("alert-packet", schema_id).await?;
-
         let mut slice = &avro_bytes[5..];
         let value = from_avro_datum(&schema, &mut slice, None)?;
 

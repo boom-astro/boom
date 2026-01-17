@@ -40,6 +40,8 @@ pub const LSST_DECAM_XMATCH_RADIUS: f64 =
     (LSST_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
+pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
+    "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema";
 
 const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
 
@@ -769,6 +771,10 @@ impl AlertWorker for LsstAlertWorker {
             Some(ref url) => url.as_ref(),
             None => LSST_SCHEMA_REGISTRY_URL,
         };
+        let github_fallback_url = match kafka_consumer_config.schema_github_fallback_url {
+            Some(ref url) => url.as_ref(),
+            None => LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL,
+        };
 
         let db: mongodb::Database = config
             .build_db()
@@ -787,7 +793,10 @@ impl AlertWorker for LsstAlertWorker {
 
         let worker = LsstAlertWorker {
             stream_name: STREAM_NAME.to_string(),
-            schema_registry: SchemaRegistry::new(schema_registry_url),
+            schema_registry: SchemaRegistry::new(
+                schema_registry_url,
+                Some(github_fallback_url.to_string()),
+            ),
             xmatch_configs,
             db,
             alert_collection,

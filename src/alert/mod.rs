@@ -12,8 +12,8 @@ pub use decam::{
 };
 pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,
-    LsstForcedPhot, LsstObject, LsstRawAvroAlert, LSST_DEC_RANGE, LSST_SCHEMA_REGISTRY_URL,
-    LSST_ZTF_XMATCH_RADIUS,
+    LsstForcedPhot, LsstObject, LsstRawAvroAlert, LSST_DEC_RANGE,
+    LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use ztf::{
     deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist,
