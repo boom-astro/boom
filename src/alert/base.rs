@@ -440,9 +440,8 @@ impl SchemaRegistry {
         let (schema, schemas) = apache_avro::schema::Schema::parse_str_with_list(
             &schema_str,
             schema_strs.iter().map(|s| s.as_str()),
-        )
-        .unwrap();
-        let canonical_schema_str = schema.independent_canonical_form(&schemas).unwrap();
+        )?;
+        let canonical_schema_str = schema.independent_canonical_form(&schemas)?;
         let schema = Schema::parse_str(&canonical_schema_str).inspect_err(as_error!(
             "failed to parse resolved alert schema from github"
         ))?;
@@ -477,7 +476,6 @@ impl SchemaRegistry {
         let schema_id =
             u32::from_be_bytes([avro_bytes[1], avro_bytes[2], avro_bytes[3], avro_bytes[4]]);
         let schema = self.get_schema("alert-packet", schema_id).await?;
-
         let mut slice = &avro_bytes[5..];
         let value = from_avro_datum(&schema, &mut slice, None)?;
 
