@@ -15,6 +15,7 @@ use crate::{
 use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
 
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
+use futures::future::join_all;
 use mongodb::{
     bson::{doc, Document},
     Collection,
@@ -439,15 +440,22 @@ impl SchemaRegistry {
             }
         }
 
-        // Fetch all referenced schemas
+        // Fetch all referenced schemas concurrently
+        let fetch_futures: Vec<_> = schema_files
+            .iter()
+            .map(|file_name| {
+                let url = format!("{}/{}", raw_url_base, file_name);
+                let client = self.client.clone();
+                let url_for_logging = url.clone();
+                async move { (url_for_logging, client.get(&url).send().await) }
+            })
+            .collect();
+
+        let fetch_results = join_all(fetch_futures).await;
         let mut schema_strs = vec![];
-        for file_name in schema_files {
-            let file_url = format!("{}/{}", raw_url_base, file_name);
-            let response = self
-                .client
-                .get(&file_url)
-                .send()
-                .await
+
+        for (file_url, response_result) in fetch_results {
+            let response = response_result
                 .inspect_err(as_error!("failed to fetch schema file from github"))?;
             if !response.status().is_success() {
                 error!(
