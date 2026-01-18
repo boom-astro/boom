@@ -26,12 +26,12 @@ pub enum XmatchError {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct GeoJsonPoint {
     r#type: String,
-    coordinates: Vec<f64>,
+    pub coordinates: Vec<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Coordinates {
-    radec_geojson: GeoJsonPoint,
+    pub radec_geojson: GeoJsonPoint,
     l: Option<f64>,
     b: Option<f64>,
 }
@@ -47,6 +47,15 @@ impl Coordinates {
             l: Some(l),
             b: Some(b),
         }
+    }
+
+    pub fn get_ra_dec(&self) -> (f64, f64) {
+        if self.radec_geojson.coordinates.len() != 2 {
+            panic!("Invalid coordinates length");
+        }
+        let ra = self.radec_geojson.coordinates[0] + 180.0;
+        let dec = self.radec_geojson.coordinates[1];
+        (ra, dec)
     }
 }
 

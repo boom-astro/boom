@@ -94,7 +94,7 @@ crossmatch:
         phot_rp_mean_mag: 1
         ra: 1
         dec: 1
-    - catalog: milliquas_v6
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -128,6 +128,30 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: 2MASS
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        j_m: 1
+        j_msigcom: 1
+        h_m: 1
+        h_msigcom: 1
+        k_m: 1
+        k_msigcom: 1
+    - catalog: GALEX
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        fuv_mag: 1
+        fuv_magerr: 1
+        nuv_mag: 1
+        nuv_magerr: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0 # 30 arcseconds
