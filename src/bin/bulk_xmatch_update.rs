@@ -55,7 +55,7 @@ async fn process_object(
             let update_result = alert_aux_collection
                 .update_one(
                     doc! { "_id": &obj.object_id },
-                    doc! { "$set": { "crossmatches": mongify(&matches) } },
+                    doc! { "$set": { "cross_matches": mongify(&matches) } },
                 )
                 .await;
             if let Err(e) = update_result {
