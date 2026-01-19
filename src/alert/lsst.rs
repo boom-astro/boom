@@ -794,6 +794,7 @@ impl AlertWorker for LsstAlertWorker {
         let worker = LsstAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             schema_registry: SchemaRegistry::new(
+                Survey::Lsst,
                 schema_registry_url,
                 Some(github_fallback_url.to_string()),
             ),

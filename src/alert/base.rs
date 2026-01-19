@@ -1,4 +1,5 @@
 use crate::conf::AppConfig;
+use crate::utils::enums::Survey;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
@@ -231,6 +232,7 @@ pub enum ProcessAlertStatus {
 
 #[derive(Clone, Debug)]
 pub struct SchemaRegistry {
+    survey: Survey,
     client: reqwest::Client,
     cache: HashMap<String, Schema>,
     url: String,
@@ -239,10 +241,11 @@ pub struct SchemaRegistry {
 
 impl SchemaRegistry {
     #[instrument]
-    pub fn new(url: &str, github_fallback_url: Option<String>) -> Self {
+    pub fn new(survey: Survey, url: &str, github_fallback_url: Option<String>) -> Self {
         let client = reqwest::Client::new();
         let cache = HashMap::new();
         SchemaRegistry {
+            survey,
             client,
             cache,
             url: url.to_string(),
@@ -332,9 +335,9 @@ impl SchemaRegistry {
 
     /// Attempts to get a schema first from the schema registry, and falls back to GitHub if that fails.
     ///
-    /// This is useful when the schema registry is temporarily unavailable. The fallback fetches
-    /// schemas from the LSST alert_packet repository on GitHub:
-    /// https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema/{major}/{minor}
+    /// This is useful when a schema registry is temporarily unavailable. The fallback fetches
+    /// schemas from the provided GitHub URL (e.g.
+    /// https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema/{major}/{minor})
     /// where major and minor are derived from the version number.
     async fn _get_schema_by_id_with_fallback(
         &self,
@@ -346,18 +349,14 @@ impl SchemaRegistry {
             Ok(schema) => Ok(schema),
             Err(registry_error) => {
                 if self.github_fallback_url.is_none() {
-                    // if we have no github fallback url, return the registry error
                     return Err(registry_error);
                 }
-
                 debug!(
                     "Schema registry lookup failed for subject {} version {}, attempting GitHub fallback: {:?}",
                     subject,
                     version,
                     registry_error
                 );
-                // let's split the version in major and minor, where minor is the last 2 digits
-                // If schema registry fails, try GitHub fallback
                 self.get_github_schema(version / 100, version % 100)
                     .await
                     .map_err(|github_error| {
@@ -372,7 +371,7 @@ impl SchemaRegistry {
         }
     }
 
-    /// Fetches the LSST alert packet schema from GitHub and resolves all nested schema references.
+    /// Fetches the alert packet schema from GitHub and resolves all nested schema references.
     #[instrument(skip(self), err)]
     async fn get_github_schema(
         &self,
@@ -404,7 +403,13 @@ impl SchemaRegistry {
         };
 
         // Fetch the main alert schema file
-        let schema_url = format!("{}/lsst.v{}_{}.alert.avsc", raw_url_base, major, minor);
+        let schema_url = format!(
+            "{}/{}.v{}_{}.alert.avsc",
+            raw_url_base,
+            self.survey.to_string().to_lowercase(),
+            major,
+            minor
+        );
         let response = self
             .client
             .get(&schema_url)
@@ -428,7 +433,15 @@ impl SchemaRegistry {
         let mut schema_files = HashSet::new();
         let schema_lines: Vec<&str> = schema_str.lines().collect();
         for line in schema_lines {
-            if let Some(start_idx) = line.find(format!("lsst.v{}_{}.", major, minor).as_str()) {
+            if let Some(start_idx) = line.find(
+                format!(
+                    "{}.v{}_{}.",
+                    self.survey.to_string().to_lowercase(),
+                    major,
+                    minor
+                )
+                .as_str(),
+            ) {
                 let end_idx = line[start_idx..]
                     .find('"')
                     .map(|idx| start_idx + idx)

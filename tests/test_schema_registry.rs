@@ -1,4 +1,7 @@
-use boom::alert::{SchemaRegistry, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL};
+use boom::{
+    alert::{SchemaRegistry, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL},
+    utils::enums::Survey,
+};
 
 /// Test that the GitHub fallback works when schema registry is unreachable
 #[tokio::test]
@@ -6,6 +9,7 @@ async fn test_schema_registry_github_fallback() {
     // Create a SchemaRegistry pointing to a non-existent/unreachable URL
     // This ensures the schema registry lookup will fail immediately
     let mut registry = SchemaRegistry::new(
+        Survey::Lsst,
         "http://localhost:9999",
         Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
     );
@@ -17,7 +21,8 @@ async fn test_schema_registry_github_fallback() {
     // The result should be Ok with a valid schema, fetched from GitHub
     assert!(
         result.is_ok(),
-        "Should successfully fetch schema from GitHub fallback"
+        "Should successfully fetch schema from GitHub fallback: {:?}",
+        result.err()
     );
 
     let schema = result.unwrap();
@@ -37,6 +42,7 @@ async fn test_schema_registry_github_fallback() {
 #[tokio::test]
 async fn test_schema_registry_github_fallback_nested_refs() {
     let mut registry = SchemaRegistry::new(
+        Survey::Lsst,
         "http://localhost:9999",
         Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
     );
@@ -45,7 +51,8 @@ async fn test_schema_registry_github_fallback_nested_refs() {
     let result = registry.get_schema("alert-packet", 1000).await;
     assert!(
         result.is_ok(),
-        "Should successfully fetch schema from GitHub"
+        "Should successfully fetch schema from GitHub fallback: {:?}",
+        result.err()
     );
 
     let schema = result.unwrap();
@@ -84,6 +91,7 @@ async fn test_schema_registry_github_fallback_nested_refs() {
 #[tokio::test]
 async fn test_schema_registry_caching() {
     let mut registry = SchemaRegistry::new(
+        Survey::Lsst,
         "http://localhost:9999",
         Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
     );
@@ -109,6 +117,7 @@ async fn test_schema_registry_caching() {
 #[tokio::test]
 async fn test_schema_registry_multiple_versions() {
     let mut registry = SchemaRegistry::new(
+        Survey::Lsst,
         "http://localhost:9999",
         Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
     );

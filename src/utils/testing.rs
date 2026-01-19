@@ -211,6 +211,7 @@ impl AlertRandomizer {
     pub fn new(survey: Survey) -> Self {
         let schema_registry = match survey {
             Survey::Lsst => Some(SchemaRegistry::new(
+                Survey::Lsst,
                 LSST_SCHEMA_REGISTRY_URL,
                 Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
             )),
@@ -254,6 +255,7 @@ impl AlertRandomizer {
                     Some(payload),
                     None,
                     Some(SchemaRegistry::new(
+                        Survey::Lsst,
                         LSST_SCHEMA_REGISTRY_URL,
                         Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
                     )),
