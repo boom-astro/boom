@@ -15,17 +15,10 @@ async fn test_schema_registry_github_fallback() {
     let result = registry.get_schema("alert-packet", 1000).await;
 
     // The result should be Ok with a valid schema, fetched from GitHub
-    match result {
-        Ok(_schema) => {
-            // Expected - fallback worked
-        }
-        Err(e) => {
-            panic!(
-                "Schema should be fetched from GitHub fallback when registry fails, but got error: {:?}",
-                e
-            );
-        }
-    }
+    assert!(
+        result.is_ok(),
+        "Should successfully fetch schema from GitHub fallback"
+    );
 
     let schema = result.unwrap();
     // The schema should have a name field indicating it's from the alert packet
