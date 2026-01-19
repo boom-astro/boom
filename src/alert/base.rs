@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+use std::collections::HashSet;
 use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
 
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
@@ -424,7 +425,7 @@ impl SchemaRegistry {
             .inspect_err(as_error!("failed to get schema text from github response"))?;
 
         // Parse the schema to find all referenced schemas
-        let mut schema_files = vec![];
+        let mut schema_files = HashSet::new();
         let schema_lines: Vec<&str> = schema_str.lines().collect();
         for line in schema_lines {
             if let Some(start_idx) = line.find(format!("lsst.v{}_{}.", major, minor).as_str()) {
@@ -434,9 +435,7 @@ impl SchemaRegistry {
                     .unwrap_or(line.len());
                 let schema_ref = &line[start_idx..end_idx];
                 let file_name = format!("{}.avsc", schema_ref);
-                if !schema_files.contains(&file_name) {
-                    schema_files.push(file_name);
-                }
+                schema_files.insert(file_name);
             }
         }
 
