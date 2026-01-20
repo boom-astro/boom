@@ -15,6 +15,7 @@ interface AladinCatalog {
 }
 
 interface AladinAPI {
+  init: Promise<void>;
   aladin(selector: string, opts: Record<string, unknown>): AladinInstance;
   catalogHiPS(url: string, opts?: Record<string, unknown>): AladinCatalog;
   catalog(opts?: Record<string, unknown>): AladinCatalog;
