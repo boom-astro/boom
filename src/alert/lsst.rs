@@ -195,6 +195,63 @@ pub struct DiaSource {
     /// General pixel flags failure; set if anything went wrong when setting pixels flags from this footprint's mask. This implies that some pixelFlags for this source may be incorrectly set to False.
     #[serde(rename = "pixelFlags")]
     pub pixel_flags: Option<bool>,
+    /// Bad pixel in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_bad")]
+    pub pixel_flags_bad: Option<bool>,
+    /// Cosmic ray in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_cr")]
+    pub pixel_flags_cr: Option<bool>,
+    /// Cosmic ray in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_crCenter")]
+    pub pixel_flags_cr_center: Option<bool>,
+    /// Some of the source footprint is outside usable exposure region (masked EDGE or centroid off image).
+    #[serde(rename = "pixelFlags_edge")]
+    pub pixel_flags_edge: Option<bool>,
+    /// NO_DATA pixel in the source footprint.
+    #[serde(rename = "pixelFlags_nodata")]
+    pub pixel_flags_nodata: Option<bool>,
+    /// NO_DATA pixel in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_nodataCenter")]
+    pub pixel_flags_nodata_center: Option<bool>,
+    /// Interpolated pixel in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_interpolated")]
+    pub pixel_flags_interpolated: Option<bool>,
+    /// Interpolated pixel in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_interpolatedCenter")]
+    pub pixel_flags_interpolated_center: Option<bool>,
+    /// DiaSource center is off image.
+    #[serde(rename = "pixelFlags_offimage")]
+    pub pixel_flags_offimage: Option<bool>,
+    /// Saturated pixel in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_saturated")]
+    pub pixel_flags_saturated: Option<bool>,
+    /// Saturated pixel in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_saturatedCenter")]
+    pub pixel_flags_saturated_center: Option<bool>,
+    /// DiaSource's footprint includes suspect pixels.
+    #[serde(rename = "pixelFlags_suspect")]
+    pub pixel_flags_suspect: Option<bool>,
+    /// Suspect pixel in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_suspectCenter")]
+    pub pixel_flags_suspect_center: Option<bool>,
+    /// Streak in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_streak")]
+    pub pixel_flags_streak: Option<bool>,
+    /// Streak in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_streakCenter")]
+    pub pixel_flags_streak_center: Option<bool>,
+    /// Injection in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_injected")]
+    pub pixel_flags_injected: Option<bool>,
+    /// Injection in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_injectedCenter")]
+    pub pixel_flags_injected_center: Option<bool>,
+    /// Template injection in the DiaSource footprint.
+    #[serde(rename = "pixelFlags_injected_template")]
+    pub pixel_flags_injected_template: Option<bool>,
+    /// Template injection in the 3x3 region around the centroid.
+    #[serde(rename = "pixelFlags_injected_templateCenter")]
+    pub pixel_flags_injected_template_center: Option<bool>,
     /// This flag is set if the source is part of a glint trail.
     pub glint_trail: Option<bool>,
 }
@@ -267,7 +324,7 @@ impl TryFrom<DiaSource> for LsstCandidate {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
     #[serde(rename = "diaObjectId")]
@@ -454,9 +511,48 @@ pub struct DiaObject {
     #[serde(rename = "lastDiaSourceMjdTai")]
     pub last_dia_source_mjd_tai: f64,
     /// Total number of DiaSources associated with this DiaObject.
-    #[serde(rename = "ndethist")]
-    #[serde(alias = "nDiaSources")]
+    #[serde(rename = "nDiaSources")]
     pub ndethist: i32,
+}
+
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+pub struct LsstAlertObject {
+    #[serde(flatten)]
+    pub dia_object: DiaObject,
+    // Time of the first diaSource in JD UTC days
+    pub jdstarthist: Option<f64>,
+    /// Total number of DiaSources associated with this DiaObject.
+    pub ndethist: Option<i32>,
+}
+
+impl TryFrom<DiaObject> for LsstAlertObject {
+    type Error = AlertError;
+    fn try_from(dia_object: DiaObject) -> Result<Self, Self::Error> {
+        let jdstarthist =
+            Some(Epoch::from_mjd_tai(dia_object.first_dia_source_mjd_tai).to_jde_utc_days());
+        let ndethist = Some(dia_object.ndethist);
+
+        Ok(LsstAlertObject {
+            dia_object,
+            jdstarthist,
+            ndethist,
+        })
+    }
+}
+
+pub fn deserialize_object<'de, D>(deserializer: D) -> Result<Option<LsstAlertObject>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let dia_object: Option<DiaObject> = Option::deserialize(deserializer)?;
+    match dia_object {
+        Some(obj) => Ok(Some(
+            LsstAlertObject::try_from(obj).map_err(serde::de::Error::custom)?,
+        )),
+        None => Ok(None),
+    }
 }
 
 #[serde_as]
@@ -569,7 +665,8 @@ pub struct LsstRawAvroAlert {
     #[serde(deserialize_with = "deserialize_prv_forced_sources")]
     pub fp_hists: Option<Vec<LsstForcedPhot>>,
     #[serde(rename = "diaObject")]
-    pub dia_object: Option<DiaObject>,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub object: Option<LsstAlertObject>,
     #[serde(rename = "cutoutDifference")]
     #[serde(deserialize_with = "deserialize_cutout")]
     pub cutout_difference: Vec<u8>,
@@ -670,6 +767,7 @@ pub struct LsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
+    pub object: Option<LsstAlertObject>,
     #[serde(rename = "ssObjectId")]
     pub ss_object_id: Option<String>,
     pub candidate: LsstCandidate,
@@ -901,6 +999,7 @@ impl AlertWorker for LsstAlertWorker {
             candid,
             object_id: object_id.clone(),
             ss_object_id: ss_object_id,
+            object: avro_alert.object,
             candidate: avro_alert.candidate,
             coordinates: Coordinates::new(ra, dec),
             created_at: now,

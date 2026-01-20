@@ -940,6 +940,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         candid: lsst_alert_id,
         object_id: lsst_object_id.clone(),
         ss_object_id: None,
+        object: None,
         candidate: lsst_candidate.clone(),
         coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
