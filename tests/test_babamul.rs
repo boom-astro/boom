@@ -1,6 +1,6 @@
 use apache_avro::AvroSchema;
 use boom::{
-    alert::{Candidate, DiaSource, LsstCandidate, ZtfCandidate},
+    alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{
         babamul::{EnrichedLsstAlert, EnrichedZtfAlert},
@@ -183,6 +183,8 @@ fn create_mock_enriched_lsst_alert_with_matches(
             snr: 100.0,
             magap: 18.6,
             sigmagap: 0.12,
+            jdstarthist: Some(2459990.5),
+            ndethist: Some(5),
         },
         prv_candidates: vec![],
         fp_hists: vec![],
@@ -934,13 +936,14 @@ async fn test_babamul_lsst_with_ztf_match() {
         snr: 100.0,
         magap: 18.6,
         sigmagap: 0.12,
+        jdstarthist: Some(2459990.5),
+        ndethist: Some(5),
     };
 
     let lsst_alert = LsstAlert {
         candid: lsst_alert_id,
         object_id: lsst_object_id.clone(),
         ss_object_id: None,
-        object: None,
         candidate: lsst_candidate.clone(),
         coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
@@ -991,7 +994,7 @@ async fn test_babamul_lsst_with_ztf_match() {
 
     let lsst_aux = LsstObject {
         object_id: lsst_object_id.clone(),
-        prv_candidates: vec![lsst_candidate.clone()],
+        prv_candidates: vec![LsstPrvCandidate::try_from(lsst_candidate).unwrap()],
         fp_hists: vec![lsst_forced_phot],
         is_sso: false,
         cross_matches: None,
@@ -1131,8 +1134,7 @@ async fn test_babamul_lsst_with_ztf_match() {
 #[tokio::test]
 async fn test_babamul_ztf_with_lsst_match() {
     use boom::alert::{
-        AlertWorker, DiaForcedSource, DiaSource, LsstAliases, LsstCandidate, LsstForcedPhot,
-        LsstObject, ZtfObject,
+        AlertWorker, DiaForcedSource, DiaSource, LsstAliases, LsstForcedPhot, LsstObject, ZtfObject,
     };
     use boom::enrichment::EnrichmentWorker;
     use boom::utils::enums::Survey;
@@ -1205,8 +1207,6 @@ async fn test_babamul_ztf_with_lsst_match() {
         dia
     };
 
-    let lsst_candidate = LsstCandidate::try_from(lsst_dia_source.clone()).unwrap();
-
     let lsst_forced_phot = LsstForcedPhot::try_from(DiaForcedSource {
         dia_forced_source_id: 1,
         object_id: 42,
@@ -1225,7 +1225,7 @@ async fn test_babamul_ztf_with_lsst_match() {
 
     let lsst_aux = LsstObject {
         object_id: lsst_match_id.clone(),
-        prv_candidates: vec![lsst_candidate],
+        prv_candidates: vec![LsstPrvCandidate::try_from(lsst_dia_source).unwrap()],
         fp_hists: vec![lsst_forced_phot],
         is_sso: false,
         cross_matches: None,
