@@ -437,11 +437,9 @@ impl Babamul {
             }
         }
         // Apply or update retention policy even if topic already existed
-        let retention_ms_string = self.topic_retention_ms.to_string();
-        let cleanup_policy_string = String::from("delete");
         let mut entries: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
         entries.insert("retention.ms", &retention_ms_string);
-        entries.insert("cleanup.policy", &cleanup_policy_string);
+        entries.insert("cleanup.policy", "delete");
         let alter = AlterConfig {
             specifier: ResourceSpecifier::Topic(topic_name),
             entries,
