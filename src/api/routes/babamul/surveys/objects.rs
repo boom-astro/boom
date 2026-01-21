@@ -151,13 +151,24 @@ pub async fn get_object(
             };
             let mut newest_alert = None;
             let mut classifications_history = vec![];
-            while let Ok(Some(alert)) = alert_cursor.try_next().await {
-                // Push classification to history
-                classifications_history.push(alert.classifications.clone());
+            loop {
+                match alert_cursor.try_next().await {
+                    Ok(Some(alert)) => {
+                        // Push classification to history
+                        classifications_history.push(alert.classifications.clone());
 
-                // Update newest_alert only if not set yet (first iteration)
-                if newest_alert.is_none() {
-                    newest_alert = Some(alert);
+                        // Update newest_alert only if not set yet (first iteration)
+                        if newest_alert.is_none() {
+                            newest_alert = Some(alert);
+                        }
+                    }
+                    Ok(None) => break, // No more alerts
+                    Err(error) => {
+                        return response::internal_error(&format!(
+                            "error getting documents: {}",
+                            error
+                        ));
+                    }
                 }
             }
             let newest_alert = match newest_alert {
@@ -271,7 +282,6 @@ pub async fn get_object(
                 classifications: newest_alert.classifications,
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
-                // aliases: aux_entry.aliases.unwrap_or_default(),
                 survey_matches,
             };
             return response::ok(

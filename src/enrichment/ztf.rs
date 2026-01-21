@@ -199,7 +199,9 @@ where
 // it should return an optional PhotometryMag
 impl ZtfPhotometry {
     pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
-        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+        // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
+        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
+        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
         match (self.snr, self.magpsf, self.sigmapsf) {
             (Some(snr), Some(mag), Some(sig)) => match min_snr {
                 Some(thresh) if snr.abs() < thresh => None,

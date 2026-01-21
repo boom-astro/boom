@@ -49,6 +49,7 @@ impl Coordinates {
         }
     }
 
+    /// Get RA and Dec from the stored GeoJSON coordinates (formatting RA back to [0, 360])
     pub fn get_radec(&self) -> (f64, f64) {
         let ra = self.radec_geojson.coordinates[0] + 180.0;
         let dec = self.radec_geojson.coordinates[1];
