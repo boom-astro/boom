@@ -90,7 +90,7 @@ populated.
 sequenceDiagram
     participant LSST as LSST
     participant ZTF as ZTF
-    participant Stream as Kafka topics
+    participant Stream as Babamul topics
 
     Note over LSST,Stream: Day 1: First observation by LSST
     LSST->>Stream: Object discovered (stellar)
@@ -100,7 +100,7 @@ sequenceDiagram
 
     Note over ZTF,Stream: Day 3: ZTF observes same object
     ZTF->>Stream: Object observed (stellar)
-    rect rgb(45, 95, 63)
+    rect rgb(45, 63, 95)
     Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/><br/>Survey matches: lsst
     end
 
@@ -112,7 +112,7 @@ sequenceDiagram
 
     Note over ZTF,Stream: Day 7+: LSST and ZTF continue observing
     ZTF->>Stream: Subsequent observations
-    rect rgb(45, 95, 63)
+    rect rgb(45, 63, 95)
     Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/><br/>Survey matches: lsst
     end
     LSST->>Stream: Subsequent observations
