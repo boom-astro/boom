@@ -372,7 +372,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // Detect if Babamul is enabled from the config
         let babamul: Option<Babamul> = if config.babamul.enabled {
-            Some(Babamul::new(&config).await?)
+            Some(Babamul::new(&config))
         } else {
             None
         };
