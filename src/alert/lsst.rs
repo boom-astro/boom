@@ -52,8 +52,7 @@ const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, a
 #[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
-    #[serde(rename = "candid")]
-    #[serde(alias = "diaSourceId")]
+    #[serde(rename = "diaSourceId", alias = "candid")]
     pub candid: i64,
     /// Id of the visit where this diaSource was measured.
     pub visit: i64,
