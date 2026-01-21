@@ -16,7 +16,8 @@ use rdkafka::admin::{
 };
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
@@ -259,6 +260,8 @@ pub struct Babamul {
     ztf_avro_schema: Schema,
     kafka_admin_client: AdminClient<DefaultClientContext>,
     topic_retention_ms: i64,
+    // A cache for Kafka topics we've checked exist and match retention policy
+    checked_topics: Mutex<HashSet<String>>,
 }
 
 impl Babamul {
@@ -304,6 +307,7 @@ impl Babamul {
             ztf_avro_schema,
             kafka_admin_client: admin_client,
             topic_retention_ms: babamul_retention_ms,
+            checked_topics: Mutex::new(HashSet::new()),
         }
     }
 
@@ -320,8 +324,8 @@ impl Babamul {
         for (topic_name, alerts) in alerts_by_topic {
             tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
-            // Ensure topic exists with the desired retention policy
-            self.ensure_topic_with_retention(&topic_name).await?;
+            // Check topic exists with the desired retention policy
+            self.check_topic(&topic_name).await?;
 
             // Convert alerts to Avro payloads
             let mut payloads = Vec::new();
@@ -391,11 +395,17 @@ impl Babamul {
         }
     }
 
+    /// Ensure the given topic exists with the desired retention policy
     #[instrument(skip_all, err)]
-    async fn ensure_topic_with_retention(
-        &self,
-        topic_name: &str,
-    ) -> Result<(), EnrichmentWorkerError> {
+    async fn check_topic(&self, topic_name: &str) -> Result<(), EnrichmentWorkerError> {
+        // Fast-path: skip if already checked in this process
+        {
+            let checked = self.checked_topics.lock().await;
+            if checked.contains(topic_name) {
+                return Ok(());
+            }
+        }
+
         // Create topic with retention if it does not exist; ignore "already exists" errors
         let retention_ms_string = self.topic_retention_ms.to_string();
         let new_topic = NewTopic::new(topic_name, 1, TopicReplication::Fixed(1))
@@ -451,6 +461,10 @@ impl Babamul {
                 )));
             }
         }
+
+        // Record that we've checked this topic during this process lifetime
+        let mut checked = self.checked_topics.lock().await;
+        checked.insert(topic_name.to_string());
         Ok(())
     }
 
