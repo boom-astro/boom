@@ -1,6 +1,6 @@
 use crate::alert::{
-    AlertCutout, LsstCandidate, LsstForcedPhot, LsstObject, ZtfCandidate, ZtfForcedPhot, ZtfObject,
-    ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
+    AlertCutout, LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate,
+    ZtfForcedPhot, ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
 };
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
@@ -18,7 +18,7 @@ struct LsstMatch {
     object_id: String,
     ra: f64,
     dec: f64,
-    prv_candidates: Vec<LsstCandidate>,
+    prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     distance_arcsec: f64,
 }
