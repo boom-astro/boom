@@ -21,6 +21,37 @@ use tracing::{info, instrument};
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
 
+// Expected Babamul topic suffixes so we can pre-create and configure them once at startup
+const LSST_BABAMUL_CATEGORIES: [&str; 8] = [
+    "ztf-match.stellar",
+    "ztf-match.hosted",
+    "ztf-match.hostless",
+    "ztf-match.unknown",
+    "no-ztf-match.stellar",
+    "no-ztf-match.hosted",
+    "no-ztf-match.hostless",
+    "no-ztf-match.unknown",
+];
+
+const ZTF_BABAMUL_CATEGORIES: [&str; 6] = [
+    "lsst-match.stellar",
+    "lsst-match.hosted",
+    "lsst-match.hostless",
+    "no-lsst-match.stellar",
+    "no-lsst-match.hosted",
+    "no-lsst-match.hostless",
+];
+
+fn is_allowed_topic(topic_name: &str) -> bool {
+    if let Some(suffix) = topic_name.strip_prefix("babamul.lsst.") {
+        return LSST_BABAMUL_CATEGORIES.contains(&suffix);
+    }
+    if let Some(suffix) = topic_name.strip_prefix("babamul.ztf.") {
+        return ZTF_BABAMUL_CATEGORIES.contains(&suffix);
+    }
+    false
+}
+
 // Wrapper around cutout bytes, so we can implement
 // AvroSchemaComponent for it, to serialize as bytes in Avro
 #[derive(Debug, serde::Deserialize)]
@@ -262,7 +293,7 @@ pub struct Babamul {
 }
 
 impl Babamul {
-    pub fn new(config: &AppConfig) -> Self {
+    pub async fn new(config: &AppConfig) -> Result<Self, EnrichmentWorkerError> {
         // Read Kafka producer config from kafka: producer in the config
         let kafka_producer_host = config.kafka.producer.server.clone();
 
@@ -298,13 +329,18 @@ impl Babamul {
         let babamul_retention_ms: i64 =
             (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
 
-        Babamul {
+        let babamul = Babamul {
             kafka_producer,
             lsst_avro_schema,
             ztf_avro_schema,
             kafka_admin_client: admin_client,
             topic_retention_ms: babamul_retention_ms,
-        }
+        };
+
+        // Pre-create and configure all expected Babamul topics
+        babamul.ensure_all_topics().await?;
+
+        Ok(babamul)
     }
 
     #[instrument(skip_all, err)]
@@ -320,8 +356,13 @@ impl Babamul {
         for (topic_name, alerts) in alerts_by_topic {
             tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
-            // Ensure topic exists with the desired retention policy
-            self.ensure_topic_with_retention(&topic_name).await?;
+            // Validate topic against known Babamul topic set
+            if !is_allowed_topic(&topic_name) {
+                return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                    "Attempted to send to unsupported Babamul topic: {}",
+                    topic_name
+                )));
+            }
 
             // Convert alerts to Avro payloads
             let mut payloads = Vec::new();
@@ -451,6 +492,24 @@ impl Babamul {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Pre-create and configure all expected Babamul topics once at startup
+    #[instrument(skip_all, err)]
+    pub async fn ensure_all_topics(&self) -> Result<(), EnrichmentWorkerError> {
+        // LSST topics
+        for suffix in LSST_BABAMUL_CATEGORIES {
+            let topic = format!("babamul.lsst.{}", suffix);
+            self.ensure_topic_with_retention(&topic).await?;
+        }
+
+        // ZTF topics
+        for suffix in ZTF_BABAMUL_CATEGORIES {
+            let topic = format!("babamul.ztf.{}", suffix);
+            self.ensure_topic_with_retention(&topic).await?;
+        }
+
         Ok(())
     }
 

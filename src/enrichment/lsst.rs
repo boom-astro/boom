@@ -256,7 +256,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             }
         }
         let babamul: Option<Babamul> = if babamul_enabled {
-            Some(Babamul::new(&config))
+            Some(Babamul::new(&config).await?)
         } else {
             None
         };
