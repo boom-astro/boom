@@ -1,6 +1,6 @@
 use crate::alert::{
-    AlertCutout, LsstAliases, LsstCandidate, LsstForcedPhot, LsstObject, ZtfAliases, ZtfCandidate,
-    ZtfForcedPhot, ZtfObject, ZtfPrvCandidate,
+    AlertCutout, LsstAliases, LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate,
+    ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject, ZtfPrvCandidate,
 };
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
@@ -39,7 +39,7 @@ struct LsstObj {
     cutout_science: serde_json::Value,
     cutout_template: serde_json::Value,
     cutout_difference: serde_json::Value,
-    prv_candidates: Vec<LsstCandidate>,
+    prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
     aliases: LsstAliases,
