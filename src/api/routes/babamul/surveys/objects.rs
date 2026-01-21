@@ -71,7 +71,7 @@ struct LsstObj {
     cutout_science: serde_json::Value,
     cutout_template: serde_json::Value,
     cutout_difference: serde_json::Value,
-    prv_candidates: Vec<LsstCandidate>,
+    prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
     survey_matches: LsstSurveyMatches,
