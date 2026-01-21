@@ -11,6 +11,11 @@ use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
+use rdkafka::admin::{
+    AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
+};
+use rdkafka::client::DefaultClientContext;
+use rdkafka::error::RDKafkaErrorCode;
 use std::collections::HashMap;
 use tracing::{info, instrument};
 
@@ -252,6 +257,8 @@ pub struct Babamul {
     kafka_producer: rdkafka::producer::FutureProducer,
     lsst_avro_schema: Schema,
     ztf_avro_schema: Schema,
+    kafka_admin_client: AdminClient<DefaultClientContext>,
+    topic_retention_ms: i64,
 }
 
 impl Babamul {
@@ -281,10 +288,22 @@ impl Babamul {
         let lsst_avro_schema = EnrichedLsstAlert::get_schema();
         let ztf_avro_schema = EnrichedZtfAlert::get_schema();
 
+        // Create Kafka Admin client
+        let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", &kafka_producer_host)
+            .create()
+            .expect("Failed to create Babamul Kafka admin client");
+
+        // Compute retention in milliseconds from config (days)
+        let babamul_retention_ms: i64 =
+            (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
+
         Babamul {
             kafka_producer,
             lsst_avro_schema,
             ztf_avro_schema,
+            kafka_admin_client: admin_client,
+            topic_retention_ms: babamul_retention_ms,
         }
     }
 
@@ -300,6 +319,9 @@ impl Babamul {
         let mut total_sent: usize = 0;
         for (topic_name, alerts) in alerts_by_topic {
             tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+
+            // Ensure topic exists with the desired retention policy
+            self.ensure_topic_with_retention(&topic_name).await?;
 
             // Convert alerts to Avro payloads
             let mut payloads = Vec::new();
@@ -367,6 +389,69 @@ impl Babamul {
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
             }
         }
+    }
+
+    #[instrument(skip_all, err)]
+    async fn ensure_topic_with_retention(
+        &self,
+        topic_name: &str,
+    ) -> Result<(), EnrichmentWorkerError> {
+        // Create topic with retention if it does not exist; ignore "already exists" errors
+        let retention_ms_string = self.topic_retention_ms.to_string();
+        let new_topic = NewTopic::new(topic_name, 1, TopicReplication::Fixed(1))
+            .set("retention.ms", &retention_ms_string)
+            .set("cleanup.policy", "delete");
+
+        let opts = AdminOptions::new();
+        let results: Vec<Result<String, (String, RDKafkaErrorCode)>> = self
+            .kafka_admin_client
+            .create_topics(&[new_topic], &opts)
+            .await
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Admin create_topics error: {}", e))
+            })?;
+
+        for r in results.into_iter() {
+            match r {
+                Ok(_created) => (),
+                Err((_topic, code)) => {
+                    if code == RDKafkaErrorCode::TopicAlreadyExists {
+                        // Continue to alter configs below
+                        continue;
+                    }
+                    return Err(EnrichmentWorkerError::Kafka(format!(
+                        "Failed to ensure topic {} with retention (code: {:?})",
+                        topic_name, code
+                    )));
+                }
+            }
+        }
+        // Apply or update retention policy even if topic already existed
+        let retention_ms_string = self.topic_retention_ms.to_string();
+        let cleanup_policy_string = String::from("delete");
+        let mut entries: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        entries.insert("retention.ms", &retention_ms_string);
+        entries.insert("cleanup.policy", &cleanup_policy_string);
+        let alter = AlterConfig {
+            specifier: ResourceSpecifier::Topic(topic_name),
+            entries,
+        };
+        let alter_results = self
+            .kafka_admin_client
+            .alter_configs(&[alter], &opts)
+            .await
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Admin alter_configs error: {}", e))
+            })?;
+        for res in alter_results {
+            if let Err((_spec, code)) = res {
+                return Err(EnrichmentWorkerError::Kafka(format!(
+                    "Failed to set retention for {} (code: {:?})",
+                    topic_name, code
+                )));
+            }
+        }
+        Ok(())
     }
 
     #[instrument(skip_all, err)]
