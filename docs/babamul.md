@@ -123,7 +123,7 @@ flowchart TD
     CheckStar -->|Yes| StellarTopic[Topic: babamul.lsst.*.stellar]
     CheckStar -->|No| CheckLSPSC{LSPSC<br/>cross-matches<br/>exist?}
 
-    CheckLSPSC -->|No| CheckFootprint{In LSST<br/>footprint?}
+    CheckLSPSC -->|No| CheckFootprint{In LSPSC<br/>footprint?}
     CheckFootprint -->|Yes| HostlessTopic[Topic: babamul.lsst.*.hostless]
     CheckFootprint -->|No| UnknownTopic[Topic: babamul.lsst.*.unknown]
 
