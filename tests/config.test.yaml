@@ -30,6 +30,7 @@ kafka:
     lsst:
       server: "usdf-alert-stream-dev.lsst.cloud:9094"
       schema_registry: "https://usdf-alert-schemas-dev.slac.stanford.edu"
+      schema_github_fallback_url: "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema"
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
       username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
       password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
