@@ -1,6 +1,6 @@
 use crate::alert::{
-    AlertCutout, LsstAliases, LsstCandidate, LsstForcedPhot, LsstObject, ZtfAliases, ZtfCandidate,
-    ZtfForcedPhot, ZtfObject, ZtfPrvCandidate,
+    AlertCutout, LsstCandidate, LsstForcedPhot, LsstObject, ZtfCandidate, ZtfForcedPhot, ZtfObject,
+    ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
 };
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
@@ -12,6 +12,21 @@ use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use utoipa::ToSchema;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct LsstMatch {
+    object_id: String,
+    ra: f64,
+    dec: f64,
+    prv_candidates: Vec<LsstCandidate>,
+    fp_hists: Vec<LsstForcedPhot>,
+    distance_arcsec: f64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ZtfSurveyMatches {
+    lsst: Option<LsstMatch>,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfObj {
@@ -26,8 +41,25 @@ struct ZtfObj {
     prv_nondetections: Vec<ZtfPrvCandidate>,
     fp_hists: Vec<ZtfForcedPhot>,
     classifications: ZtfAlertClassifications,
+    classifications_history: Vec<ZtfAlertClassifications>,
     cross_matches: serde_json::Value,
-    aliases: ZtfAliases,
+    survey_matches: ZtfSurveyMatches,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ZtfMatch {
+    object_id: String,
+    ra: f64,
+    dec: f64,
+    prv_candidates: Vec<ZtfPrvCandidate>,
+    prv_nondetections: Vec<ZtfPrvCandidate>,
+    fp_hists: Vec<ZtfForcedPhot>,
+    distance_arcsec: f64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct LsstSurveyMatches {
+    ztf: Option<ZtfMatch>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -42,7 +74,7 @@ struct LsstObj {
     prv_candidates: Vec<LsstCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
-    aliases: LsstAliases,
+    survey_matches: LsstSurveyMatches,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -87,7 +119,6 @@ pub async fn get_object(
         .sort(doc! {
             "candidate.jd": -1,
         })
-        .limit(1)
         .build();
 
     let (survey, object_id) = path.into_inner();
@@ -99,8 +130,10 @@ pub async fn get_object(
                 db.collection(&format!("{}_alerts_cutouts", survey));
             let aux_collection: Collection<ZtfObject> =
                 db.collection(&format!("{}_alerts_aux", survey));
+            let lsst_aux_collection: Collection<LsstObject> =
+                db.collection(&format!("LSST_alerts_aux"));
 
-            // Get the most recent alert for the object
+            // We get all the alerts, to build the classification history and find the newest
             let mut alert_cursor = match alerts_collection
                 .find(doc! {
                     "objectId": &object_id,
@@ -116,18 +149,25 @@ pub async fn get_object(
                     ));
                 }
             };
-            let newest_alert = match alert_cursor.try_next().await {
-                Ok(Some(alert)) => alert,
-                Ok(None) => {
+            let mut newest_alert = None;
+            let mut classifications_history = vec![];
+            while let Ok(Some(alert)) = alert_cursor.try_next().await {
+                // Push classification to history
+                classifications_history.push(alert.classifications.clone());
+
+                // Update newest_alert only if not set yet (first iteration)
+                if newest_alert.is_none() {
+                    newest_alert = Some(alert);
+                }
+            }
+            let newest_alert = match newest_alert {
+                Some(alert) => alert,
+                None => {
                     return response::not_found(&format!("no object found with id {}", object_id));
                 }
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
             };
+            // reverse classification history, to have it in chronological order
+            classifications_history.reverse();
 
             // using the candid, query the cutout collection for the cutouts
             let candid = newest_alert.candid;
@@ -171,6 +211,48 @@ pub async fn get_object(
                         error
                     ));
                 }
+            };
+
+            // Get the nearest LsstObject if any. We use a near query on the aux collection
+            let (ra, dec) = aux_entry.coordinates.get_radec();
+            let nearest_lsst = match lsst_aux_collection
+                .find_one(doc! {
+                    "coordinates.radec_geojson": {
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": ZTF_LSST_XMATCH_RADIUS,
+                    },
+                })
+                .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error getting nearest lsst object: {}",
+                        error
+                    ));
+                }
+            };
+
+            let survey_matches = ZtfSurveyMatches {
+                lsst: match nearest_lsst {
+                    Some(lsst_obj) => {
+                        let lsst_radec = lsst_obj.coordinates.get_radec();
+                        Some(LsstMatch {
+                            object_id: lsst_obj.object_id,
+                            ra: lsst_radec.0,
+                            dec: lsst_radec.1,
+                            prv_candidates: lsst_obj.prv_candidates,
+                            fp_hists: lsst_obj.fp_hists,
+                            distance_arcsec: flare::spatial::great_circle_distance(
+                                ra,
+                                dec,
+                                lsst_radec.0,
+                                lsst_radec.1,
+                            ) * 3600.0,
+                        })
+                    }
+                    None => None,
+                },
             };
 
             let obj = ZtfObj {
@@ -187,8 +269,10 @@ pub async fn get_object(
                 prv_nondetections: aux_entry.prv_nondetections,
                 fp_hists: aux_entry.fp_hists,
                 classifications: newest_alert.classifications,
+                classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
-                aliases: aux_entry.aliases.unwrap_or_default(),
+                // aliases: aux_entry.aliases.unwrap_or_default(),
+                survey_matches,
             };
             return response::ok(
                 &format!("object found with object_id: {}", object_id),
@@ -202,6 +286,8 @@ pub async fn get_object(
                 db.collection(&format!("{}_alerts_cutouts", survey));
             let aux_collection: Collection<LsstObject> =
                 db.collection(&format!("{}_alerts_aux", survey));
+            let ztf_aux_collection: Collection<ZtfObject> =
+                db.collection(&format!("ZTF_alerts_aux"));
 
             // Get the most recent alert for the object
             let mut alert_cursor = match alerts_collection
@@ -274,6 +360,49 @@ pub async fn get_object(
                 }
             };
 
+            // Get the nearest ZtfObject if any. We use a near query on the aux collection
+            let (ra, dec) = aux_entry.coordinates.get_radec();
+            let nearest_ztf = match ztf_aux_collection
+                .find_one(doc! {
+                    "coordinates.radec_geojson": {
+                        "$nearSphere": [ra - 180.0, dec],
+                        "$maxDistance": LSST_ZTF_XMATCH_RADIUS,
+                    },
+                })
+                .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error getting nearest ztf object: {}",
+                        error
+                    ));
+                }
+            };
+
+            let survey_matches = LsstSurveyMatches {
+                ztf: match nearest_ztf {
+                    Some(ztf_obj) => {
+                        let ztf_radec = ztf_obj.coordinates.get_radec();
+                        Some(ZtfMatch {
+                            object_id: ztf_obj.object_id,
+                            ra: ztf_radec.0,
+                            dec: ztf_radec.1,
+                            prv_candidates: ztf_obj.prv_candidates,
+                            prv_nondetections: ztf_obj.prv_nondetections,
+                            fp_hists: ztf_obj.fp_hists,
+                            distance_arcsec: flare::spatial::great_circle_distance(
+                                ra,
+                                dec,
+                                ztf_radec.0,
+                                ztf_radec.1,
+                            ) * 3600.0,
+                        })
+                    }
+                    None => None,
+                },
+            };
+
             let obj = LsstObj {
                 candid: newest_alert.candid,
                 object_id: object_id.clone(),
@@ -287,7 +416,7 @@ pub async fn get_object(
                 prv_candidates: aux_entry.prv_candidates,
                 fp_hists: aux_entry.fp_hists,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
-                aliases: aux_entry.aliases.unwrap_or_default(),
+                survey_matches,
             };
             return response::ok(
                 &format!("object found with object_id: {}", object_id),
