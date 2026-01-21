@@ -306,7 +306,7 @@ impl LsstCandidate {
             dia_source.ss_object_id.clone(),
         ) {
             (Some(dia_id), _) => dia_id.to_string(),
-            (None, Some(ss_id)) => format!("sso{}", ss_id.to_string()),
+            (None, Some(ss_id)) => format!("sso{}", ss_id),
             (None, None) => return Err(AlertError::MissingObjectId),
         };
 
@@ -317,7 +317,7 @@ impl LsstCandidate {
                 } else {
                     None
                 };
-                (jdstarthist, Some(obj.ndethist))
+                (jdstarthist, Some(obj.n_dia_sources))
             }
             None => (None, None),
         };
@@ -343,6 +343,9 @@ impl LsstCandidate {
 #[skip_serializing_none]
 #[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+/// LSST difference-image analysis (DIA) candidate representing an astrophysical source
+/// detected in a single-epoch difference image. Unlike `LsstCandidate`, this does not
+/// include historical information from the associated `DiaObject` (e.g., `jdstarthist`, ndethist`).
 pub struct LsstPrvCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
@@ -386,7 +389,7 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
             dia_source.ss_object_id.clone(),
         ) {
             (Some(dia_id), _) => dia_id.to_string(),
-            (None, Some(ss_id)) => format!("sso{}", ss_id.to_string()),
+            (None, Some(ss_id)) => format!("sso{}", ss_id),
             (None, None) => return Err(AlertError::MissingObjectId),
         };
 
@@ -426,6 +429,13 @@ impl TryFrom<LsstCandidate> for LsstPrvCandidate {
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+/// LSST difference-image analysis (DIA) object representing an astrophysical source
+/// aggregated from multiple `DiaSource` detections.
+///
+/// A `DiaObject` captures the object-level state (position, variability, and other
+/// summary properties) inferred from the time series of associated `DiaSource`
+/// measurements, where each `DiaSource` corresponds to a single-epoch detection
+/// in a difference image.
 pub struct DiaObject {
     /// Unique identifier of this DiaObject.
     #[serde(rename = "diaObjectId")]
@@ -613,7 +623,7 @@ pub struct DiaObject {
     pub last_dia_source_mjd_tai: f64,
     /// Total number of DiaSources associated with this DiaObject.
     #[serde(rename = "nDiaSources")]
-    pub ndethist: i32,
+    pub n_dia_sources: i32,
 }
 
 #[serde_as]
@@ -626,7 +636,7 @@ pub struct DiaForcedSource {
     pub dia_forced_source_id: i64,
     /// Id of the DiaObject that this DiaForcedSource was associated with.
     #[serde(rename = "diaObjectId")]
-    pub object_id: i64,
+    pub dia_object_id: i64,
     /// Right ascension coordinate of the position of the DiaObject at time radecMjdTai.
     pub ra: f64,
     /// Declination coordinate of the position of the DiaObject at time radecMjdTai.

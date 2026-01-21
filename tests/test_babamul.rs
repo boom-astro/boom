@@ -972,7 +972,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     let lsst_forced_phot = LsstForcedPhot {
         dia_forced_source: DiaForcedSource {
             dia_forced_source_id: 1,
-            object_id: 987654321,
+            dia_object_id: 987654321,
             ra: 180.0,
             dec: 0.0,
             visit: 123456789,
@@ -1209,7 +1209,7 @@ async fn test_babamul_ztf_with_lsst_match() {
 
     let lsst_forced_phot = LsstForcedPhot::try_from(DiaForcedSource {
         dia_forced_source_id: 1,
-        object_id: 42,
+        dia_object_id: 42,
         ra: 180.0,
         dec: 0.0,
         visit: 123456789,
