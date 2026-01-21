@@ -88,36 +88,36 @@ populated.
 
 ```mermaid
 sequenceDiagram
-    participant LSST as LSST Survey
-    participant ZTF as ZTF Survey
-    participant Stream as Kafka Topics
+    participant LSST as LSST
+    participant ZTF as ZTF
+    participant Stream as Kafka topics
 
-    Note over LSST,Stream: Day 1: First observation
+    Note over LSST,Stream: Day 1: First observation by LSST
     LSST->>Stream: Object discovered (stellar)
     rect rgb(45, 95, 63)
-    Note over Stream: Topic: babamul.lsst.no-ztf-match.stellar<br/>survey_matches: []
+    Note over Stream: Topic: babamul.lsst.no-ztf-match.stellar<br/><br/>Survey matches: none
     end
 
-    Note over ZTF,Stream: Day 3: Second survey observes same object
+    Note over ZTF,Stream: Day 3: ZTF observes same object
     ZTF->>Stream: Object observed (stellar)
     rect rgb(45, 95, 63)
-    Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/>survey_matches.lsst: [match data]
+    Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/><br/>Survey matches: lsst
     end
 
-    Note over LSST,Stream: Day 5: First survey observes again
+    Note over LSST,Stream: Day 5: LSST observes again
     LSST->>Stream: Object re-observed (stellar)
     rect rgb(45, 95, 63)
-    Note over Stream: Topic: babamul.lsst.ztf-match.stellar<br/>survey_matches.ztf: [match data]
+    Note over Stream: Topic: babamul.lsst.ztf-match.stellar<br/><br/>Survey matches: ztf
     end
 
-    Note over ZTF,Stream: Day 7+: Both surveys continue observing
+    Note over ZTF,Stream: Day 7+: LSST and ZTF continue observing
     ZTF->>Stream: Subsequent observations
     rect rgb(45, 95, 63)
-    Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/>survey_matches.lsst: [match data]
+    Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/><br/>Survey matches: lsst
     end
     LSST->>Stream: Subsequent observations
     rect rgb(45, 95, 63)
-    Note over Stream: Topic: babamul.lsst.ztf-match.stellar<br/>survey_matches.ztf: [match data]
+    Note over Stream: Topic: babamul.lsst.ztf-match.stellar<br/><br/>Survey matches: ztf
     end
 ```
 
