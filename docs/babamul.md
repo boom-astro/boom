@@ -132,10 +132,10 @@ flowchart TD
     EvalMatches -->|score < 0.5| HostedTopic[Topic: babamul.lsst.*.hosted]
     EvalMatches -->|Otherwise| HostlessTopic
 
-    style StellarTopic fill:#e1f5e1
-    style HostedTopic fill:#ffe1e1
-    style HostlessTopic fill:#e1e5ff
-    style UnknownTopic fill:#f5f5f5
+    style StellarTopic fill:#2d5f3f,color:#e0e0e0
+    style HostedTopic fill:#5f2d2d,color:#e0e0e0
+    style HostlessTopic fill:#2d3f5f,color:#e0e0e0
+    style UnknownTopic fill:#3a3a3a,color:#e0e0e0
 
     Note1[Note: The * represents survey match status<br/>e.g., ztf-match or no-ztf-match]
 ```
