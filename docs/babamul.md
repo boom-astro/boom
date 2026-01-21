@@ -117,6 +117,9 @@ The classification suffix (stellar/hosted/hostless/unknown)
 is determined by cross-matching against archival catalogs like LSPSC.
 This happens independently of survey cross-matches.
 
+Note: The `*` below represents survey match status, e.g., `ztf-match` or
+`no-ztf-match`.
+
 ```mermaid
 flowchart TD
     Alert[New LSST Alert] --> CheckStar{Already classified<br/>as stellar?}
@@ -127,15 +130,14 @@ flowchart TD
     CheckFootprint -->|Yes| HostlessTopic[Topic: babamul.lsst.*.hostless]
     CheckFootprint -->|No| UnknownTopic[Topic: babamul.lsst.*.unknown]
 
-    CheckLSPSC -->|Yes| EvalMatches{Evaluate matches:<br/>distance & score}
-    EvalMatches -->|distance ≤ 1.0″<br/>AND score > 0.5| StellarTopic
-    EvalMatches -->|score < 0.5| HostedTopic[Topic: babamul.lsst.*.hosted]
-    EvalMatches -->|Otherwise| HostlessTopic
+    CheckLSPSC -->|Yes| EvalMatches{Check match<br/>distance & score}
+
+    EvalMatches -->|Any match:<br/>distance ≤ 1.0″<br/>AND score > 0.5| StellarTopic
+    EvalMatches -->|Any match:<br/>distance ≤ 30″<br/>AND score < 0.5| HostedTopic[Topic: babamul.lsst.*.hosted]
+    EvalMatches -->|No qualifying<br/>matches| HostlessTopic
 
     style StellarTopic fill:#2d5f3f,color:#e0e0e0
     style HostedTopic fill:#5f2d2d,color:#e0e0e0
     style HostlessTopic fill:#2d3f5f,color:#e0e0e0
     style UnknownTopic fill:#3a3a3a,color:#e0e0e0
-
-    Note1[Note: The * represents survey match status<br/>e.g., ztf-match or no-ztf-match]
 ```
