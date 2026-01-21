@@ -10,6 +10,7 @@ database:
   srv: false
 babamul:
   enabled: true # Enabled for testing
+  retention_days: 2 # Set different from default to test override
 api:
   port: 4000 # Set via BOOM_API__PORT environment variable
   domain: localhost
