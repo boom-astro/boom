@@ -75,11 +75,11 @@ finally:
 When the same object has been observed by multiple surveys,
 it will show up in the `survey_matches` of an alert message,
 which will be sent to
-topic like `babamul.{source_survey}.{other_survey}-match.*`.
+a topic like `babamul.{source_survey}.{other_survey}-match.*`.
 
 For a newly-discovered object,
 the first alert will have empty `survey_matches`.
-If the object subsequently observed by another survey, it will
+If the object is subsequently observed by another survey, it will
 contain a match from the first.
 From that point onward, alerts on both streams will have `survey_matches`
 populated.
