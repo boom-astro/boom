@@ -94,21 +94,31 @@ sequenceDiagram
 
     Note over LSST,Stream: Day 1: First observation
     LSST->>Stream: Object discovered (stellar)
+    rect rgb(45, 95, 63)
     Note over Stream: Topic: babamul.lsst.no-ztf-match.stellar<br/>survey_matches: []
+    end
 
     Note over ZTF,Stream: Day 3: Second survey observes same object
     ZTF->>Stream: Object observed (stellar)
+    rect rgb(45, 95, 63)
     Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/>survey_matches.lsst: [match data]
+    end
 
     Note over LSST,Stream: Day 5: First survey observes again
     LSST->>Stream: Object re-observed (stellar)
+    rect rgb(45, 95, 63)
     Note over Stream: Topic: babamul.lsst.ztf-match.stellar<br/>survey_matches.ztf: [match data]
+    end
 
     Note over ZTF,Stream: Day 7+: Both surveys continue observing
     ZTF->>Stream: Subsequent observations
+    rect rgb(45, 95, 63)
     Note over Stream: Topic: babamul.ztf.lsst-match.stellar<br/>survey_matches.lsst: [match data]
+    end
     LSST->>Stream: Subsequent observations
+    rect rgb(45, 95, 63)
     Note over Stream: Topic: babamul.lsst.ztf-match.stellar<br/>survey_matches.ztf: [match data]
+    end
 ```
 
 ### Archival catalog cross-match flow
