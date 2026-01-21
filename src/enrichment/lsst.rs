@@ -134,6 +134,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$project": {
                 "objectId": 1,
+                "ssObjectId": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
