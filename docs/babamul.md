@@ -72,17 +72,19 @@ finally:
 
 ## Object appearance in output topics
 
-When the same object has been observed by multiple surveys,
-it will show up in the `survey_matches` of an alert message,
-which will be sent to
-a topic like `babamul.{source_survey}.{other_survey}-match.*`.
+When an object is observed by multiple surveys,
+alerts include survey match data in the
+`survey_matches` field.
+Topics follow the pattern: `babamul.{source_survey}.{other_survey}-match.*`.
 
-For a newly-discovered object,
-the first alert will have empty `survey_matches`.
-If the object is subsequently observed by another survey, it will
-contain a match from the first.
-From that point onward, alerts on both streams will have `survey_matches`
-populated.
+On the first observation of a given object,
+the alert has empty `survey_matches`.
+When the object
+is subsequently observed by another survey,
+that alert includes information from
+the other survey in its `survey_matches` field.
+From that point forward, alerts on both streams include
+`survey_matches` in their alerts.
 
 ### Multi-survey object appearance flow
 
