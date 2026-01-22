@@ -198,15 +198,20 @@ where
 
 // it should return an optional PhotometryMag
 impl ZtfPhotometry {
-    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
+        // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
+        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
+        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
         match (self.snr, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
-                time: self.jd,
-                mag: mag as f32,
-                mag_err: sig as f32,
-                band: self.band.clone(),
-            }),
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag: mag as f32,
+                    mag_err: sig as f32,
+                    band: self.band.clone(),
+                }),
+            },
             _ => None,
         }
     }
@@ -573,12 +578,12 @@ impl ZtfEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -594,12 +599,12 @@ impl ZtfEnrichmentWorker {
                 let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
                 let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
                     .fp_hists
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
                     .collect();
                 let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
                 prepare_photometry(&mut lsst_lightcurve);

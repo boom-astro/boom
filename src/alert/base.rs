@@ -29,7 +29,7 @@ use opentelemetry::{
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
@@ -351,7 +351,7 @@ impl SchemaRegistry {
                 if self.github_fallback_url.is_none() {
                     return Err(registry_error);
                 }
-                debug!(
+                warn!(
                     "Schema registry lookup failed for subject {} version {}, attempting GitHub fallback: {:?}",
                     subject,
                     version,
