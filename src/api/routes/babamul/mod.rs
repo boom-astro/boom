@@ -153,7 +153,7 @@ pub struct BabamulSignupResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/signup")]
+#[post("/signup")]
 pub async fn post_babamul_signup(
     db: web::Data<Database>,
     email_service: web::Data<EmailService>,
@@ -573,7 +573,7 @@ pub struct BabamulActivateResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/activate")]
+#[post("/activate")]
 pub async fn post_babamul_activate(
     db: web::Data<Database>,
     body: web::Json<BabamulActivatePost>,
@@ -684,7 +684,7 @@ pub struct BabamulAuthResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/auth")]
+#[post("/auth")]
 pub async fn post_babamul_auth(
     db: web::Data<Database>,
     auth: web::Data<AuthProvider>,
@@ -757,7 +757,7 @@ pub async fn post_babamul_auth(
     ),
     tags=["Babamul"]
 )]
-#[get("/babamul/profile")]
+#[get("/profile")]
 pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
@@ -793,7 +793,7 @@ pub struct CreateKafkaCredentialResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/kafka-credentials")]
+#[post("/kafka-credentials")]
 pub async fn post_kafka_credentials(
     db: web::Data<Database>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -893,7 +893,7 @@ pub async fn post_kafka_credentials(
     ),
     tags=["Babamul"]
 )]
-#[get("/babamul/kafka-credentials")]
+#[get("/kafka-credentials")]
 pub async fn get_kafka_credentials(
     config: web::Data<crate::conf::AppConfig>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -945,7 +945,7 @@ pub struct DeleteKafkaCredentialResponse {
     ),
     tags=["Babamul"]
 )]
-#[delete("/babamul/kafka-credentials/{credential_id}")]
+#[delete("/kafka-credentials/{credential_id}")]
 pub async fn delete_kafka_credential(
     db: web::Data<Database>,
     current_user: Option<web::ReqData<BabamulUser>>,
