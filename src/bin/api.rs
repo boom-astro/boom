@@ -63,7 +63,7 @@ async fn main() -> std::io::Result<()> {
                         .service(routes::babamul::get_kafka_credentials)
                         .service(routes::babamul::delete_kafka_credential)
                         .service(routes::babamul::surveys::get_object)
-                        .service(routes::babamul::surveys::search_objects_by_partial_id)
+                        .service(routes::babamul::surveys::get_objects)
                         .service(routes::babamul::surveys::get_alert_cutouts)
                         .service(routes::babamul::surveys::get_alerts),
                 )

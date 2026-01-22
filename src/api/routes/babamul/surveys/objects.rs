@@ -479,6 +479,10 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
 
     // ZTF with complete prefix: only accept full "ZTF" when followed by digits/letters
     let ztf_prefix_re = get_ztf_prefix_regex();
+    println!(
+        "Trying to match ZTF prefix regex against: {} (regex: {:?})",
+        upper, ztf_prefix_re
+    );
     if let Some(caps) = ztf_prefix_re.captures(&upper) {
         let digits = caps.get(1).unwrap().as_str();
         let letters = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -568,7 +572,7 @@ struct ObjectMini {
     tags=["Surveys"]
 )]
 #[get("/babamul/objects")]
-pub async fn search_objects_by_partial_id(
+pub async fn get_objects(
     query: web::Query<SearchObjectsQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
@@ -586,6 +590,8 @@ pub async fn search_objects_by_partial_id(
     } else {
         query.limit as i64
     };
+
+    println!("Searching for objects with partial id: {}", query.object_id);
 
     // Infer survey from objectId (and normalize id casing for ZTF)
     let (survey, normalized_id) = match infer_survey_from_objectid(&query.object_id) {

@@ -810,9 +810,9 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/objects/search validation for ZTF patterns
+    /// Test GET /babamul/objects validation for ZTF patterns
     #[actix_rt::test]
-    async fn test_search_objects_by_partial_id_validation() {
+    async fn test_get_objects_validation() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
@@ -825,7 +825,7 @@ mod tests {
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::search_objects_by_partial_id),
+                .service(routes::babamul::surveys::get_objects),
         )
         .await;
 
