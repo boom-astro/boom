@@ -833,7 +833,7 @@ mod tests {
         // Acceptable values
         for value in ["Z", "ZT", "ZTF", "ZTF20a", "20a"] {
             let req = test::TestRequest::get()
-                .uri(&format!("/babamul/surveys/objects/search/{}", value))
+                .uri(&format!("/babamul/objects?object_id={}", value))
                 .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
                 .to_request();
 
@@ -849,7 +849,7 @@ mod tests {
         // Invalid values
         for value in ["Z2", "ZTF231", "ZTF2a", "ZTF20aaaaaaaa"] {
             let req = test::TestRequest::get()
-                .uri(&format!("/babamul/surveys/objects/search/{}", value))
+                .uri(&format!("/babamul/objects?object_id={}", value))
                 .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
                 .to_request();
 
@@ -866,7 +866,7 @@ mod tests {
         // Acceptable values
         for value in ["L", "LS", "LSS", "LSST", "LSST1", "1", "LSST123", "123"] {
             let req = test::TestRequest::get()
-                .uri(&format!("/babamul/surveys/objects/search/{}", value))
+                .uri(&format!("/babamul/objects?object_id={}", value))
                 .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -881,7 +881,7 @@ mod tests {
         // Invalid values
         for value in ["L2", "LSSTA", "1a"] {
             let req = test::TestRequest::get()
-                .uri(&format!("/babamul/surveys/objects/search/{}", value))
+                .uri(&format!("/babamul/objects?object_id={}", value))
                 .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
                 .to_request();
             let resp = test::call_service(&app, req).await;

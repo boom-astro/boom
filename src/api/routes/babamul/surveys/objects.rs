@@ -16,6 +16,22 @@ use regex::Regex;
 use std::sync::OnceLock;
 use utoipa::ToSchema;
 
+static ZTF_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+static ZTF_NO_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+static LSST_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn get_ztf_prefix_regex() -> &'static Regex {
+    ZTF_PREFIX_REGEX.get_or_init(|| Regex::new(r"^ZTF(\d{1,2})([a-zA-Z]{0,7})$").unwrap())
+}
+
+fn get_ztf_no_prefix_regex() -> &'static Regex {
+    ZTF_NO_PREFIX_REGEX.get_or_init(|| Regex::new(r"^(\d{2})([a-zA-Z]{1,7})$").unwrap())
+}
+
+fn get_lsst_prefix_regex() -> &'static Regex {
+    LSST_PREFIX_REGEX.get_or_init(|| Regex::new(r"^LSST(\d+)$").unwrap())
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstMatch {
     object_id: String,
@@ -444,32 +460,6 @@ pub async fn get_object(
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct SearchObjectsQuery {
-    #[serde(default = "default_limit")]
-    limit: u32,
-}
-
-fn default_limit() -> u32 {
-    10
-}
-
-static ZTF_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
-static ZTF_NO_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
-static LSST_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn get_ztf_prefix_regex() -> &'static Regex {
-    ZTF_PREFIX_REGEX.get_or_init(|| Regex::new(r"^ZTF(\d{1,2})([a-zA-Z]{0,7})$").unwrap())
-}
-
-fn get_ztf_no_prefix_regex() -> &'static Regex {
-    ZTF_NO_PREFIX_REGEX.get_or_init(|| Regex::new(r"^(\d{2})([a-zA-Z]{1,7})$").unwrap())
-}
-
-fn get_lsst_prefix_regex() -> &'static Regex {
-    LSST_PREFIX_REGEX.get_or_init(|| Regex::new(r"^LSST(\d+)$").unwrap())
-}
-
 fn ztf_bad_formatting_message(value: &str) -> String {
     format!(
         "Invalid objectId format: {}. ZTF names must look like ZTF + YY + 7 letters (partial is accepted, can omit the ZTF prefix)",
@@ -536,6 +526,17 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
     ))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct SearchObjectsQuery {
+    object_id: String,
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+fn default_limit() -> u32 {
+    10
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct SearchObjectResult {
     object_id: String,
@@ -554,9 +555,9 @@ struct ObjectMini {
 /// Search for objects by partial object ID across surveys. Supports ZTF and LSST, and returns id, ra, dec for up to `limit` results.
 #[utoipa::path(
     get,
-    path = "/babamul/surveys/objects/search/{value}",
+    path = "/babamul/objects",
     params(
-        ("value" = String, Path, description = "Partial object ID to search for"),
+        ("object_id" = String, Query, description = "Partial object ID to search for"),
         ("limit" = Option<u32>, Query, description = "Maximum number of results to return (1-100, default 10)"),
     ),
     responses(
@@ -566,9 +567,8 @@ struct ObjectMini {
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/surveys/objects/search/{value}")]
+#[get("/babamul/objects")]
 pub async fn search_objects_by_partial_id(
-    value: web::Path<String>,
     query: web::Query<SearchObjectsQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
@@ -588,7 +588,7 @@ pub async fn search_objects_by_partial_id(
     };
 
     // Infer survey from objectId (and normalize id casing for ZTF)
-    let (survey, normalized_id) = match infer_survey_from_objectid(&value) {
+    let (survey, normalized_id) = match infer_survey_from_objectid(&query.object_id) {
         Ok(pair) => pair,
         Err(e) => return response::bad_request(&e),
     };
