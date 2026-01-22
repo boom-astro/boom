@@ -134,19 +134,17 @@ Note: The `*` below represents survey match status, e.g., `ztf-match` or
 
 ```mermaid
 flowchart TD
-    Alert[New LSST Alert] --> CheckStar{Already classified<br/>as stellar?}
-    CheckStar -->|Yes| StellarTopic[Topic: babamul.lsst.*.stellar]
-    CheckStar -->|No| CheckLSPSC{LSPSC<br/>cross-matches<br/>exist?}
+    Alert[New LSST Alert] --> CheckLSPSC{Has matches<br/>in LSPSC?}
 
     CheckLSPSC -->|No| CheckFootprint{In LSPSC<br/>footprint?}
     CheckFootprint -->|Yes| HostlessTopic[Topic: babamul.lsst.*.hostless]
     CheckFootprint -->|No| UnknownTopic[Topic: babamul.lsst.*.unknown]
 
-    CheckLSPSC -->|Yes| EvalMatches{Check match<br/>distance & score}
-
-    EvalMatches -->|Any match:<br/>distance ≤ 1.0″<br/>AND score > 0.5| StellarTopic
-    EvalMatches -->|Any match:<br/>distance ≤ 30″<br/>AND score < 0.5| HostedTopic[Topic: babamul.lsst.*.hosted]
-    EvalMatches -->|No qualifying<br/>matches| HostlessTopic
+    CheckLSPSC -->|Yes| CheckStellar{Any match with<br/>distance ≤ 1.0″<br/>and score > 0.5?}
+    CheckStellar -->|Yes| StellarTopic[Topic: babamul.lsst.*.stellar]
+    CheckStellar -->|No| CheckHosted{Any match with<br/>distance ≤ 30″<br/>and score < 0.5?}
+    CheckHosted -->|Yes| HostedTopic[Topic: babamul.lsst.*.hosted]
+    CheckHosted -->|No| HostlessTopic
 
     style StellarTopic fill:#2d5f3f,color:#e0e0e0
     style HostedTopic fill:#5f2d2d,color:#e0e0e0
