@@ -118,7 +118,7 @@ struct ObjResponse {
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/surveys/{survey}/objects/{object_id}")]
+#[get("/surveys/{survey}/objects/{object_id}")]
 pub async fn get_object(
     path: web::Path<(Survey, String)>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -571,7 +571,7 @@ struct ObjectMini {
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/objects")]
+#[get("/objects")]
 pub async fn get_objects(
     query: web::Query<SearchObjectsQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,

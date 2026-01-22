@@ -84,7 +84,7 @@ enum AlertsQueryResult {
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/surveys/{survey}/alerts")]
+#[get("/surveys/{survey}/alerts")]
 pub async fn get_alerts(
     path: web::Path<Survey>,
     query: web::Query<AlertsQuery>,
@@ -275,7 +275,7 @@ pub async fn get_alerts(
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/surveys/{survey}/alerts/{candid}/cutouts")]
+#[get("/surveys/{survey}/alerts/{candid}/cutouts")]
 pub async fn get_alert_cutouts(
     path: web::Path<(Survey, i64)>,
     current_user: Option<web::ReqData<BabamulUser>>,
