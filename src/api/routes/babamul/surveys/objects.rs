@@ -13,6 +13,7 @@ use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use regex::Regex;
+use std::sync::OnceLock;
 use utoipa::ToSchema;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -453,6 +454,22 @@ fn default_limit() -> u32 {
     10
 }
 
+static ZTF_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+static ZTF_NO_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+static LSST_PREFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn get_ztf_prefix_regex() -> &'static Regex {
+    ZTF_PREFIX_REGEX.get_or_init(|| Regex::new(r"^ZTF(\d{1,2})([a-zA-Z]{0,7})$").unwrap())
+}
+
+fn get_ztf_no_prefix_regex() -> &'static Regex {
+    ZTF_NO_PREFIX_REGEX.get_or_init(|| Regex::new(r"^(\d{2})([a-zA-Z]{1,7})$").unwrap())
+}
+
+fn get_lsst_prefix_regex() -> &'static Regex {
+    LSST_PREFIX_REGEX.get_or_init(|| Regex::new(r"^LSST(\d+)$").unwrap())
+}
+
 fn ztf_bad_formatting_message(value: &str) -> String {
     format!(
         "Invalid objectId format: {}. ZTF names must look like ZTF + YY + 7 letters (partial is accepted, can omit the ZTF prefix)",
@@ -471,7 +488,7 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
     }
 
     // ZTF with complete prefix: only accept full "ZTF" when followed by digits/letters
-    let ztf_prefix_re = Regex::new(r"^ZTF(\d{1,2})([a-zA-Z]{0,7})$").unwrap();
+    let ztf_prefix_re = get_ztf_prefix_regex();
     if let Some(caps) = ztf_prefix_re.captures(&upper) {
         let digits = caps.get(1).unwrap().as_str();
         let letters = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -486,7 +503,7 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
     }
 
     // ZTF without prefix: 2 digits followed by up to 7 letters -> prepend ZTF
-    let ztf_no_prefix_re = Regex::new(r"^(\d{2})([a-zA-Z]{1,7})$").unwrap();
+    let ztf_no_prefix_re = get_ztf_no_prefix_regex();
     if let Some(caps) = ztf_no_prefix_re.captures(trimmed) {
         let digits = caps.get(1).unwrap().as_str();
         let letters = caps.get(2).unwrap().as_str();
@@ -502,14 +519,14 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
     }
 
     // then if we have LSST + digits (any length is fine), accept that and return just the digits
-    let lsst_re = Regex::new(r"^LSST(\d+)$").unwrap();
+    let lsst_re = get_lsst_prefix_regex();
     if let Some(caps) = lsst_re.captures(&upper) {
         let digits = caps.get(1).unwrap().as_str();
         return Ok((Survey::Lsst, digits.to_string()));
     }
 
     // LSST numeric id
-    if let Ok(_) = trimmed.parse::<u64>() {
+    if trimmed.parse::<u64>().is_ok() {
         return Ok((Survey::Lsst, trimmed.to_string()));
     }
 
@@ -539,6 +556,7 @@ struct ObjectMini {
     get,
     path = "/babamul/surveys/objects/search/{value}",
     params(
+        ("value" = String, Path, description = "Partial object ID to search for"),
         ("limit" = Option<u32>, Query, description = "Maximum number of results to return (1-100, default 10)"),
     ),
     responses(
@@ -575,13 +593,7 @@ pub async fn search_objects_by_partial_id(
         Err(e) => return response::bad_request(&e),
     };
 
-    let collection = match survey {
-        Survey::Ztf => db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey)),
-        Survey::Lsst => db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey)),
-        _ => {
-            return response::bad_request("Invalid survey, only ZTF and LSST are supported");
-        }
-    };
+    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
 
     // Anchor regex to the start so we only match ordered prefixes
     let filter = doc! {
