@@ -7,10 +7,12 @@ use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZt
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
+use crate::utils::spatial::Coordinates;
 use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
+use regex::Regex;
 use utoipa::ToSchema;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -438,5 +440,189 @@ pub async fn get_object(
                 "Invalid survey specified, only ZTF and LSST are supported",
             );
         }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SearchObjectsQuery {
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+fn default_limit() -> u32 {
+    10
+}
+
+fn ztf_bad_formatting_message(value: &str) -> String {
+    format!(
+        "Invalid objectId format: {}. ZTF names must look like ZTF + YY + 7 letters (partial is accepted, can omit the ZTF prefix)",
+        value
+    )
+}
+
+/// Infer survey from objectId value and return normalized id
+fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
+    let trimmed = value.trim();
+    let upper = trimmed.to_ascii_uppercase();
+
+    // Handle bare prefix: Z, ZT, or ZTF without any suffix
+    if upper == "Z" || upper == "ZT" || upper == "ZTF" {
+        return Ok((Survey::Ztf, "ZTF".to_string()));
+    }
+
+    // ZTF with complete prefix: only accept full "ZTF" when followed by digits/letters
+    let ztf_prefix_re = Regex::new(r"^ZTF(\d{1,2})([a-zA-Z]{0,7})$").unwrap();
+    if let Some(caps) = ztf_prefix_re.captures(&upper) {
+        let digits = caps.get(1).unwrap().as_str();
+        let letters = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+
+        // If we have letters, require exactly 2 digits
+        if !letters.is_empty() && digits.len() != 2 {
+            return Err(ztf_bad_formatting_message(value));
+        }
+
+        let normalized = format!("ZTF{}{}", digits, letters.to_lowercase());
+        return Ok((Survey::Ztf, normalized));
+    }
+
+    // ZTF without prefix: 2 digits followed by up to 7 letters -> prepend ZTF
+    let ztf_no_prefix_re = Regex::new(r"^(\d{2})([a-zA-Z]{1,7})$").unwrap();
+    if let Some(caps) = ztf_no_prefix_re.captures(trimmed) {
+        let digits = caps.get(1).unwrap().as_str();
+        let letters = caps.get(2).unwrap().as_str();
+        return Ok((
+            Survey::Ztf,
+            format!("ZTF{}{}", digits, letters.to_lowercase()),
+        ));
+    }
+
+    // Let's have a similar logic for LSST. If we start with L, LS, LSS, or LSST
+    if upper == "L" || upper == "LS" || upper == "LSS" || upper == "LSST" {
+        return Ok((Survey::Lsst, "".to_string()));
+    }
+
+    // then if we have LSST + digits (any length is fine), accept that and return just the digits
+    let lsst_re = Regex::new(r"^LSST(\d+)$").unwrap();
+    if let Some(caps) = lsst_re.captures(&upper) {
+        let digits = caps.get(1).unwrap().as_str();
+        return Ok((Survey::Lsst, digits.to_string()));
+    }
+
+    // LSST numeric id
+    if let Ok(_) = trimmed.parse::<u64>() {
+        return Ok((Survey::Lsst, trimmed.to_string()));
+    }
+
+    Err(format!(
+        "Invalid objectId format: {}. Could not infer survey from given value",
+        value
+    ))
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct SearchObjectResult {
+    object_id: String,
+    ra: f64,
+    dec: f64,
+    survey: Survey,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ObjectMini {
+    #[serde(rename = "_id")]
+    object_id: String,
+    coordinates: Coordinates,
+}
+
+/// Search for objects by partial object ID across surveys. Supports ZTF and LSST, and returns id, ra, dec for up to `limit` results.
+#[utoipa::path(
+    get,
+    path = "/babamul/surveys/objects/search/{value}",
+    params(
+        ("limit" = Option<u32>, Query, description = "Maximum number of results to return (1-100, default 10)"),
+    ),
+    responses(
+        (status = 200, description = "Search results", body = Vec<SearchObjectResult>),
+        (status = 400, description = "Invalid objectId format"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[get("/babamul/surveys/objects/search/{value}")]
+pub async fn search_objects_by_partial_id(
+    value: web::Path<String>,
+    query: web::Query<SearchObjectsQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    // Validate limit is within bounds
+    let limit = if query.limit < 1 || query.limit > 100 {
+        return response::bad_request("Limit must be between 1 and 100");
+    } else {
+        query.limit as i64
+    };
+
+    // Infer survey from objectId (and normalize id casing for ZTF)
+    let (survey, normalized_id) = match infer_survey_from_objectid(&value) {
+        Ok(pair) => pair,
+        Err(e) => return response::bad_request(&e),
+    };
+
+    let collection = match survey {
+        Survey::Ztf => db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey)),
+        Survey::Lsst => db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey)),
+        _ => {
+            return response::bad_request("Invalid survey, only ZTF and LSST are supported");
+        }
+    };
+
+    // Anchor regex to the start so we only match ordered prefixes
+    let filter = doc! {
+        "_id": {
+            "$regex": format!("^{}", normalized_id),
+        }
+    };
+
+    match collection
+        .find(filter)
+        .sort(doc! { "_id": 1 })
+        .limit(limit)
+        .await
+    {
+        Ok(mut cursor) => {
+            let mut results = vec![];
+            loop {
+                match cursor.try_next().await {
+                    Ok(Some(obj)) => {
+                        let (ra, dec) = obj.coordinates.get_radec();
+                        results.push(SearchObjectResult {
+                            object_id: obj.object_id,
+                            ra,
+                            dec,
+                            survey: survey.clone(),
+                        });
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        return response::internal_error(&format!(
+                            "error searching objects: {}",
+                            error
+                        ));
+                    }
+                }
+            }
+            response::ok(
+                &format!("Found {} objects", results.len()),
+                serde_json::json!(results),
+            )
+        }
+        Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
     }
 }

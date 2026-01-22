@@ -658,6 +658,7 @@ pub async fn post_babamul_activate(
 
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct BabamulAuthPost {
+    #[serde(alias = "username")]
     pub email: String,
     pub password: String,
 }
