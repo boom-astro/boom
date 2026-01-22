@@ -19,7 +19,7 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub properties: ZtfAlertProperties,
+    pub properties: Option<ZtfAlertProperties>,
     pub classifications: ZtfAlertClassifications,
 }
 
@@ -30,7 +30,7 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub properties: LsstAlertProperties,
+    pub properties: Option<LsstAlertProperties>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
