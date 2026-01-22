@@ -810,6 +810,90 @@ mod tests {
         );
     }
 
+    /// Test GET /babamul/objects validation for ZTF patterns
+    #[actix_rt::test]
+    async fn test_get_objects_validation() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(babamul_auth_middleware))
+                .service(routes::babamul::surveys::get_objects),
+        )
+        .await;
+
+        // ZTF:
+        // Acceptable values
+        for value in ["Z", "ZT", "ZTF", "ZTF20a", "20a"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // Invalid values
+        for value in ["Z2", "ZTF231", "ZTF2a", "ZTF20aaaaaaaa"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject invalid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // LSST:
+        // Acceptable values
+        for value in ["L", "LS", "LSS", "LSST", "LSST1", "1", "LSST123", "123"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // Invalid values
+        for value in ["L2", "LSSTA", "1a"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject invalid object_id pattern '{}'",
+                value
+            );
+        }
+    }
+
     /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
     /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
     #[actix_rt::test]
