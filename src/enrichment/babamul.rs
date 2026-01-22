@@ -66,7 +66,6 @@ impl serde::Serialize for CutoutBytes {
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct EnrichedLsstAlert {
-    #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
