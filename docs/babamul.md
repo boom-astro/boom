@@ -144,10 +144,11 @@ flowchart TD
     CheckStellar -->|Yes| StellarTopic[Topic: babamul.lsst.*.stellar]
     CheckStellar -->|No| CheckHosted{Any match with<br/>distance ≤ 30″<br/>and score < 0.5?}
     CheckHosted -->|Yes| HostedTopic[Topic: babamul.lsst.*.hosted]
-    CheckHosted -->|No| HostlessTopic
+    CheckHosted -->|No| HostlessTopic2[Topic: babamul.lsst.*.hostless]
 
     style StellarTopic fill:#2d5f3f,color:#e0e0e0
     style HostedTopic fill:#5f2d2d,color:#e0e0e0
     style HostlessTopic fill:#2d3f5f,color:#e0e0e0
+    style HostlessTopic2 fill:#2d3f5f,color:#e0e0e0
     style UnknownTopic fill:#3a3a3a,color:#e0e0e0
 ```
