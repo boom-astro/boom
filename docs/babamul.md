@@ -96,7 +96,7 @@ sequenceDiagram
 
     Note over LSST,Stream: Day 1: First observation by LSST
     LSST->>Stream: Object discovered (stellar)
-    rect rgb(45, 95, 63)
+    rect rgb(95, 63, 45)
     Note over Stream: Topic: babamul.lsst.no-ztf-match.stellar<br/><br/>Survey matches: none
     end
 
