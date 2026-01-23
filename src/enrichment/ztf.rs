@@ -580,7 +580,6 @@ impl ZtfEnrichmentWorker {
             .iter()
             .filter(|p| p.jd <= alert.candidate.candidate.jd)
             .filter_map(|p| p.to_photometry_mag(None))
-            .filter(|p| p.time <= alert.candidate.candidate.jd)
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
