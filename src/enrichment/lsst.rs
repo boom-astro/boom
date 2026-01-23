@@ -381,7 +381,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 }
 
 impl LsstEnrichmentWorker {
-    async fn get_alert_properties(
+    pub async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
