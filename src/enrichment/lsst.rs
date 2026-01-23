@@ -431,6 +431,11 @@ impl LsstEnrichmentWorker {
                 {
                     is_near_brightstar = Some(true);
                 }
+
+                // if the 2 properties we are evaluating are true, we can stop checking
+                if is_star == Some(true) && is_near_brightstar == Some(true) {
+                    break;
+                }
             }
         }
 
