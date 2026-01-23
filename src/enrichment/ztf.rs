@@ -578,11 +578,14 @@ impl ZtfEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
             .filter_map(|p| p.to_photometry_mag(None))
+            .filter(|p| p.time <= alert.candidate.candidate.jd)
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
             .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
@@ -599,11 +602,13 @@ impl ZtfEnrichmentWorker {
                 let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
                 let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
                     .fp_hists
                     .iter()
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(Some(3.0)))
                     .collect();
                 let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
