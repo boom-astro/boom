@@ -18,7 +18,6 @@ use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
 use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
@@ -87,15 +86,17 @@ pub struct LsstPhotometry {
 }
 
 impl LsstPhotometry {
-    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // If the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
         match (self.snr, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
-                time: self.jd,
-                mag,
-                mag_err: sig,
-                band: self.band.clone(),
-            }),
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag,
+                    mag_err: sig,
+                    band: self.band.clone(),
+                }),
+            },
             _ => None,
         }
     }
@@ -133,6 +134,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$project": {
                 "objectId": 1,
+                "ssObjectId": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
@@ -194,12 +196,13 @@ pub struct LsstAlertForEnrichment {
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
     pub star: Option<bool>,
     pub photstats: PerBandProperties,
+    pub multisurvey_photstats: PerBandProperties,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -306,7 +309,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             HashMap::new()
         };
 
-        if candid_to_cutouts.len() != alerts.len() {
+        if self.babamul.is_some() && candid_to_cutouts.len() != alerts.len() {
             warn!(
                 "only {} cutouts fetched from {} candids",
                 candid_to_cutouts.len(),
@@ -419,12 +422,14 @@ impl LsstEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -433,11 +438,40 @@ impl LsstEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
+        // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
+        let mut has_matches = false;
+        if let Some(survey_matches) = &alert.survey_matches {
+            if let Some(ztf_match) = &survey_matches.ztf {
+                let ztf_prv_candidates: Vec<PhotometryMag> = ztf_match
+                    .prv_candidates
+                    .iter()
+                    .filter(|p| p.jd <= alert.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
+                    .collect();
+                let ztf_fp_hists: Vec<PhotometryMag> = ztf_match
+                    .fp_hists
+                    .iter()
+                    .filter(|p| p.jd <= alert.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+                    .collect();
+                let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
+                prepare_photometry(&mut ztf_lightcurve);
+                lightcurve.extend(ztf_lightcurve);
+                has_matches = true;
+            }
+        }
+        let multisurvey_photstats = if has_matches {
+            analyze_photometry(&lightcurve).0
+        } else {
+            photstats.clone()
+        };
+
         Ok(LsstAlertProperties {
             rock: is_rock,
             star: is_star,
             stationary,
             photstats,
+            multisurvey_photstats,
         })
     }
 }

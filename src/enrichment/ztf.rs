@@ -18,7 +18,6 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
 use tracing::{instrument, trace, warn};
 
@@ -199,15 +198,20 @@ where
 
 // it should return an optional PhotometryMag
 impl ZtfPhotometry {
-    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
+        // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
+        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
+        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
         match (self.snr, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
-                time: self.jd,
-                mag: mag as f32,
-                mag_err: sig as f32,
-                band: self.band.clone(),
-            }),
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag: mag as f32,
+                    mag_err: sig as f32,
+                    band: self.band.clone(),
+                }),
+            },
             _ => None,
         }
     }
@@ -311,18 +315,18 @@ pub struct ZtfAlertForEnrichment {
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
-    pub multisurvey_photstats: PerBandProperties,
+    pub multisurvey_photstats: Option<PerBandProperties>,
 }
 
 /// ZTF alert ML classifier scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
     pub acai_h: f32,
     pub acai_n: f32,
@@ -612,12 +616,14 @@ impl ZtfEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -626,26 +632,32 @@ impl ZtfEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
-        // make a multisurvey lightcurve if we have LSST matches
-        let multisurvey_photstats = if let Some(survey_matches) = &alert.survey_matches {
+        // Compute multisurvey photstats (including LSST if available, other surveys can be added later)
+        let mut has_matches = false;
+        if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
                 let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
                 let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
                     .fp_hists
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
                     .collect();
                 let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
                 prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
+                has_matches = true;
             }
+        }
+        let multisurvey_photstats = if has_matches {
             analyze_photometry(&lightcurve).0
         } else {
-            PerBandProperties::default()
+            photstats.clone()
         };
 
         Ok((
@@ -655,7 +667,7 @@ impl ZtfEnrichmentWorker {
                 near_brightstar: is_near_brightstar,
                 stationary,
                 photstats,
-                multisurvey_photstats,
+                multisurvey_photstats: Some(multisurvey_photstats),
             },
             all_bands_properties,
             programid,

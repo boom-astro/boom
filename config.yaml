@@ -8,6 +8,7 @@ database:
   password: "" # Set via BOOM_DATABASE__PASSWORD environment variable
   srv: false
 api:
+  domain: "localhost" # Set via BOOM_API__DOMAIN environment variable
   port: 4000 # Set via BOOM_API__PORT environment variable
   auth:
     secret_key: "" # Set via BOOM_API__AUTH__SECRET_KEY environment variable
@@ -16,7 +17,9 @@ api:
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
 babamul:
-  enabled: false
+  enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
+  webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
+  retention_days: 3
 redis:
   host: localhost
   port: 6379
@@ -28,6 +31,7 @@ kafka:
     lsst:
       server: "usdf-alert-stream-dev.lsst.cloud:9094"
       schema_registry: "https://usdf-alert-schemas-dev.slac.stanford.edu"
+      schema_github_fallback_url: "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
       username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
       password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
