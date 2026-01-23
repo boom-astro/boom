@@ -43,7 +43,9 @@ struct AlertsQuery {
     end_jd: Option<f64>,
     min_magpsf: Option<f64>,
     max_magpsf: Option<f64>,
+    #[serde(alias = "min_reliability")]
     min_drb: Option<f64>,
+    #[serde(alias = "max_reliability")]
     max_drb: Option<f64>,
     min_sgscore1: Option<f64>,
     max_sgscore1: Option<f64>,
@@ -148,7 +150,7 @@ pub async fn get_alerts(
     }
     if let (Some(min_drb), Some(max_drb)) = (query.min_drb, query.max_drb) {
         filter_doc.insert(
-            "classifications.drb",
+            "candidate.drb",
             doc! {
                 "$gte": min_drb,
                 "$lte": max_drb,
@@ -166,14 +168,14 @@ pub async fn get_alerts(
             return response::bad_request("sgscore1 and distpsnr1 filters are only supported for ZTF survey (other surveys coming soon)");
         }
         filter_doc.insert(
-            "classifications.sgscore1",
+            "candidate.sgscore1",
             doc! {
                 "$gte": min_sgscore1,
                 "$lte": max_sgscore1,
             },
         );
         filter_doc.insert(
-            "classifications.distpsnr1",
+            "candidate.distpsnr1",
             doc! {
                 "$gte": min_distpsnr1,
                 "$lte": max_distpsnr1,
