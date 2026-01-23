@@ -191,6 +191,7 @@ fn create_mock_enriched_lsst_alert_with_matches(
         properties: LsstAlertProperties {
             rock: is_rock,
             star: Some(false),
+            near_brightstar: Some(false),
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: PerBandProperties::default(),
