@@ -50,7 +50,7 @@ async fn main() -> std::io::Result<()> {
                     .app_data(web::Data::new(babamul_avro_schemas))
                     .wrap(from_fn(babamul_auth_middleware))
                     // Public routes
-                    .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
+                    .service(Scalar::with_url("/docs", babamul_doc.clone()))
                     .service(routes::babamul::surveys::get_babamul_schema)
                     .service(routes::babamul::post_babamul_signup)
                     .service(routes::babamul::post_babamul_activate)
