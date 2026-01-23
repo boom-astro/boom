@@ -426,6 +426,7 @@ impl LsstEnrichmentWorker {
                     None => continue,
                 };
                 if distance <= IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC
+                    && score > IS_HOSTED_SCORE_THRESH
                     && mag_white <= IS_NEAR_BRIGHTSTAR_MAG_THRESH
                 {
                     is_near_brightstar = Some(true);
