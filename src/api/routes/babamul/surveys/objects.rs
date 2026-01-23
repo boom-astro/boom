@@ -481,10 +481,6 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
 
     // ZTF with complete prefix: only accept full "ZTF" when followed by digits/letters
     let ztf_prefix_re = get_ztf_prefix_regex();
-    println!(
-        "Trying to match ZTF prefix regex against: {} (regex: {:?})",
-        upper, ztf_prefix_re
-    );
     if let Some(caps) = ztf_prefix_re.captures(&upper) {
         let digits = caps.get(1).unwrap().as_str();
         let letters = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -592,8 +588,6 @@ pub async fn get_objects(
     } else {
         query.limit as i64
     };
-
-    println!("Searching for objects with partial id: {}", query.object_id);
 
     // Infer survey from objectId (and normalize id casing for ZTF)
     let (survey, normalized_id) = match infer_survey_from_objectid(&query.object_id) {
