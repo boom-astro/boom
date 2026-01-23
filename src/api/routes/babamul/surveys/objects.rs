@@ -59,7 +59,7 @@ struct ZtfObj {
     prv_candidates: Vec<ZtfPrvCandidate>,
     prv_nondetections: Vec<ZtfPrvCandidate>,
     fp_hists: Vec<ZtfForcedPhot>,
-    classifications: ZtfAlertClassifications,
+    classifications: Option<ZtfAlertClassifications>,
     classifications_history: Vec<ZtfAlertClassifications>,
     cross_matches: serde_json::Value,
     survey_matches: ZtfSurveyMatches,
@@ -174,7 +174,9 @@ pub async fn get_object(
                 match alert_cursor.try_next().await {
                     Ok(Some(alert)) => {
                         // Push classification to history
-                        classifications_history.push(alert.classifications.clone());
+                        if let Some(classifications) = &alert.classifications {
+                            classifications_history.push(classifications.clone());
+                        }
 
                         // Update newest_alert only if not set yet (first iteration)
                         if newest_alert.is_none() {

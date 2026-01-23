@@ -20,7 +20,7 @@ pub struct EnrichedZtfAlert {
     pub object_id: String,
     pub candidate: ZtfCandidate,
     pub properties: Option<ZtfAlertProperties>,
-    pub classifications: ZtfAlertClassifications,
+    pub classifications: Option<ZtfAlertClassifications>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
