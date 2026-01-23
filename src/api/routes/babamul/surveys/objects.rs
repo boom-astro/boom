@@ -59,7 +59,7 @@ struct ZtfObj {
     prv_candidates: Vec<ZtfPrvCandidate>,
     prv_nondetections: Vec<ZtfPrvCandidate>,
     fp_hists: Vec<ZtfForcedPhot>,
-    classifications: ZtfAlertClassifications,
+    classifications: Option<ZtfAlertClassifications>,
     classifications_history: Vec<ZtfAlertClassifications>,
     cross_matches: serde_json::Value,
     survey_matches: ZtfSurveyMatches,
@@ -174,7 +174,9 @@ pub async fn get_object(
                 match alert_cursor.try_next().await {
                     Ok(Some(alert)) => {
                         // Push classification to history
-                        classifications_history.push(alert.classifications.clone());
+                        if let Some(classifications) = &alert.classifications {
+                            classifications_history.push(classifications.clone());
+                        }
 
                         // Update newest_alert only if not set yet (first iteration)
                         if newest_alert.is_none() {
@@ -479,10 +481,6 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
 
     // ZTF with complete prefix: only accept full "ZTF" when followed by digits/letters
     let ztf_prefix_re = get_ztf_prefix_regex();
-    println!(
-        "Trying to match ZTF prefix regex against: {} (regex: {:?})",
-        upper, ztf_prefix_re
-    );
     if let Some(caps) = ztf_prefix_re.captures(&upper) {
         let digits = caps.get(1).unwrap().as_str();
         let letters = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -590,8 +588,6 @@ pub async fn get_objects(
     } else {
         query.limit as i64
     };
-
-    println!("Searching for objects with partial id: {}", query.object_id);
 
     // Infer survey from objectId (and normalize id casing for ZTF)
     let (survey, normalized_id) = match infer_survey_from_objectid(&query.object_id) {
