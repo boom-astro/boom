@@ -23,6 +23,8 @@ use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
 
 pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
+pub const IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC: f64 = 20.0;
+pub const IS_NEAR_BRIGHTSTAR_MAG_THRESH: f64 = 15.0;
 pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
 const MOC_DEPTH: u8 = 11;
@@ -201,6 +203,7 @@ pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
     pub star: Option<bool>,
+    pub near_brightstar: Option<bool>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
 }
@@ -387,6 +390,7 @@ impl LsstEnrichmentWorker {
 
         // Determine if this is a star based on LSPSC cross-matches
         let mut is_star = Some(false);
+        let mut is_near_brightstar = Some(false);
 
         let empty_vec = vec![];
         let lspsc_matches = alert
@@ -400,9 +404,11 @@ impl LsstEnrichmentWorker {
                 alert.candidate.dia_source.dec,
             ) {
                 is_star = None;
+                is_near_brightstar = None;
             }
         } else {
             // Check each LSPSC match for a nearby stellar-like object
+            // and for bright stars within a larger radius
             for m in lspsc_matches {
                 let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
                     Some(d) => d,
@@ -414,7 +420,15 @@ impl LsstEnrichmentWorker {
                 };
                 if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
                     is_star = Some(true);
-                    break;
+                }
+                let mag_white = match m.get("mag_white").and_then(|v| v.as_f64()) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                if distance <= IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC
+                    && mag_white <= IS_NEAR_BRIGHTSTAR_MAG_THRESH
+                {
+                    is_near_brightstar = Some(true);
                 }
             }
         }
@@ -465,6 +479,7 @@ impl LsstEnrichmentWorker {
         Ok(LsstAlertProperties {
             rock: is_rock,
             star: is_star,
+            near_brightstar: is_near_brightstar,
             stationary,
             photstats,
             multisurvey_photstats,
