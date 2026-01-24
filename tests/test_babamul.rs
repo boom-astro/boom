@@ -16,6 +16,7 @@ use rdkafka::{
     consumer::{Consumer, StreamConsumer},
     Message,
 };
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Create realistic LSPSC cross-matches with configurable distance and score for testing
@@ -126,7 +127,7 @@ async fn create_mock_enriched_lsst_alert(
     is_rock: bool,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> EnrichedLsstAlert {
+) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
     create_mock_enriched_lsst_alert_with_matches(
         candid,
         object_id,
@@ -151,7 +152,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> EnrichedLsstAlert {
+) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
     dia_source.candid = candid;
@@ -277,7 +278,7 @@ async fn test_compute_babamul_category() {
     // Test case 1: No ZTF match + stellar LSPSC → "no-ztf-match.stellar"
     // distance ≤ 1.0 AND score > 0.5
     let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
-    let alert_stellar = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_stellar, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543210,
         "LSST24aaaaaaa",
         0.8,
@@ -289,7 +290,7 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_stellar.compute_babamul_category();
+    let category = alert_stellar.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "no-ztf-match.stellar",
         "Alert with close, high-score match should be stellar"
@@ -298,7 +299,7 @@ async fn test_compute_babamul_category() {
     // Test case 2: No ZTF match + hosted LSPSC → "no-ztf-match.hosted"
     // nearest match has score < 0.5
     let cross_matches = create_lspsc_cross_matches(Some(2.0), Some(0.3), false);
-    let alert_hosted = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_hosted, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543211,
         "LSST24aaaaaab",
         0.8,
@@ -310,7 +311,7 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_hosted.compute_babamul_category();
+    let category = alert_hosted.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "no-ztf-match.hosted",
         "Alert with low-score match should be hosted"
@@ -319,7 +320,7 @@ async fn test_compute_babamul_category() {
     // Test case 3: No ZTF match + hostless LSPSC → "no-ztf-match.hostless"
     // distance > 1.0 AND all scores > 0.5 (no hosted criteria met)
     let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
-    let alert_hostless = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_hostless, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543212,
         "LSST24aaaaaac",
         0.8,
@@ -331,14 +332,14 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_hostless.compute_babamul_category();
+    let category = alert_hostless.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "no-ztf-match.hostless",
         "Alert with distant, high-score match should be hostless"
     );
 
     // Test case 4: No ZTF match + no matches + in footprint → "no-ztf-match.hostless"
-    let alert_no_matches = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_no_matches, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543213,
         "LSST24aaaaaad",
         0.8,
@@ -350,7 +351,7 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_no_matches.compute_babamul_category();
+    let category = alert_no_matches.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "no-ztf-match.hostless",
         "Alert with no matches but in footprint should be hostless"
@@ -368,7 +369,7 @@ async fn test_compute_babamul_category() {
             fp_hists: vec![],
         }),
     });
-    let alert_ztf_stellar = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_ztf_stellar, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543214,
         "LSST24aaaaaae",
         0.8,
@@ -380,7 +381,7 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_ztf_stellar.compute_babamul_category();
+    let category = alert_ztf_stellar.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "ztf-match.stellar",
         "Alert with ZTF match and stellar LSPSC should be ztf-match.stellar"
@@ -398,7 +399,7 @@ async fn test_compute_babamul_category() {
             fp_hists: vec![],
         }),
     });
-    let alert_ztf_hosted = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_ztf_hosted, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543215,
         "LSST24aaaaaaf",
         0.8,
@@ -410,7 +411,7 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_ztf_hosted.compute_babamul_category();
+    let category = alert_ztf_hosted.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "ztf-match.hosted",
         "Alert with ZTF match and hosted LSPSC should be ztf-match.hosted"
@@ -428,7 +429,7 @@ async fn test_compute_babamul_category() {
             fp_hists: vec![],
         }),
     });
-    let alert_ztf_hostless = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_ztf_hostless, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543216,
         "LSST24aaaaaag",
         0.8,
@@ -440,7 +441,7 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_ztf_hostless.compute_babamul_category();
+    let category = alert_ztf_hostless.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "ztf-match.hostless",
         "Alert with ZTF match and hostless LSPSC should be ztf-match.hostless"
@@ -457,7 +458,7 @@ async fn test_compute_babamul_category() {
             fp_hists: vec![],
         }),
     });
-    let alert_ztf_unknown = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_ztf_unknown, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543217,
         "LSST24aaaaaah",
         0.8,
@@ -469,14 +470,14 @@ async fn test_compute_babamul_category() {
         None,
     )
     .await;
-    let category = alert_ztf_unknown.compute_babamul_category();
+    let category = alert_ztf_unknown.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "ztf-match.hostless",
         "Alert with ZTF match but no LSPSC and in footprint should be ztf-match.hostless"
     );
 
     // Test case 9: No LSPSC + no ZTF match + out of footprint → "unknown"
-    let alert_unknown = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_unknown, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543218,
         "LSST24aaaaaai",
         0.8,
@@ -488,14 +489,14 @@ async fn test_compute_babamul_category() {
         Some(-32.25),                           // Dec out of footprint
     )
     .await;
-    let category = alert_unknown.compute_babamul_category();
+    let category = alert_unknown.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "no-ztf-match.unknown",
         "Alert with no matches and no ZTF match should be unknown"
     );
 
     // Test case 10: LSPSC exists but empty + no ZTF match + out of footprint → "unknown"
-    let alert_empty_lspsc = create_mock_enriched_lsst_alert_with_matches(
+    let (alert_empty_lspsc, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
         9876543219,
         "LSST24aaaaaaj",
         0.8,
@@ -507,7 +508,7 @@ async fn test_compute_babamul_category() {
         Some(-32.25),                           // Dec out of footprint
     )
     .await;
-    let category = alert_empty_lspsc.compute_babamul_category();
+    let category = alert_empty_lspsc.compute_babamul_category(&cross_matches);
     assert_eq!(
         category, "no-ztf-match.unknown",
         "Alert with empty LSPSC matches and no ZTF match should be unknown"
