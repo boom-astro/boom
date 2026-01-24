@@ -321,7 +321,10 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut enriched_alerts: Vec<EnrichedLsstAlert> = Vec::new();
+        let mut enriched_alerts: Vec<(
+            EnrichedLsstAlert,
+            std::collections::HashMap<String, Vec<serde_json::Value>>,
+        )> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
 
@@ -350,14 +353,15 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                 let cutouts = candid_to_cutouts
                     .remove(&candid)
                     .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-                let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
-                    alert,
-                    Some(cutouts.cutout_science),
-                    Some(cutouts.cutout_template),
-                    Some(cutouts.cutout_difference),
-                    properties,
-                );
-                enriched_alerts.push(enriched_alert);
+                let (enriched_alert, cross_matches) =
+                    EnrichedLsstAlert::from_alert_properties_and_cutouts(
+                        alert,
+                        Some(cutouts.cutout_science),
+                        Some(cutouts.cutout_template),
+                        Some(cutouts.cutout_difference),
+                        properties,
+                    );
+                enriched_alerts.push((enriched_alert, cross_matches));
             }
         }
 
