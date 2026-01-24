@@ -34,6 +34,7 @@ fn get_lsst_prefix_regex() -> &'static Regex {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstMatch {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -50,6 +51,7 @@ struct ZtfSurveyMatches {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfObj {
     candid: i64,
+    #[serde(rename = "objectId")]
     object_id: String,
     candidate: ZtfCandidate,
     properties: Option<ZtfAlertProperties>,
@@ -67,6 +69,7 @@ struct ZtfObj {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfMatch {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -84,6 +87,7 @@ struct LsstSurveyMatches {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstObj {
     candid: i64,
+    #[serde(rename = "objectId")]
     object_id: String,
     candidate: LsstCandidate,
     properties: Option<LsstAlertProperties>,
@@ -106,10 +110,10 @@ struct ObjResponse {
 /// Fetch an object from a given survey's alert stream by its object ID
 #[utoipa::path(
     get,
-    path = "/babamul/surveys/{survey}/objects/{object_id}",
+    path = "/babamul/surveys/{survey}/objects/{objectId}",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
-        ("object_id" = String, Path, description = "ID of the object to retrieve"),
+        ("objectId" = String, Path, description = "ID of the object to retrieve"),
     ),
     responses(
         (status = 200, description = "Object found", body = ObjResponse),
@@ -118,7 +122,7 @@ struct ObjResponse {
     ),
     tags=["Surveys"]
 )]
-#[get("/surveys/{survey}/objects/{object_id}")]
+#[get("/surveys/{survey}/objects/{objectId}")]
 pub async fn get_object(
     path: web::Path<(Survey, String)>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -306,7 +310,7 @@ pub async fn get_object(
                 survey_matches,
             };
             return response::ok(
-                &format!("object found with object_id: {}", object_id),
+                &format!("object found with objectId: {}", object_id),
                 serde_json::json!(obj),
             );
         }
@@ -450,7 +454,7 @@ pub async fn get_object(
                 survey_matches,
             };
             return response::ok(
-                &format!("object found with object_id: {}", object_id),
+                &format!("object found with objectId: {}", object_id),
                 serde_json::json!(obj),
             );
         }
@@ -530,6 +534,7 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SearchObjectsQuery {
+    #[serde(rename = "objectId")]
     object_id: String,
     #[serde(default = "default_limit")]
     limit: u32,
@@ -541,6 +546,7 @@ fn default_limit() -> u32 {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct SearchObjectResult {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -559,7 +565,7 @@ struct ObjectMini {
     get,
     path = "/babamul/objects",
     params(
-        ("object_id" = String, Query, description = "Partial object ID to search for"),
+        ("objectId" = String, Query, description = "Partial object ID to search for"),
         ("limit" = Option<u32>, Query, description = "Maximum number of results to return (1-100, default 10)"),
     ),
     responses(

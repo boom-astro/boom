@@ -12,12 +12,12 @@ use crate::{
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
-    utils::{db::mongify, enums::Survey},
+    utils::{avro::get_avro_schema, db::mongify, enums::Survey},
 };
 
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
-use apache_avro_macros::serdavro;
+// use apache_avro_macros::serdavro;
 use flare::Time;
 use futures::stream::StreamExt;
 use mongodb::{
@@ -846,30 +846,30 @@ pub async fn post_filter_test_count(
     )
 }
 
-#[serdavro]
-#[derive(Debug, Deserialize, Serialize)]
+// #[serdavro]
+#[derive(Debug, Deserialize, Serialize, AvroSchema)]
 pub struct GalacticCoordinates {
     pub l: f64,
     pub b: f64,
 }
 
-#[serdavro]
-#[derive(Debug, Deserialize, Serialize)]
+// #[serdavro]
+#[derive(Debug, Deserialize, Serialize, AvroSchema)]
 pub struct ZtfFilterMatch {
     pub prv_candidates: Vec<ZtfCandidate>,
     pub prv_nondetections: Vec<ZtfPrvCandidate>,
     pub fp_hists: Vec<ZtfForcedPhot>,
 }
 
-#[serdavro]
-#[derive(Debug, Deserialize, Serialize)]
+// #[serdavro]
+#[derive(Debug, Deserialize, Serialize, AvroSchema)]
 pub struct LsstFilterMatch {
     pub prv_candidates: Vec<LsstCandidate>,
     pub fp_hists: Vec<LsstForcedPhot>,
 }
 
-#[serdavro]
-#[derive(Debug, Deserialize, Serialize)]
+// #[serdavro]
+#[derive(Debug, Deserialize, Serialize, AvroSchema)]
 /// ZTF data available at filtering time
 pub struct ZtfAlertToFilter {
     pub candid: i64,
@@ -887,8 +887,8 @@ pub struct ZtfAlertToFilter {
     pub lsst: Option<LsstFilterMatch>,
 }
 
-#[serdavro]
-#[derive(Debug, Deserialize, Serialize)]
+// #[serdavro]
+#[derive(Debug, Deserialize, Serialize, AvroSchema)]
 /// LSST data available at filtering time
 pub struct LsstAlertToFilter {
     pub candid: i64,
@@ -922,8 +922,8 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     // return the avro schema
     let survey_name = path.into_inner().0;
     let schema = match survey_name {
-        Survey::Ztf => ZtfAlertToFilter::get_schema(),
-        Survey::Lsst => LsstAlertToFilter::get_schema(),
+        Survey::Ztf => get_avro_schema::<ZtfAlertToFilter>(),
+        Survey::Lsst => get_avro_schema::<LsstAlertToFilter>(),
         _ => {
             return response::not_found(&format!(
                 "no filter data schema found for survey {}",

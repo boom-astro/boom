@@ -15,14 +15,14 @@ use crate::{
     },
 };
 use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
+// use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use tracing::{instrument, trace, warn};
 
-#[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// #[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, AvroSchema)]
 /// Represents ZTF alert photometry data we retrieve from the database
 /// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
 pub struct ZtfAlertPhotometry {
@@ -41,8 +41,8 @@ pub struct ZtfAlertPhotometry {
     pub programid: i32,
 }
 
-#[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// #[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, AvroSchema)]
 /// Represents ZTF forced photometry data we retrieve from the database
 /// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
 pub struct ZtfForcedPhotometry {
@@ -63,8 +63,8 @@ pub struct ZtfForcedPhotometry {
     pub procstatus: Option<String>,
 }
 
-#[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// #[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, AvroSchema)]
 /// Represents ZTF photometry data we retrieved from the database
 /// (from alert or forced photometry)
 pub struct ZtfPhotometry {
@@ -258,7 +258,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
                                 "ra": { "$add": [
@@ -283,7 +283,7 @@ pub struct ZtfSurveyMatches {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
 pub struct ZtfMatch {
-    // #[serde(rename = "_id")]
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,

@@ -15,8 +15,8 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
-use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
+use apache_avro::AvroSchema;
+// use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
 use hifitime::Epoch;
@@ -45,10 +45,9 @@ pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
 
 const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
 
-#[serde_as]
-#[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+// #[serde_as]
+// #[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema, AvroSchema)]
 #[serde(default)]
 pub struct DiaSource {
     /// Unique identifier of this DiaSource.
@@ -257,10 +256,9 @@ pub struct DiaSource {
     pub glint_trail: Option<bool>,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+// #[serde_as]
+// #[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema, AvroSchema)]
 pub struct LsstCandidate {
     #[serde(flatten)]
     pub dia_source: DiaSource,
@@ -340,8 +338,7 @@ impl LsstCandidate {
 
 #[serde_as]
 #[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema, AvroSchema)]
 /// LSST difference-image analysis (DIA) candidate representing an astrophysical source
 /// detected in a single-epoch difference image. Unlike `LsstCandidate`, this does not
 /// include historical information from the associated `DiaObject` (e.g., `jdstarthist`, ndethist`).
@@ -625,8 +622,8 @@ pub struct DiaObject {
     pub n_dia_sources: i32,
 }
 
-#[serde_as]
-#[skip_serializing_none]
+// #[serde_as]
+// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
@@ -663,10 +660,9 @@ pub struct DiaForcedSource {
     pub band: Option<Band>,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+// #[serde_as]
+// #[skip_serializing_none]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema, AvroSchema)]
 pub struct LsstForcedPhot {
     #[serde(flatten)]
     pub dia_forced_source: DiaForcedSource,
@@ -760,7 +756,7 @@ pub fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let cutout: Option<Vec<u8>> = apache_avro::serde_avro_bytes_opt::deserialize(deserializer)?;
+    let cutout: Option<Vec<u8>> = apache_avro::serde::bytes_opt::deserialize(deserializer)?;
     // if cutout is None, return an error
     match cutout {
         None => Err(serde::de::Error::custom("Missing cutout data")),
@@ -798,8 +794,7 @@ where
     Ok(Some(forced_phots))
 }
 
-#[serdavro]
-#[derive(Debug, Deserialize, Serialize, ToSchema, Default)]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Default, AvroSchema)]
 pub struct LsstAliases {
     #[serde(rename = "ZTF")]
     pub ztf: Vec<String>,

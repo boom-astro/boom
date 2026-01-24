@@ -10,7 +10,7 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
+// use apache_avro_macros::serdavro;
 use cdshealpix::nested::get;
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
 use moc::moc::range::RangeMOC;
@@ -67,8 +67,8 @@ fn default_lsst_zp() -> Option<f64> {
     Some(8.9)
 }
 
-#[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// #[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, AvroSchema)]
 pub struct LsstPhotometry {
     pub jd: f64,
     pub magpsf: Option<f32>,
@@ -146,7 +146,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
                                 "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
@@ -172,6 +172,7 @@ pub struct LsstSurveyMatches {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
 pub struct LsstMatch {
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,

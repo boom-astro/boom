@@ -11,7 +11,7 @@ use crate::{
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
 use apache_avro::Schema;
-use apache_avro::{serde_avro_bytes, Writer};
+use apache_avro::Writer;
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use opentelemetry::{
@@ -211,11 +211,11 @@ pub struct Alert {
     pub filters: Vec<FilterResults>,
     pub classifications: Vec<Classification>,
     pub photometry: Vec<Photometry>,
-    #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
+    #[serde(with = "apache_avro::serde::bytes", rename = "cutoutScience")]
     pub cutout_science: Vec<u8>,
-    #[serde(with = "serde_avro_bytes", rename = "cutoutTemplate")]
+    #[serde(with = "apache_avro::serde::bytes", rename = "cutoutTemplate")]
     pub cutout_template: Vec<u8>,
-    #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
+    #[serde(with = "apache_avro::serde::bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
 }
 
@@ -235,7 +235,7 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
+    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy).unwrap();
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;

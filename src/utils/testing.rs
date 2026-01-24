@@ -481,7 +481,7 @@ impl AlertRandomizer {
                         _ => {}
                     }
                 }
-                let mut writer = Writer::new(&schema, Vec::new());
+                let mut writer = Writer::new(&schema, Vec::new()).unwrap();
                 let mut new_record = Record::new(writer.schema()).unwrap();
                 for (key, value) in record {
                     new_record.put(&key, value);
@@ -547,7 +547,7 @@ impl AlertRandomizer {
                     }
                 }
 
-                let mut writer = Writer::new(&schema, Vec::new());
+                let mut writer = Writer::new(&schema, Vec::new()).unwrap();
                 let mut new_record = Record::new(&schema).unwrap();
                 for (key, value) in record {
                     new_record.put(&key, value);

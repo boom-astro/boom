@@ -35,6 +35,7 @@ pub struct EnrichedLsstAlert {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 struct AlertsQuery {
+    #[serde(rename = "objectId")]
     object_id: Option<String>,
     ra: Option<f64>,
     dec: Option<f64>,
@@ -64,7 +65,7 @@ enum AlertsQueryResult {
     path = "/babamul/surveys/{survey}/alerts",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
-        ("object_id" = Option<String>, Query, description = "Object ID to filter alerts"),
+        ("objectId" = Option<String>, Query, description = "Object ID to filter alerts"),
         ("ra" = Option<f64>, Query, description = "Right Ascension in degrees for cone search"),
         ("dec" = Option<f64>, Query, description = "Declination in degrees for cone search"),
         ("radius_arcsec" = Option<f64>, Query, description = "Radius in arcseconds for cone search"),
