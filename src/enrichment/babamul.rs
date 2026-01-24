@@ -4,7 +4,6 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
-    IS_STELLAR_DISTANCE_THRESH_ARCSEC,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
@@ -124,8 +123,10 @@ impl EnrichedLsstAlert {
             None => "no-ztf-match.".to_string(),
         };
 
-        // already classified as stellar (by the enrichment worker), return that
-        if self.properties.star.unwrap_or(false) {
+        // The enrichment worker already uses the LSPSC matches to classify stars
+        // by creating 2 properties: star (bool) and near_brightstar (bool)
+        if self.properties.star.unwrap_or(false) || self.properties.near_brightstar.unwrap_or(false)
+        {
             return category + "stellar";
         }
 
@@ -142,22 +143,18 @@ impl EnrichedLsstAlert {
             };
         }
 
-        // Evaluate matches (stellar > hosted > hostless)
+        // Evaluate matches (hosted > hostless).
+        // Stellar was already evaluated in the enrichment worker
+        // and used above to break early with "stellar" classification.
         let mut label = "hostless";
         for m in lspsc_matches {
-            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
-                Some(d) => d,
-                None => continue,
-            };
             let score = match m.get("score").and_then(|v| v.as_f64()) {
                 Some(s) => s,
                 None => continue,
             };
-            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
-                label = "stellar";
-                break;
-            } else if score < IS_HOSTED_SCORE_THRESH {
+            if score < IS_HOSTED_SCORE_THRESH {
                 label = "hosted";
+                break;
             }
         }
         category + label
