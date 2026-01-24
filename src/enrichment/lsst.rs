@@ -170,7 +170,8 @@ pub struct LsstSurveyMatches {
     pub ztf: Option<ZtfMatch>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct LsstMatch {
     #[serde(rename = "objectId")]
     pub object_id: String,

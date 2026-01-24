@@ -281,7 +281,8 @@ pub struct ZtfSurveyMatches {
     pub lsst: Option<LsstMatch>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ZtfMatch {
     #[serde(rename = "objectId")]
     pub object_id: String,
