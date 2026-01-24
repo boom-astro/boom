@@ -1,7 +1,9 @@
-use crate::api::models::response;
+use crate::enrichment::babamul::{EnrichedLsstAlert, EnrichedZtfAlert};
 use crate::utils::enums::Survey;
+use crate::{api::models::response, utils::avro::get_avro_schema};
 use actix_web::{web, HttpResponse};
 use mongodb::bson::doc;
+
 pub struct BabamulAvroSchemas {
     lsst_schema: serde_json::Value,
     ztf_schema: serde_json::Value,
@@ -9,9 +11,8 @@ pub struct BabamulAvroSchemas {
 
 impl BabamulAvroSchemas {
     pub fn new() -> Self {
-        use apache_avro::AvroSchema;
-        let lsst_schema = crate::enrichment::babamul::EnrichedLsstAlert::get_schema();
-        let ztf_schema = crate::enrichment::babamul::EnrichedZtfAlert::get_schema();
+        let lsst_schema = get_avro_schema::<EnrichedLsstAlert>();
+        let ztf_schema = get_avro_schema::<EnrichedZtfAlert>();
         let lsst_schema = serde_json::to_value(&lsst_schema).unwrap();
         let ztf_schema = serde_json::to_value(&ztf_schema).unwrap();
         Self {

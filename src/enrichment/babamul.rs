@@ -8,6 +8,7 @@ use crate::enrichment::lsst::{
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
+use crate::utils::avro::get_avro_schema;
 use apache_avro::{AvroSchema, Schema, Writer};
 use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
@@ -283,17 +284,8 @@ impl Babamul {
                 .expect("Failed to create Babamul Kafka producer");
 
         // Generate Avro schemas
-        let lsst_avro_schema = EnrichedLsstAlert::get_schema();
-        let ztf_avro_schema = EnrichedZtfAlert::get_schema();
-
-        // Looks like the generated schema may have repetitions of named types
-        // so we get the canonical form to deduplicate them, then load them back
-        let lsst_canonical = lsst_avro_schema.canonical_form();
-        let ztf_canonical = ztf_avro_schema.canonical_form();
-        let lsst_avro_schema =
-            Schema::parse_str(&lsst_canonical).expect("Failed to parse LSST Avro schema");
-        let ztf_avro_schema =
-            Schema::parse_str(&ztf_canonical).expect("Failed to parse ZTF Avro schema");
+        let lsst_avro_schema = get_avro_schema::<EnrichedLsstAlert>();
+        let ztf_avro_schema = get_avro_schema::<EnrichedZtfAlert>();
 
         // Create Kafka Admin client
         let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()

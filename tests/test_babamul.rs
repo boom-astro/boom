@@ -7,6 +7,7 @@ use boom::{
         LsstAlertProperties, ZtfAlertProperties,
     },
     utils::{
+        avro::get_avro_schema,
         lightcurves::{Band, PerBandProperties},
         testing::TEST_CONFIG_FILE,
     },
@@ -635,7 +636,7 @@ async fn test_babamul_process_ztf_alerts() {
     let expected: std::collections::HashSet<String> =
         [ztf_obj1.clone(), ztf_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedZtfAlert::get_schema();
+    let schema = get_avro_schema::<EnrichedZtfAlert>();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -685,14 +686,21 @@ async fn test_babamul_process_lsst_alerts() {
         create_mock_enriched_lsst_alert(9876543211, &lsst_obj2, 0.9, false, false, None, None);
 
     // Process the alerts
-    let _result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
+    let result = babamul
+        .process_lsst_alerts(vec![alert1, alert2])
+        .await
+        .unwrap();
+    assert_eq!(
+        result, 2,
+        "Expected 2 messages to be processed for LSST alerts"
+    );
 
     // Consume messages and verify our specific alerts are present via objectId
     let messages = consume_kafka_messages(topic, &config).await;
     let expected: std::collections::HashSet<String> =
         [lsst_obj1.clone(), lsst_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedLsstAlert::get_schema();
+    let schema = get_avro_schema::<EnrichedLsstAlert>();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {

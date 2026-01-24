@@ -258,7 +258,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
                                 "ra": { "$add": [
@@ -283,7 +283,7 @@ pub struct ZtfSurveyMatches {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
 pub struct ZtfMatch {
-    // #[serde(rename = "_id")]
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,

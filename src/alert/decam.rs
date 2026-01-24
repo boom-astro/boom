@@ -20,7 +20,6 @@ use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_with::{serde_as, skip_serializing_none};
 use tracing::instrument;
 
 pub const STREAM_NAME: &str = "DECAM";
@@ -36,8 +35,6 @@ pub const DECAM_ZTF_XMATCH_RADIUS: f64 =
 pub const DECAM_LSST_XMATCH_RADIUS: f64 =
     (DECAM_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
-#[serde_as]
-#[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct FpHist {
     pub mjd: f64,
@@ -51,8 +48,6 @@ pub struct FpHist {
     pub diffmaglim: f64,
 }
 
-#[serde_as]
-#[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Candidate {
     pub mjd: f64,
@@ -68,8 +63,6 @@ pub struct Candidate {
     pub dec: f64,
 }
 
-#[serde_as]
-#[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DecamCandidate {
     #[serde(flatten)]
@@ -108,8 +101,6 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-#[serde_as]
-#[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DecamForcedPhot {
     #[serde(flatten)]

@@ -1,3 +1,4 @@
+pub mod avro;
 pub mod data;
 pub mod db;
 pub mod enums;

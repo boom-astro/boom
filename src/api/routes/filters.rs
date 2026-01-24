@@ -12,7 +12,7 @@ use crate::{
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
-    utils::{db::mongify, enums::Survey},
+    utils::{avro::get_avro_schema, db::mongify, enums::Survey},
 };
 
 use actix_web::{get, patch, post, web, HttpResponse};
@@ -922,8 +922,8 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     // return the avro schema
     let survey_name = path.into_inner().0;
     let schema = match survey_name {
-        Survey::Ztf => ZtfAlertToFilter::get_schema(),
-        Survey::Lsst => LsstAlertToFilter::get_schema(),
+        Survey::Ztf => get_avro_schema::<ZtfAlertToFilter>(),
+        Survey::Lsst => get_avro_schema::<LsstAlertToFilter>(),
         _ => {
             return response::not_found(&format!(
                 "no filter data schema found for survey {}",
