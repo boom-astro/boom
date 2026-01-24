@@ -12,8 +12,8 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
-use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
+use apache_avro::AvroSchema;
+// use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
@@ -52,12 +52,12 @@ pub struct Cutout {
     #[serde(rename = "fileName")]
     pub file_name: String,
     #[serde(rename = "stampData")]
-    #[serde(with = "apache_avro::serde_avro_bytes")]
+    #[serde(with = "apache_avro::serde::bytes")]
     pub stamp_data: Vec<u8>,
 }
 
-#[serde_as]
-#[skip_serializing_none]
+// #[serde_as]
+// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct PrvCandidate {
@@ -105,10 +105,10 @@ pub struct PrvCandidate {
     pub magzpsci: Option<f32>,
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+// #[serde_as]
+// #[skip_serializing_none]
+// #[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema, AvroSchema)]
 pub struct ZtfPrvCandidate {
     #[serde(flatten)]
     pub prv_candidate: PrvCandidate,
@@ -196,8 +196,8 @@ where
 }
 
 /// avro alert schema
-#[serde_as]
-#[skip_serializing_none]
+// #[serde_as]
+// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct FpHist {
@@ -234,10 +234,10 @@ where
     Ok(value.filter(|&x| x != -99999.0 && !x.is_nan()))
 }
 
-#[serde_as]
-#[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+// #[serde_as]
+// #[skip_serializing_none]
+// #[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema, AvroSchema)]
 pub struct ZtfForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
@@ -295,8 +295,8 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 }
 
 /// avro alert schema
-#[serde_as]
-#[skip_serializing_none]
+// #[serde_as]
+// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct Candidate {
@@ -439,8 +439,8 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+// #[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema, AvroSchema)]
 pub struct ZtfCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,

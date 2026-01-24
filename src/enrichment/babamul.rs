@@ -8,9 +8,7 @@ use crate::enrichment::lsst::{
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
-use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
-use apache_avro_macros::serdavro;
 use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
 };
@@ -34,7 +32,7 @@ pub struct CrossMatchesWrapper(
     pub Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
 );
 
-impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
+impl apache_avro::serde::AvroSchemaComponent for CrossMatchesWrapper {
     fn get_schema_in_ctxt(
         _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
         _enclosing_namespace: &apache_avro::schema::Namespace,
@@ -44,7 +42,7 @@ impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
     }
 }
 
-impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
+impl apache_avro::serde::AvroSchemaComponent for CutoutBytes {
     fn get_schema_in_ctxt(
         _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
         _enclosing_namespace: &apache_avro::schema::Namespace,
@@ -58,13 +56,12 @@ impl serde::Serialize for CutoutBytes {
     where
         S: serde::ser::Serializer,
     {
-        apache_avro::serde_avro_bytes::serialize(&self.0, serializer)
+        apache_avro::serde::bytes::serialize(&self.0, serializer)
     }
 }
 
 /// Enriched LSST alert
-#[serdavro]
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct EnrichedLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -167,8 +164,7 @@ impl EnrichedLsstAlert {
 }
 
 /// Enriched ZTF alert
-#[serdavro]
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct EnrichedZtfAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -290,6 +286,15 @@ impl Babamul {
         let lsst_avro_schema = EnrichedLsstAlert::get_schema();
         let ztf_avro_schema = EnrichedZtfAlert::get_schema();
 
+        // Looks like the generated schema may have repetitions of named types
+        // so we get the canonical form to deduplicate them, then load them back
+        let lsst_canonical = lsst_avro_schema.canonical_form();
+        let ztf_canonical = ztf_avro_schema.canonical_form();
+        let lsst_avro_schema =
+            Schema::parse_str(&lsst_canonical).expect("Failed to parse LSST Avro schema");
+        let ztf_avro_schema =
+            Schema::parse_str(&ztf_canonical).expect("Failed to parse ZTF Avro schema");
+
         // Create Kafka Admin client
         let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
             .set("bootstrap.servers", &kafka_producer_host)
@@ -370,9 +375,10 @@ impl Babamul {
                     &self.lsst_avro_schema,
                     Vec::new(),
                     apache_avro::Codec::Snappy,
-                );
+                )
+                .unwrap();
                 writer
-                    .append_serdavro(a)
+                    .append_ser(a)
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
                 writer
                     .into_inner()
@@ -383,9 +389,10 @@ impl Babamul {
                     &self.ztf_avro_schema,
                     Vec::new(),
                     apache_avro::Codec::Snappy,
-                );
+                )
+                .unwrap();
                 writer
-                    .append_serdavro(a)
+                    .append_ser(a)
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
                 writer
                     .into_inner()

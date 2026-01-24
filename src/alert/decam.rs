@@ -139,13 +139,13 @@ pub struct DecamRawAvroAlert {
     #[serde(deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Vec<DecamForcedPhot>,
     #[serde(rename = "cutoutScience")]
-    #[serde(with = "apache_avro::serde_avro_bytes")]
+    #[serde(with = "apache_avro::serde::bytes")]
     pub cutout_science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
-    #[serde(with = "apache_avro::serde_avro_bytes")]
+    #[serde(with = "apache_avro::serde::bytes")]
     pub cutout_template: Vec<u8>,
     #[serde(rename = "cutoutDifference")]
-    #[serde(with = "apache_avro::serde_avro_bytes")]
+    #[serde(with = "apache_avro::serde::bytes")]
     pub cutout_difference: Vec<u8>,
 }
 

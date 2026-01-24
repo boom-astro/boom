@@ -1,5 +1,5 @@
 use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
+// use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -30,8 +30,8 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
     10.0_f32.powf((diffmaglim - zp) / -2.5) / 5.0
 }
 
-#[apache_avro_macros::serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, ToSchema)]
+// #[apache_avro_macros::serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, ToSchema, AvroSchema)]
 pub enum Band {
     #[serde(rename = "g")]
     G,
@@ -89,8 +89,8 @@ pub struct BandProperties {
 // (this needs to be fixed in the apache_avro-related crates)
 // #[serde_as]
 // #[skip_serializing_none]
-#[serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+// #[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema, AvroSchema)]
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,

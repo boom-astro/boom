@@ -10,7 +10,7 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
-use apache_avro_macros::serdavro;
+// use apache_avro_macros::serdavro;
 use cdshealpix::nested::get;
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
 use moc::moc::range::RangeMOC;
@@ -65,8 +65,8 @@ fn default_lsst_zp() -> Option<f64> {
     Some(8.9)
 }
 
-#[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// #[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, AvroSchema)]
 pub struct LsstPhotometry {
     pub jd: f64,
     pub magpsf: Option<f32>,
