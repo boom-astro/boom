@@ -34,6 +34,7 @@ fn get_lsst_prefix_regex() -> &'static Regex {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstMatch {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -50,6 +51,7 @@ struct ZtfSurveyMatches {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfObj {
     candid: i64,
+    #[serde(rename = "objectId")]
     object_id: String,
     candidate: ZtfCandidate,
     properties: Option<ZtfAlertProperties>,
@@ -67,6 +69,7 @@ struct ZtfObj {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfMatch {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -84,6 +87,7 @@ struct LsstSurveyMatches {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstObj {
     candid: i64,
+    #[serde(rename = "objectId")]
     object_id: String,
     candidate: LsstCandidate,
     properties: Option<LsstAlertProperties>,
