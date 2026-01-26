@@ -309,9 +309,9 @@ pub async fn get_alert_cutouts(
     };
     let resp = serde_json::json!({
         "candid": candid,
-        "cutout_science": BASE64_STANDARD.encode(&cutouts.cutout_science),
-        "cutout_template": BASE64_STANDARD.encode(&cutouts.cutout_template),
-        "cutout_difference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
+        "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
+        "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
+        "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
     });
     return response::ok(
         &format!("cutouts found for candid: {}", candid),

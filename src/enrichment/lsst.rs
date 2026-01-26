@@ -146,7 +146,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
                                 "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
@@ -170,8 +170,10 @@ pub struct LsstSurveyMatches {
     pub ztf: Option<ZtfMatch>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct LsstMatch {
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,

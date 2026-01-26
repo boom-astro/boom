@@ -527,7 +527,7 @@ mod tests {
             "Response should contain correct candid"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -723,16 +723,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(
-            body["data"]["object_id"].as_str().unwrap(),
+            body["data"]["objectId"].as_str().unwrap(),
             &object_id,
-            "Response should contain correct object_id"
+            "Response should contain correct objectId"
         );
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -798,16 +798,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(
-            body["data"]["object_id"].as_str().unwrap(),
+            body["data"]["objectId"].as_str().unwrap(),
             &object_id,
-            "Response should contain correct object_id"
+            "Response should contain correct objectId"
         );
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
