@@ -315,10 +315,7 @@ pub async fn get_object(
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
                 survey_matches,
             };
-            return response::ok(
-                &format!("object found with object_id: {}", object_id),
-                serde_json::json!(obj),
-            );
+            return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
         Survey::Lsst => {
             let alerts_collection: Collection<EnrichedLsstAlert> =
@@ -459,10 +456,7 @@ pub async fn get_object(
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
                 survey_matches,
             };
-            return response::ok(
-                &format!("object found with object_id: {}", object_id),
-                serde_json::json!(obj),
-            );
+            return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
         _ => {
             return response::bad_request(
@@ -551,6 +545,7 @@ fn default_limit() -> u32 {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct SearchObjectResult {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -642,10 +637,7 @@ pub async fn get_objects(
                     }
                 }
             }
-            response::ok(
-                &format!("Found {} objects", results.len()),
-                serde_json::json!(results),
-            )
+            response::ok_ser(&format!("Found {} objects", results.len()), results)
         }
         Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
     }
