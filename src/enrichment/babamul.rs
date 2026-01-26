@@ -79,10 +79,6 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
-    // Not serialized - kept in memory for category computation only
-    #[serde(skip)]
-    #[allow(dead_code)] // Would show up unused erroneously
-    pub cross_matches: CrossMatchesWrapper,
 }
 
 impl EnrichedLsstAlert {
@@ -92,24 +88,31 @@ impl EnrichedLsstAlert {
         cutout_template: Option<Vec<u8>>,
         cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
-    ) -> Self {
-        let cross_matches = CrossMatchesWrapper(alert.cross_matches);
-        EnrichedLsstAlert {
-            candid: alert.candid,
-            object_id: alert.object_id,
-            candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            fp_hists: alert.fp_hists,
-            properties,
-            cutout_science: cutout_science.map(CutoutBytes),
-            cutout_template: cutout_template.map(CutoutBytes),
-            cutout_difference: cutout_difference.map(CutoutBytes),
-            survey_matches: alert.survey_matches,
-            cross_matches,
-        }
+    ) -> (
+        Self,
+        std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) {
+        (
+            EnrichedLsstAlert {
+                candid: alert.candid,
+                object_id: alert.object_id,
+                candidate: alert.candidate,
+                prv_candidates: alert.prv_candidates,
+                fp_hists: alert.fp_hists,
+                properties,
+                cutout_science: cutout_science.map(CutoutBytes),
+                cutout_template: cutout_template.map(CutoutBytes),
+                cutout_difference: cutout_difference.map(CutoutBytes),
+                survey_matches: alert.survey_matches,
+            },
+            alert.cross_matches.unwrap_or_default(),
+        )
     }
 
-    pub fn compute_babamul_category(&self) -> String {
+    pub fn compute_babamul_category(
+        &self,
+        cross_matches: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) -> String {
         // If we have a ZTF match, category starts with "ztf-match."
         // Otherwise, "no-ztf-match."
         let category = match &self.survey_matches {
@@ -129,12 +132,7 @@ impl EnrichedLsstAlert {
 
         // Check if we have LSPSC cross-matches
         let empty_vec = vec![];
-        let lspsc_matches = self
-            .cross_matches
-            .0
-            .as_ref()
-            .and_then(|xmatches| xmatches.get("LSPSC"))
-            .unwrap_or(&empty_vec);
+        let lspsc_matches = cross_matches.get("LSPSC").unwrap_or(&empty_vec);
 
         // No matches: check if in footprint
         if lspsc_matches.is_empty() {
@@ -465,7 +463,10 @@ impl Babamul {
     #[instrument(skip_all, err)]
     pub async fn process_lsst_alerts(
         &self,
-        alerts: Vec<EnrichedLsstAlert>,
+        alerts: Vec<(
+            EnrichedLsstAlert,
+            std::collections::HashMap<String, Vec<serde_json::Value>>,
+        )>,
     ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
@@ -474,7 +475,7 @@ impl Babamul {
         let min_reliability = 0.5;
 
         // Iterate over the alerts
-        for mut alert in alerts {
+        for (mut alert, cross_matches) in alerts {
             // Filter ZTF matches to only include public (programid=1)
             if let Some(ref mut survey_matches) = alert.survey_matches {
                 if let Some(ref mut ztf_match) = survey_matches.ztf {
@@ -493,7 +494,7 @@ impl Babamul {
             }
 
             // Compute the category for this alert to determine the topic
-            let category = alert.compute_babamul_category();
+            let category = alert.compute_babamul_category(&cross_matches);
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
