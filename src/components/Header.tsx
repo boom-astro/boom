@@ -69,16 +69,16 @@ type Detection = {
 };
 
 type CandidateData = {
-  object_id?: string;
+  objectId?: string;
   candidate?: { ra?: number; dec?: number; drb?: number; ndethist?: number };
   classifications?: Record<string, number>;
   properties?: { star?: boolean };
-  cutout_science?: Uint8Array | string | ArrayBuffer | undefined;
-  cutout_template?: Uint8Array | string | ArrayBuffer | undefined;
-  cutout_difference?: Uint8Array | string | ArrayBuffer | undefined;
+  cutoutScience?: Uint8Array | string | ArrayBuffer | undefined;
+  cutoutTemplate?: Uint8Array | string | ArrayBuffer | undefined;
+  cutoutDifference?: Uint8Array | string | ArrayBuffer | undefined;
   prv_candidates?: Detection[];
   prv_nondetections?: Detection[];
-  survey_matches?: Record<string, { object_id?: string; distance_arcsec?: number }>;
+  survey_matches?: Record<string, { objectId?: string; distance_arcsec?: number }>;
   cross_matches?: Record<string, Array<{ ra?: number; dec?: number; score?: number; distance_arcsec?: number }>>;
 };
 
@@ -148,7 +148,7 @@ export function ClassificationBadges({
 export function SurveyMatchesBadges({
   survey_matches,
 }: {
-  survey_matches: Record<string, { object_id?: string, distance_arcsec?: number }> | null | undefined;
+  survey_matches: Record<string, { objectId?: string, distance_arcsec?: number }> | null | undefined;
 }) {
   if (!survey_matches || Object.keys(survey_matches).length === 0) {
     return null;
@@ -156,11 +156,11 @@ export function SurveyMatchesBadges({
   return (
     <div className="flex flex-row flex-wrap gap-2">
       {Object.entries(survey_matches).map(([survey, match]) => {
-        // if match is null or object_id is missing, skip
-        if (!match || !match.object_id) {
+        // if match is null or objectId is missing, skip
+        if (!match || !match.objectId) {
           return null;
         }
-        const objectId = match.object_id ?? "unknown";
+        const objectId = match.objectId ?? "unknown";
         const distance = match.distance_arcsec != null ? `${match.distance_arcsec.toFixed(2)}"` : "unknown";
         const url = `/objects/${survey}/${objectId}`;
         return (
@@ -203,7 +203,7 @@ export default function Header({
     const [band, setBand] = useState<string>("all");
     const [rotated, setRotated] = useState(true);
 
-    const objectId = data.object_id ?? "";
+    const objectId = data.objectId ?? "";
     const ra = data.candidate?.ra?.toFixed(6) ?? "-";
     const dec = data.candidate?.dec?.toFixed(6) ?? "-";
 
@@ -241,9 +241,9 @@ export default function Header({
 
     const survey = objectId.startsWith("ZTF") ? "ztf" : "lsst";
 
-    const scienceImage = bytes2image(data.cutout_science, survey, "science", colorMap, rotated);
-    const templateImage = bytes2image(data.cutout_template, survey, "template", colorMap, rotated);
-    const differenceImage = bytes2image(data.cutout_difference, survey, "difference", colorMap, rotated);
+    const scienceImage = bytes2image(data.cutoutScience, survey, "science", colorMap, rotated);
+    const templateImage = bytes2image(data.cutoutTemplate, survey, "template", colorMap, rotated);
+    const differenceImage = bytes2image(data.cutoutDifference, survey, "difference", colorMap, rotated);
 
     const firstTime = first_det?.jd ? mjd_to_utc(jd_to_mjd(first_det.jd)).replace("T", ' ').replace("Z", "") : "-";
     const peakTime = peak_det?.jd ? mjd_to_utc(jd_to_mjd(peak_det.jd)).replace("T", ' ').replace("Z", "") : "-";

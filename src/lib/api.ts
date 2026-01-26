@@ -200,13 +200,12 @@ export type AlertSearchParams = {
 };
 
 export type Cutouts = {
-  cutout_science?: string;
-  cutout_difference?: string;
-  cutout_template?: string;
+  cutoutScience?: string;
+  cutoutDifference?: string;
+  cutoutTemplate?: string;
 };
 
 export type Alert = {
-  object_id: string;
   objectId?: string;
   candid: number;
   jd: number;
@@ -261,7 +260,7 @@ export async function fetchAlertCutouts(survey: string, candid: number): Promise
 }
 
 export type SearchResult = {
-  object_id: string;
+  objectId: string;
   ra: number;
   dec: number;
   survey: string;

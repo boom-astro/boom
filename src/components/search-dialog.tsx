@@ -100,7 +100,7 @@ export function SearchContent({
       if (
         isExtension &&
         results.length > 0 &&
-        results.every(result => matchesQuery(result.object_id))
+        results.every(result => matchesQuery(result.objectId))
       ) {
         // Skip search, results are already filtered correctly
         return
@@ -153,12 +153,12 @@ export function SearchContent({
           <div className="space-y-1 p-2">
             {results.map((result, index) => (
               <button
-                key={`${result.survey}-${result.object_id}-${index}`}
+                key={`${result.survey}-${result.objectId}-${index}`}
                 onClick={() => onResultClick(result)}
                 className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent transition-colors text-left"
               >
                 <div className="flex flex-col gap-1">
-                  <span className="font-medium">{result.object_id}</span>
+                  <span className="font-medium">{result.objectId}</span>
                   <span className="text-xs text-muted-foreground">
                     RA: {result.ra.toFixed(6)}° | Dec: {result.dec.toFixed(6)}°
                   </span>
@@ -191,7 +191,7 @@ export function SearchDialog({ open, onOpenChange }: SearchDialogProps) {
   const navigate = useNavigate()
 
   const handleResultClick = (result: SearchResult) => {
-    navigate(`/objects/${result.survey}/${result.object_id}`)
+    navigate(`/objects/${result.survey}/${result.objectId}`)
     onOpenChange(false)
   }
 

@@ -113,7 +113,7 @@ export default function Query() {
             <TabsContent value="object">
               <SearchContent 
                 onResultClick={(result) => {
-                  window.location.href = `/objects/${result.survey}/${result.object_id}`;
+                  window.location.href = `/objects/${result.survey}/${result.objectId}`;
                 }}
                 maxResults={20}
                 showFooter={false}
@@ -373,9 +373,9 @@ const AlertCard = memo(function AlertCard({ alert, survey }: { alert: Alert; sur
 
   const drb = alert.candidate.drb ?? alert.candidate.reliability ?? null;
 
-  const scienceImage = cutouts ? bytes2image(cutouts.cutout_science, survey, "science", "bone") : null;
-  const templateImage = cutouts ? bytes2image(cutouts.cutout_template, survey, "template", "bone") : null;
-  const differenceImage = cutouts ? bytes2image(cutouts.cutout_difference, survey, "difference", "bone") : null;
+  const scienceImage = cutouts ? bytes2image(cutouts.cutoutScience, survey, "science", "bone") : null;
+  const templateImage = cutouts ? bytes2image(cutouts.cutoutTemplate, survey, "template", "bone") : null;
+  const differenceImage = cutouts ? bytes2image(cutouts.cutoutDifference, survey, "difference", "bone") : null;
 
   useEffect(() => {
     const fetchCutouts = async () => {
