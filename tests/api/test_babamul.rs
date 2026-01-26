@@ -527,7 +527,7 @@ mod tests {
             "Response should contain correct candid"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -732,7 +732,7 @@ mod tests {
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -807,7 +807,7 @@ mod tests {
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 

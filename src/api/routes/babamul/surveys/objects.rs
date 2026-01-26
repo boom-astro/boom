@@ -55,8 +55,11 @@ struct ZtfObj {
     object_id: String,
     candidate: ZtfCandidate,
     properties: Option<ZtfAlertProperties>,
+    #[serde(rename = "cutoutScience")]
     cutout_science: serde_json::Value,
+    #[serde(rename = "cutoutTemplate")]
     cutout_template: serde_json::Value,
+    #[serde(rename = "cutoutDifference")]
     cutout_difference: serde_json::Value,
     prv_candidates: Vec<ZtfPrvCandidate>,
     prv_nondetections: Vec<ZtfPrvCandidate>,
@@ -91,8 +94,11 @@ struct LsstObj {
     object_id: String,
     candidate: LsstCandidate,
     properties: Option<LsstAlertProperties>,
+    #[serde(rename = "cutoutScience")]
     cutout_science: serde_json::Value,
+    #[serde(rename = "cutoutTemplate")]
     cutout_template: serde_json::Value,
+    #[serde(rename = "cutoutDifference")]
     cutout_difference: serde_json::Value,
     prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
