@@ -18,7 +18,7 @@ export type ApiObject = Record<string, unknown>;
 export type Profile = { username?: string; name?: string; email?: string; avatar?: string } | null;
 
 // Kafka credential returned by `/babamul/kafka-credentials`
-export type KafkaCredential = { name: string; client_id: string; client_secret: string };
+export type KafkaCredential = { name: string; kafka_username: string; kafka_password: string };
 
 const TOKEN_KEY = "api_token";
 const USERNAME_KEY = "api_user";
@@ -26,22 +26,13 @@ const USERNAME_KEY = "api_user";
 // Helper function to parse JSON with bigint support
 async function parseResponseJson(res: Response): Promise<unknown> {
   const text = await res.text();
-  // return JSONbigNative.parse(text);
-  // const text = await response.text();
-  // Parse with a reviver function to keep int64 as strings
-  const data = JSON.parse(text, (_, value) => {
-    // Check if this looks like a large integer
-    // if (typeof value === 'number' && !Number.isSafeInteger(value)) {
-    //   return value.toString();
-    // }
-    // the above doesn't work with floating point numbers that exceed safe integer range
-    // so if we have a number that isn't safe integer and has no fractional part, treat it as bigint
-    if (typeof value === 'number' && !Number.isSafeInteger(value) && Number.isInteger(value)) {
-      return value.toString();
-    }
-    return value;
-  });
-  return data;
+  // TODO: find a better way to handle bigints in JSON without a heavy dependency
+  // For now we convert them to strings by wrapping large integers in quotes, to avoid loss of precision
+  const bigIntRegex = /:\s*(-?\d{16,})(?![\d]*["])/g;
+  const safeText = text.replace(bigIntRegex, (_, numStr) => `:"${numStr}"`);
+  return JSON.parse(safeText);
+
+  // return data;
 }
 
 type DataEnvelope<T> = { data?: T };
@@ -252,7 +243,6 @@ export async function fetchAlerts(survey: string, params: AlertSearchParams): Pr
   }
   const body = await parseResponseJson(res).catch(() => ({ data: [] }));
   const result = unwrapData<unknown>(body, []);
-  console.log("fetchAlerts: fetched alerts:", result);
   return Array.isArray(result) ? (result as Alert[]) : [];
 }
 
@@ -263,9 +253,59 @@ export async function fetchAlertCutouts(survey: string, candid: number): Promise
     const txt = await res.text().catch(() => "");
     throw new Error(`Fetch cutouts failed: ${res.status} ${txt}`);
   }
-  const body = await parseResponseJson(res).catch(() => ({}));
+  const body = await parseResponseJson(res).catch((_) => {
+    return {};
+  });
   const result = unwrapData<unknown>(body, {});
   return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
+}
+
+export type SearchResult = {
+  object_id: string;
+  ra: number;
+  dec: number;
+  survey: string;
+};
+
+export type SearchObjectsResponse = {
+  results: SearchResult[];
+  message?: string;
+};
+
+export async function searchObjects(value: string, limit: number = 10): Promise<SearchObjectsResponse> {
+  const searchParams = new URLSearchParams({
+    object_id: value,
+    limit: String(limit),
+  });
+  
+  const url = `${API_BASE}/objects?${searchParams.toString()}`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    // Gracefully handle 400 with message, error if there is no message
+    if (res.status === 400) {
+      const body = await parseResponseJson(res).catch(() => ({}));
+      let message: string | undefined = undefined;
+      if (body && typeof body === 'object' && 'message' in body) {
+        const m = (body as { message?: unknown }).message;
+        if (typeof m === 'string') message = m;
+        return { results: [], message };
+      }
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Search objects failed: ${res.status} ${message ? message : txt}`);
+    }
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Search objects failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  const result = unwrapData<unknown>(body, []);
+  const results = Array.isArray(result) ? (result as SearchResult[]) : [];
+  // If server returns a message field even on success, include it
+  let message: string | undefined = undefined;
+  if (body && typeof body === 'object' && 'message' in (body as Record<string, unknown>)) {
+    const m = (body as { message?: unknown }).message;
+    if (typeof m === 'string') message = m;
+  }
+  return { results, message };
 }
 
 export default {
@@ -278,4 +318,5 @@ export default {
   createKafkaCredential,
   fetchAlerts,
   fetchAlertCutouts,
+  searchObjects,
 };

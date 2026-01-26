@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle, Info } from 'lucide-react';
 import { Card, CardContent, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
@@ -31,173 +31,67 @@ const plotHeight = height - padding.top - padding.bottom;
 
 // --- Types ---
 type EpochEntry = { epoch: number; score?: number; date?: string; classes?: Record<string, number> };
-type ClassifierEntry = { name: string; score: number; history: EpochEntry[]; isStatic?: boolean; separation?: number };
+type ClassifierEntry = { name: string; score: number; history: EpochEntry[]; isStatic?: boolean; separation?: number, description?: string | undefined };
 type BinaryFamilies = Record<string, ClassifierEntry[]>;
 type MulticlassData = { name: string; classes: Record<string, number>; history: EpochEntry[] };
 
 type MapAlertResult = { binary: BinaryFamilies; multiclass: Record<string, MulticlassData> };
 
-
-// Sample data with classifier families
-const mockClassifierData = {
-  binary: {
-    'ACAI': [
-      { 
-        name: 'Hosted', 
-        score: 0.82, 
-        history: [
-          { epoch: 1, score: 0.75, date: '2024-01-15' },
-          { epoch: 2, score: 0.78, date: '2024-02-01' },
-          { epoch: 3, score: 0.80, date: '2024-02-15' },
-          { epoch: 4, score: 0.81, date: '2024-03-01' },
-          { epoch: 5, score: 0.82, date: '2024-03-15' },
-          { epoch: 6, score: 0.82, date: '2024-04-01' },
-        ]
-      },
-      { 
-        name: 'Nuclear', 
-        score: 0.15, 
-        history: [
-          { epoch: 1, score: 0.22, date: '2024-01-15' },
-          { epoch: 2, score: 0.20, date: '2024-02-01' },
-          { epoch: 3, score: 0.18, date: '2024-02-15' },
-          { epoch: 4, score: 0.16, date: '2024-03-01' },
-          { epoch: 5, score: 0.15, date: '2024-03-15' },
-          { epoch: 6, score: 0.15, date: '2024-04-01' },
-        ]
-      },
-      { 
-        name: 'Variable', 
-        score: 0.08, 
-        history: [
-          { epoch: 1, score: 0.12, date: '2024-01-15' },
-          { epoch: 2, score: 0.11, date: '2024-02-01' },
-          { epoch: 3, score: 0.10, date: '2024-02-15' },
-          { epoch: 4, score: 0.09, date: '2024-03-01' },
-          { epoch: 5, score: 0.08, date: '2024-03-15' },
-          { epoch: 6, score: 0.08, date: '2024-04-01' },
-        ]
-      },
-      { 
-        name: 'Orphan', 
-        score: 0.03,
-        history: [
-          { epoch: 1, score: 0.05, date: '2024-01-15' },
-          { epoch: 2, score: 0.04, date: '2024-02-01' },
-          { epoch: 3, score: 0.04, date: '2024-02-15' },
-          { epoch: 4, score: 0.03, date: '2024-03-01' },
-          { epoch: 5, score: 0.03, date: '2024-03-15' },
-          { epoch: 6, score: 0.03, date: '2024-04-01' },
-        ]
-      },
-    ],
-    'drb': [
-      { 
-        name: 'Real/Bogus', 
-        score: 0.98,
-        history: [
-          { epoch: 1, score: 0.96, date: '2024-01-15' },
-          { epoch: 2, score: 0.97, date: '2024-02-01' },
-          { epoch: 3, score: 0.97, date: '2024-02-15' },
-          { epoch: 4, score: 0.98, date: '2024-03-01' },
-          { epoch: 5, score: 0.98, date: '2024-03-15' },
-          { epoch: 6, score: 0.98, date: '2024-04-01' },
-        ]
-      },
-    ],
-    'sgscore': [
-      { 
-        name: 'Star/Galaxy', 
-        score: 0.23,
-        isStatic: true, // Spatial classifier, not time-variant
-        history: [
-          { epoch: 1, score: 0.23, date: '2024-01-15' },
-          { epoch: 2, score: 0.23, date: '2024-02-01' },
-          { epoch: 3, score: 0.23, date: '2024-02-15' },
-          { epoch: 4, score: 0.23, date: '2024-03-01' },
-          { epoch: 5, score: 0.23, date: '2024-03-15' },
-          { epoch: 6, score: 0.23, date: '2024-04-01' },
-        ]
-      },
-    ],
-  },
-  multiclass: {
-    'AppleCider': {
-      name: 'Type Classification',
-      classes: {
-        'SNIa': 0.78,
-        'SNII': 0.12,
-        'AGN': 0.06,
-        'TDE': 0.03,
-        'CV': 0.01
-      },
-      history: [
-        { 
-          epoch: 1, 
-          date: '2024-01-15',
-          classes: { 'SNIa': 0.45, 'SNII': 0.35, 'AGN': 0.12, 'TDE': 0.05, 'CV': 0.03 }
-        },
-        { 
-          epoch: 2, 
-          date: '2024-02-01',
-          classes: { 'SNIa': 0.58, 'SNII': 0.25, 'AGN': 0.10, 'TDE': 0.04, 'CV': 0.03 }
-        },
-        { 
-          epoch: 3, 
-          date: '2024-02-15',
-          classes: { 'SNIa': 0.67, 'SNII': 0.18, 'AGN': 0.09, 'TDE': 0.04, 'CV': 0.02 }
-        },
-        { 
-          epoch: 4, 
-          date: '2024-03-01',
-          classes: { 'SNIa': 0.73, 'SNII': 0.14, 'AGN': 0.08, 'TDE': 0.03, 'CV': 0.02 }
-        },
-        { 
-          epoch: 5, 
-          date: '2024-03-15',
-          classes: { 'SNIa': 0.76, 'SNII': 0.13, 'AGN': 0.07, 'TDE': 0.03, 'CV': 0.01 }
-        },
-        { 
-          epoch: 6, 
-          date: '2024-04-01',
-          classes: { 'SNIa': 0.78, 'SNII': 0.12, 'AGN': 0.06, 'TDE': 0.03, 'CV': 0.01 }
-        },
-      ]
-    }
-  }
-};
-
-// alert.classifications actually just looks like this at the moment:
-// {
-//   "acai_h": 0.82,
-//   "acai_n": 0.15,
-//   "acai_v": 0.08,
-//   "acai_o": 0.03,
-// }
-// and drb and sgscore similarly, but from the alert.candidate field
-// so let's build a mapping function to convert that into the above structure
 type AlertLike = {
   classifications?: Record<string, number>;
-  candidate?: { drb?: number; sgscore1?: number; distpsnr1?: number };
+  candidate?: { drb?: number; sgscore1?: number; distpsnr1?: number, reliability?: number };
+  classifications_history?: Record<string, number>[];
+  cross_matches?: Record<string, Array<{ ra?: number; dec?: number; score?: number, distance_arcsec?: number }>>;
 };
 
 function mapAlertClassifications(alert: unknown): MapAlertResult {
   const mapped: MapAlertResult = { binary: {}, multiclass: {} };
   if (!alert) return mapped;
   const a = alert as AlertLike;
+  const historySnapshots = a.classifications_history && Array.isArray(a.classifications_history)
+    ? a.classifications_history
+    : [];
 
   if (a.classifications) {
+    const baseHistory = historySnapshots.length > 0 ? historySnapshots : [a.classifications];
+
     mapped.binary['ACAI'] = [
       { name: 'Hosted', score: a.classifications.acai_h ?? 0, history: [] },
       { name: 'Nuclear', score: a.classifications.acai_n ?? 0, history: [] },
       { name: 'Variable', score: a.classifications.acai_v ?? 0, history: [] },
       { name: 'Orphan', score: a.classifications.acai_o ?? 0, history: [] },
     ];
+
+    baseHistory.forEach((snapshot: Record<string, number>, idx: number) => {
+      const epochEntry: EpochEntry = { epoch: idx + 1, classes: snapshot };
+      mapped.binary['ACAI'].forEach((classifier: ClassifierEntry) => {
+        const classKey = classifier.name === 'Hosted' ? 'acai_h'
+          : classifier.name === 'Nuclear' ? 'acai_n'
+          : classifier.name === 'Variable' ? 'acai_v'
+          : classifier.name === 'Orphan' ? 'acai_o'
+          : null;
+        if (classKey && snapshot[classKey] !== undefined) {
+          classifier.history.push({ ...epochEntry, score: snapshot[classKey] });
+        }
+      });
+    });
   }
 
   if (a.candidate?.drb !== undefined) {
     mapped.binary['drb'] = [
-      { name: 'Real/Bogus', score: a.candidate.drb ?? 0, history: [] },
+      {
+        name: 'Real/Bogus',
+        score: a.candidate.drb ?? 0,
+        history: []
+      },
+    ];
+  } else if (a.candidate?.reliability !== undefined) {
+    mapped.binary['reliability'] = [
+      {
+        name: 'Real/Bogus',
+        score: a.candidate.reliability ?? 0,
+        history: []
+      },
     ];
   }
 
@@ -207,10 +101,33 @@ function mapAlertClassifications(alert: unknown): MapAlertResult {
         name: 'Star/Galaxy',
         score: a.candidate.sgscore1 ?? 0,
         isStatic: true,
-        history: [],
+        history: [
+          {
+            epoch: 1,
+            score: a.candidate.sgscore1 ?? 0,
+          },
+        ],
         separation: a.candidate.distpsnr1,
       },
     ];
+  }
+
+  // Add LSPSC classifier from cross_matches if available
+  if (a.cross_matches?.LSPSC && Array.isArray(a.cross_matches.LSPSC) && a.cross_matches.LSPSC.length > 0) {
+    const lspscMatches = a.cross_matches.LSPSC.filter((m) => m.ra !== undefined && m.dec !== undefined && m.score !== undefined);
+    if (lspscMatches.length > 0) {
+      const nearestMatch = lspscMatches[0];
+      mapped.binary['LSPSC'] = [
+        {
+          name: 'LSPSC',
+          score: nearestMatch.score ?? 0,
+          isStatic: true,
+          history: [],
+          separation: nearestMatch.distance_arcsec,
+          description: `High score + small separation indicate a likely star; a low score indicates a likely a galaxy.`
+        },
+      ];
+    }
   }
 
   return mapped;
@@ -237,31 +154,19 @@ const detectAnomalies = (allClassifiers: BinaryFamilies) => {
   return anomalies;
 };
 
-const CompactHeatmap = ({ name, score, showTrend, history, isStatic, separation }: { name: string; score: number; showTrend?: boolean; history: EpochEntry[]; isStatic?: boolean; separation?: number }) => {
+const CompactHeatmap = ({ name, score, showTrend, history, isStatic, separation, description }: { name: string; score: number; showTrend?: boolean; history: EpochEntry[]; isStatic?: boolean; separation?: number; description?: string }) => {
   const bgColor = score > 0.7 ? 'bg-green-500' : score > 0.4 ? 'bg-yellow-500' : 'bg-red-500';
   const trend = history && history.length > 1 ? (history[history.length - 1].score ?? 0) - (history[0].score ?? 0) : 0;
   const TrendIcon = trend > 0.1 ? TrendingUp : trend < -0.1 ? TrendingDown : Minus;
   const trendColor = trend > 0.1 ? 'text-green-100' : trend < -0.1 ? 'text-red-100' : 'text-white/60';
-  
-  return (
-    <div className={`${bgColor} text-white p-3 rounded-lg relative space-between flex flex-col h-full`}>
+  const hasTooltipContent = description || isStatic;
+
+  const content = (
+    <div className={`${bgColor} text-white p-3 rounded-lg relative space-between flex flex-col h-full ${hasTooltipContent ? 'cursor-help' : ''}`}>
       <div className="flex items-start justify-between mb-1.5">
         <div className="text-sm font-semibold truncate flex-1 pr-2">{name}</div>
         {showTrend && history && history.length > 1 && !isStatic && (
           <TrendIcon className={`w-3.5 h-3.5 flex-shrink-0 ${trendColor}`} />
-        )}
-        {isStatic && (
-            // <Tooltip content="This score comes from another catalog (by spatial matching) and does not change over time.">
-            <Tooltip>
-                <TooltipTrigger className="absolute top-1.5 right-1.5 px-1.5 py-0">
-                    <Badge variant="secondary" className="text-xs bg-white/20 text-white border-0">
-                        Static
-                    </Badge>
-                </TooltipTrigger>
-                <TooltipContent>
-                This score comes from another catalog (by spatial matching) and does not change over time.
-                </TooltipContent>
-            </Tooltip>
         )}
       </div>
       <div className="flex items-end justify-between">
@@ -274,6 +179,24 @@ const CompactHeatmap = ({ name, score, showTrend, history, isStatic, separation 
       </div>
     </div>
   );
+
+  if (!hasTooltipContent) {
+    return content;
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {content}
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <div className="text-sm space-y-2">
+          {isStatic && <p>Static score (from spatial catalog matching).</p>}
+          {description && <p className="text-sm text-gray-500">Description: {description}</p>}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
 };
 
 const CompactSparkline = ({ classifier, onClick }: { classifier: ClassifierEntry; onClick?: () => void }) => {
@@ -281,13 +204,14 @@ const CompactSparkline = ({ classifier, onClick }: { classifier: ClassifierEntry
   const color = score > 0.7 ? '#10b981' : score > 0.4 ? '#f59e0b' : '#ef4444';
   
   const sparklineData = history.map((h: EpochEntry) => h.score ?? 0);
-  const maxY = Math.max(...sparklineData);
-  const minY = Math.min(...sparklineData);
-  const range = maxY - minY || 0.1;
+  const axisMin = 0;
+  const axisMax = 1;
+  const axisRange = axisMax - axisMin || 1;
+  const denom = Math.max(sparklineData.length - 1, 1); // avoid div/0 when only one point
   
   const sparklinePath = sparklineData.map((value: number, i: number) => {
-    const x = (i / (sparklineData.length - 1)) * 100;
-    const y = 24 - ((value - minY) / range) * 20;
+    const x = (i / denom) * 100;
+    const y = 24 - ((value - axisMin) / axisRange) * 20;
     return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
   }).join(' ');
   
@@ -300,7 +224,7 @@ const CompactSparkline = ({ classifier, onClick }: { classifier: ClassifierEntry
       onClick={onClick}
       className="py-2 px-2.5 rounded-lg text-left transition-colors w-full border-1 hover:border-gray-300"
     >
-      <div className="flex items-start justify-between mb-1.5">
+      <div className="flex items-start justify-between">
         <div className="flex-1 min-w-0">
           <h4 className="text-xs font-semibold truncate">{name}</h4>
         </div>
@@ -324,8 +248,8 @@ const CompactSparkline = ({ classifier, onClick }: { classifier: ClassifierEntry
           strokeWidth="2"
         />
         {sparklineData.map((value: number, i: number) => {
-          const x = (i / (sparklineData.length - 1)) * 100;
-          const y = 24 - ((value - minY) / range) * 20;
+          const x = (i / denom) * 100;
+          const y = 24 - ((value - axisMin) / axisRange) * 20;
           const isLast = i === sparklineData.length - 1;
           return (
             <circle
@@ -346,97 +270,6 @@ const CompactSparkline = ({ classifier, onClick }: { classifier: ClassifierEntry
   );
 };
 
-const MulticlassHeatmap = ({ classes }: { classes: Record<string, number> }) => {
-  const cls = classes;
-  const sortedClasses = Object.entries(cls).sort((a, b) => b[1] - a[1]);
-  const maxScore = Math.max(...Object.values(cls));
-  
-  return (
-    <div className="grid grid-cols-2 gap-2">
-      {sortedClasses.map(([className, score]) => {
-        const intensity = score / maxScore;
-        const bgColor = `rgba(59, 130, 246, ${intensity * 0.7 + 0.3})`;
-        const textColor = intensity > 0.5 ? 'text-white' : 'text-gray-800';
-        
-        return (
-          <div 
-            key={className}
-            className={`px-2.5 py-2 rounded-lg ${textColor} transition-all`}
-            style={{ backgroundColor: bgColor }}
-          >
-            <div className="text-xs font-medium truncate mb-0.5">{className}</div>
-            <div className="text-lg font-bold tabular-nums">{(score * 100).toFixed(0)}%</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
-const MulticlassSparkline = ({ className, history, onClick }: { className: string; history: EpochEntry[]; onClick?: () => void }) => {
-  const scores = history.map((h: EpochEntry) => (h.classes ? (h.classes[className] ?? 0) : 0));
-  const currentScore = scores[scores.length - 1];
-  const color = '#3b82f6';
-  
-  const maxY = Math.max(...scores);
-  const minY = Math.min(...scores);
-  const range = maxY - minY || 0.1;
-  
-  const sparklinePath = scores.map((value: number, i: number) => {
-    const x = (i / (scores.length - 1)) * 100;
-    const y = 24 - ((value - minY) / range) * 20;
-    return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
-  }).join(' ');
-  
-  const trend = scores[scores.length - 1] - scores[0];
-  const TrendIcon = trend > 0.05 ? TrendingUp : trend < -0.05 ? TrendingDown : Minus;
-  const trendColor = trend > 0.05 ? 'text-green-600' : trend < -0.05 ? 'text-red-600' : 'text-gray-400';
-  
-  return (
-    <button 
-      onClick={onClick}
-      className="py-2 px-2.5 rounded-lg text-left transition-colors w-full border-1 hover:border-gray-300"
-    >
-      <div className="flex items-start justify-between mb-1.5">
-        <h4 className="text-xs font-semibold text-blue-900 truncate flex-1">{className}</h4>
-        <div className="flex items-center gap-1 flex-shrink-0 ml-1">
-          <TrendIcon className={`w-3 h-3 ${trendColor}`} />
-          <div className="text-base font-bold tabular-nums" style={{ color }}>
-            {(currentScore * 100).toFixed(0)}%
-          </div>
-        </div>
-      </div>
-      <svg viewBox="0 0 100 24" className="w-full h-8">
-        <path
-          d={`${sparklinePath} L 100 24 L 0 24 Z`}
-          fill={color}
-          opacity="0.1"
-        />
-        <path
-          d={sparklinePath}
-          fill="none"
-          stroke={color}
-          strokeWidth="2"
-        />
-        {scores.map((value: number, i: number) => {
-          const x = (i / (scores.length - 1)) * 100;
-          const y = 24 - ((value - minY) / range) * 20;
-          const isLast = i === scores.length - 1;
-          return (
-            <circle
-              key={i}
-              cx={x}
-              cy={y}
-              r={isLast ? 2.5 : 1.5}
-              fill={color}
-            />
-          );
-        })}
-      </svg>
-    </button>
-  );
-};
-
 type TimeSeriesDialogProps = { open: boolean; onClose: (open: boolean) => void; classifier?: ClassifierEntry | null; isMulticlass?: boolean; multiclassData?: MulticlassData | null };
 
 const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassData }: TimeSeriesDialogProps) => {
@@ -450,11 +283,10 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
     // Multi-class stacked area chart
     const { name, history } = multiclassData as MulticlassData;
     const allClasses = Object.keys(history[0].classes ?? {});
-    // Compute data range across all classes so the y-axis reflects actual min/max
-    const allValues = history.flatMap((h: EpochEntry) => Object.values(h.classes ?? {})) as number[];
-    const minY = Math.min(...allValues);
-    const maxY = Math.max(...allValues);
-    const range = maxY - minY || 0.01;
+    // Fix y-axis to full probability range (0-1)
+    const minY = 0;
+    const maxY = 1;
+    const range = maxY - minY || 1;
     const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
     
     return (
@@ -506,7 +338,7 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
                 // Line path
                 const linePath = history.map((h: EpochEntry, i: number) => {
                   const x = padding.left + (i / (history.length - 1)) * plotWidth;
-                  const y = padding.top + plotHeight - ((h.classes?.[className] ?? 0) * plotHeight);
+                  const y = padding.top + plotHeight - ((h.classes?.[className] ?? 0 - minY) / range) * plotHeight;
                   return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
                 }).join(' ');
 
@@ -523,7 +355,7 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
                     {/* Data points */}
                     {history.map((h: EpochEntry, i: number) => {
                       const x = padding.left + (i / (history.length - 1)) * plotWidth;
-                      const y = padding.top + plotHeight - ((h.classes?.[className] ?? 0) * plotHeight);
+                      const y = padding.top + plotHeight - ((h.classes?.[className] ?? 0 - minY) / range) * plotHeight;
                       return (
                         <circle
                           key={i}
@@ -554,14 +386,6 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
                       className="text-xs fill-gray-600"
                     >
                       E{h.epoch}
-                    </text>
-                    <text
-                      x={x}
-                      y={height - padding.bottom + 35}
-                      textAnchor="middle"
-                      className="text-xs fill-gray-400"
-                    >
-                      {h.date ? h.date.slice(5) : ''}
                     </text>
                   </g>
                 );
@@ -633,9 +457,11 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
   const color = score > 0.7 ? '#10b981' : score > 0.4 ? '#f59e0b' : '#ef4444';
   
   const scores = history.map((h: EpochEntry) => h.score ?? 0);
-  const maxY = Math.max(...scores);
-  const minY = Math.min(...scores);
-  const range = maxY - minY || 0.1;
+  const minScore = Math.min(...scores);
+  const maxScore = Math.max(...scores);
+  const axisMin = 0;
+  const axisMax = 1;
+  const axisRange = axisMax - axisMin || 1;
   
   return (
     <Dialog open={open} onOpenChange={onClose}>
@@ -650,8 +476,8 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
           <svg width={width} height={height} className="mx-auto">
             {/* Y-axis grid lines */}
             {[0, 0.25, 0.5, 0.75, 1.0].map(t => {
-              const val = minY + t * range;
-              const y = padding.top + plotHeight - ((val - minY) / range) * plotHeight;
+              const val = axisMin + t * axisRange;
+              const y = padding.top + plotHeight - ((val - axisMin) / axisRange) * plotHeight;
               return (
                 <g key={`grid-y-${t}`}>
                   <line 
@@ -682,7 +508,7 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
                 M ${padding.left} ${height - padding.bottom}
                 ${history.map((h: EpochEntry, i: number) => {
                   const x = padding.left + (i / (history.length - 1)) * plotWidth;
-                  const y = padding.top + plotHeight - (((h.score ?? 0) - minY) / range) * plotHeight;
+                  const y = padding.top + plotHeight - (((h.score ?? 0) - axisMin) / axisRange) * plotHeight;
                   return `L ${x} ${y}`;
                 }).join(' ')}
                 L ${padding.left + plotWidth} ${height - padding.bottom}
@@ -696,7 +522,7 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
             <path
               d={history.map((h: EpochEntry, i: number) => {
                 const x = padding.left + (i / (history.length - 1)) * plotWidth;
-                const y = padding.top + plotHeight - (((h.score ?? 0) - minY) / range) * plotHeight;
+                const y = padding.top + plotHeight - (((h.score ?? 0) - axisMin) / axisRange) * plotHeight;
                 return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
               }).join(' ')}
               fill="none"
@@ -707,7 +533,7 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
             {/* Data points */}
             {history.map((h: EpochEntry, i: number) => {
               const x = padding.left + (i / (history.length - 1)) * plotWidth;
-              const y = padding.top + plotHeight - (((h.score ?? 0) - minY) / range) * plotHeight;
+              const y = padding.top + plotHeight - (((h.score ?? 0) - axisMin) / axisRange) * plotHeight;
               return (
                 <circle
                   key={i}
@@ -735,14 +561,6 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
                       className="text-xs fill-gray-600"
                     >
                       E{h.epoch}
-                    </text>
-                    <text
-                      x={x}
-                      y={height - padding.bottom + 35}
-                      textAnchor="middle"
-                      className="text-xs fill-gray-400"
-                    >
-                      {h.date ? h.date.slice(5) : ''}
                     </text>
                   </g>
                 );
@@ -776,11 +594,11 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
             </div>
             <div>
               <span className="text-gray-600">Min: </span>
-              <span className="font-semibold">{(minY * 100).toFixed(1)}%</span>
+              <span className="font-semibold">{(minScore * 100).toFixed(1)}%</span>
             </div>
             <div>
               <span className="text-gray-600">Max: </span>
-              <span className="font-semibold">{(maxY * 100).toFixed(1)}%</span>
+              <span className="font-semibold">{(maxScore * 100).toFixed(1)}%</span>
             </div>
             <div>
               <span className="text-gray-600">Change: </span>
@@ -800,8 +618,9 @@ const TimeSeriesDialog = ({ open, onClose, classifier, isMulticlass, multiclassD
 const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
   const [viewMode, setViewMode] = useState<'current' | 'temporal'>('current');
   const [binaryFamily, setBinaryFamily] = useState<string>('all');
-  const [multiclassFamily, setMulticlassFamily] = useState<string>('AppleCider');
+  // const [multiclassFamily, setMulticlassFamily] = useState<string>('AppleCider');
   const [dialogOpen, setDialogOpen] = useState<boolean>(false);
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const [selectedClassifier, setSelectedClassifier] = useState<ClassifierEntry | null>(null);
   const [selectedMulticlass, setSelectedMulticlass] = useState<MulticlassData | null>(null);
 
@@ -809,7 +628,7 @@ const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
       const classifierData = useMemo< { binary: BinaryFamilies; multiclass: Record<string, MulticlassData> }>(() => {
         const mapped = mapAlertClassifications(alert);
         // Merge with mock data for history (for demo purposes)
-        const mockBinary = (mockClassifierData.binary as unknown) as BinaryFamilies;
+        const mockBinary = (mapped.binary as unknown) as BinaryFamilies;
         Object.keys(mockBinary).forEach((family: string) => {
           if (mapped.binary[family]) {
             mapped.binary[family] = mapped.binary[family].map((mc: ClassifierEntry) => {
@@ -820,14 +639,15 @@ const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
         });
         return {
           binary: mapped.binary,
-          multiclass: (mockClassifierData.multiclass as unknown) as Record<string, MulticlassData>, // No multiclass in alert yet
+          multiclass: (mapped.multiclass as unknown) as Record<string, MulticlassData>, // No multiclass in alert yet
         };
       }, [alert]);
   
   const binaryFamilies = Object.keys(classifierData.binary);
-  const multiclassFamilies = Object.keys(classifierData.multiclass);
   
   const anomalies = detectAnomalies(classifierData.binary);
+  const hasData = Object.values(classifierData.binary).flat().length > 0
+    || Object.keys(classifierData.multiclass).length > 0;
   
   // Get classifiers to display based on selection
   const displayedBinaryClassifiers: ClassifierEntry[] = binaryFamily === 'all'
@@ -835,30 +655,26 @@ const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
     : (classifierData.binary[binaryFamily] ?? []);
 
   // Filter out static classifiers for temporal view
-  const temporalBinaryClassifiers: ClassifierEntry[] = displayedBinaryClassifiers.filter((c) => !c.isStatic);
-
-  const displayedMulticlass: MulticlassData = classifierData.multiclass[multiclassFamily] ?? { name: '', classes: {}, history: [] };
-  const sortedClasses = Object.entries(displayedMulticlass.classes ?? {}).sort((a, b) => b[1] - a[1]);
+  const temporalBinaryClassifiers: ClassifierEntry[] = displayedBinaryClassifiers.filter((c) => !c.isStatic && c.history && c.history.length > 1);
 
   const totalEpochs = displayedBinaryClassifiers[0]?.history?.length ?? 0;
   const showTrend = viewMode === 'current' && totalEpochs > 1;
   
   return (
     <>
-      <Card className="@container/card col-span-1 row-span-2">
-        {/* <CardHeader className="pt-0 pb-0">
+      <Card className="@container/card col-span-1 h-full bg-card text-card-foreground flex flex-col">
+        <CardContent className="space-y-4 pt-0 flex-1 flex flex-col min-h-0">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-lg">ML Classifiers</CardTitle>
-            {totalEpochs > 0 && (
-              <Badge variant="outline" className="text-xs">
-                {totalEpochs} epochs
-              </Badge>
-            )}
-          </div>
-        </CardHeader> */}
-        <CardContent className="space-y-4 pt-0">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-lg">ML Classifiers</CardTitle>
+            <div className="flex items-center gap-2">
+              <CardTitle className="text-lg">ML Classifiers</CardTitle>
+              <button 
+                onClick={() => setHelpDialogOpen(true)} 
+                title="Widget information"
+                className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700"
+              >
+                <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+              </button>
+            </div>
             {totalEpochs > 0 && (
               <Badge variant="outline" className="text-xs">
                 {totalEpochs} epochs
@@ -874,173 +690,120 @@ const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
               </AlertDescription>
             </Alert>
           )}
-          
-          {/* View Toggle */}
-          <Tabs value={viewMode} onValueChange={(v: string) => setViewMode(v as 'current' | 'temporal')} className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="current" className="text-xs">Current</TabsTrigger>
-              <TabsTrigger value="temporal" className="text-xs">Temporal</TabsTrigger>
-            </TabsList>
-            
-            <TabsContent value="current" className="space-y-4 mt-1">
-              {/* Binary Classifiers */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-gray-700">Binary</h3>
-                  <Select value={binaryFamily} onValueChange={setBinaryFamily}>
-                    <SelectTrigger className="w-32 h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all" className="text-xs">All</SelectItem>
-                      {binaryFamilies.map(family => (
-                        <SelectItem key={family} value={family} className="text-xs">
-                          {family}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                
-                <div className="grid grid-cols-2 gap-2">
-                  {displayedBinaryClassifiers.map((c: ClassifierEntry) => (
-                    <CompactHeatmap key={`${binaryFamily}-${c.name}`} {...c} showTrend={showTrend} />
-                  ))}
-                </div>
+
+          {!hasData ? (
+            <div className="flex-1 flex items-center justify-center min-h-0">
+              <div className="w-full h-full flex items-center justify-center text-md text-muted-foreground italic px-4 py-6 text-center bg-muted/30 rounded-lg border border-dashed border-muted-foreground/30">
+                No data
               </div>
-              
-              {/* Multi-class Classifiers */}
-              <div className="space-y-2 pt-2 border-t">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-gray-700">Multi-class</h3>
-                  {multiclassFamilies.length > 0 && (
-                    <Select value={multiclassFamily} onValueChange={setMulticlassFamily}>
-                      <SelectTrigger className="w-36 h-8 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {multiclassFamilies.map(family => (
-                          <SelectItem key={family} value={family} className="text-xs">
-                            {family}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                </div>
-                
-                <div className="text-xs text-gray-500 mb-2">{displayedMulticlass.name}</div>
-                
-                <MulticlassHeatmap classes={displayedMulticlass.classes} />
-              </div>
-            </TabsContent>
-            
-            <TabsContent value="temporal" className="space-y-4 mt-3">
-              {/* Binary Classifiers */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-gray-700">Binary</h3>
-                  <Select value={binaryFamily} onValueChange={setBinaryFamily}>
-                    <SelectTrigger className="w-32 h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all" className="text-xs">All Families</SelectItem>
-                      {binaryFamilies.map(family => (
-                        <SelectItem key={family} value={family} className="text-xs">
-                          {family}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                
-                {temporalBinaryClassifiers.length > 0 ? (
-                  <div className="grid grid-cols-2 gap-2">
-                    {temporalBinaryClassifiers.map(c => (
-                      <CompactSparkline 
-                        key={`${binaryFamily}-${c.name}`} 
-                        classifier={c}
-                        onClick={() => {
-                          setSelectedClassifier(c);
-                          setSelectedMulticlass(null);
-                          setDialogOpen(true);
-                        }}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-xs text-gray-500 italic py-4 text-center bg-gray-50 rounded-lg">
-                    No time-variant classifiers available <br />(for the selected classifier type).
-                  </div>
-                )}
-              </div>
-              
-              {/* Multi-class */}
-              <div className="space-y-2 pt-2 border-t">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-gray-700">Multi-class</h3>
-                  {multiclassFamilies.length > 0 && (
-                    <Select value={multiclassFamily} onValueChange={setMulticlassFamily}>
-                      <SelectTrigger className="w-36 h-8 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {multiclassFamilies.map(family => (
-                          <SelectItem key={family} value={family} className="text-xs">
-                            {family}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                </div>
-                
-                <div className="text-xs text-gray-500 mb-2">{displayedMulticlass.name}</div>
-                
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {sortedClasses.map(([className]) => (
-                    <MulticlassSparkline 
-                      key={className}
-                      className={className}
-                      history={displayedMulticlass.history}
-                      onClick={() => {
-                        setSelectedClassifier(null);
-                        setSelectedMulticlass(displayedMulticlass);
-                        setDialogOpen(true);
-                      }}
-                    />
-                  ))}
-                </div>
-              </div>
-            </TabsContent>
-          </Tabs>
-          
-          {/* Legend */}
-          <div className="pt-2 border-t">
-            <div className="flex items-center justify-between text-xs text-gray-500">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                  <span>High</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 bg-yellow-500 rounded-full"></div>
-                  <span>Med</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 bg-red-500 rounded-full"></div>
-                  <span>Low</span>
-                </div>
-              </div>
-              {showTrend && (
-                <div className="flex items-center gap-1 text-gray-400">
-                  <TrendingUp className="w-3 h-3" />
-                  <span>Trend</span>
-                </div>
-              )}
             </div>
-          </div>
+          ) : (
+            <>
+              {/* View Toggle */}
+              <Tabs value={viewMode} onValueChange={(v: string) => setViewMode(v as 'current' | 'temporal')} className="w-full">
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="current" className="text-xs">Current</TabsTrigger>
+                  <TabsTrigger value="temporal" className="text-xs">Temporal</TabsTrigger>
+                </TabsList>
+                
+                <TabsContent value="current" className="space-y-4 mt-1">
+                  {/* Binary Classifiers */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-gray-700">Binary</h3>
+                      <Select value={binaryFamily} onValueChange={setBinaryFamily}>
+                        <SelectTrigger className="w-32 h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all" className="text-xs">All</SelectItem>
+                          {binaryFamilies.map(family => (
+                            <SelectItem key={family} value={family} className="text-xs">
+                              {family}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-2">
+                      {displayedBinaryClassifiers.map((c: ClassifierEntry) => (
+                        <CompactHeatmap key={`${binaryFamily}-${c.name}`} {...c} showTrend={showTrend} />
+                      ))}
+                    </div>
+                  </div>
+                </TabsContent>
+                
+                <TabsContent value="temporal" className="space-y-4 mt-1">
+                  {/* Binary Classifiers */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-gray-700">Binary</h3>
+                      <Select value={binaryFamily} onValueChange={setBinaryFamily}>
+                        <SelectTrigger className="w-32 h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all" className="text-xs">All</SelectItem>
+                          {binaryFamilies.map(family => (
+                            <SelectItem key={family} value={family} className="text-xs">
+                              {family}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    
+                    {temporalBinaryClassifiers.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        {temporalBinaryClassifiers.map(c => (
+                          <CompactSparkline 
+                            key={`${binaryFamily}-${c.name}`} 
+                            classifier={c}
+                            onClick={() => {
+                              setSelectedClassifier(c);
+                              setSelectedMulticlass(null);
+                              setDialogOpen(true);
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground italic py-4 text-center bg-muted/30 rounded-lg border border-dashed border-muted-foreground/30">
+                        No time-variant classifiers available, for the selected classifier type(s).
+                      </div>
+                    )}
+                  </div>
+                </TabsContent>
+              </Tabs>
+              
+              {/* Legend */}
+              <div className="pt-2 border-t">
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1">
+                      <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      <span>High</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="w-2 h-2 bg-yellow-500 rounded-full"></div>
+                      <span>Med</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="w-2 h-2 bg-red-500 rounded-full"></div>
+                      <span>Low</span>
+                    </div>
+                  </div>
+                  {showTrend && (
+                    <div className="flex items-center gap-1 text-gray-400">
+                      <TrendingUp className="w-3 h-3" />
+                      <span>Trend</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
       
@@ -1052,6 +815,145 @@ const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
         isMulticlass={!!selectedMulticlass}
         multiclassData={selectedMulticlass}
       />
+
+      {/* Help Dialog */}
+      <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
+        <DialogContent className="w-[min(1000px,95vw)] max-w-none sm:!max-w-none max-h-[90vh] overflow-auto">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Understanding ML Classifiers</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            <div>
+              <h3 className="font-semibold mb-2">What This Widget Shows</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                This widget displays machine learning classification scores for the astronomical object. These scores represent 
+                the probability (0-100%) that the object belongs to specific categories based on various trained models. 
+                The widget shows both current scores and their evolution over time (if multiple epochs are available).
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">View Modes</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Current:</span>
+                  <span>Shows the latest classification scores as horizontal bars. Scores are color-coded (green for high confidence, yellow for medium, red for low).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Temporal:</span>
+                  <span>Displays how classifier scores have changed over time across multiple epochs. Click any classifier in Current view to see its detailed time series.</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Classifier Types</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Binary:</span>
+                  <span>These classifiers provide a single score indicating the likelihood of a specific property (e.g., "Real/Bogus" for artifact detection, "Hosted" for supernova-like events in host galaxies).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Multiclass:</span>
+                  <span>These classifiers output probabilities for multiple mutually exclusive categories (e.g., different supernova types, variable star classes). The sum of all classes equals 100%.</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Classifier Families</h3>
+              <p className="text-gray-600 dark:text-gray-300 mb-2">
+                Classifiers are organized into families (selectable via dropdown):
+              </p>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">ACAI:</span>
+                  <span>Alert Classification for Astrophysical Insights - classifies transients by context (hosted, nuclear, orphan, variable).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">drb:</span>
+                  <span>Deep-learning Real/Bogus classifier - distinguishes real astronomical sources from artifacts.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">sgscore/LSPSC:</span>
+                  <span>Star-Galaxy Score - indicates whether nearby sources are point-like (stars) or extended (galaxies).
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Visual Elements</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Color coding:</span>
+                  <span>Green (high confidence, &gt;60%), Yellow (medium, 30-60%), Red (low, &lt;30%).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Trend arrows:</span>
+                  <span>Show whether the score is increasing ↑, decreasing ↓, or stable — compared to the previous epoch.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Clock icon:</span>
+                  <span>Indicates time-variant classifiers that update as new data becomes available.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Epoch badge:</span>
+                  <span>Shows the number of times the object has been classified (as new observations arrive).</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Interactive Features</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Click a classifier:</span>
+                  <span>Opens a detailed time series plot showing how the score has evolved across all epochs.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Switch families:</span>
+                  <span>Use the dropdown to view different classifier families (ACAI, drb, etc.).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Toggle view mode:</span>
+                  <span>Switch between Current (bar chart) and Temporal (time series overview) views.</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Anomaly Detection</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                When unusual patterns are detected (e.g., scores that sum to &gt;110% or significant unexpected changes), 
+                an alert banner appears at the top to highlight potential data quality issues.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Interpretation Tips</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">High drb score:</span>
+                  <span>Indicates the detection is likely a real astronomical source, not an artifact.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Rising trends:</span>
+                  <span>May indicate the object is becoming more consistent with a classification as more data arrives.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Multiclass consensus:</span>
+                  <span>When one class has a much higher score than others, the classification is more confident.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Competing scores:</span>
+                  <span>Similar scores across multiple - conflicting - classes suggest the object's type is ambiguous or evolving.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 };

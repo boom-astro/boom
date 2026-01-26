@@ -62,12 +62,10 @@ export async function ensureProfileLoaded() {
     const data = await api.fetchProfile()
     // assume API returns { username, email, avatar }
     // normalize: if API returns `name`, copy it to `username`
-    console.log('fetched profile:', data);
     if (data && data.name && !data.username) {
       data.username = data.name as string;
     }
     if (data && data.email) {
-        console.log('generate avatar for', data.email);
         data.avatar = await generateAvatarUrl(data.email);
     }
     useAppStore.getState().setProfile(data)

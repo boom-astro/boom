@@ -1,8 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Card, CardContent, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Info } from 'lucide-react';
 import useAppStore from '@/lib/store';
 
 function prettyKey(k: string) {
@@ -13,36 +15,46 @@ function prettyKey(k: string) {
 }
 
 export default function CrossmatchCard() {
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const current = useAppStore(state => state.currentSource) as { data?: { cross_matches?: Record<string, unknown[]> } } | null;
 
   const crossMatches = current?.data?.cross_matches ?? {};
 
-  const catalogs = useMemo(() => {
-    // produce sorted array of [catalogName, matches[]] with catalogs having matches first
+  const { catalogs, firstNonEmpty } = useMemo(() => {
     const entries = Object.entries(crossMatches || {});
     entries.sort((a, b) => {
-      const al = Array.isArray(a[1]) ? a[1].length : 0;
-      const bl = Array.isArray(b[1]) ? b[1].length : 0;
-      if (al !== bl) return bl - al; // more matches first
-      return a[0].localeCompare(b[0]);
+      const aHas = Array.isArray(a[1]) && a[1].length > 0;
+      const bHas = Array.isArray(b[1]) && b[1].length > 0;
+      if (aHas !== bHas) return aHas ? -1 : 1; // catalogs with matches first
+      return a[0].localeCompare(b[0]); // alphabetically within each group
     });
-    return entries;
+    const first = entries.find(([, matches]) => Array.isArray(matches) && matches.length > 0)?.[0];
+    return { catalogs: entries, firstNonEmpty: first };
   }, [crossMatches]);
 
   if (!current) return null;
 
   return (
-    <Card className="@container/card col-span-2 row-span-2">
+    <Card className="@container/card col-span-1 @xl/main:col-span-2 @5xl/main:col-span-3">
       <CardContent>
         <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
             <CardTitle className="text-lg">Cross-matches</CardTitle>
+            <button 
+              onClick={() => setHelpDialogOpen(true)} 
+              title="Widget information"
+              className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700"
+            >
+              <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+            </button>
+          </div>
         </div>
         {catalogs.length === 0 && (
           <div className="text-sm text-gray-500">No cross-matches available for this object.</div>
         )}
 
         {catalogs.length > 0 && (
-          <Accordion type="single" collapsible className="w-full">
+          <Accordion type="single" collapsible className="w-full" defaultValue={firstNonEmpty || undefined}>
             {catalogs.map(([cat, matches]) => {
               const list = Array.isArray(matches) ? matches : [];
               const disabled = list.length === 0;
@@ -73,13 +85,9 @@ export default function CrossmatchCard() {
               return (
                 <AccordionItem key={cat} value={cat} className={`rounded-md ${disabled ? 'opacity-40' : ''}`}>
                   <AccordionTrigger disabled={disabled} className="font-medium">
-                    <div className="flex items-center justify-between w-full">
-                      <div className="flex items-center gap-3">
-                        <div className="font-semibold">{cat}</div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <Badge variant="outline" className="text-xs">{list.length}</Badge>
-                      </div>
+                    <div className="flex w-full items-center gap-3">
+                      <div className="font-semibold">{cat}</div>
+                      <Badge variant="outline" className="text-xs">{list.length} match{list.length !== 1 ? 'es' : ''}</Badge>
                     </div>
                   </AccordionTrigger>
                   <AccordionContent>
@@ -144,6 +152,85 @@ export default function CrossmatchCard() {
           </Accordion>
         )}
       </CardContent>
+
+      {/* Help Dialog */}
+      <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
+        <DialogContent className="w-[min(1000px,95vw)] max-w-none sm:!max-w-none max-h-[90vh] overflow-auto">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Understanding Cross-matches</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            <div>
+              <h3 className="font-semibold mb-2">What This Widget Shows</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                This widget displays cross-matches between the survey's object and sources in various astronomical catalogs. 
+                Each catalog contains a list of known astronomical objects, and the cross-match shows which catalog entries 
+                are positionally coincident with the detected object, ordered by increasing angular separation.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Catalog Availability</h3>
+              <p className="text-gray-600 dark:text-gray-300 mb-2">
+                The catalogs available for cross-matching depend on the survey from which the object originates. Different surveys 
+                have pre-computed cross-matches with different sets of reference catalogs, depending on how the broker is configured.
+                <br/><span className="font-semibold">If you think other catalogs would be useful, please contact the administrators!</span>
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Pre-computed Matches</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                Cross-matches are <span className="font-semibold">pre-computed once when the object is first detected</span> (except for catalogs that change over time).
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Reading the Tables</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Catalog Name:</span>
+                  <span>The name of the reference catalog (e.g., Gaia DR3, 2MASS, PS1, etc.).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Match Count:</span>
+                  <span>The number of sources found in that catalog within the search radius.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Separation:</span>
+                  <span>The angular distance (in arcseconds) between the survey's object and the catalog source.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Additional Columns:</span>
+                  <span>Varies by catalog.</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Interpreting Matches</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">No matches:</span>
+                  <span>The survey's object is not in that catalog or lies outside the survey's coverage area.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Small separations (&lt;1"):</span>
+                  <span>Likely the same source, especially if the coordinates are from precise astrometric catalogs like Gaia.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Larger separations (1-5"):</span>
+                  <span>Possible associations, but could also be chance coincidences (depending on the catalog).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Multiple matches:</span>
+                  <span>The closest match is usually the most likely candidate, but consider all nearby sources when available.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

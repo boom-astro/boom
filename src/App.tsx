@@ -9,13 +9,13 @@ import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "sonner";
 
 const Query = lazy(() => import("@/pages/Query"));
-const BabamulDocs = lazy(() => import("@/pages/BabamulDocs"));
+const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));
 const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
 const Login = lazy(() => import("@/pages/Login"));
 const ObjectPage = lazy(() => import("@/pages/ObjectPage"));
 const SignupPage = lazy(() => import("@/pages/Signup"));
 const Landing = lazy(() => import("@/pages/Landing"));
-const Profile = lazy(() => import("@/pages/Profile"));
+const Profile = lazy(() => import("@/pages/Profile"))
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
@@ -24,7 +24,17 @@ const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
 
 function LoginPageWrapper() {
   const navigate = useNavigate();
-  return <Login onLoginSuccess={() => navigate('/')} />;
+  // after login, redirect to /query or to the page the user originally
+  // wanted to visit (minus login/signup/landing/root)
+  const location = useLocation();
+
+  return <Login onLoginSuccess={() => {
+    let from = (location.state as any)?.from?.pathname || '/query';
+    if (from === '/login' || from === '/signup' || from === '/landing' || from === '/') {
+      from = '/query';
+    }
+    navigate(from, { replace: true });
+  }} />;
 }
 
 export default function App() {
@@ -68,11 +78,6 @@ function LayoutRoutes() {
   const path = location.pathname || '/';
   const isLanding = path === '/' || path === '/landing';
 
-  // In release mode, only allow landing page
-  if (PRERELEASE_MODE && !['/', '/landing'].includes(path)) {
-    return <Navigate to="/" replace />;
-  }
-
   return (
     <>
       {!isLanding && <AppSidebar variant="inset" />}
@@ -86,14 +91,13 @@ function LayoutRoutes() {
                 <Routes>
                   <Route path="/" element={<Landing />} />
                   <Route path="/landing" element={<Landing />} />
-                  {!PRERELEASE_MODE && <Route path="/login" element={<LoginPageWrapper />} />}
+                  <Route path="/login" element={<LoginPageWrapper />} />
                   {!PRERELEASE_MODE && <Route path="/signup" element={<SignupPage />} />}
-                  {!PRERELEASE_MODE && <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />}
-                  {!PRERELEASE_MODE && <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />}
-                  {!PRERELEASE_MODE && <Route path="/docs/kafka" element={<ProtectedRoute><BabamulDocs /></ProtectedRoute>} />}
-                  {!PRERELEASE_MODE && <Route path="/docs/api" element={<ApiDocs />} />}
-                  {!PRERELEASE_MODE && <Route path="/objects/:survey/:objectId" element={<ProtectedRoute><ObjectPage /></ProtectedRoute>} />}
-                  {PRERELEASE_MODE && <Route path="*" element={<Navigate to="/" replace />} />}
+                  <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
+                  <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+                  <Route path="/docs/kafka" element={<ProtectedRoute><KafkaDocs /></ProtectedRoute>} />
+                  <Route path="/docs/api" element={<ApiDocs />} />
+                  <Route path="/objects/:survey/:objectId" element={<ProtectedRoute><ObjectPage /></ProtectedRoute>} />
                 </Routes>
               </Suspense>
             </div>

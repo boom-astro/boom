@@ -1,7 +1,6 @@
-import { useState, FormEvent, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, FormEvent, useEffect, useCallback, useRef, memo } from "react";
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from "@/components/ui/select";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -10,17 +9,13 @@ import { Separator } from "@/components/ui/separator";
 import api, { Alert, AlertSearchParams, Cutouts } from "@/lib/api";
 import { bytes2image } from "@/lib/imageProcessing";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SearchContent } from "@/components/search-dialog"
 
 export default function Query() {
-  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"object" | "alerts">("object");
-  
-  // Object lookup state
-  const [survey, setSurvey] = useState('ZTF');
-  const [objectId, setObjectId] = useState('');
 
   // Alert search state
-  const [alertSurvey, setAlertSurvey] = useState('ZTF');
+  const [alertSurvey, setAlertSurvey] = useState<'ZTF' | 'LSST'>('ZTF');
   const [alertObjectId, setAlertObjectId] = useState('');
   const [ra, setRa] = useState('');
   const [dec, setDec] = useState('');
@@ -40,12 +35,9 @@ export default function Query() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  function submitObjectSearch(e?: FormEvent) {
-    e?.preventDefault();
-    if (!survey || !objectId) return;
-    navigate(`/objects/${encodeURIComponent(survey)}/${encodeURIComponent(objectId)}`);
-  }
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 25;
+  const searchResultsRef = useRef<HTMLDivElement | null>(null);
 
   async function submitAlertSearch(e?: FormEvent) {
     e?.preventDefault();
@@ -87,6 +79,12 @@ export default function Query() {
     setLoading(true);
     setError(null);
     setAlerts([]);
+    setCurrentPage(1);
+
+    // Snap results into view on search start
+    requestAnimationFrame(() => {
+      searchResultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
 
     try {
       const results = await api.fetchAlerts(alertSurvey, params);
@@ -97,8 +95,6 @@ export default function Query() {
       setLoading(false);
     }
   }
-
-  const gotoExample = () => navigate(`/objects/${encodeURIComponent('ZTF')}/${encodeURIComponent('ZTF25abxeyzt')}`);
 
   return (
     <div className="px-4 lg:px-6 space-y-4">
@@ -115,33 +111,16 @@ export default function Query() {
             </TabsList>
 
             <TabsContent value="object">
-              <form onSubmit={submitObjectSearch} className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start">
-                <div className="sm:col-span-1">
-                  <Label className="text-xs font-medium mb-1 block text-muted-foreground">Survey</Label>
-                  <Select value={survey} onValueChange={(v) => setSurvey(v)}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="ZTF">ZTF</SelectItem>
-                      <SelectItem value="LSST">LSST</SelectItem>
-                      {/* <SelectItem value="Decam">Decam</SelectItem> */}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="sm:col-span-2">
-                  <Label className="text-xs font-medium mb-1 block text-muted-foreground">Object ID</Label>
-                  <Input value={objectId} onChange={e => setObjectId(e.target.value)} placeholder="Object ID (e.g. ZTF25aagbkaj)" />
-                </div>
-
-                <div className="sm:col-span-3 mt-2 text-sm text-muted-foreground">Tip: try the example object if you're exploring the UI.</div>
-
-                <div className="sm:col-span-3 flex justify-end gap-2 mt-1">
-                  <Button variant="ghost" onClick={gotoExample} type="button">Open example</Button>
-                  <Button type="submit">Open</Button>
-                </div>
-              </form>
+              <SearchContent 
+                onResultClick={(result) => {
+                  window.location.href = `/objects/${result.survey}/${result.object_id}`;
+                }}
+                maxResults={20}
+                showFooter={false}
+              />
+              <div className="text-sm text-muted-foreground mt-2 w-full text-end">
+                Showing up to 10 results.
+              </div>
             </TabsContent>
 
             <TabsContent value="alerts">
@@ -149,7 +128,7 @@ export default function Query() {
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   <div className="sm:col-span-4">
                     <Label className="text-xs font-medium mb-1 block text-muted-foreground">Survey</Label>
-                    <Select value={alertSurvey} onValueChange={(v) => setAlertSurvey(v)}>
+                    <Select value={alertSurvey} onValueChange={(v) => setAlertSurvey(v as 'ZTF' | 'LSST')}>
                       <SelectTrigger className="w-full">
                         <SelectValue />
                       </SelectTrigger>
@@ -294,24 +273,28 @@ export default function Query() {
 
       {/* Alert Results */}
       {activeTab === "alerts" && (
-        <Card className="max-w-6xl mx-auto">
+        <Card ref={searchResultsRef} className="max-w-6xl mx-auto" style={{ height: '94vh' }}>
           <CardHeader>
             <CardTitle>Search Results</CardTitle>
             <CardDescription>
               {loading ? "Loading..." : alerts.length > 0 ? `Found ${alerts.length} alert${alerts.length !== 1 ? 's' : ''}` : error ? "Error" : "No results yet"}
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 200px)' }}>
             {error && (
               <div className="text-red-500 text-sm">{error}</div>
             )}
             
             {loading && (
               <div className="space-y-4">
-                {[1, 2, 3].map((i) => (
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => (
                   <div key={i} className="flex gap-4 p-4 border rounded-lg">
-                    <Skeleton className="h-32 w-32 flex-shrink-0" />
-                    <div className="flex-1 space-y-2">
+                    <div className="flex gap-2 flex-shrink-0">
+                      <Skeleton className="h-24 w-24" />
+                      <Skeleton className="h-24 w-24" />
+                      <Skeleton className="h-24 w-24" />
+                    </div>
+                    <div className="flex-1 grid grid-cols-2 gap-x-4 gap-y-1">
                       <Skeleton className="h-4 w-3/4" />
                       <Skeleton className="h-4 w-1/2" />
                       <Skeleton className="h-4 w-2/3" />
@@ -323,9 +306,11 @@ export default function Query() {
 
             {!loading && !error && alerts.length > 0 && (
               <div className="space-y-3">
-                {alerts.map((alert) => (
-                  <AlertCard key={alert.candid} alert={alert} survey={alertSurvey} />
-                ))}
+                {alerts
+                  .slice((currentPage - 1) * pageSize, currentPage * pageSize)
+                  .map((alert) => (
+                    <AlertCard key={alert.candid} alert={alert} survey={alertSurvey} />
+                  ))}
               </div>
             )}
 
@@ -335,22 +320,62 @@ export default function Query() {
               </div>
             )}
           </CardContent>
+          {activeTab === "alerts" && (
+            <CardFooter className="border-t px-6 py-4">
+              <PaginationBar
+                currentPage={currentPage}
+                totalItems={alerts.length}
+                pageSize={pageSize}
+                onPrev={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                onNext={() => setCurrentPage((p) => Math.min(Math.ceil(alerts.length / pageSize), p + 1))}
+              />
+            </CardFooter>
+          )}
         </Card>
       )}
     </div>
   )
 }
 
-function AlertCard({ alert, survey }: { alert: Alert; survey: string }) {
-  const navigate = useNavigate();
+function PaginationBar({ currentPage, totalItems, pageSize, onPrev, onNext }: { currentPage: number; totalItems: number; pageSize: number; onPrev: () => void; onNext: () => void }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+
+  return (
+    <div className="flex items-center justify-between text-sm gap-4 w-full">
+      <div className="text-muted-foreground">
+        Page {currentPage} of {totalPages} ({totalItems} total)
+      </div>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onPrev}
+          disabled={currentPage === 1}
+        >
+          Previous
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onNext}
+          disabled={currentPage >= totalPages}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+const AlertCard = memo(function AlertCard({ alert, survey }: { alert: Alert; survey: 'ZTF' | 'LSST' }) {
   const [cutouts, setCutouts] = useState<Cutouts | null>(null);
   const [loadingCutouts, setLoadingCutouts] = useState(true);
 
   const drb = alert.candidate.drb ?? alert.candidate.reliability ?? null;
 
-  const scienceImage = cutouts ? bytes2image(cutouts.cutout_science, "science") : null;
-  const templateImage = cutouts ? bytes2image(cutouts.cutout_template, "template") : null;
-  const differenceImage = cutouts ? bytes2image(cutouts.cutout_difference, "difference") : null;
+  const scienceImage = cutouts ? bytes2image(cutouts.cutout_science, survey, "science", "bone") : null;
+  const templateImage = cutouts ? bytes2image(cutouts.cutout_template, survey, "template", "bone") : null;
+  const differenceImage = cutouts ? bytes2image(cutouts.cutout_difference, survey, "difference", "bone") : null;
 
   useEffect(() => {
     const fetchCutouts = async () => {
@@ -368,9 +393,10 @@ function AlertCard({ alert, survey }: { alert: Alert; survey: string }) {
     fetchCutouts();
   }, [survey, alert.candid]);
 
-  const handleClick = () => {
-    navigate(`/objects/${encodeURIComponent(survey)}/${encodeURIComponent(alert.objectId || '')}`);
-  };
+  const handleClick = useCallback(() => {
+    const objectUrl = `/objects/${encodeURIComponent(survey)}/${encodeURIComponent(alert.objectId || '')}`;
+    window.open(objectUrl, '_blank');
+  }, [survey, alert.objectId]);
 
   return (
     <div 
@@ -380,9 +406,11 @@ function AlertCard({ alert, survey }: { alert: Alert; survey: string }) {
       {/* Cutouts */}
       <div className="flex gap-2 flex-shrink-0">
         {loadingCutouts ? (
-          <div className="h-24 w-24 bg-muted rounded flex items-center justify-center text-xs text-muted-foreground">
-            Loading...
-          </div>
+          <>
+            <Skeleton className="h-24 w-24" />
+            <Skeleton className="h-24 w-24" />
+            <Skeleton className="h-24 w-24" />
+          </>
         ) : (
           <>
             {scienceImage && (
@@ -432,4 +460,4 @@ function AlertCard({ alert, survey }: { alert: Alert; survey: string }) {
       </div>
     </div>
   );
-}
+});

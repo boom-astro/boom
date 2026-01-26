@@ -45,3 +45,38 @@ export function greatCircleDistance(
       return (distance * 180.0) / Math.PI;
   }
 }
+
+// pub const DEGRA: f64 = std::f64::consts::PI / 180.0;
+
+const RGE = [
+    [-0.054875539, -0.873437105, -0.483834992],
+    [0.494109454, -0.444829594, 0.746982249],
+    [-0.867666136, -0.198076390, 0.455983795],
+];
+
+// based on the rust code above, implement the function in typescript, to convert ra/dec to galactic l/b
+export function radec2lb(ra_deg: number, dec_deg: number): [number, number] {
+  const ra_rad = ra_deg * rad;
+  const dec_rad = dec_deg * rad;
+
+  const u = [
+    Math.cos(ra_rad) * Math.cos(dec_rad),
+    Math.sin(ra_rad) * Math.cos(dec_rad),
+    Math.sin(dec_rad),
+  ];
+
+  const ug = [
+    RGE[0][0] * u[0] + RGE[0][1] * u[1] + RGE[0][2] * u[2],
+    RGE[1][0] * u[0] + RGE[1][1] * u[1] + RGE[1][2] * u[2],
+    RGE[2][0] * u[0] + RGE[2][1] * u[1] + RGE[2][2] * u[2],
+  ];
+
+  const x = ug[0];
+  const y = ug[1];
+  const z = ug[2];
+
+  const galactic_l = Math.atan2(y, x);
+  const galactic_b = Math.atan2(z, Math.sqrt(x * x + y * y));
+
+  return [galactic_l * (180.0 / PI), galactic_b * (180.0 / PI)];
+}

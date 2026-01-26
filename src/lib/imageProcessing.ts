@@ -39,7 +39,7 @@ function bone(n: number) {
   return lookup
 }
 
-const bone_cm = bone(256)
+const bone_cm = bone(256);
 
 function isEqualArray(a: Uint8Array | number[], b: Uint8Array | number[]) {
   if (a.length != b.length) {
@@ -61,7 +61,7 @@ function bytesToFloats(data: Uint8Array): Float32Array {
   return floats;
 }
 
-function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, naxis1: number, naxis2: number } {
+function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, naxis1: number, naxis2: number, rotpa: number | null } {
   let decompressedCutout: Uint8Array;
   try {
     const compressedCutoutArray = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -86,7 +86,7 @@ function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, n
 
   if (naxis1_key_start === 0) {
     console.error("NAXIS1 key not found in FITS header");
-    return { data: new Float32Array(), naxis1: 0, naxis2: 0 };
+    return { data: new Float32Array(), naxis1: 0, naxis2: 0, rotpa: null };
   }
 
   for (let i = naxis1_key_start + NAXIS1_BYTES_LEN; i < FITS_HEADER_LEN; i++) {
@@ -98,7 +98,7 @@ function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, n
 
   if (naxis1_val_start === 0) {
     console.error("NAXIS1 value start not found in FITS header");
-    return { data: new Float32Array(), naxis1: 0, naxis2: 0 };
+    return { data: new Float32Array(), naxis1: 0, naxis2: 0, rotpa: null };
   }
 
   for (let i = naxis1_val_start; i < FITS_HEADER_LEN; i++) {
@@ -123,7 +123,7 @@ function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, n
   }
   if (naxis2_key_start === 0) {
     console.error("NAXIS2 key not found in FITS header");
-    return { data: new Float32Array(), naxis1: 0, naxis2: 0 };
+    return { data: new Float32Array(), naxis1: 0, naxis2: 0, rotpa: null };
   }
   for (let i = naxis2_key_start + NAXIS2_BYTES_LEN; i < FITS_HEADER_LEN; i++) {
     if (subset[i] !== SPACE_BYTE) {
@@ -133,7 +133,7 @@ function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, n
   }
   if (naxis2_val_start === 0) {
     console.error("NAXIS2 value start not found in FITS header");
-    return { data: new Float32Array(), naxis1: 0, naxis2: 0 };
+    return { data: new Float32Array(), naxis1: 0, naxis2: 0, rotpa: null };
   }
   for (let i = naxis2_val_start; i < FITS_HEADER_LEN; i++) {
     if (subset[i] === SPACE_BYTE) {
@@ -145,6 +145,42 @@ function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, n
   const naxis2_val = subset.slice(naxis2_val_start, naxis2_val_end);
   const naxis2_val_str = new TextDecoder().decode(naxis2_val);
   const naxis2 = parseInt(naxis2_val_str, 10);
+
+  // We now look for ROTPA   =     40.6698912392206 , if it exists
+  let rotpa_key_start = naxis2_val_end;
+  let rotpa_val_start = 0;
+  let rotpa_val_end = 0;
+  const ROTPA_BYTES = new TextEncoder().encode("ROTPA   =");
+  const ROTPA_BYTES_LEN = ROTPA_BYTES.length;
+  for (let i = rotpa_key_start; i < FITS_HEADER_LEN - ROTPA_BYTES_LEN; i++) {
+    if (isEqualArray(subset.slice(i, i + ROTPA_BYTES_LEN), ROTPA_BYTES)) {
+      rotpa_key_start = i;
+      break;
+    }
+  }
+  if (rotpa_key_start !== 0) {
+    for (let i = rotpa_key_start + ROTPA_BYTES_LEN; i < FITS_HEADER_LEN; i++) {
+      if (subset[i] !== SPACE_BYTE) {
+        rotpa_val_start = i;
+        break;
+      }
+    }
+    if (rotpa_val_start !== 0) {
+      for (let i = rotpa_val_start; i < FITS_HEADER_LEN; i++) {
+        if (subset[i] === SPACE_BYTE || subset[i] === 47 /* '/' */) {
+          rotpa_val_end = i;
+          break;
+        }
+      }
+    }
+  }
+  let rotpa = null;
+  if (rotpa_val_start !== 0 && rotpa_val_end !== 0) {
+    const rotpa_val = subset.slice(rotpa_val_start, rotpa_val_end);
+    const rotpa_val_str = new TextDecoder().decode(rotpa_val);
+    const rotpa_float = parseFloat(rotpa_val_str);
+    rotpa = !isNaN(rotpa_float) ? rotpa_float : null;
+  }
 
   let data: Uint8Array | Float32Array = decompressedCutout.slice(FITS_HEADER_LEN, naxis1 * naxis2 * 4 + FITS_HEADER_LEN);
   if (data instanceof Uint8Array) {
@@ -170,8 +206,7 @@ function bytes2imgdata(bytes: Uint8Array | ArrayBuffer): { data: Float32Array, n
     data = new_image_data;
   }
 
-  console.log(`bytes2imgdata: naxis1=${naxis1}, naxis2=${naxis2}, NAXIS_STANDARD=${NAXIS_STANDARD}, data length=${data.length}`);
-  return { data: data as Float32Array, naxis1: NAXIS_STANDARD, naxis2: NAXIS_STANDARD };
+  return { data: data as Float32Array, naxis1: NAXIS_STANDARD, naxis2: NAXIS_STANDARD, rotpa: rotpa };
 }
 
 function cleanupImage(image: Float32Array | number[]): number[] {
@@ -262,9 +297,10 @@ function applyColorMap(image: number[], colorMap: "gray" | "bone" = "gray") {
   return rgba_image;
 }
 
-export function bytes2image(bytes: Uint8Array | string | ArrayBuffer | undefined, type: string = "science"): string | null {
+export function bytes2image(bytes: Uint8Array | string | ArrayBuffer | undefined, survey: "ztf" | "lsst" | "ZTF" | "LSST", type: string = "science", colorMap: "gray" | "bone" = "gray", rotated: boolean = true): string | null {
   let naxis1: number;
   let naxis2: number;
+  let rotpa: number | null;
   let data: number[];
   
   if (typeof bytes === 'string') {
@@ -275,25 +311,29 @@ export function bytes2image(bytes: Uint8Array | string | ArrayBuffer | undefined
       byteArray[i] = binaryString.charCodeAt(i);
     }
     const result = bytes2imgdata(byteArray);
-    console.log("bytes2image: result from bytes2imgdata:", result);
     data = Array.from(result.data);
     naxis1 = result.naxis1;
     naxis2 = result.naxis2;
+    rotpa = result.rotpa;
   } else {
     if (!bytes) return null;
+
     let buf: Uint8Array;
-    if (bytes instanceof Uint8Array) buf = bytes;
-    else if (bytes instanceof ArrayBuffer) buf = new Uint8Array(bytes);
-    else return null;
+    if (bytes instanceof Uint8Array) {
+      buf = bytes;
+    } else if (bytes instanceof ArrayBuffer) {
+      buf = new Uint8Array(bytes);
+    } else {
+      return null;
+    }
     const result = bytes2imgdata(buf);
-    console.log("bytes2image: result from bytes2imgdata:", result);
     data = Array.from(result.data);
     naxis1 = result.naxis1;
     naxis2 = result.naxis2;
+    rotpa = result.rotpa;
   }
   
   const NAXIS_STANDARD = Math.max(naxis1, naxis2);
-  console.log(`bytes2image: initial naxis1=${naxis1}, naxis2=${naxis2}, NAXIS_STANDARD=${NAXIS_STANDARD}, data length=${data.length}`);
   data = cleanupImage(data);
   
   data = normalizeImage(data, "minmax");
@@ -303,19 +343,140 @@ export function bytes2image(bytes: Uint8Array | string | ArrayBuffer | undefined
 
   data = data.map(value => Math.round(Math.max(0, Math.min(255, value * 255))));
 
-  const colored = applyColorMap(data, "bone");
+  let colored = applyColorMap(data, colorMap);
+
+  // if rotpa is defined, rotate the image accordingly. When we rotate, we rotate around the center of the image
+  // and add black pixels for the areas that are outside the original image
+  // if (rotpa !== null) {
+  //   const angleRad = (rotpa * Math.PI) / 180;
+  //   const cosAngle = Math.cos(angleRad);
+  //   const sinAngle = Math.sin(angleRad);
+  //   const centerX = NAXIS_STANDARD / 2;
+  //   const centerY = NAXIS_STANDARD / 2;
+
+  //   const rotatedImage: Array<[number, number, number, number]> = new Array(NAXIS_STANDARD * NAXIS_STANDARD).fill([0, 0, 0, 255]);
+
+  //   for (let y = 0; y < NAXIS_STANDARD; y++) {
+  //     for (let x = 0; x < NAXIS_STANDARD; x++) {
+  //       const xCentered = x - centerX;
+  //       const yCentered = y - centerY;
+
+  //       const originalX = Math.round(cosAngle * xCentered + sinAngle * yCentered + centerX);
+  //       const originalY = Math.round(-sinAngle * xCentered + cosAngle * yCentered + centerY);
+
+  //       if (originalX >= 0 && originalX < NAXIS_STANDARD && originalY >= 0 && originalY < NAXIS_STANDARD) {
+  //         const originalIndex = originalY * NAXIS_STANDARD + originalX;
+  //         const rotatedIndex = y * NAXIS_STANDARD + x;
+  //         rotatedImage[rotatedIndex] = colored[originalIndex];
+  //       }
+  //     }
+  //   }
+  //   colored.splice(0, colored.length, ...rotatedImage);
+  // }
+  // same as above (rotate if rotpa is defined), but create a new colored array
+  // that is big enough for the rotated image without cropping
+  // so, we want to compute what the new size should be
+  // then we create a new array of that size, and we copy the rotated pixels into it
+  if (rotpa !== null && rotated) {
+    const angleRad = (rotpa * Math.PI) / 180;
+    const cosAngle = Math.cos(angleRad);
+    const sinAngle = Math.sin(angleRad);
+    const centerX = NAXIS_STANDARD / 2;
+    const centerY = NAXIS_STANDARD / 2;
+
+    // compute new image size
+    const corners = [
+      { x: 0 - centerX, y: 0 - centerY },
+      { x: NAXIS_STANDARD - centerX, y: 0 - centerY },
+      { x: 0 - centerX, y: NAXIS_STANDARD - centerY },
+      { x: NAXIS_STANDARD - centerX, y: NAXIS_STANDARD - centerY },
+    ];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const corner of corners) {
+      const rotatedX = cosAngle * corner.x + sinAngle * corner.y;
+      const rotatedY = -sinAngle * corner.x + cosAngle * corner.y;
+      minX = Math.min(minX, rotatedX);
+      maxX = Math.max(maxX, rotatedX);
+      minY = Math.min(minY, rotatedY);
+      maxY = Math.max(maxY, rotatedY);
+    }
+    const newWidth = Math.ceil(maxX - minX);
+    const newHeight = Math.ceil(maxY - minY);
+    const newCenterX = newWidth / 2;
+    const newCenterY = newHeight / 2;
+
+    const rotatedImage: Array<[number, number, number, number]> = Array.from({ length: newWidth * newHeight }, () => [0, 0, 0, 0]);
+
+    // Use backward mapping (inverse transform) to avoid gaps
+    for (let newY = 0; newY < newHeight; newY++) {
+      for (let newX = 0; newX < newWidth; newX++) {
+        // Find where this destination pixel came from in the source
+        const xCentered = newX - newCenterX;
+        const yCentered = newY - newCenterY;
+
+        // Apply inverse rotation (clockwise)
+        const originalX = cosAngle * xCentered + sinAngle * yCentered + centerX;
+        const originalY = -sinAngle * xCentered + cosAngle * yCentered + centerY;
+
+        // Use bilinear interpolation for better quality
+        const x0 = Math.floor(originalX);
+        const y0 = Math.floor(originalY);
+        const x1 = x0 + 1;
+        const y1 = y0 + 1;
+
+        if (x0 >= 0 && x1 < NAXIS_STANDARD && y0 >= 0 && y1 < NAXIS_STANDARD) {
+          const dx = originalX - x0;
+          const dy = originalY - y0;
+
+          const p00 = colored[y0 * NAXIS_STANDARD + x0];
+          const p10 = colored[y0 * NAXIS_STANDARD + x1];
+          const p01 = colored[y1 * NAXIS_STANDARD + x0];
+          const p11 = colored[y1 * NAXIS_STANDARD + x1];
+
+          const rotatedIndex = newY * newWidth + newX;
+          rotatedImage[rotatedIndex] = [
+            Math.round((1 - dx) * (1 - dy) * p00[0] + dx * (1 - dy) * p10[0] + (1 - dx) * dy * p01[0] + dx * dy * p11[0]),
+            Math.round((1 - dx) * (1 - dy) * p00[1] + dx * (1 - dy) * p10[1] + (1 - dx) * dy * p01[1] + dx * dy * p11[1]),
+            Math.round((1 - dx) * (1 - dy) * p00[2] + dx * (1 - dy) * p10[2] + (1 - dx) * dy * p01[2] + dx * dy * p11[2]),
+            255
+          ];
+        }
+      }
+    }
+    colored = rotatedImage;
+    naxis1 = newWidth;
+    naxis2 = newHeight;
+  }
+
+  // also reverse north and south to have north up, if survey is lsst
+  const finalWidth = rotpa !== null ? naxis1 : NAXIS_STANDARD;
+  const finalHeight = rotpa !== null ? naxis2 : NAXIS_STANDARD;
+  if (survey.toLocaleLowerCase() === "lsst") {
+    const finalImage: Array<[number, number, number, number]> = new Array(finalWidth * finalHeight);
+    for (let y = 0; y < finalHeight; y++) {
+      for (let x = 0; x < finalWidth; x++) {
+        const originalIndex = y * finalWidth + x;
+        const flippedIndex = (finalHeight - 1 - y) * finalWidth + x;
+        finalImage[flippedIndex] = colored[originalIndex];
+      }
+    }
+    colored.splice(0, colored.length, ...finalImage);
+  }
 
   if (typeof document !== 'undefined') {
     const canvas = document.createElement('canvas');
-    canvas.width = NAXIS_STANDARD;
-    canvas.height = NAXIS_STANDARD;
+    canvas.width = finalWidth;
+    canvas.height = finalHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    const imageData = ctx.createImageData(NAXIS_STANDARD, NAXIS_STANDARD);
-    for (let i = 0; i < NAXIS_STANDARD; i++) {
-      for (let j = 0; j < NAXIS_STANDARD; j++) {
-        const pixelValue = colored[i * NAXIS_STANDARD + j];
-        const pixelIndex = (i * NAXIS_STANDARD + j) * 4;
+    const imageData = ctx.createImageData(finalWidth, finalHeight);
+    for (let i = 0; i < finalHeight; i++) {
+      for (let j = 0; j < finalWidth; j++) {
+        const pixelValue = colored[i * finalWidth + j];
+        const pixelIndex = (i * finalWidth + j) * 4;
         imageData.data[pixelIndex] = pixelValue[0]; // R
         imageData.data[pixelIndex + 1] = pixelValue[1]; // G
         imageData.data[pixelIndex + 2] = pixelValue[2]; // B

@@ -26,7 +26,6 @@ export default function ObjectPage() {
       setError(null);
       try {
         const obj = await api.fetchObject(survey as string, objectId as string);
-        console.log("Fetched object data:", obj);
         if (!mounted) return;
 
         // Format cross_matches: compute separation from source and strip coordinates
@@ -81,8 +80,6 @@ export default function ObjectPage() {
                 for (const k of altDecKeys) if (rest[k] !== undefined && mDec === null) mDec = tryNum(rest[k]);
               }
 
-              console.log("Match coordinates:", mRa, mDec);
-
               let separation_arcsec: number | null = null;
               if (srcRa != null && srcDec != null && mRa != null && mDec != null && Number.isFinite(mRa) && Number.isFinite(mDec)) {
                 try {
@@ -92,8 +89,6 @@ export default function ObjectPage() {
                   separation_arcsec = null;
                 }
               }
-
-              console.log("Computed separation (arcsec):", separation_arcsec);
 
               return {
                 ...rest,

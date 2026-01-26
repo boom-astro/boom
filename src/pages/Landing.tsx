@@ -3,19 +3,12 @@ import { Button } from '@/components/ui/button';
 import api from '@/lib/api';
 import Kilonova from '@/components/Kilonova';
 import { IconNews } from '@tabler/icons-react';
-import { toast } from 'sonner';
-
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
 
 export default function Landing() {
   const token = api.getTokenRecord();
   const loggedIn = !!token;
-
-  const handleRestrictedNavigation = (e: React.MouseEvent) => {
-    e.preventDefault();
-    toast.info('This feature will become available when LSST alerts are released publicly');
-  };
 
   return (
     <div className="w-full min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-950 to-slate-900 text-white">
@@ -68,44 +61,15 @@ export default function Landing() {
           <p className="text-lg md:text-xl text-slate-200 mb-8 fade-in-up">Ingest, filter and stream optical transient alerts from ZTF and LSST at scale. Subscribe with Kafka, query with a flexible API, and build real-time alerting systems.</p>
 
           <div className="grid grid-cols-2 md:flex md:flex-row items-center justify-center gap-3 md:gap-4 fade-in-up">
-            {PRERELEASE_MODE ? (
-              <Button 
-                onClick={handleRestrictedNavigation}
-                className="col-span-2 md:col-span-1 px-6 py-3 bg-white/90 hover:bg-white text-slate-900 shadow-md hover:shadow-xl transform transition duration-150 ease-out hover:-translate-y-0.5"
-              >
-                Search for alerts
-              </Button>
-            ) : (
-              <Link to="/query" className="col-span-2 md:col-span-1">
-                <Button className="w-full px-6 py-3 bg-white/90 hover:bg-white text-slate-900 shadow-md hover:shadow-xl transform transition duration-150 ease-out hover:-translate-y-0.5">Search for alerts</Button>
-              </Link>
-            )}
-            {PRERELEASE_MODE ? (
-              <Button 
-                onClick={handleRestrictedNavigation}
-                variant="outline" 
-                className="col-span-1 px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md"
-              >
-                Kafka docs
-              </Button>
-            ) : (
-              <Link to="/docs/kafka" className="col-span-1">
-                <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md">Kafka docs</Button>
-              </Link>
-            )}
-            {PRERELEASE_MODE ? (
-              <Button 
-                onClick={handleRestrictedNavigation}
-                variant="outline" 
-                className="col-span-1 px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md"
-              >
-                API docs
-              </Button>
-            ) : (
-              <Link to="/docs/api" state={{ from: '/' }} className="col-span-1">
-                <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md">API docs</Button>
-              </Link>
-            )}
+            <Link to="/query" className="col-span-2 md:col-span-1">
+              <Button className="w-full px-6 py-3 bg-white/90 hover:bg-white text-slate-900 shadow-md hover:shadow-xl transform transition duration-150 ease-out hover:-translate-y-0.5">Search for alerts</Button>
+            </Link>
+            <Link to="/docs/kafka" className="col-span-1">
+              <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md">Kafka docs</Button>
+            </Link>
+            <Link to="/docs/api" state={{ from: '/' }} className="col-span-1">
+              <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md">API docs</Button>
+            </Link>
             <a href="https://arxiv.org/abs/2511.00164" target="_blank" rel="noopener noreferrer" className="col-span-2 md:hidden">
               <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md flex items-center justify-center gap-2">
                 <IconNews className="w-4 h-4" />

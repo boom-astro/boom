@@ -1,15 +1,17 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Maximize2 } from 'lucide-react';
+import { Maximize2, Info } from 'lucide-react';
 
 // Band colors matching other plots
 const BAND_COLORS: Record<string, string> = {
-    g: '#38b000',
-    r: '#ef233c',
-    i: '#fcbf49',
-    z: '#f59e0b',
-    default: '#6b7280',
+    g: '#38b000ea',
+    r: '#ef233be7',
+    i: '#fcc049e3',
+    z: '#dd900be3',
+    u: '#dd15b2e3',
+    y: '#25a2c2e3',
+    default: '#7a7a7cdc',
 };
 function toColor(band?: string) {
     if (!band) return BAND_COLORS.default;
@@ -17,11 +19,13 @@ function toColor(band?: string) {
     return BAND_COLORS[k] ?? BAND_COLORS.default;
 }
 
-type Detection = { jd?: number; magpsf?: number; sigmapsf?: number; diffmaglim?: number; band?: string };
+type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey' | 'main', snr?: number | undefined };
 
 type LightcurveData = {
     prv_candidates?: Detection[];
+    fp_hists?: Detection[];
     prv_nondetections?: Detection[];
+    survey_matches?: Record<string, any>;
 };
 
 function jd2mjd(jd: number) {
@@ -30,29 +34,124 @@ function jd2mjd(jd: number) {
 
 export default function Lightcurve({ data }: { data: LightcurveData }) {
     const candidates: Detection[] = data?.prv_candidates ?? [];
+    const fpHists: Detection[] = data?.fp_hists ?? [];
     const nondets: Detection[] = data?.prv_nondetections ?? [];
+    const survey_matches = data?.survey_matches;
+    const [includeSurveyMatches, setIncludeSurveyMatches] = useState(true);
+    const [includeForcedPhot, setIncludeForcedPhot] = useState(true);
+
+    const nondetsFromFpHists = useMemo(() => {
+        if (!includeForcedPhot) return [];
+        return fpHists.filter(d => d.diffmaglim !== undefined && d.magpsf === undefined);
+    }, [fpHists, includeForcedPhot]);
+
+    // extract survey match detections (candidates only)
+    const surveyMatchDetections = useMemo(() => {
+        if (!survey_matches || !includeSurveyMatches) return [];
+        const result: Detection[] = [];
+        for (const [_survey, data] of Object.entries(survey_matches)) {
+            if (data?.prv_candidates) {
+                result.push(...(Array.isArray(data.prv_candidates) ? data.prv_candidates : []));
+            }
+        }
+        return result;
+    }, [survey_matches, includeSurveyMatches]);
+
+    const surveyMatchNondetections = useMemo(() => {
+        if (!survey_matches || !includeSurveyMatches) return [];
+        const result: Detection[] = [];
+        for (const [_survey, data] of Object.entries(survey_matches)) {
+            if (data?.prv_nondetections) {
+                result.push(...(Array.isArray(data.prv_nondetections) ? data.prv_nondetections : []));
+            }
+        }
+        return result;
+    }, [survey_matches, includeSurveyMatches]);
+
+    // extract survey match forced photometry
+    // fp hists contains both detections and non-detections, so we need to split them
+    const surveyMatchFpHists = useMemo(() => {
+        if (!survey_matches || !includeSurveyMatches || !includeForcedPhot) return [];
+        const result: Detection[] = [];
+        for (const [_survey, data] of Object.entries(survey_matches)) {
+            if (data?.fp_hists) {
+                const arr = Array.isArray(data.fp_hists) ? data.fp_hists : [];
+                for (const d of arr) {
+                    if (d.magpsf !== undefined) {
+                        result.push(d);
+                    }
+                }
+            }
+        }
+        return result;
+    }, [survey_matches, includeSurveyMatches, includeForcedPhot]);
+
+    const surveyMatchNondetectionsFromFpHists = useMemo(() => {
+        if (!survey_matches || !includeSurveyMatches) return [];
+        const result: Detection[] = [];
+        for (const [_survey, data] of Object.entries(survey_matches)) {
+            if (data?.fp_hists) {
+                const arr = Array.isArray(data.fp_hists) ? data.fp_hists : [];
+                for (const d of arr) {
+                    if (d.diffmaglim !== undefined && d.magpsf === undefined) {
+                        result.push(d);
+                    }
+                }
+            }
+        }
+        return result;
+    }, [survey_matches, includeSurveyMatches]);
 
     // merge detections and non-detections into series grouped by band
     const detections = useMemo(() => {
-        return candidates
+        let arr: Detection[] = [];
+        let candidates_arr = candidates.map(d => ({
+            ...d,
+            source: 'candidate' as const,
+        }));
+        let fphists_arr = (includeForcedPhot ? fpHists : []).map(d => ({
+            ...d,
+            source: 'fphist' as const,
+        }));
+        let survey_candidates_arr = surveyMatchDetections.map(d => ({
+            ...d,
+            source: 'survey' as const,
+        }));
+        let survey_fphists_arr = surveyMatchFpHists.map(d => ({
+            ...d,
+            source: 'survey' as const,
+        }));
+        arr = [...candidates_arr, ...fphists_arr, ...survey_candidates_arr, ...survey_fphists_arr] as Detection[];
+        return arr
             .map(d => ({
                 t: d.jd !== undefined ? jd2mjd(Number(d.jd)) : NaN,
                 mag: d.magpsf !== undefined ? Number(d.magpsf) : NaN,
                 band: d.band ?? 'unknown',
                 sigma: d.sigmapsf !== undefined ? Number(d.sigmapsf) : NaN,
+                snr: d.snr !== undefined ? Number(d.snr) : NaN,
+                source: d.source,
             }))
             .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag));
-    }, [candidates]);
+    }, [candidates, fpHists, surveyMatchDetections, surveyMatchFpHists, includeForcedPhot]);
 
     const nondetectionsSeries = useMemo(() => {
-        return nondets
+        // Get non-detections from survey matches if included
+        const allNondets: Detection[] = [
+            ...nondets.map(d => ({ ...d, source: 'main' as const })),
+            ...nondetsFromFpHists.map(d => ({ ...d, source: 'fphist' as const })),
+            ...surveyMatchNondetections.map(d => ({ ...d, source: 'survey' as const })),
+            ...surveyMatchNondetectionsFromFpHists.map(d => ({ ...d, source: 'survey' as const })),
+        ];
+        
+        return allNondets
             .map(d => ({
                 t: d.jd !== undefined ? jd2mjd(Number(d.jd)) : NaN,
                 mag: d.diffmaglim !== undefined ? Number(d.diffmaglim) : NaN,
                 band: d.band ?? 'unknown',
+                source: d.source,
             }))
             .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag));
-    }, [nondets]);
+    }, [nondets, nondetsFromFpHists, surveyMatchNondetections, surveyMatchNondetectionsFromFpHists]);
 
     const bands = useMemo(() => {
         const set = new Set<string>();
@@ -84,6 +183,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
 
     const [hiddenBands, setHiddenBands] = useState<Set<string>>(new Set());
     const [dialogOpen, setDialogOpen] = useState(false);
+    const [helpDialogOpen, setHelpDialogOpen] = useState(false);
 
     const handleLegendClick = (band: string) => {
         setHiddenBands(prev => {
@@ -293,12 +393,20 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     // (no additional helpers needed right now)
 
     return (
-        <>
-        <Card className="@container/card col-span-2 lg:col-span-2">
+        <Card className="@container/card col-span-1 @xl/main:col-span-2">
             <CardContent>
                 <div ref={containerRef} style={{ width: '100%', height: '36vh', marginBottom: 20, position: 'relative'}}>
                     <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium pb-2">Photometry</div>
+                        <div className="flex items-center gap-2">
+                            <div className="text-lg font-semibold pb-2">Photometry</div>
+                            <button 
+                                onClick={() => setHelpDialogOpen(true)} 
+                                title="Plot information"
+                                className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 mb-2"
+                            >
+                                <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+                            </button>
+                        </div>
                         <div className="flex items-center gap-3">
                             {bands.map(b =>
                                 <div
@@ -312,6 +420,26 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     <div className="text-xs text-gray-600 dark:text-gray-300">{b.toUpperCase()}</div>
                                 </div>
                             )}
+                            {survey_matches && Object.keys(survey_matches).length > 0 && (
+                                <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={includeSurveyMatches}
+                                        onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
+                                        className="w-4 h-4"
+                                    />
+                                    <span className="text-gray-600 dark:text-gray-300">Other surveys</span>
+                                </label>
+                            )}
+                            <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                                <input 
+                                    type="checkbox" 
+                                    checked={includeForcedPhot}
+                                    onChange={(e) => setIncludeForcedPhot(e.target.checked)}
+                                    className="w-4 h-4"
+                                />
+                                <span className="text-gray-600 dark:text-gray-300">Forced Phot</span>
+                            </label>
                             <button onClick={() => setDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
                                 <Maximize2 className="w-4 h-4 text-gray-600" />
                             </button>
@@ -379,13 +507,20 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                 ) : null;
                             })}
 
-                            {/* non-detections as downward triangles */}
+                            {/* non-detections as downward triangles (main) or diamonds (survey) */}
                             {nondetectionsSeries.map((pt, i) => {
                                 const { bandKey, isHidden, color } = getBandState(pt.band);
                                 if (isHidden) return null;
                                 const px = xToPixel(pt.t);
                                 const py = yToPixel(pt.mag);
-                                const path = `${px - 5},${py - 1} ${px + 5},${py - 1} ${px},${py + 5}`;
+                                const isFromSurvey = pt.source === 'survey';
+                                const size = 5;
+                                
+                                // Triangle for main, diamond for survey
+                                const path = isFromSurvey 
+                                    ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
+                                    : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
+                                
                                 return (
                                     <polygon
                                         key={`nd-vis-${i}-${bandKey}`}
@@ -415,6 +550,9 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             if (isHidden) return null;
                             const px = xToPixel(pt.t);
                             const py = yToPixel(pt.mag);
+                            const isFromSurvey = pt.source === 'survey';
+                            const size = 4;
+                            
                             return (
                                 <g key={`d-hit-${i}-${bandKey}`}>
                                     {/* invisible hit area */}
@@ -442,14 +580,25 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                         }}
                                         onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
                                     />
-                                    {/* visible circle */}
-                                    <circle
-                                        cx={px}
-                                        cy={py}
-                                        r={4}
-                                        fill={color}
-                                        style={{ opacity: 1, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
-                                    />
+                                    {/* visible marker: circle for main, square for survey */}
+                                    {isFromSurvey ? (
+                                        <rect
+                                            x={px - size}
+                                            y={py - size}
+                                            width={size * 2}
+                                            height={size * 2}
+                                            fill={color}
+                                            style={{ opacity: 0.9, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
+                                        />
+                                    ) : (
+                                        <circle
+                                            cx={px}
+                                            cy={py}
+                                            r={size}
+                                            fill={color}
+                                            style={{ opacity: 0.9, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
+                                        />
+                                    )}
                                 </g>
                             );
                         })}
@@ -460,7 +609,14 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             if (isHidden) return null;
                             const px = xToPixel(pt.t);
                             const py = yToPixel(pt.mag);
-                            const path = `${px - 5},${py - 1} ${px + 5},${py - 1} ${px},${py + 5}`;
+                            const isFromSurvey = pt.source === 'survey';
+                            const size = 5;
+                            
+                            // Triangle for main, diamond for survey
+                            const path = isFromSurvey 
+                                ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
+                                : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
+                            
                             return (
                                 <g key={`nd-hit-${i}-${bandKey}`}>
                                     {/* invisible hit area */}
@@ -511,17 +667,17 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                 <div className="font-medium">Band: {String(tooltip.band).toUpperCase()}{tooltip.nondet ? ' (non-det)' : ''}</div>
                                 <div>MJD: {tooltip.t?.toFixed(3)}</div>
                                 {!tooltip.nondet && (
-                                    <div>Mag: {tooltip.mag?.toFixed(3)} {tooltip.sigma !== undefined && Number.isFinite(tooltip.sigma) && tooltip.sigma > 0 ? `± ${tooltip.sigma?.toFixed(3)}` : ''}</div>
+                                    <>
+                                        <div>Mag: {tooltip.mag?.toFixed(3)} {tooltip.sigma !== undefined && Number.isFinite(tooltip.sigma) && tooltip.sigma > 0 ? `± ${tooltip.sigma?.toFixed(3)}` : ''}</div>
+                                        <div>SNR: {tooltip.sigma && tooltip.sigma > 0 ? (tooltip.mag! / tooltip.sigma).toFixed(2) : 'N/A'}</div>
+                                    </>
                                 )}
                                 <div>Lim mag: {tooltip.mag?.toFixed(3)}</div>
                             </div>
                         </div>
                     )}
                 </div>
-            </CardContent>
-        </Card>
-
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogContent className="w-[min(1400px,95vw)] max-w-none sm:!max-w-none h-[90vh] flex flex-col">
                 <DialogHeader>
                     <DialogTitle className="text-xl">Photometry - Expanded View</DialogTitle>
@@ -593,7 +749,14 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                             if (isHidden) return null;
                                             const px = xToPixelDialog(pt.t);
                                             const py = yToPixelDialog(pt.mag);
-                                            const path = `${px - 6},${py - 1} ${px + 6},${py - 1} ${px},${py + 6}`;
+                                            const isFromSurvey = pt.source === 'survey';
+                                            const size = 6;
+                                            
+                                            // Triangle for main, diamond for survey
+                                            const path = isFromSurvey 
+                                                ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
+                                                : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
+                                            
                                             return (
                                                 <polygon key={`nd-vis-${i}-${bandKey}`} points={path} fill={color} style={{ opacity: 0.95, transition: 'opacity 200ms ease' }} />
                                             );
@@ -606,8 +769,13 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                         if (isHidden) return null;
                                         const px = xToPixelDialog(pt.t);
                                         const py = yToPixelDialog(pt.mag);
-                                        return (
-                                            <circle key={`d-${i}-${bandKey}`} cx={px} cy={py} r={5} fill={color} style={{ opacity: 1, transition: 'opacity 200ms ease, r 120ms ease' }} />
+                                        const isFromSurvey = pt.source === 'survey';
+                                        const size = 5 ;
+                                        
+                                        return isFromSurvey ? (
+                                            <rect key={`d-${i}-${bandKey}`} x={px - size} y={py - size} width={size * 2} height={size * 2} fill={color} style={{ opacity: 0.9, transition: 'opacity 200ms ease', pointerEvents: 'none' }} />
+                                        ) : (
+                                            <circle key={`d-${i}-${bandKey}`} cx={px} cy={py} r={size} fill={color} style={{ opacity: 0.9, transition: 'opacity 200ms ease, r 120ms ease' }} />
                                         );
                                     })}
 
@@ -617,7 +785,14 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                         if (isHidden) return null;
                                         const px = xToPixelDialog(pt.t);
                                         const py = yToPixelDialog(pt.mag);
-                                        const path = `${px - 6},${py - 1} ${px + 6},${py - 1} ${px},${py + 6}`;
+                                        const isFromSurvey = pt.source === 'survey';
+                                        const size = 6;
+                                        
+                                        // Triangle for main, diamond for survey
+                                        const path = isFromSurvey 
+                                            ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
+                                            : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
+                                        
                                         return (
                                             <polygon key={`nd-${i}-${bandKey}`} points={path} fill={color} style={{ opacity: 0.95, transition: 'opacity 200ms ease' }} />
                                         );
@@ -629,6 +804,91 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                 </div>
             </DialogContent>
         </Dialog>
-        </>
+
+                {/* Help Dialog */}
+                <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
+                    <DialogContent className="w-[min(1000px,95vw)] max-w-none sm:!max-w-none max-h-[90vh] overflow-auto">
+                        <DialogHeader>
+                            <DialogTitle className="text-xl">Understanding the Photometry Plot</DialogTitle>
+                        </DialogHeader>
+                        <div className="space-y-4 text-sm">
+                            <div>
+                                <h3 className="font-semibold mb-2">What This Plot Shows</h3>
+                                <p className="text-gray-600 dark:text-gray-300">
+                                    This plot displays the brightness history of the astronomical object over time, including previous alerts, forced photometry, and non-detections. The X-axis shows Modified Julian Date (MJD), 
+                                    and the Y-axis shows the AB magnitude (note: fainter objects have higher magnitude values, so the Y-axis is inverted).
+                                    It takes advantage of data from multiple surveys to provide a comprehensive view of the object's photometric behavior,
+                                    if available. We will refer to the survey from which the object originates as the "primary" survey, and any additional data from other surveys as "other surveys".
+                                </p>
+                            </div>
+
+                            <div>
+                                <h3 className="font-semibold mb-2">Data Markers</h3>
+                                <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Circles:</span>
+                                        <span>Detections from the "primary" survey. Error bars show the measurement uncertainty (±σ).</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Squares:</span>
+                                        <span>Detections from other surveys (when "Other surveys" is enabled).</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Triangles:</span>
+                                        <span>Non-detections from the "primary" survey, showing limiting magnitude (the object was fainter than this value).</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Diamonds:</span>
+                                        <span>Non-detections from other surveys.</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <h3 className="font-semibold mb-2">Filter Bands</h3>
+                                <p className="text-gray-600 dark:text-gray-300">
+                                    Different colored markers represent different photometric filters (bands), such as <span className="font-mono">g</span>, <span className="font-mono">r</span>, <span className="font-mono">i</span>, etc. 
+                                    Each filter captures light in a specific wavelength range.
+                                </p>
+                            </div>
+
+                            <div>
+                                <h3 className="font-semibold mb-2">Interactive Features</h3>
+                                <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Hover:</span>
+                                        <span>Move your cursor over any point to see detailed information.</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Drag to zoom:</span>
+                                        <span>Click and drag to select a region and zoom in on that area.</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Double-click:</span>
+                                        <span>Reset the zoom to show all data.</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Click band legend:</span>
+                                        <span>Toggle visibility of individual filter bands.</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Double-click band:</span>
+                                        <span>Show only that band (isolate it). Double-click again to show all bands.</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <h3 className="font-semibold mb-2">Data Sources</h3>
+                                <p className="text-gray-600 dark:text-gray-300">
+                                    The plot combines data from the "primary" survey with data from other surveys' nearest objects, if any. 
+                                    Use the "Other surveys" checkbox to include or exclude cross-matched data from additional sources.
+                                </p>
+                            </div>
+                        </div>
+                    </DialogContent>
+                </Dialog>
+            </CardContent>
+        </Card>
     );
 }

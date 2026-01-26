@@ -2,16 +2,18 @@ import { useMemo, useState, useRef, useEffect } from 'react';
 import type React from 'react';
 import { Card, CardContent, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Maximize2 } from 'lucide-react';
+import { Maximize2, Info } from 'lucide-react';
 import useAppStore from '@/lib/store';
 
 // band -> color map matching Lightcurve's palette
 const BAND_COLORS: Record<string, string> = {
-  g: '#38b000',
-  r: '#ef233c',
-  i: '#fcbf49',
-  z: '#f59e0b',
-  default: '#6b7280',
+    g: '#38b000ea',
+    r: '#ef233be7',
+    i: '#fcc049e3',
+    z: '#dd900be3',
+    u: '#dd15b2e3',
+    y: '#25a2c2e3',
+    default: '#7a7a7cdc',
 };
 
 function toColor(band?: string) {
@@ -23,8 +25,22 @@ function toColor(band?: string) {
 export default function CentroidPlot() {
   const current = useAppStore(state => state.currentSource);
   const prv = ((current && (current['data'] as Record<string, unknown> | undefined))?.['prv_candidates']) ?? [] as unknown[];
+  const survey_matches = ((current && (current['data'] as Record<string, unknown> | undefined))?.['survey_matches']) as Record<string, any> | undefined;
 
   const [hoveredBand, setHoveredBand] = useState<string | null>(null);
+  const [includeSurveyMatches, setIncludeSurveyMatches] = useState(true);
+
+  // Extract survey match detections
+  const surveyMatchDetections = useMemo(() => {
+    if (!survey_matches || !includeSurveyMatches) return [];
+    const result: unknown[] = [];
+    for (const [_survey, data] of Object.entries(survey_matches)) {
+      if (data?.prv_candidates) {
+        result.push(...(Array.isArray(data.prv_candidates) ? data.prv_candidates : []));
+      }
+    }
+    return result;
+  }, [survey_matches, includeSurveyMatches]);
 
   type Candidate = {
     ra?: number | string;
@@ -32,15 +48,20 @@ export default function CentroidPlot() {
     band?: string;
     jd?: number | string;
     magpsf?: number | string;
+    source?: 'main' | 'survey';
     [k: string]: unknown;
   };
 
   const { points, centroidRa, centroidDec, maxOffsetArcsec, bandCentroids } = useMemo(() => {
     const rows = Array.isArray(prv) ? (prv as unknown[]) : [];
+    const allRows = [
+      ...rows.map(r => ({ ...(r as Record<string, unknown>), source: 'main' as const })),
+      ...surveyMatchDetections.map(r => ({ ...(r as Record<string, unknown>), source: 'survey' as const }))
+    ];
     // build array preserving original row for tooltip
-    const coords = rows.map((rRaw: unknown) => {
+    const coords = allRows.map((rRaw: unknown) => {
       const r = (rRaw ?? {}) as Candidate;
-      return { row: r, ra: Number(r.ra), dec: Number(r.dec), band: r.band };
+      return { row: r, ra: Number(r.ra), dec: Number(r.dec), band: r.band, source: r.source };
     });
 
     const valid = coords.filter(c => Number.isFinite(c.ra) && Number.isFinite(c.dec));
@@ -73,7 +94,7 @@ export default function CentroidPlot() {
       while (draDeg > 180) draDeg -= 360;
       const dra = draDeg * Math.cos((centroidDecVal * Math.PI) / 180) * 3600;
       const ddec = (c.dec - centroidDecVal) * 3600;
-      return { x: dra, y: ddec, band: c.band, row: c.row };
+      return { x: dra, y: ddec, band: c.band, row: c.row, source: c.source };
     });
 
     // determine zoom from the furthest point (radial separation)
@@ -100,7 +121,7 @@ export default function CentroidPlot() {
       if (v.count > 0) bandCentroids[k] = { x: v.sumX / v.count, y: v.sumY / v.count, count: v.count };
     });
     return { points, centroidRa: centroidRaVal, centroidDec: centroidDecVal, maxOffsetArcsec, bandCentroids };
-  }, [prv]);
+  }, [prv, surveyMatchDetections]);
 
   const size = 320;
   const padding = 28;
@@ -110,6 +131,7 @@ export default function CentroidPlot() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; point?: { x: number; y: number; band?: string; row?: Candidate } }>(() => ({ visible: false, x: 0, y: 0 }));
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false);
 
   // Clear hoveredBand when opening the dialog to avoid focus-driven hover
   useEffect(() => {
@@ -123,20 +145,30 @@ export default function CentroidPlot() {
         dra: p.x,
         ddec: p.y,
         band: p.band,
+        source: p.source,
       }))
       .filter(r => Number.isFinite(r.t))
-      .map(r => ({ t: r.t - 2400000.5, dra: r.dra, ddec: r.ddec, band: r.band }));
+      .map(r => ({ t: r.t - 2400000.5, dra: r.dra, ddec: r.ddec, band: r.band, source: r.source }));
     rows.sort((a, b) => a.t - b.t);
-    const series = rows.map(r => ({ t: r.t, dra: r.dra, ddec: r.ddec, sep: Math.sqrt(r.dra * r.dra + r.ddec * r.ddec), band: r.band }));
+    const series = rows.map(r => ({ t: r.t, dra: r.dra, ddec: r.ddec, sep: Math.sqrt(r.dra * r.dra + r.ddec * r.ddec), band: r.band, source: r.source }));
     return series;
   }, [points]);
 
   return (
     <>
-    <Card data-slot="card" className="col-span-1">
-      <CardContent>
+    <Card data-slot="card" className="col-span-1 h-full flex flex-col">
+      <CardContent className="flex-1 flex flex-col">
         <div className="pt-0 pb-1 flex items-center justify-between">
-          <CardTitle className="text-lg">Centroid Plot</CardTitle>
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-lg">Centroid Plot</CardTitle>
+            <button 
+              onClick={() => setHelpDialogOpen(true)} 
+              title="Plot information"
+              className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700"
+            >
+              <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+            </button>
+          </div>
           <div>
             <button onClick={() => setDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
               <Maximize2 className="w-4 h-4 text-gray-600" />
@@ -146,7 +178,7 @@ export default function CentroidPlot() {
         {!points || points.length === 0 ? (
           <div className="text-sm text-gray-500">No previous detections available to compute centroid.</div>
         ) : (
-          <div className="flex flex-col">
+          <div className="flex flex-col h-full">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 {(() => {
@@ -169,10 +201,21 @@ export default function CentroidPlot() {
                       </div>
                     ));
                 })()}
+                {survey_matches && Object.keys(survey_matches).length > 0 && (
+                  <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                    <input 
+                      type="checkbox" 
+                      checked={includeSurveyMatches}
+                      onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
+                      className="w-3 h-3"
+                    />
+                    <span className="text-gray-600 dark:text-gray-300">Other surveys</span>
+                  </label>
+                )}
               </div>
             </div>
 
-            <div ref={containerRef} className="w-full relative">
+            <div ref={containerRef} className="w-full relative flex-1 flex items-center justify-center">
               <svg viewBox={`0 0 ${size} ${size}`} className="block mx-auto bg-transparent w-full h-auto" style={{ maxWidth: size }}>
                 {/* center lines */}
                 <line x1={padding} y1={size/2} x2={size-padding} y2={size/2} stroke="#e5e7eb" strokeWidth={1} />
@@ -274,12 +317,45 @@ export default function CentroidPlot() {
                   const color = toColor(p.band);
                   const bandKey = p.band ?? 'default';
                   const isActive = !hoveredBand || hoveredBand === bandKey;
-                  return (
+                  const isFromSurvey = p.source === 'survey';
+                  const size1 = isActive ? 3.5 : 2;
+                  
+                  return isFromSurvey ? (
+                    <rect
+                      key={idx}
+                      x={px - size1}
+                      y={py - size1}
+                      width={size1 * 2}
+                      height={size1 * 2}
+                      fill={color}
+                      opacity={isActive ? 0.9 : 0.12}
+                      stroke={color}
+                      strokeWidth={isActive ? 0.9 : 0.6}
+                      style={{ transition: 'opacity 200ms ease, stroke-width 200ms ease' }}
+                      onMouseEnter={(e: React.MouseEvent<SVGRectElement>) => {
+                        const rect = containerRef.current?.getBoundingClientRect();
+                        const clientX = e.clientX;
+                        const clientY = e.clientY;
+                        const x = rect ? clientX - rect.left : clientX;
+                        const y = rect ? clientY - rect.top : clientY;
+                        setTooltip({ visible: true, x, y, point: p });
+                      }}
+                      onMouseMove={(e: React.MouseEvent<SVGRectElement>) => {
+                        const rect = containerRef.current?.getBoundingClientRect();
+                        const clientX = e.clientX;
+                        const clientY = e.clientY;
+                        const x = rect ? clientX - rect.left : clientX;
+                        const y = rect ? clientY - rect.top : clientY;
+                        setTooltip(prev => ({ ...prev, x, y }));
+                      }}
+                      onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
+                    />
+                  ) : (
                     <circle
                       key={idx}
                       cx={px}
                       cy={py}
-                      r={isActive ? 3.5 : 2}
+                      r={size1}
                       fill={color}
                       opacity={isActive ? 0.9 : 0.12}
                       stroke={color}
@@ -303,7 +379,7 @@ export default function CentroidPlot() {
                       }}
                       onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
                     />
-                  )
+                  );
                 })}
 
                 {/* per-band centroid when hovering a band in the legend */}
@@ -371,8 +447,8 @@ export default function CentroidPlot() {
               )}
             </div>
 
-            <div className="mt-2 text-xs text-gray-400 p-0">
-                <div>Points: {points.length} · maxSep: {(Math.max(0, ((() => { const s = points.map(p => Math.sqrt(p.x*p.x + p.y*p.y)).filter(n=>Number.isFinite(n)); return s.length?Math.max(...s):0 })())))?.toFixed(3)}″ · zoom: {maxOffsetArcsec.toFixed(3)}″</div>
+            <div className="mt-auto text-xs text-gray-400 p-0 flex-shrink-0 min-w-0 overflow-hidden">
+                <div className="truncate">Points: {points.length} · maxSep: {(Math.max(0, ((() => { const s = points.map(p => Math.sqrt(p.x*p.x + p.y*p.y)).filter(n=>Number.isFinite(n)); return s.length?Math.max(...s):0 })())))?.toFixed(3)}″ · zoom: {maxOffsetArcsec.toFixed(3)}″</div>
                 {/* <div className="text-xs text-gray-600">Offsets shown in arcsec relative to centroid (0,0).</div> */}
             </div>
           </div>
@@ -511,7 +587,13 @@ export default function CentroidPlot() {
                             const y = panelInnerPad + plotH - ((values[idx] - y0) / (y1 - y0)) * plotH;
                             const bandKey = String(pt.band ?? 'default').toLowerCase();
                             const isActive = !hoveredBand || hoveredBand === bandKey;
-                            return <circle key={idx} cx={x} cy={y} r={isActive ? 3.5 : 2} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />;
+                            const isFromSurvey = pt.source === 'survey';
+                            const size1 = isActive ? 3.5 : 2;
+                            return isFromSurvey ? (
+                              <rect key={idx} x={x - size1} y={y - size1} width={size1 * 2} height={size1 * 2} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />
+                            ) : (
+                              <circle key={idx} cx={x} cy={y} r={size1} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />
+                            );
                           })}
                         </g>
                       );
@@ -553,7 +635,13 @@ export default function CentroidPlot() {
                             const y = panelInnerPad + plotH - ((values[idx] - y0) / (y1 - y0)) * plotH;
                             const bandKey = String(pt.band ?? 'default').toLowerCase();
                             const isActive = !hoveredBand || hoveredBand === bandKey;
-                            return <circle key={idx} cx={x} cy={y + 0} r={isActive ? 3.5 : 2} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />;
+                            const isFromSurvey = pt.source === 'survey';
+                            const size1 = isActive ? 3.5 : 2;
+                            return isFromSurvey ? (
+                              <rect key={idx} x={x - size1} y={y - size1} width={size1 * 2} height={size1 * 2} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />
+                            ) : (
+                              <circle key={idx} cx={x} cy={y + 0} r={size1} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />
+                            );
                           })}
                         </g>
                       );
@@ -595,7 +683,13 @@ export default function CentroidPlot() {
                             const y = panelInnerPad + plotH - ((values[idx] - y0) / (y1 - y0)) * plotH;
                             const bandKey = String(pt.band ?? 'default').toLowerCase();
                             const isActive = !hoveredBand || hoveredBand === bandKey;
-                            return <circle key={idx} cx={x} cy={y} r={isActive ? 3.5 : 2} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />;
+                            const isFromSurvey = pt.source === 'survey';
+                            const size1 = isActive ? 3.5 : 2;
+                            return isFromSurvey ? (
+                              <rect key={idx} x={x - size1} y={y - size1} width={size1 * 2} height={size1 * 2} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />
+                            ) : (
+                              <circle key={idx} cx={x} cy={y} r={size1} fill={toColor(pt.band)} className={`stroke-white dark:stroke-slate-900`} opacity={isActive ? 1 : 0.12} strokeWidth={1} />
+                            );
                           })}
                         </g>
                       );
@@ -613,6 +707,99 @@ export default function CentroidPlot() {
                 );
               })()
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Help Dialog */}
+      <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
+        <DialogContent className="w-[min(1000px,95vw)] max-w-none sm:!max-w-none max-h-[90vh] overflow-auto">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Understanding the Centroid Plot</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            <div>
+              <h3 className="font-semibold mb-2">What This Plot Shows</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                This plot displays the positional offsets of individual detections relative to the computed centroid of all detections. 
+                The centroid (marked with a crosshair at the center) represents the average position of the object across all observations.
+                Just like on the photometry plot, a toggle for "Other surveys" allows you to include or exclude data from additional surveys, if available.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Data Markers</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Circles:</span>
+                  <span>Individual detections from the main survey, colored by photometric filter band.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Squares:</span>
+                  <span>Detections from other surveys (when "Other surveys" is enabled).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Crosshair (center):</span>
+                  <span>The computed centroid position, representing the mean RA/Dec across all detections.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Dashed circles:</span>
+                  <span>Reference circles showing distances from the centroid at 0.25", 0.5", 1", and larger intervals.</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Coordinate System</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                The plot shows offsets in arcseconds. ΔRA (horizontal axis) and ΔDec (vertical axis) represent the difference 
+                between each detection's position and the centroid. The plot automatically scales to show all detections with appropriate padding.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Interactive Features</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Hover over points:</span>
+                  <span>View detailed information including RA/Dec offsets, separation from centroid, magnitude, and observation time (MJD).</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Hover over band legend:</span>
+                  <span>Highlights detections from that specific filter band and displays the band's individual centroid with a colored cross.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Hover over center crosshair:</span>
+                  <span>Shows the precise RA and Dec coordinates of the overall centroid.</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">Expanded View</h3>
+              <p className="text-gray-600 dark:text-gray-300">
+                Click the expand icon to view time series plots showing how ΔRA, ΔDec, and separation from the centroid 
+                evolve over time (in MJD). This helps identify systematic position shifts or other temporal patterns.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mb-2">What to Look For</h3>
+              <div className="space-y-2 text-gray-600 dark:text-gray-300">
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Tight cluster:</span>
+                  <span>Indicates consistent astrometric measurements with good precision.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Scattered points:</span>
+                  <span>May indicate astrometric uncertainty, proper motion, or potential source confusion.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-medium">Band-specific offsets:</span>
+                  <span>Different bands clustering in different areas may reveal chromatic effects or systematic biases.</span>
+                </div>
+              </div>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

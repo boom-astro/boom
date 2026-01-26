@@ -54,8 +54,10 @@ export default function Profile() {
       setNewCredentialName("");
       setShowCreateDialog(false);
       // Auto-reveal the newly created credential's secret
-      setRevealedSecrets(new Set([...revealedSecrets, newCred.client_id]));
+      setRevealedSecrets(new Set([...revealedSecrets, newCred.kafka_username]));
       toast.success("Kafka credential created successfully");
+      // let's reload profile to reflect any changes
+      await loadData();
     } catch (error) {
       toast.error(`Failed to create credential: ${error}`);
     } finally {
@@ -86,7 +88,7 @@ export default function Profile() {
   }
 
   return (
-    <div className="px-4 lg:px-6 max-w-6xl mx-auto">
+    <div className="px-4 lg:px-6 w-full max-w-3xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Profile</h1>
         <p className="text-sm text-muted-foreground">Manage your account and Kafka credentials</p>
@@ -145,9 +147,9 @@ export default function Profile() {
           ) : (
             <div className="space-y-4">
               {credentials.map((cred) => {
-                const isRevealed = revealedSecrets.has(cred.client_id);
+                const isRevealed = revealedSecrets.has(cred.kafka_username);
                 return (
-                  <div key={cred.client_id} className="border rounded-lg p-4">
+                  <div key={cred.kafka_username} className="border rounded-lg p-4">
                     <div className="flex items-start justify-between mb-3">
                       <div>
                         <h3 className="font-semibold">{cred.name}</h3>
@@ -160,12 +162,12 @@ export default function Profile() {
                         <Label className="text-xs text-muted-foreground">Client ID</Label>
                         <div className="flex items-center gap-2 mt-1">
                           <code className="flex-1 bg-muted px-3 py-2 rounded text-sm font-mono">
-                            {cred.client_id}
+                            {cred.kafka_username}
                           </code>
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => copyToClipboard(cred.client_id, "Client ID")}
+                            onClick={() => copyToClipboard(cred.kafka_username, "Client ID")}
                           >
                             <Copy className="h-4 w-4" />
                           </Button>
@@ -176,19 +178,19 @@ export default function Profile() {
                         <Label className="text-xs text-muted-foreground">Client Secret</Label>
                         <div className="flex items-center gap-2 mt-1">
                           <code className="flex-1 bg-muted px-3 py-2 rounded text-sm font-mono">
-                            {isRevealed ? cred.client_secret : "••••••••••••••••"}
+                            {isRevealed ? cred.kafka_password : "••••••••••••••••"}
                           </code>
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => toggleSecretVisibility(cred.client_id)}
+                            onClick={() => toggleSecretVisibility(cred.kafka_username)}
                           >
                             {isRevealed ? <IconEyeOff className="h-4 w-4" /> : <IconEye className="h-4 w-4" />}
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => copyToClipboard(cred.client_secret, "Client Secret")}
+                            onClick={() => copyToClipboard(cred.kafka_password, "Client Secret")}
                           >
                             <Copy className="h-4 w-4" />
                           </Button>

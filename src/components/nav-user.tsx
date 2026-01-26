@@ -60,8 +60,8 @@ export function NavUser() {
     <SidebarMenu>
       <SidebarMenuItem>
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Tooltip>
+          <Tooltip>
+            <DropdownMenuTrigger asChild>
               <TooltipTrigger asChild>
                 <SidebarMenuButton
                   size="lg"
@@ -81,15 +81,15 @@ export function NavUser() {
                   <IconDotsVertical className="ml-auto size-4" />
                 </SidebarMenuButton>
               </TooltipTrigger>
-              <TooltipContent
-                side="right"
-                align="center"
-                hidden={state !== "collapsed" || isMobile}
-              >
-                {profile?.username}
-              </TooltipContent>
-            </Tooltip>
-          </DropdownMenuTrigger>
+            </DropdownMenuTrigger>
+            <TooltipContent
+              side="right"
+              align="center"
+              hidden={state !== "collapsed" || isMobile}
+            >
+              {profile?.username}
+            </TooltipContent>
+          </Tooltip>
           <DropdownMenuContent
             className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
             side={isMobile ? 'bottom' : 'right'}
@@ -113,27 +113,19 @@ export function NavUser() {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem onClick={() => navigate('/profile')}>
+              <DropdownMenuItem onSelect={() => navigate('/profile')}>
                 <IconUserCircle />
                 Profile
               </DropdownMenuItem>
-              {/* <DropdownMenuItem>
-                <IconCreditCard />
-                Billing
-              </DropdownMenuItem> */}
-              {/* <DropdownMenuItem>
-                <IconNotification />
-                Notifications
-              </DropdownMenuItem> */}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
             {authenticated ? (
-              <DropdownMenuItem onClick={handleLogout}>
+              <DropdownMenuItem onSelect={handleLogout}>
                 <IconLogout />
                 Log out
               </DropdownMenuItem>
             ) : (
-              <DropdownMenuItem onClick={handleSignIn}>Sign in</DropdownMenuItem>
+              <DropdownMenuItem onSelect={handleSignIn}>Sign in</DropdownMenuItem>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

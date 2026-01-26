@@ -5,6 +5,7 @@ import {
 import { useEffect, useState } from "react";
 import { ApiObject } from '@/lib/api';
 import { loadAladinScript } from '@/lib/aladinLoader';
+import { radec2lb } from "@/lib/utils";
 
 export default function Aladin({
         alert,
@@ -25,8 +26,8 @@ export default function Aladin({
                 const candidate = alert['candidate'] as Record<string, unknown> | undefined;
                 const ra: number = Number(candidate?.['ra'] ?? alert['ra'] ?? alert['ra_deg']);
                 const dec: number = Number(candidate?.['dec'] ?? alert['dec'] ?? alert['dec_deg']);
-        const b = 10; // placeholder for galactic latitude
-        const survey = (Math.abs(b) < 20) ? 'CDS/P/Pan-STARRS/DR1/color-z-zg-g' : 'CDS/P/DESI-Legacy-Surveys/DR10/color';
+        const [, b] = radec2lb(ra, dec);
+        const survey = (Math.abs(b) < 20 || dec > 30) ? 'CDS/P/Pan-STARRS/DR1/color-z-zg-g' : 'CDS/P/DESI-Legacy-Surveys/DR10/color';
         const aladin = window.A.aladin('#aladin-lite-div', {
             survey: survey,
             fov: 63/3600,
@@ -114,7 +115,7 @@ export default function Aladin({
     return (
     //   <Card className="@container/card">
     // we want no padding at all in that card
-      <Card className="@container/card p-0 min-h-[100px]">
+      <Card className="@container/card p-0 min-h-[100px] col-span-1" style={{ minHeight: '40vh' }}>
         {/* then the card content also has no padding, but has rounded corners */}
         <CardContent className="p-0 flex flex-row gap-4 items-center w-full h-full rounded-lg" id="aladin-lite-container">
             <div id="aladin-lite-div" className="w-full h-full rounded-lg z-10"></div>

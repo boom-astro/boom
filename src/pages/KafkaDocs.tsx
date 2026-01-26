@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Copy } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -20,93 +21,127 @@ type TopicNode = {
 
 const TOPIC_TREE: TopicNode[] = [
   {
-    key: "babamul.lsst",
-    label: "LSST",
+    key: "babamul.ztf",
+    label: "ZTF",
     children: [
       {
-        key: "babamul.lsst.only",
-        label: "LSST — LSST-only",
+        key: "babamul.ztf.stellar",
+        label: "Stellar",
         children: [
-          { key: "babamul.lsst.only.stellar", desc: "Alerts classified as stellar" },
-          { key: "babamul.lsst.only.hosted", desc: "Alerts with a host galaxy" },
-          { key: "babamul.lsst.only.hostless", desc: "Alerts without a host galaxy" },
-          { key: "babamul.lsst.only.unknown", desc: "Unclassified alerts" },
+          { key: "babamul.ztf.no-lsst-match.stellar", desc: "ZTF-only, classified as stellar" },
+          { key: "babamul.ztf.lsst-match.stellar", desc: "With LSST match, classified as stellar" },
         ],
       },
       {
-        key: "babamul.lsst.ztfmatch",
-        label: "LSST — with ZTF match",
+        key: "babamul.ztf.hosted",
+        label: "Hosted",
         children: [
-          { key: "babamul.lsst.ztfmatch.stellar", desc: "Alerts classified as stellar" },
-          { key: "babamul.lsst.ztfmatch.hosted", desc: "Alerts with a host galaxy" },
-          { key: "babamul.lsst.ztfmatch.hostless", desc: "Alerts without a host galaxy" },
-          { key: "babamul.lsst.ztfmatch.unknown", desc: "Unclassified alerts" },
+          { key: "babamul.ztf.no-lsst-match.hosted", desc: "ZTF-only, with a host galaxy" },
+          { key: "babamul.ztf.lsst-match.hosted", desc: "With LSST match, with a host galaxy" },
+        ],
+      },
+      {
+        key: "babamul.ztf.hostless",
+        label: "Hostless",
+        children: [
+          { key: "babamul.ztf.no-lsst-match.hostless", desc: "ZTF-only, without a host galaxy" },
+          { key: "babamul.ztf.lsst-match.hostless", desc: "With LSST match, without a host galaxy" },
         ],
       },
     ],
   },
   {
-    key: "babamul.ztf",
-    label: "ZTF",
+    key: "babamul.lsst",
+    label: "LSST",
     children: [
       {
-        key: "babamul.ztf.only",
-        label: "ZTF — ZTF-only",
+        key: "babamul.lsst.stellar",
+        label: "Stellar",
         children: [
-          { key: "babamul.ztf.only.stellar", desc: "Alerts classified as stellar" },
-          { key: "babamul.ztf.only.hosted", desc: "Alerts with a host galaxy" },
-          { key: "babamul.ztf.only.hostless", desc: "Alerts without a host galaxy" },
-          { key: "babamul.ztf.only.unknown", desc: "Unclassified alerts" },
+          { key: "babamul.lsst.no-ztf-match.stellar", desc: "LSST-only, classified as stellar" },
+          { key: "babamul.lsst.ztf-match.stellar", desc: "With ZTF match, classified as stellar" },
         ],
       },
       {
-        key: "babamul.ztf.ztfmatch",
-        label: "ZTF — with LSST match",
+        key: "babamul.lsst.hosted",
+        label: "Hosted",
         children: [
-          { key: "babamul.ztf.lsstmatch.stellar", desc: "Alerts classified as stellar" },
-          { key: "babamul.ztf.lsstmatch.hosted", desc: "Alerts with a host galaxy" },
-          { key: "babamul.ztf.lsstmatch.hostless", desc: "Alerts without a host galaxy" },
-          { key: "babamul.ztf.lsstmatch.unknown", desc: "Unclassified alerts" },
+          { key: "babamul.lsst.no-ztf-match.hosted", desc: "LSST-only, with a host galaxy" },
+          { key: "babamul.lsst.ztf-match.hosted", desc: "With ZTF match, with a host galaxy" },
+        ],
+      },
+      {
+        key: "babamul.lsst.hostless",
+        label: "Hostless",
+        children: [
+          { key: "babamul.lsst.no-ztf-match.hostless", desc: "LSST-only, without a host galaxy" },
+          { key: "babamul.lsst.ztf-match.hostless", desc: "With ZTF match, without a host galaxy" },
+        ],
+      },
+      {
+        key: "babamul.lsst.unknown",
+        label: "Unknown",
+        children: [
+          { key: "babamul.lsst.no-ztf-match.unknown", desc: "LSST-only, unclassified alerts" },
+          { key: "babamul.lsst.ztf-match.unknown", desc: "With ZTF match, unclassified alerts" },
         ],
       },
     ],
   },
 ];
 
-function generatePython(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<CLIENT_ID>", passwordVar = "<CLIENT_SECRET>") {
-  const topicsList = topics.map(t => `"${t}"`).join(', ');
-  return `from confluent_kafka import Consumer
+const KAFKA_BOOTSTRAP = import.meta.env.VITE_KAFKA_DOMAIN ?? "kafka.boom.example.com:9092";
+
+function generatePython(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<KAFKA_USERNAME>", passwordVar = "<KAFKA_PASSWORD>") {
+  let autoCommitStr = autoCommit ? "True" : "False";
+  const topicsList = topics.map(t => `"${t}"`).join(',\n    ');
+  return `import fastavro
+from io import BytesIO
+from confluent_kafka import Consumer
 
 # Configuration
 conf = {
-    "bootstrap.servers": "kafka.boom.example.com:9092",
+  "bootstrap.servers": "${KAFKA_BOOTSTRAP}",
     "security.protocol": "SASL_PLAINTEXT",
     "sasl.mechanism": "SCRAM-SHA-512",
     "sasl.username": "${usernameVar}",
     "sasl.password": "${passwordVar}",
     "group.id": "${usernameVar}-${groupId}",
     "auto.offset.reset": "${offset}",
-    "enable.auto.commit": ${autoCommit}
+    "enable.auto.commit": ${autoCommitStr},
 }
 
 consumer = Consumer(conf)
-consumer.subscribe([${topicsList}])
+consumer.subscribe([
+    ${topicsList}
+])
 
 try:
     while True:
-        msg = consumer.poll(timeout=1.0)
+        msg = consumer.poll(timeout=5.0)
         if msg is None:
             continue
         if msg.error():
             print(f"Consumer error: {msg.error()}")
             continue
-        print(msg.value())
+        
+        # Deserialize Avro message
+        bytes_io = BytesIO(msg.value())
+        reader = fastavro.reader(bytes_io)
+        alert = next(reader) # There is only one record/alert per message
+
+        candid, objectId = alert["candid"], alert["objectId"]
+        print(f"Received alert: CANDID={candid}, ObjectID={objectId}")
+
+        # Process the alert as needed...
+except KeyboardInterrupt:
+    pass
 finally:
     consumer.close()
 `;
 }
 
-function generateRust(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<CLIENT_ID>", passwordVar = "<CLIENT_SECRET>") {
+function generateRust(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<KAFKA_USERNAME>", passwordVar = "<KAFKA_PASSWORD>") {
   const topicsList = topics.map(t => `"${t}"`).join(', ');
   const autoCommitCfg = autoCommit ? 'true' : 'false';
   return `use rdkafka::config::ClientConfig;
@@ -115,7 +150,7 @@ use rdkafka::message::Message;
 
 fn main() {
     let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", "kafka.boom.example.com:9092")
+    .set("bootstrap.servers", "${KAFKA_BOOTSTRAP}")
         .set("security.protocol", "SASL_PLAINTEXT")
         .set("sasl.mechanisms", "SCRAM-SHA-512")
         .set("sasl.username", "${usernameVar}")
@@ -143,7 +178,28 @@ fn main() {
 `;
 }
 
-export default function BabamulDocs() {
+function CopyablePre({ code, label = "Copy snippet" }: { code: string; label?: string }) {
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(
+      () => toast.success('Code copied to clipboard'),
+      () => toast.error('Failed to copy code')
+    );
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      className="group relative w-full text-left cursor-pointer"
+      aria-label={label}
+    >
+      <pre className="p-2 rounded bg-muted text-sm overflow-x-auto pr-10">{code}</pre>
+      <Copy className="h-4 w-4 absolute right-2 top-2 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+    </button>
+  );
+}
+
+export default function KafkaDocs() {
   const [step, setStep] = useState<number>(0);
   const [selected, setSelected] = useState<string[]>([]);
   
@@ -171,7 +227,7 @@ export default function BabamulDocs() {
   // Other settings
   const [groupId, setGroupId] = useState<string>("");
   const [offset, setOffset] = useState<string>("earliest");
-  const [autoCommit, setAutoCommit] = useState<boolean>(true);
+  const [autoCommit, setAutoCommit] = useState<boolean>(false);
   const [lang, setLang] = useState<'python'|'rust'>('python');
 
   // Load kafka credentials on mount
@@ -182,7 +238,7 @@ export default function BabamulDocs() {
         const creds = await fetchKafkaCredentials();
         setKafkaCredentials(creds);
         if (creds.length > 0) {
-          setSelectedCredentialId(creds[0].client_id);
+          setSelectedCredentialId(creds[0].kafka_username);
         }
       } catch (err) {
         console.error('Failed to load kafka credentials:', err);
@@ -194,9 +250,9 @@ export default function BabamulDocs() {
   }, []);
 
   // Get selected credential details for code generation
-  const selectedCredential = kafkaCredentials.find(c => c.client_id === selectedCredentialId);
-  const clientIdForGeneration = selectedCredential?.client_id || "<CLIENT_ID>";
-  const clientSecretForGeneration = selectedCredential?.client_secret || "<CLIENT_SECRET>";
+  const selectedCredential = kafkaCredentials.find(c => c.kafka_username === selectedCredentialId);
+  const clientIdForGeneration = selectedCredential?.kafka_username || "<KAFKA_USERNAME>";
+  const clientSecretForGeneration = selectedCredential?.kafka_password || "<KAFKA_PASSWORD>";
 
   function toggleCollapsed(key: string) {
     setCollapsed(prev => {
@@ -335,7 +391,7 @@ export default function BabamulDocs() {
             <p className="text-sm text-muted-foreground">Use your Kafka credentials from your profile page for SCRAM authentication. Client ID is the username and client secret is the password.</p>
           </div>
           <div className="flex items-center gap-3">
-            <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-primary text-white font-medium select-none">{step+1}/3</div>
+            <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-primary text-white dark:text-black font-medium select-none">{step+1}/3</div>
           </div>
         </div>
 
@@ -390,7 +446,7 @@ export default function BabamulDocs() {
                         </SelectTrigger>
                         <SelectContent>
                           {kafkaCredentials.map(cred => (
-                            <SelectItem key={cred.client_id} value={cred.client_id}>
+                            <SelectItem key={cred.kafka_username} value={cred.kafka_username}>
                               {cred.name}
                             </SelectItem>
                           ))}
@@ -422,6 +478,9 @@ export default function BabamulDocs() {
                   <label className="text-sm font-medium">Enable auto commit</label>
                   <input type="checkbox" checked={autoCommit} onChange={e => setAutoCommit(e.target.checked)} />
                 </div>
+                <p className="text-sm text-muted-foreground -mt-1">
+                  Default is off to avoid unexpected offset commits. Turn it on if you're okay with Kafka committing reads automatically; leave it off if you prefer to manage commits yourself (you'll reread messages on restart unless you commit manually! Useful while testing for example, so you can re-read the same messages on restart).
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -465,16 +524,62 @@ export default function BabamulDocs() {
               <div className="mt-6">
                 <h4 className="font-semibold">Setup</h4>
                 {lang === 'python' ? (
-                  <div className="mt-2">
-                    <p className="text-sm">Create a virtualenv and install the dependency:</p>
-                    <pre className="p-2 rounded bg-muted text-sm">python -m venv .venv
-source .venv/bin/activate
-pip install confluent-kafka</pre>
+                  <div className="mt-2 space-y-3">
+                    <p className="text-sm">Pick one method. <span className="font-medium">uv</span> is fastest, <span className="font-medium">conda</span> fits Anaconda users, and <span className="font-medium">pip + venv</span> works everywhere.</p>
+                    <Tabs defaultValue="uv">
+                      <TabsList className="w-full sm:w-auto">
+                        <TabsTrigger value="uv">uv</TabsTrigger>
+                        <TabsTrigger value="conda">conda</TabsTrigger>
+                        <TabsTrigger value="pip">pip + venv</TabsTrigger>
+                      </TabsList>
+
+                      <TabsContent value="uv" className="space-y-2">
+                        <p className="text-sm text-muted-foreground">Fast as lightning, we can't recommend it enough. See installation steps here: <a href="https://uvlang.org/getting-started/" target="_blank" rel="noreferrer" className="underline hover:text-foreground">uvlang.org/getting-started/</a></p>
+                        <ol className="list-decimal pl-5 text-sm space-y-3 marker:font-medium marker:text-muted-foreground">
+                          <li>
+                            <div>Create and activate an isolated env:</div>
+                            <CopyablePre code={`uv venv\nsource .venv/bin/activate`} label="Copy uv venv commands" />
+                          </li>
+                          <li>
+                            <div>Install the Kafka dependencies:</div>
+                            <CopyablePre code={`uv pip install confluent-kafka fastavro cramjam`} label="Copy uv install command" />
+                          </li>
+                        </ol>
+                      </TabsContent>
+
+                      <TabsContent value="conda" className="space-y-2">
+                        <p className="text-sm text-muted-foreground">Use this if you already manage Python with Anaconda/Miniconda.</p>
+                        <ol className="list-decimal pl-5 text-sm space-y-3 marker:font-medium marker:text-muted-foreground">
+                          <li>
+                            <div>Create and activate an env (adjust the Python version if needed):</div>
+                            <CopyablePre code={`conda create -n boom-kafka python=3.11 -y\nconda activate boom-kafka`} label="Copy conda env commands" />
+                          </li>
+                          <li>
+                            <div>Install the Kafka dependencies with pip inside the env:</div>
+                            <CopyablePre code={`pip install confluent-kafka fastavro cramjam`} label="Copy conda pip install command" />
+                          </li>
+                        </ol>
+                      </TabsContent>
+
+                      <TabsContent value="pip" className="space-y-2">
+                        <p className="text-sm text-muted-foreground">Works anywhere Python 3 is available.</p>
+                        <ol className="list-decimal pl-5 text-sm space-y-3 marker:font-medium marker:text-muted-foreground">
+                          <li>
+                            <div>Create and activate a virtual environment:</div>
+                            <CopyablePre code={`python -m venv .venv\nsource .venv/bin/activate`} label="Copy venv commands" />
+                          </li>
+                          <li>
+                            <div>Upgrade pip and install the dependencies:</div>
+                            <CopyablePre code={`python -m pip install --upgrade pip\npip install confluent-kafka fastavro cramjam`} label="Copy pip install commands" />
+                          </li>
+                        </ol>
+                      </TabsContent>
+                    </Tabs>
                   </div>
                 ) : (
                   <div className="mt-2">
                     <p className="text-sm">Add the Kafka client dependency to your project:</p>
-                    <pre className="p-2 rounded bg-muted text-sm">cargo add rdkafka --features="gssapi sasl ssl tracing"</pre>
+                    <CopyablePre code={`cargo add rdkafka --features="gssapi sasl ssl tracing"`} label="Copy cargo add command" />
                   </div>
                 )}
               </div>
