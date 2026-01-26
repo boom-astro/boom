@@ -34,6 +34,7 @@ fn get_lsst_prefix_regex() -> &'static Regex {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstMatch {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -50,11 +51,15 @@ struct ZtfSurveyMatches {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfObj {
     candid: i64,
+    #[serde(rename = "objectId")]
     object_id: String,
     candidate: ZtfCandidate,
     properties: Option<ZtfAlertProperties>,
+    #[serde(rename = "cutoutScience")]
     cutout_science: serde_json::Value,
+    #[serde(rename = "cutoutTemplate")]
     cutout_template: serde_json::Value,
+    #[serde(rename = "cutoutDifference")]
     cutout_difference: serde_json::Value,
     prv_candidates: Vec<ZtfPrvCandidate>,
     prv_nondetections: Vec<ZtfPrvCandidate>,
@@ -67,6 +72,7 @@ struct ZtfObj {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfMatch {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -84,11 +90,15 @@ struct LsstSurveyMatches {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct LsstObj {
     candid: i64,
+    #[serde(rename = "objectId")]
     object_id: String,
     candidate: LsstCandidate,
     properties: Option<LsstAlertProperties>,
+    #[serde(rename = "cutoutScience")]
     cutout_science: serde_json::Value,
+    #[serde(rename = "cutoutTemplate")]
     cutout_template: serde_json::Value,
+    #[serde(rename = "cutoutDifference")]
     cutout_difference: serde_json::Value,
     prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
@@ -305,10 +315,7 @@ pub async fn get_object(
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
                 survey_matches,
             };
-            return response::ok(
-                &format!("object found with object_id: {}", object_id),
-                serde_json::json!(obj),
-            );
+            return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
         Survey::Lsst => {
             let alerts_collection: Collection<EnrichedLsstAlert> =
@@ -449,10 +456,7 @@ pub async fn get_object(
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
                 survey_matches,
             };
-            return response::ok(
-                &format!("object found with object_id: {}", object_id),
-                serde_json::json!(obj),
-            );
+            return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
         _ => {
             return response::bad_request(
@@ -541,6 +545,7 @@ fn default_limit() -> u32 {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct SearchObjectResult {
+    #[serde(rename = "objectId")]
     object_id: String,
     ra: f64,
     dec: f64,
@@ -632,10 +637,7 @@ pub async fn get_objects(
                     }
                 }
             }
-            response::ok(
-                &format!("Found {} objects", results.len()),
-                serde_json::json!(results),
-            )
+            response::ok_ser(&format!("Found {} objects", results.len()), results)
         }
         Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
     }
