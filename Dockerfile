@@ -68,7 +68,11 @@ ENV PATH="/opt/kafka/bin:${PATH}"
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
+COPY --from=builder /app/target/release/tarball_consumer /app/tarball_consumer
 COPY --from=builder /app/target/release/api /app/boom-api
+COPY --from=builder /app/target/release/kowalski_import_objs /app/kowalski_import_objs
+COPY --from=builder /app/target/release/kowalski_import_alerts /app/kowalski_import_alerts
+COPY --from=builder /app/target/release/cutout_transfer /app/cutout_transfer
 
 # Set the entrypoint, though this will be overridden
 CMD ["/app/scheduler"]
