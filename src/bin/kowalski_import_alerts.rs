@@ -291,21 +291,62 @@ async fn get_all_boom_obj_ids(boom_collection_idonly: &Collection<ZtfObjectIdOnl
     count
 }
 
+// async fn get_all_boom_existing_obj_ids(
+//     boom_alert_collection: &Collection<ZtfAlert>,
+// ) -> Vec<String> {
+//     let obj_ids: Vec<Bson> = boom_alert_collection
+//         .distinct("objectId", doc! {})
+//         .await
+//         .unwrap();
+//     let mut obj_ids: Vec<String> = obj_ids
+//         .into_iter()
+//         .filter_map(|bson| match bson {
+//             Bson::String(s) => Some(s),
+//             _ => None,
+//         })
+//         .collect();
+//     obj_ids.sort_unstable();
+//     obj_ids
+// }
 async fn get_all_boom_existing_obj_ids(
     boom_alert_collection: &Collection<ZtfAlert>,
 ) -> Vec<String> {
-    let obj_ids: Vec<Bson> = boom_alert_collection
-        .distinct("objectId", doc! {})
-        .await
-        .unwrap();
-    let mut obj_ids: Vec<String> = obj_ids
-        .into_iter()
-        .filter_map(|bson| match bson {
-            Bson::String(s) => Some(s),
-            _ => None,
-        })
-        .collect();
+    // Use aggregation pipeline to get unique objectIds
+    // This avoids the 16MB limit of distinct and streams results
+    let pipeline = vec![
+        // Group by objectId to get unique values (no other fields needed)
+        doc! {
+            "$group": {
+                "_id": "$objectId"
+            }
+        },
+        // Sort to make the output deterministic and allow for efficient set operations later
+        doc! {
+            "$sort": {
+                "_id": 1
+            }
+        },
+    ];
+
+    let mut cursor = boom_alert_collection.aggregate(pipeline).await.unwrap();
+
+    let mut obj_ids = Vec::new();
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(doc) => {
+                if let Some(Bson::String(obj_id)) = doc.get("_id") {
+                    obj_ids.push(obj_id.clone());
+                }
+            }
+            Err(e) => {
+                error!("Error reading cursor: {}", e);
+            }
+        }
+    }
+
+    // Sort the object IDs
     obj_ids.sort_unstable();
+
     obj_ids
 }
 
@@ -452,10 +493,12 @@ async fn worker(
             total_processed += obj_ids.len();
             obj_ids.clear();
 
-            // Queue for enrichment
-            con.lpush::<&str, Vec<i64>, usize>(&output_queue_name, candids)
-                .await
-                .expect("Failed to push to Redis queue");
+            if candids.len() > 0 {
+                // Queue for enrichment
+                con.lpush::<&str, Vec<i64>, usize>(&output_queue_name, candids)
+                    .await
+                    .expect("Failed to push to Redis queue");
+            }
         }
     }
 
@@ -464,6 +507,8 @@ async fn worker(
             get_latest_kowalski_alerts_bulk(&obj_ids, &kowalski_alert_collection).await;
 
         let (boom_alerts, boom_cutouts) = make_boom_alerts_from_kowalski(kowalski_alerts);
+
+        let candids: Vec<i64> = boom_alerts.iter().map(|a| a.candid).collect();
 
         if !boom_cutouts.is_empty() {
             match boom_cutout_collection
@@ -515,6 +560,13 @@ async fn worker(
 
         total_processed += obj_ids.len();
         obj_ids.clear();
+
+        if candids.len() > 0 {
+            // Queue for enrichment
+            con.lpush::<&str, Vec<i64>, usize>(&output_queue_name, candids)
+                .await
+                .expect("Failed to push to Redis queue");
+        }
     }
 
     Ok(total_processed)
