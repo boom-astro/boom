@@ -10,8 +10,10 @@ END="\e[0m"
 
 display_consumers_and_schedulers() {
   if [ "$1" == "api" ]; then
-    if pgrep -f "/app/boom-api" > /dev/null; then
-      echo "                      /app/boom-api"
+    pid=$(pgrep -f "/app/boom-api")
+    if [ -n "$pid" ]; then
+      listen=$(ss -tlnp 2>/dev/null | grep "pid=$pid" | awk '{print $4}' | head -1)
+      echo "                      API running on ${listen:-?}"
     else
       echo -e "${RED}                      no API${END}"
     fi
