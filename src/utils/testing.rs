@@ -1,7 +1,7 @@
 use crate::{
     alert::{
         AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_URL,
+        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -127,18 +127,24 @@ pub async fn insert_custom_test_filter(
     pipeline_str: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let filter_id = uuid::Uuid::new_v4().to_string();
+    let filter_name = format!("test_filter_{}", &filter_id[..8]);
 
     let now = flare::Time::now().to_jd();
+    let mut permissions = std::collections::HashMap::new();
+    permissions.insert(survey.clone(), vec![1]);
     let filter_obj = Filter {
         id: filter_id.clone(),
+        name: filter_name,
+        description: Some("Test filter".to_string()),
         survey: survey.clone(),
         user_id: "test_user".to_string(),
-        permissions: vec![1],
+        permissions,
         active: true,
         active_fid: "v2e0fs".to_string(),
         fv: vec![FilterVersion {
             fid: "v2e0fs".to_string(),
             pipeline: pipeline_str.to_string(),
+            changelog: None,
             created_at: now,
         }],
         created_at: now,
@@ -204,7 +210,11 @@ pub struct AlertRandomizer {
 impl AlertRandomizer {
     pub fn new(survey: Survey) -> Self {
         let schema_registry = match survey {
-            Survey::Lsst => Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+            Survey::Lsst => Some(SchemaRegistry::new(
+                Survey::Lsst,
+                LSST_SCHEMA_REGISTRY_URL,
+                Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
+            )),
             _ => None,
         };
         Self {
@@ -244,7 +254,11 @@ impl AlertRandomizer {
                     Some(Self::randomize_object_id(&survey)),
                     Some(payload),
                     None,
-                    Some(SchemaRegistry::new(LSST_SCHEMA_REGISTRY_URL)),
+                    Some(SchemaRegistry::new(
+                        Survey::Lsst,
+                        LSST_SCHEMA_REGISTRY_URL,
+                        Some(LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL.to_string()),
+                    )),
                 )
             }
         };
@@ -488,10 +502,9 @@ impl AlertRandomizer {
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
                 let mut dec = self.dec;
-                let payload = match self.payload {
-                    Some(payload) => payload,
-                    None => fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap(),
-                };
+                let payload = self.payload.unwrap_or_else(|| {
+                    fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap()
+                });
                 let header = payload[0..5].to_vec();
                 let magic = header[0];
                 if magic != 0_u8 {

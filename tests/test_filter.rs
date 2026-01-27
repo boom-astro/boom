@@ -27,7 +27,7 @@ async fn test_build_filter() {
                 "aux": mongodb::bson::Bson::Null,
                 "prv_candidates": {
                     "$filter": {
-                        "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -44,7 +44,9 @@ async fn test_build_filter() {
         doc! { "$project": { "objectId": 1_i64, "annotations.mag_now": { "$round": ["$candidate.magpsf", 2_i64]} } },
     ];
     assert_eq!(pipeline, filter.pipeline);
-    assert_eq!(vec![1], filter.permissions);
+    let mut expected_permissions = std::collections::HashMap::new();
+    expected_permissions.insert(Survey::Ztf, vec![1]);
+    assert_eq!(expected_permissions, filter.permissions);
 }
 
 #[tokio::test]
@@ -97,7 +99,7 @@ async fn test_build_multisurvey_filter() {
                 "aux": mongodb::bson::Bson::Null,
                 "prv_candidates": {
                     "$filter": {
-                        "input": { "$arrayElemAt": ["$aux.prv_candidates", 0] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -109,7 +111,7 @@ async fn test_build_multisurvey_filter() {
                     }
                 },
                 "aliases": {
-                    "$arrayElemAt": ["$aux.aliases", 0]
+                    "$ifNull": [ {"$arrayElemAt": ["$aux.aliases", 0] }, doc!{}]
                 }
             }
         },
@@ -119,7 +121,7 @@ async fn test_build_multisurvey_filter() {
                 "lsst_aux": mongodb::bson::Bson::Null,
                 "LSST.prv_candidates": {
                     "$filter": {
-                        "input": { "$arrayElemAt": ["$lsst_aux.prv_candidates", 0] },
+                        "input": { "$ifNull": [ {"$arrayElemAt": ["$lsst_aux.prv_candidates", 0] }, [] ] },
                         "as": "x",
                         "cond": {
                             "$and": [
@@ -140,7 +142,9 @@ async fn test_build_multisurvey_filter() {
         } } },
     ];
     assert_eq!(pipeline, filter.pipeline);
-    assert_eq!(vec![1], filter.permissions);
+    let mut expected_permissions = std::collections::HashMap::new();
+    expected_permissions.insert(Survey::Ztf, vec![1]);
+    assert_eq!(expected_permissions, filter.permissions);
 }
 
 #[tokio::test]

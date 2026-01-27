@@ -146,7 +146,7 @@ async fn test_enrich_lsst_alert() {
 
     let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
     // the result should be a vec of String, for ZTF with the format
     // "programid,candid" which is what the filter worker expects
@@ -171,6 +171,7 @@ async fn test_enrich_lsst_alert() {
     let properties = alert.get_document("properties").unwrap();
     assert_eq!(properties.get_bool("rock").unwrap(), false);
     assert_eq!(properties.get_bool("stationary").unwrap(), false);
+    assert_eq!(properties.get_bool("star").is_ok(), true);
     // the properties also include "photstats, a document with bands as keys and
     // as values the rate of evolution (mag/day) before and after peak
     let photstats = properties.get_document("photstats").unwrap();
@@ -180,7 +181,7 @@ async fn test_enrich_lsst_alert() {
     let peak_mag = r_stats.get_f64("peak_mag").unwrap();
     let peak_jd = r_stats.get_f64("peak_jd").unwrap();
     assert!((peak_mag - 23.674994).abs() < 1e-6);
-    assert!((peak_jd - 2460961.733092).abs() < 1e-6);
+    assert!((peak_jd - 2460961.732664).abs() < 1e-6);
 }
 
 #[tokio::test]
@@ -221,6 +222,5 @@ async fn test_filter_lsst_alert() {
 
     // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();
-    let encoded = alert_to_avro_bytes(&alert, &schema);
-    assert!(encoded.is_ok())
+    let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 }

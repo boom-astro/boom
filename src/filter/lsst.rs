@@ -10,7 +10,7 @@ use crate::filter::{
     Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
     Origin, Photometry,
 };
-use crate::utils::db::{fetch_timeseries_op, get_array_element};
+use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
 use crate::utils::enums::Survey;
 
 /// For a filter running on another survey (e.g., ZTF), determine if we need to
@@ -112,7 +112,7 @@ pub fn insert_lsst_aux_pipeline_if_needed(
 #[instrument(skip_all, err)]
 pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
-    alert_collection: &mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     let pipeline = vec![
@@ -288,6 +288,7 @@ pub async fn build_lsst_alerts(
 /// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
 pub async fn build_lsst_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<Vec<Document>, FilterError> {
     // validate filter
     validate_filter_pipeline(&filter_pipeline)?;
@@ -299,7 +300,7 @@ pub async fn build_lsst_filter_pipeline(
 
     // ZTF data products
     let (use_aliases_index, mut ztf_insert_aux_pipeline, ztf_aux_add_fields) =
-        build_ztf_aux_data(use_aliases_index, filter_pipeline);
+        build_ztf_aux_data(use_aliases_index, filter_pipeline, permissions);
 
     let mut aux_add_fields = doc! {
         "aux": mongodb::bson::Bson::Null,
@@ -321,11 +322,11 @@ pub async fn build_lsst_filter_pipeline(
     if use_cross_matches_index.is_some() {
         aux_add_fields.insert(
             "cross_matches".to_string(),
-            get_array_element("aux.cross_matches"),
+            get_array_dict_element("aux.cross_matches"),
         );
     }
     if use_aliases_index.is_some() {
-        aux_add_fields.insert("aliases".to_string(), get_array_element("aux.aliases"));
+        aux_add_fields.insert("aliases".to_string(), get_array_dict_element("aux.aliases"));
     }
 
     let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
@@ -354,7 +355,6 @@ pub async fn build_lsst_filter_pipeline(
         ));
     }
 
-    // filter prefix (with permissions)
     let mut pipeline = vec![
         doc! {
             "$match": doc! {
@@ -406,7 +406,7 @@ pub async fn build_lsst_filter_pipeline(
 }
 
 pub struct LsstFilterWorker {
-    alert_collection: mongodb::Collection<mongodb::bson::Document>,
+    alert_collection: mongodb::Collection<Document>,
     input_queue: String,
     output_topic: String,
     filters: Vec<LoadedFilter>,
@@ -495,6 +495,7 @@ impl FilterWorker for LsstFilterWorker {
                     serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
                 let filter_result = FilterResults {
                     filter_id: filter.id.clone(),
+                    filter_name: filter.name.clone(),
                     passed_at: now_ts,
                     annotations,
                 };

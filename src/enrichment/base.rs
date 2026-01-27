@@ -19,7 +19,7 @@ use opentelemetry::{
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, error, instrument};
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -78,6 +78,10 @@ pub enum EnrichmentWorkerError {
     Serialization(String),
     #[error("kafka error: {0}")]
     Kafka(String),
+    #[error("configuration error: {0}")]
+    ConfigurationError(String),
+    #[error("Bad processing status code: {0}")]
+    BadProcstatus(String),
 }
 
 #[async_trait::async_trait]
@@ -250,6 +254,13 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             })?;
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
+        if processed_alerts.is_empty() {
+            let attributes = &ok_attrs;
+            ACTIVE.add(-1, &active_attrs);
+            BATCH_PROCESSED.add(1, attributes);
+            ALERT_PROCESSED.add(candids.len() as u64, attributes);
+            continue;
+        }
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await
             .inspect_err(|_| {

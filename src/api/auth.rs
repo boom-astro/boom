@@ -1,3 +1,4 @@
+use crate::api::routes::babamul::BabamulUser;
 use crate::api::routes::users::User;
 use crate::conf::AppConfig;
 use actix_web::body::MessageBody;
@@ -95,9 +96,10 @@ impl AuthProvider {
             .find_one(doc! {"_id": &user_id})
             .await
             .map_err(|e| {
-                eprintln!(
+                tracing::error!(
                     "Database query failed when looking for user id {}: {}",
-                    user_id, e
+                    user_id,
+                    e
                 );
                 std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -167,10 +169,16 @@ pub async fn get_test_auth(db: &Database) -> Result<AuthProvider, std::io::Error
     AuthProvider::new(&app_config, &db).await
 }
 
+pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/"];
+
 pub async fn auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    // Allow public routes without authentication
+    if PUBLIC_ROUTES.contains(&req.path()) {
+        return next.call(req).await;
+    }
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -193,6 +201,115 @@ pub async fn auth_middleware(
                 Ok(user) => {
                     // inject the user in the request
                     req.extensions_mut().insert(user);
+                }
+                Err(_) => {
+                    return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+                }
+            }
+        }
+        _ => {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Missing or invalid Authorization header",
+            ));
+        }
+    }
+    next.call(req).await
+}
+
+const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
+    "/babamul/signup",
+    "/babamul/activate",
+    "/babamul/auth",
+    "/babamul/surveys/lsst/schemas",
+    "/babamul/surveys/ztf/schemas",
+    "/babamul/docs",
+];
+
+/// Middleware for authenticating Babamul users
+///
+/// This middleware validates JWT tokens with "babamul:" prefix in the subject claim.
+/// It fetches the BabamulUser from the database and injects it into the request.
+pub async fn babamul_auth_middleware(
+    req: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    // Allow public routes without authentication
+    if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) {
+        return next.call(req).await;
+    }
+
+    let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
+        Some(data) => data,
+        None => {
+            return Err(actix_web::error::ErrorInternalServerError(
+                "Unable to authenticate user",
+            ));
+        }
+    };
+
+    let db_app_data: &web::Data<mongodb::Database> = match req.app_data() {
+        Some(data) => data,
+        None => {
+            return Err(actix_web::error::ErrorInternalServerError(
+                "Database connection not available",
+            ));
+        }
+    };
+
+    match req.headers().get("Authorization") {
+        Some(auth_header) => {
+            let token = match auth_header.to_str() {
+                Ok(token) if token.starts_with("Bearer ") => token[7..].trim(),
+                _ => {
+                    return Err(actix_web::error::ErrorUnauthorized(
+                        "Invalid Authorization header in Babamul middleware",
+                    ));
+                }
+            };
+
+            // Validate the token and extract user_id
+            match auth_app_data.validate_token(token).await {
+                Ok(user_id) => {
+                    // Check if this is a babamul user
+                    if !user_id.starts_with("babamul:") {
+                        return Err(actix_web::error::ErrorForbidden(
+                            "Main API users cannot access Babamul endpoints",
+                        ));
+                    }
+
+                    // Extract the actual user ID (remove "babamul:" prefix)
+                    let actual_user_id = user_id.trim_start_matches("babamul:");
+
+                    // Fetch the babamul user from the database
+                    let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                        db_app_data.collection("babamul_users");
+
+                    match babamul_users_collection
+                        .find_one(doc! { "_id": actual_user_id })
+                        .await
+                    {
+                        Ok(Some(user)) => {
+                            // Check if user is activated
+                            if !user.is_activated {
+                                return Err(actix_web::error::ErrorForbidden(
+                                    "Account not activated. Please check your email for activation instructions.",
+                                ));
+                            }
+                            // Inject the user in the request
+                            req.extensions_mut().insert(user);
+                        }
+                        Ok(None) => {
+                            return Err(actix_web::error::ErrorUnauthorized(
+                                "Babamul user not found",
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::error!("Database error fetching babamul user: {}", e);
+                            return Err(actix_web::error::ErrorInternalServerError(
+                                "Database error",
+                            ));
+                        }
+                    }
                 }
                 Err(_) => {
                     return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
