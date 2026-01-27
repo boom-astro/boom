@@ -107,7 +107,7 @@ async fn get_boom_collections(
         boom_client.database(boom_db_name).collection("ZTF_alerts");
     let boom_cutout_collection: Collection<AlertCutout> = boom_client
         .database(boom_db_name)
-        .collection("ZTF_alert_cutouts");
+        .collection("ZTF_alerts_cutouts");
     (
         boom_collection_idonly,
         boom_alert_collection,
