@@ -15,7 +15,7 @@ display_consumers_and_schedulers() {
     else
       echo -e "${RED}                      no API${END}"
     fi
-    exit 0
+    return
   fi
 
   local survey="$1"
