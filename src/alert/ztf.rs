@@ -531,7 +531,7 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
     }
 }
 
-fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
+pub fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -569,7 +569,7 @@ pub struct ZtfRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+pub fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
