@@ -4,10 +4,17 @@ RED="\e[31m"
 GREEN="\e[0;32m"
 END="\e[0m"
 
+# -----------------------------
+# Load environment variables from .env file
+# -----------------------------
+set -a
+source .env
+set +a
+
 exec_db_cmd_in_mongo() {
   local cmd="$1"
   apptainer exec instance://mongo \
-    mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
+    mongosh "mongodb://$BOOM_DATABASE__USERNAME:$BOOM_DATABASE__PASSWORD@localhost:27017/boom?authSource=admin" \
     --eval "$cmd"
 }
 

@@ -14,6 +14,18 @@ GREEN="\e[32m"
 YELLOW="\e[33m"
 END="\e[0m"
 
+load_env() {
+  # Load environment variables from .env file
+  if [ -f "$BOOM_DIR/.env" ]; then
+    set -a
+    source "$BOOM_DIR/.env"
+    set +a
+  else
+    echo -e "${RED}Error: .env file not found in $BOOM_DIR.${END}"
+    exit 1
+  fi
+}
+
 kill_process() {
   local process="$1"
   local name="$2"
@@ -77,11 +89,11 @@ fi
 if [ "$1" == "stop" ]; then
   target="$2"
   if [ -n "$target" ] && [ "$target" != "all" ] && [[ "$target" != boom* ]] && [ "$target" != "consumer" ] && [ "$target" != "scheduler" ] \
-    && [ "$target" != "mongo" ] && [ "$target" != "kafka" ] && [ "$target" != "valkey" ] && [ "$target" != "prometheus" ] \
-    && [ "$target" != "otel" ] && [ "$target" != "listener" ] && [ "$target" != "kuma" ]; then
+    && [ "$target" != "api" ] && [ "$target" != "mongo" ] && [ "$target" != "kafka" ] && [ "$target" != "valkey" ] \
+    && [ "$target" != "prometheus" ] && [ "$target" != "otel" ] && [ "$target" != "listener" ] && [ "$target" != "kuma" ]; then
     echo -e "${RED}Error: Invalid service name '$target'.${END}"
     echo -e "Usage: ${BLUE}$0 stop [service|all|'empty']${END} ${YELLOW}('empty' will default to all)${END}"
-    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom_<survey> | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma ${END}"
+    echo -e "  ${BLUE}[service]:${END} ${GREEN}boom_<survey> | consumer | scheduler | api | mongo | kafka | valkey | prometheus | otel | listener | kuma ${END}"
     exit 1
   fi
 
@@ -96,6 +108,9 @@ if [ "$1" == "stop" ]; then
   fi
   if stop_service "prometheus" "$target"; then
     apptainer instance stop prometheus
+  fi
+  if stop_service "api" "$target"; then
+    apptainer instance stop "boom_api"
   fi
   if stop_service "boom" "$target"; then
     if [ "$target" = "boom" ] && [ -n "$3" ]; then
@@ -173,10 +188,11 @@ fi
 # 7. Backup MongoDB
 # -----------------------------
 if [ "$1" == "backup" ]; then
+  load_env # Load environment variables
   path_to_folder=${2:-/tmp/mongo_backups} # Folder to save the backup to
   mkdir -p "$path_to_folder"
   apptainer exec instance://mongo mongodump \
-  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
+  --uri="mongodb://$BOOM_DATABASE__USERNAME:$BOOM_DATABASE__PASSWORD@localhost:27017/boom?authSource=admin" \
   --archive="$path_to_folder/mongo_$(date +%Y-%m-%d).gz" \
   --gzip
   exit 0
@@ -186,6 +202,7 @@ fi
 # 8. Restore MongoDB
 # -----------------------------
 if [ "$1" == "restore" ]; then
+  load_env # Load environment variables
   path_to_file="$2" # Path to the backup file
   if [ -z "$path_to_file" ]; then
     echo -e "${RED}Error: Missing path to the backup file.${END}"
@@ -193,7 +210,7 @@ if [ "$1" == "restore" ]; then
     exit 1
   fi
   apptainer exec instance://mongo mongorestore \
-  --uri="mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
+  --uri="mongodb://$BOOM_DATABASE__USERNAME:$BOOM_DATABASE__PASSWORD@localhost:27017/boom?authSource=admin" \
   --archive="$path_to_file" \
   --gzip \
   --drop

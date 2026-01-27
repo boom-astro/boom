@@ -9,6 +9,15 @@ RED="\e[31m"
 END="\e[0m"
 
 display_consumers_and_schedulers() {
+  if [ "$1" == "api" ]; then
+    if pgrep -f "/app/boom-api" > /dev/null; then
+      echo "                      /app/boom-api"
+    else
+      echo -e "${RED}                      no API${END}"
+    fi
+    exit 0
+  fi
+
   local survey="$1"
   consumers=$(pgrep -f "/app/kafka_consumer ${survey}")
   if [ -n "$consumers" ]; then

@@ -51,7 +51,7 @@ get_count_file(){
 get_mongo_count(){
   local collection=$1
   apptainer exec instance://mongo \
-    mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017/boom?authSource=admin" \
+    mongosh "mongodb://$BOOM_DATABASE__USERNAME:$BOOM_DATABASE__PASSWORD@localhost:27017/boom?authSource=admin" \
     --quiet \
     --eval "db.$collection.estimatedDocumentCount()"
 }

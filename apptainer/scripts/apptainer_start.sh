@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
-# Script to start BOOM services using Apptainer containers. Arguments:
+# Script to start Boom services using Apptainer containers. Arguments:
 # $1 = boom directory
 # $2 = service to start:
 #      - all         : starts all services
 #      - boom        : starts both consumer and scheduler
+#      - api         : starts the Boom API service
 #      - consumer    : starts the consumer process
 #      - scheduler   : starts the scheduler process
 #      - mongo       : starts the MongoDB instance
@@ -51,11 +52,11 @@ start_service() {
     return 1
 }
 
-if [ "$2" != "all" ] && [ "$2" != "boom" ] && [ "$2" != "consumer" ] && [ "$2" != "scheduler" ] \
+if [ "$2" != "all" ] && [ "$2" != "boom" ] && [ "$2" != "consumer" ] && [ "$2" != "scheduler" ] && [ "$2" != "api" ] \
   && [ "$2" != "mongo" ] && [ "$2" != "kafka" ] && [ "$2" != "valkey" ] && [ "$2" != "prometheus" ] \
   && [ "$2" != "otel" ] && [ "$2" != "listener" ] && [ "$2" != "kuma" ]; then
   echo -e "${RED}Error: Invalid service name '$2'.${END}"
-  echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
+  echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | api | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
   exit 1
 fi
 
@@ -67,7 +68,7 @@ source .env
 set +a
 
 # -----------------------------
-# 1. MongoDB
+# MongoDB
 # -----------------------------
 if start_service "mongo" "$2"; then
   if "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" 0 > /dev/null 2>&1; then
@@ -86,7 +87,7 @@ if start_service "mongo" "$2"; then
 fi
 
 # -----------------------------
-# 2. Valkey
+# Valkey
 # -----------------------------
 if start_service "valkey" "$2"; then
   if "$HEALTHCHECK_DIR/valkey-healthcheck.sh" 0 > /dev/null 2>&1; then
@@ -104,7 +105,7 @@ if start_service "valkey" "$2"; then
 fi
 
 # -----------------------------
-# 3. Kafka
+# Kafka
 # -----------------------------
 if start_service "kafka" "$2"; then
   if "$HEALTHCHECK_DIR/kafka-healthcheck.sh" 0 > /dev/null 2>&1; then
@@ -128,7 +129,7 @@ if start_service "kafka" "$2"; then
 fi
 
 # -----------------------------
-# 5. Prometheus
+# Prometheus
 # -----------------------------
 if start_service "prometheus" "$2"; then
   if "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" 0 > /dev/null 2>&1; then
@@ -148,7 +149,7 @@ if start_service "prometheus" "$2"; then
 fi
 
 # -----------------------------
-# 6. OpenTelemetry Collector
+# OpenTelemetry Collector
 # -----------------------------
 if start_service "otel" "$2"; then
   if "$HEALTHCHECK_DIR/process-healthcheck.sh" "otelcol" otel-collector > /dev/null 2>&1; then
@@ -167,7 +168,7 @@ if start_service "otel" "$2"; then
 fi
 
 # -----------------------------
-# 7. Healthcheck listener
+# Healthcheck listener
 # -----------------------------
 if start_service "listener" "$2"; then
   if "$HEALTHCHECK_DIR/boom-listener-healthcheck.sh" 0 > /dev/null 2>&1; then
@@ -181,7 +182,7 @@ if start_service "listener" "$2"; then
 fi
 
 # -----------------------------
-# 4. Boom
+# Boom
 # -----------------------------
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   survey=$3
@@ -195,7 +196,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
   else
     if apptainer instance list | awk '{print $1}' | grep -xq "boom${survey:+_$survey}"; then
-      echo && echo -e "${YELLOW}$(current_datetime) - BOOM is already running${END}"
+      echo && echo -e "${YELLOW}$(current_datetime) - Boom is already running${END}"
     else
       echo && echo "$(current_datetime) - Starting boom${survey:+_$survey} instance"
       apptainer instance start --env-file .env \
@@ -205,7 +206,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     fi
 
     # -----------------------------
-    # 4a. Boom Consumer
+    # Boom Consumer
     # -----------------------------
     if start_service "boom" "$2" || start_service "consumer" "$2"; then
       # If program ID is "all", consume for all programs
@@ -237,7 +238,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     fi
 
     # -----------------------------
-    # 4a. Boom Scheduler
+    # Boom Scheduler
     # -----------------------------
     if start_service "boom" "$2" || start_service "scheduler" "$2"; then
       ARGS=("$survey")
@@ -254,7 +255,30 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
 fi
 
 # -----------------------------
-# 8. Uptime Kuma
+# Api
+# -----------------------------
+if start_service "api" "$2"; then
+  if apptainer instance list | awk '{print $1}' | grep -xq "boom_api"; then
+    echo && echo -e "${YELLOW}$(current_datetime) - Boom_api instance is already running${END}"
+  else
+    echo && echo "$(current_datetime) - Starting Boom_api instance"
+    apptainer instance start --env-file .env \
+      --bind "$CONFIG_FILE:/app/config.yaml" \
+      "$SIF_DIR/boom.sif" "boom_api"
+    sleep 3
+  fi
+
+  if pgrep -f "/app/boom-api" > /dev/null; then
+    echo -e "${YELLOW}Boom API already running.${END}"
+  else
+    apptainer exec --pwd /app "instance://boom_api" /app/boom-api \
+      > "$LOGS_DIR/api.log" 2>&1 &
+    echo -e "${GREEN}Boom API started.${END}"
+  fi
+fi
+
+# -----------------------------
+# Uptime Kuma
 # -----------------------------
 if start_service "kuma" "$2"; then
   if "$HEALTHCHECK_DIR/kuma-healthcheck.sh" 0 > /dev/null 2>&1; then

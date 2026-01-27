@@ -2,4 +2,6 @@ Bootstrap: docker
 From: mongo:8.0
 
 %runscript
+    export MONGO_INITDB_ROOT_USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin}
+    export MONGO_INITDB_ROOT_PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set and non-empty}
     exec mongod --logpath /log/mongo.log
