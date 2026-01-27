@@ -453,8 +453,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alert).await?;
 
-            // // Now, prepare inputs for ML models and run inference
-
             // Now, prepare inputs for ML models and run inference
             // (we skip ML inference if features cannot be computed, e.g. missing required features)
             let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
