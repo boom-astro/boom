@@ -169,10 +169,16 @@ pub async fn get_test_auth(db: &Database) -> Result<AuthProvider, std::io::Error
     AuthProvider::new(&app_config, &db).await
 }
 
+pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/"];
+
 pub async fn auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    // Allow public routes without authentication
+    if PUBLIC_ROUTES.contains(&req.path()) {
+        return next.call(req).await;
+    }
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -210,6 +216,15 @@ pub async fn auth_middleware(
     next.call(req).await
 }
 
+const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
+    "/babamul/signup",
+    "/babamul/activate",
+    "/babamul/auth",
+    "/babamul/surveys/lsst/schemas",
+    "/babamul/surveys/ztf/schemas",
+    "/babamul/docs",
+];
+
 /// Middleware for authenticating Babamul users
 ///
 /// This middleware validates JWT tokens with "babamul:" prefix in the subject claim.
@@ -218,6 +233,11 @@ pub async fn babamul_auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    // Allow public routes without authentication
+    if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) {
+        return next.call(req).await;
+    }
+
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -242,7 +262,7 @@ pub async fn babamul_auth_middleware(
                 Ok(token) if token.starts_with("Bearer ") => token[7..].trim(),
                 _ => {
                     return Err(actix_web::error::ErrorUnauthorized(
-                        "Invalid Authorization header",
+                        "Invalid Authorization header in Babamul middleware",
                     ));
                 }
             };

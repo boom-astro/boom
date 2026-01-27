@@ -18,12 +18,13 @@ use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
 use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
 
 pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
+pub const IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC: f64 = 20.0;
+pub const IS_NEAR_BRIGHTSTAR_MAG_THRESH: f64 = 15.0;
 pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
 const MOC_DEPTH: u8 = 11;
@@ -87,15 +88,17 @@ pub struct LsstPhotometry {
 }
 
 impl LsstPhotometry {
-    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // If the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
         match (self.snr, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
-                time: self.jd,
-                mag,
-                mag_err: sig,
-                band: self.band.clone(),
-            }),
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag,
+                    mag_err: sig,
+                    band: self.band.clone(),
+                }),
+            },
             _ => None,
         }
     }
@@ -133,6 +136,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
         doc! {
             "$project": {
                 "objectId": 1,
+                "ssObjectId": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
@@ -142,7 +146,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
                                 "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
@@ -166,8 +170,10 @@ pub struct LsstSurveyMatches {
     pub ztf: Option<ZtfMatch>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct LsstMatch {
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,
@@ -194,12 +200,14 @@ pub struct LsstAlertForEnrichment {
 }
 
 /// LSST alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct LsstAlertProperties {
     pub rock: bool,
     pub stationary: bool,
     pub star: Option<bool>,
+    pub near_brightstar: Option<bool>,
     pub photstats: PerBandProperties,
+    pub multisurvey_photstats: PerBandProperties,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -306,7 +314,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             HashMap::new()
         };
 
-        if candid_to_cutouts.len() != alerts.len() {
+        if self.babamul.is_some() && candid_to_cutouts.len() != alerts.len() {
             warn!(
                 "only {} cutouts fetched from {} candids",
                 candid_to_cutouts.len(),
@@ -318,7 +326,10 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut enriched_alerts: Vec<EnrichedLsstAlert> = Vec::new();
+        let mut enriched_alerts: Vec<(
+            EnrichedLsstAlert,
+            std::collections::HashMap<String, Vec<serde_json::Value>>,
+        )> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
 
@@ -347,14 +358,15 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                 let cutouts = candid_to_cutouts
                     .remove(&candid)
                     .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-                let enriched_alert = EnrichedLsstAlert::from_alert_properties_and_cutouts(
-                    alert,
-                    Some(cutouts.cutout_science),
-                    Some(cutouts.cutout_template),
-                    Some(cutouts.cutout_difference),
-                    properties,
-                );
-                enriched_alerts.push(enriched_alert);
+                let (enriched_alert, cross_matches) =
+                    EnrichedLsstAlert::from_alert_properties_and_cutouts(
+                        alert,
+                        Some(cutouts.cutout_science),
+                        Some(cutouts.cutout_template),
+                        Some(cutouts.cutout_difference),
+                        properties,
+                    );
+                enriched_alerts.push((enriched_alert, cross_matches));
             }
         }
 
@@ -375,7 +387,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 }
 
 impl LsstEnrichmentWorker {
-    async fn get_alert_properties(
+    pub async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
@@ -384,6 +396,7 @@ impl LsstEnrichmentWorker {
 
         // Determine if this is a star based on LSPSC cross-matches
         let mut is_star = Some(false);
+        let mut is_near_brightstar = Some(false);
 
         let empty_vec = vec![];
         let lspsc_matches = alert
@@ -397,9 +410,11 @@ impl LsstEnrichmentWorker {
                 alert.candidate.dia_source.dec,
             ) {
                 is_star = None;
+                is_near_brightstar = None;
             }
         } else {
             // Check each LSPSC match for a nearby stellar-like object
+            // and for bright stars within a larger radius
             for m in lspsc_matches {
                 let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
                     Some(d) => d,
@@ -411,6 +426,20 @@ impl LsstEnrichmentWorker {
                 };
                 if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
                     is_star = Some(true);
+                }
+                let mag_white = match m.get("mag_white").and_then(|v| v.as_f64()) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                if distance <= IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC
+                    && score > IS_HOSTED_SCORE_THRESH
+                    && mag_white <= IS_NEAR_BRIGHTSTAR_MAG_THRESH
+                {
+                    is_near_brightstar = Some(true);
+                }
+
+                // if the 2 properties we are evaluating are true, we can stop checking
+                if is_star == Some(true) && is_near_brightstar == Some(true) {
                     break;
                 }
             }
@@ -419,12 +448,14 @@ impl LsstEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -433,11 +464,41 @@ impl LsstEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
+        // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
+        let mut has_matches = false;
+        if let Some(survey_matches) = &alert.survey_matches {
+            if let Some(ztf_match) = &survey_matches.ztf {
+                let ztf_prv_candidates: Vec<PhotometryMag> = ztf_match
+                    .prv_candidates
+                    .iter()
+                    .filter(|p| p.jd <= alert.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
+                    .collect();
+                let ztf_fp_hists: Vec<PhotometryMag> = ztf_match
+                    .fp_hists
+                    .iter()
+                    .filter(|p| p.jd <= alert.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+                    .collect();
+                let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
+                prepare_photometry(&mut ztf_lightcurve);
+                lightcurve.extend(ztf_lightcurve);
+                has_matches = true;
+            }
+        }
+        let multisurvey_photstats = if has_matches {
+            analyze_photometry(&lightcurve).0
+        } else {
+            photstats.clone()
+        };
+
         Ok(LsstAlertProperties {
             rock: is_rock,
             star: is_star,
+            near_brightstar: is_near_brightstar,
             stationary,
             photstats,
+            multisurvey_photstats,
         })
     }
 }
