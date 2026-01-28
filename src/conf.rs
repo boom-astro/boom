@@ -295,10 +295,11 @@ fn default_kafka_server() -> String {
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
     pub server: String, // URL of the Kafka broker
-    pub group_id: String,                // Consumer group ID
-    pub schema_registry: Option<String>, // URL of the schema registry (if any)
-    pub username: Option<String>,        // Username for authentication (if any)
-    pub password: Option<String>,        // Password for authentication (if any)
+    pub group_id: String,                           // Consumer group ID
+    pub schema_registry: Option<String>,            // URL of the schema registry (if any)
+    pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
+    pub username: Option<String>,                   // Username for authentication (if any)
+    pub password: Option<String>,                   // Password for authentication (if any)
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -376,6 +377,9 @@ impl Default for RedisConfig {
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
+    /// Number of days to retain Kafka messages for Babamul topics
+    #[serde(default = "default_babamul_retention_days")]
+    pub retention_days: u32,
 }
 
 impl Default for BabamulConfig {
@@ -383,8 +387,13 @@ impl Default for BabamulConfig {
         BabamulConfig {
             enabled: false,
             webapp_url: None,
+            retention_days: default_babamul_retention_days(),
         }
     }
+}
+
+fn default_babamul_retention_days() -> u32 {
+    3
 }
 
 #[derive(Deserialize, Debug, Clone)]

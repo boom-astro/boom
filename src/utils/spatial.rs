@@ -49,10 +49,8 @@ impl Coordinates {
         }
     }
 
-    pub fn get_ra_dec(&self) -> (f64, f64) {
-        if self.radec_geojson.coordinates.len() != 2 {
-            panic!("Invalid coordinates length");
-        }
+    /// Get RA and Dec from the stored GeoJSON coordinates (formatting RA back to [0, 360])
+    pub fn get_radec(&self) -> (f64, f64) {
         let ra = self.radec_geojson.coordinates[0] + 180.0;
         let dec = self.radec_geojson.coordinates[1];
         (ra, dec)

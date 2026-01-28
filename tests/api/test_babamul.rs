@@ -93,12 +93,14 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup),
+            ),
         )
         .await;
 
@@ -212,14 +214,16 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup)
-                .service(routes::babamul::post_babamul_activate)
-                .service(routes::babamul::post_babamul_auth),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup)
+                    .service(routes::babamul::post_babamul_activate)
+                    .service(routes::babamul::post_babamul_auth),
+            ),
         )
         .await;
 
@@ -367,12 +371,14 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup),
+            ),
         )
         .await;
 
@@ -402,9 +408,11 @@ mod tests {
         let babamul_schemas = boom::api::routes::babamul::surveys::BabamulAvroSchemas::new();
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(babamul_schemas))
-                .service(routes::babamul::surveys::get_babamul_schema),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(babamul_schemas))
+                    .service(routes::babamul::surveys::get_babamul_schema),
+            ),
         )
         .await;
 
@@ -487,11 +495,13 @@ mod tests {
             .expect("Failed to insert test cutout");
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_alert_cutouts),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alert_cutouts),
+            ),
         )
         .await;
 
@@ -517,7 +527,7 @@ mod tests {
             "Response should contain correct candid"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -552,11 +562,13 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_alerts),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alerts),
+            ),
         )
         .await;
 
@@ -614,11 +626,13 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_alerts),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alerts),
+            ),
         )
         .await;
 
@@ -684,11 +698,13 @@ mod tests {
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_object),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_object),
+            ),
         )
         .await;
 
@@ -707,16 +723,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(
-            body["data"]["object_id"].as_str().unwrap(),
+            body["data"]["objectId"].as_str().unwrap(),
             &object_id,
-            "Response should contain correct object_id"
+            "Response should contain correct objectId"
         );
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -757,11 +773,13 @@ mod tests {
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_object),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_object),
+            ),
         )
         .await;
 
@@ -780,16 +798,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(
-            body["data"]["object_id"].as_str().unwrap(),
+            body["data"]["objectId"].as_str().unwrap(),
             &object_id,
-            "Response should contain correct object_id"
+            "Response should contain correct objectId"
         );
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -810,6 +828,92 @@ mod tests {
         );
     }
 
+    /// Test GET /babamul/objects validation for ZTF patterns
+    #[actix_rt::test]
+    async fn test_get_objects_validation() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_objects),
+            ),
+        )
+        .await;
+
+        // ZTF:
+        // Acceptable values
+        for value in ["Z", "ZT", "ZTF", "ZTF20a", "20a"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // Invalid values
+        for value in ["Z2", "ZTF231", "ZTF2a", "ZTF20aaaaaaaa"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject invalid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // LSST:
+        // Acceptable values
+        for value in ["L", "LS", "LSS", "LSST", "LSST1", "1", "LSST123", "123"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // Invalid values
+        for value in ["L2", "LSSTA", "1a"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject invalid object_id pattern '{}'",
+                value
+            );
+        }
+    }
+
     /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
     /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
     #[actix_rt::test]
@@ -823,14 +927,16 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::post_kafka_credentials)
-                .service(routes::babamul::get_kafka_credentials)
-                .service(routes::babamul::delete_kafka_credential),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential),
+            ),
         )
         .await;
 
@@ -983,14 +1089,16 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::post_kafka_credentials)
-                .service(routes::babamul::get_kafka_credentials)
-                .service(routes::babamul::delete_kafka_credential),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential),
+            ),
         )
         .await;
 
@@ -1103,14 +1211,16 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::post_kafka_credentials)
-                .service(routes::babamul::get_kafka_credentials)
-                .service(routes::babamul::delete_kafka_credential),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential),
+            ),
         )
         .await;
 

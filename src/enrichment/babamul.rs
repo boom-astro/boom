@@ -4,14 +4,19 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
-    IS_STELLAR_DISTANCE_THRESH_ARCSEC,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
 use crate::utils::derive_avro_schema::SerdavroWriter;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
-use std::collections::HashMap;
+use rdkafka::admin::{
+    AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
+};
+use rdkafka::client::DefaultClientContext;
+use rdkafka::error::RDKafkaErrorCode;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
@@ -60,7 +65,6 @@ impl serde::Serialize for CutoutBytes {
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct EnrichedLsstAlert {
-    #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
@@ -75,10 +79,6 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "cutoutDifference")]
     pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
-    // Not serialized - kept in memory for category computation only
-    #[serde(skip)]
-    #[allow(dead_code)] // Would show up unused erroneously
-    pub cross_matches: CrossMatchesWrapper,
 }
 
 impl EnrichedLsstAlert {
@@ -88,24 +88,31 @@ impl EnrichedLsstAlert {
         cutout_template: Option<Vec<u8>>,
         cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
-    ) -> Self {
-        let cross_matches = CrossMatchesWrapper(alert.cross_matches);
-        EnrichedLsstAlert {
-            candid: alert.candid,
-            object_id: alert.object_id,
-            candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            fp_hists: alert.fp_hists,
-            properties,
-            cutout_science: cutout_science.map(CutoutBytes),
-            cutout_template: cutout_template.map(CutoutBytes),
-            cutout_difference: cutout_difference.map(CutoutBytes),
-            survey_matches: alert.survey_matches,
-            cross_matches,
-        }
+    ) -> (
+        Self,
+        std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) {
+        (
+            EnrichedLsstAlert {
+                candid: alert.candid,
+                object_id: alert.object_id,
+                candidate: alert.candidate,
+                prv_candidates: alert.prv_candidates,
+                fp_hists: alert.fp_hists,
+                properties,
+                cutout_science: cutout_science.map(CutoutBytes),
+                cutout_template: cutout_template.map(CutoutBytes),
+                cutout_difference: cutout_difference.map(CutoutBytes),
+                survey_matches: alert.survey_matches,
+            },
+            alert.cross_matches.unwrap_or_default(),
+        )
     }
 
-    pub fn compute_babamul_category(&self) -> String {
+    pub fn compute_babamul_category(
+        &self,
+        cross_matches: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) -> String {
         // If we have a ZTF match, category starts with "ztf-match."
         // Otherwise, "no-ztf-match."
         let category = match &self.survey_matches {
@@ -116,19 +123,16 @@ impl EnrichedLsstAlert {
             None => "no-ztf-match.".to_string(),
         };
 
-        // already classified as stellar (by the enrichment worker), return that
-        if self.properties.star.unwrap_or(false) {
+        // The enrichment worker already uses the LSPSC matches to classify stars
+        // by creating 2 properties: star (bool) and near_brightstar (bool)
+        if self.properties.star.unwrap_or(false) || self.properties.near_brightstar.unwrap_or(false)
+        {
             return category + "stellar";
         }
 
         // Check if we have LSPSC cross-matches
         let empty_vec = vec![];
-        let lspsc_matches = self
-            .cross_matches
-            .0
-            .as_ref()
-            .and_then(|xmatches| xmatches.get("LSPSC"))
-            .unwrap_or(&empty_vec);
+        let lspsc_matches = cross_matches.get("LSPSC").unwrap_or(&empty_vec);
 
         // No matches: check if in footprint
         if lspsc_matches.is_empty() {
@@ -139,22 +143,18 @@ impl EnrichedLsstAlert {
             };
         }
 
-        // Evaluate matches (stellar > hosted > hostless)
+        // Evaluate matches (hosted > hostless).
+        // Stellar was already evaluated in the enrichment worker
+        // and used above to break early with "stellar" classification.
         let mut label = "hostless";
         for m in lspsc_matches {
-            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
-                Some(d) => d,
-                None => continue,
-            };
             let score = match m.get("score").and_then(|v| v.as_f64()) {
                 Some(s) => s,
                 None => continue,
             };
-            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
-                label = "stellar";
-                break;
-            } else if score < IS_HOSTED_SCORE_THRESH {
+            if score < IS_HOSTED_SCORE_THRESH {
                 label = "hosted";
+                break;
             }
         }
         category + label
@@ -252,6 +252,10 @@ pub struct Babamul {
     kafka_producer: rdkafka::producer::FutureProducer,
     lsst_avro_schema: Schema,
     ztf_avro_schema: Schema,
+    kafka_admin_client: AdminClient<DefaultClientContext>,
+    topic_retention_ms: i64,
+    // A cache for Kafka topics we've checked exist and match retention policy
+    checked_topics: Mutex<HashSet<String>>,
 }
 
 impl Babamul {
@@ -281,10 +285,23 @@ impl Babamul {
         let lsst_avro_schema = EnrichedLsstAlert::get_schema();
         let ztf_avro_schema = EnrichedZtfAlert::get_schema();
 
+        // Create Kafka Admin client
+        let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", &kafka_producer_host)
+            .create()
+            .expect("Failed to create Babamul Kafka admin client");
+
+        // Compute retention in milliseconds from config (days)
+        let babamul_retention_ms: i64 =
+            (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
+
         Babamul {
             kafka_producer,
             lsst_avro_schema,
             ztf_avro_schema,
+            kafka_admin_client: admin_client,
+            topic_retention_ms: babamul_retention_ms,
+            checked_topics: Mutex::new(HashSet::new()),
         }
     }
 
@@ -300,6 +317,9 @@ impl Babamul {
         let mut total_sent: usize = 0;
         for (topic_name, alerts) in alerts_by_topic {
             tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+
+            // Check topic exists with the desired retention policy
+            self.check_topic(&topic_name).await?;
 
             // Convert alerts to Avro payloads
             let mut payloads = Vec::new();
@@ -369,10 +389,84 @@ impl Babamul {
         }
     }
 
+    /// Ensure the given topic exists with the desired retention policy
+    #[instrument(skip_all, err)]
+    async fn check_topic(&self, topic_name: &str) -> Result<(), EnrichmentWorkerError> {
+        // Fast-path: skip if already checked in this process
+        {
+            let checked = self.checked_topics.lock().await;
+            if checked.contains(topic_name) {
+                return Ok(());
+            }
+        }
+
+        // Create topic with retention if it does not exist; ignore "already exists" errors
+        let retention_ms_string = self.topic_retention_ms.to_string();
+        let new_topic = NewTopic::new(topic_name, 1, TopicReplication::Fixed(1))
+            .set("retention.ms", &retention_ms_string)
+            .set("cleanup.policy", "delete");
+
+        let opts = AdminOptions::new();
+        let results: Vec<Result<String, (String, RDKafkaErrorCode)>> = self
+            .kafka_admin_client
+            .create_topics(&[new_topic], &opts)
+            .await
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Admin create_topics error: {}", e))
+            })?;
+
+        for r in results.into_iter() {
+            match r {
+                Ok(_created) => (),
+                Err((_topic, code)) => {
+                    if code == RDKafkaErrorCode::TopicAlreadyExists {
+                        // Continue to alter configs below
+                        continue;
+                    }
+                    return Err(EnrichmentWorkerError::Kafka(format!(
+                        "Failed to ensure topic {} with retention (code: {:?})",
+                        topic_name, code
+                    )));
+                }
+            }
+        }
+        // Apply or update retention policy even if topic already existed
+        let mut entries: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        entries.insert("retention.ms", &retention_ms_string);
+        entries.insert("cleanup.policy", "delete");
+        let alter = AlterConfig {
+            specifier: ResourceSpecifier::Topic(topic_name),
+            entries,
+        };
+        let alter_results = self
+            .kafka_admin_client
+            .alter_configs(&[alter], &opts)
+            .await
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Admin alter_configs error: {}", e))
+            })?;
+        for res in alter_results {
+            if let Err((_spec, code)) = res {
+                return Err(EnrichmentWorkerError::Kafka(format!(
+                    "Failed to set retention for {} (code: {:?})",
+                    topic_name, code
+                )));
+            }
+        }
+
+        // Record that we've checked this topic during this process lifetime
+        let mut checked = self.checked_topics.lock().await;
+        checked.insert(topic_name.to_string());
+        Ok(())
+    }
+
     #[instrument(skip_all, err)]
     pub async fn process_lsst_alerts(
         &self,
-        alerts: Vec<EnrichedLsstAlert>,
+        alerts: Vec<(
+            EnrichedLsstAlert,
+            std::collections::HashMap<String, Vec<serde_json::Value>>,
+        )>,
     ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
@@ -381,7 +475,7 @@ impl Babamul {
         let min_reliability = 0.5;
 
         // Iterate over the alerts
-        for mut alert in alerts {
+        for (mut alert, cross_matches) in alerts {
             // Filter ZTF matches to only include public (programid=1)
             if let Some(ref mut survey_matches) = alert.survey_matches {
                 if let Some(ref mut ztf_match) = survey_matches.ztf {
@@ -400,7 +494,7 @@ impl Babamul {
             }
 
             // Compute the category for this alert to determine the topic
-            let category = alert.compute_babamul_category();
+            let category = alert.compute_babamul_category(&cross_matches);
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)

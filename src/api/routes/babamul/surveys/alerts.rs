@@ -19,8 +19,8 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub properties: ZtfAlertProperties,
-    pub classifications: ZtfAlertClassifications,
+    pub properties: Option<ZtfAlertProperties>,
+    pub classifications: Option<ZtfAlertClassifications>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -30,7 +30,7 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub properties: LsstAlertProperties,
+    pub properties: Option<LsstAlertProperties>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -43,7 +43,9 @@ struct AlertsQuery {
     end_jd: Option<f64>,
     min_magpsf: Option<f64>,
     max_magpsf: Option<f64>,
+    #[serde(alias = "min_reliability")]
     min_drb: Option<f64>,
+    #[serde(alias = "max_reliability")]
     max_drb: Option<f64>,
     min_sgscore1: Option<f64>,
     max_sgscore1: Option<f64>,
@@ -84,7 +86,7 @@ enum AlertsQueryResult {
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/surveys/{survey}/alerts")]
+#[get("/surveys/{survey}/alerts")]
 pub async fn get_alerts(
     path: web::Path<Survey>,
     query: web::Query<AlertsQuery>,
@@ -148,7 +150,7 @@ pub async fn get_alerts(
     }
     if let (Some(min_drb), Some(max_drb)) = (query.min_drb, query.max_drb) {
         filter_doc.insert(
-            "classifications.drb",
+            "candidate.drb",
             doc! {
                 "$gte": min_drb,
                 "$lte": max_drb,
@@ -166,14 +168,14 @@ pub async fn get_alerts(
             return response::bad_request("sgscore1 and distpsnr1 filters are only supported for ZTF survey (other surveys coming soon)");
         }
         filter_doc.insert(
-            "classifications.sgscore1",
+            "candidate.sgscore1",
             doc! {
                 "$gte": min_sgscore1,
                 "$lte": max_sgscore1,
             },
         );
         filter_doc.insert(
-            "classifications.distpsnr1",
+            "candidate.distpsnr1",
             doc! {
                 "$gte": min_distpsnr1,
                 "$lte": max_distpsnr1,
@@ -275,7 +277,7 @@ pub async fn get_alerts(
     ),
     tags=["Surveys"]
 )]
-#[get("/babamul/surveys/{survey}/alerts/{candid}/cutouts")]
+#[get("/surveys/{survey}/alerts/{candid}/cutouts")]
 pub async fn get_alert_cutouts(
     path: web::Path<(Survey, i64)>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -307,9 +309,9 @@ pub async fn get_alert_cutouts(
     };
     let resp = serde_json::json!({
         "candid": candid,
-        "cutout_science": BASE64_STANDARD.encode(&cutouts.cutout_science),
-        "cutout_template": BASE64_STANDARD.encode(&cutouts.cutout_template),
-        "cutout_difference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
+        "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
+        "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
+        "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
     });
     return response::ok(
         &format!("cutouts found for candid: {}", candid),
