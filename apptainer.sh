@@ -117,8 +117,18 @@ if [ "$1" == "stop" ]; then
       apptainer instance stop "boom_$3"
       exit 0
     fi
-    apptainer instance stop "boom_lsst"
-    apptainer instance stop "boom_ztf"
+    if apptainer instance list | grep -q "boom "; then
+      apptainer instance stop "boom"
+    fi
+    if apptainer instance list | grep -q "boom_lsst"; then
+      apptainer instance stop "boom_lsst"
+    fi
+    if apptainer instance list | grep -q "boom_ztf"; then
+      apptainer instance stop "boom_ztf"
+    fi
+    if apptainer instance list | grep -q "boom_decam"; then
+      apptainer instance stop "boom_decam"
+    fi
   elif stop_service "consumer" "$target"; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
