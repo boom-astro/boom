@@ -47,7 +47,7 @@ async fn process_object(
     db: mongodb::Database,
     xmatch_config: Vec<CatalogXmatchConfig>,
 ) {
-    let (ra, dec) = obj.coordinates.get_ra_dec();
+    let (ra, dec) = obj.coordinates.get_radec();
 
     let xmatches = xmatch(ra, dec, &xmatch_config, &db).await;
     match xmatches {
