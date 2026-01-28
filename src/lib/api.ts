@@ -18,7 +18,7 @@ export type ApiObject = Record<string, unknown>;
 export type Profile = { username?: string; name?: string; email?: string; avatar?: string } | null;
 
 // Kafka credential returned by `/babamul/kafka-credentials`
-export type KafkaCredential = { name: string; kafka_username: string; kafka_password: string };
+export type KafkaCredential = { id: string; name: string; kafka_username: string; kafka_password: string };
 
 const TOKEN_KEY = "api_token";
 const USERNAME_KEY = "api_user";
@@ -180,6 +180,18 @@ export async function createKafkaCredential(name: string): Promise<KafkaCredenti
   }
   const body = await parseResponseJson(res).catch(() => ({}));
   return unwrapData<KafkaCredential>(body, {} as KafkaCredential);
+}
+
+export async function deleteKafkaCredential(credentials_id: string): Promise<void> {
+  const url = `${API_BASE}/kafka-credentials/${encodeURIComponent(credentials_id)}`;
+  const res = await fetchWithAuth(url, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Delete kafka credential failed: ${res.status} ${txt}`);
+  }
+  // no content expected
 }
 
 export type AlertSearchParams = {

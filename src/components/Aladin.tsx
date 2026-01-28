@@ -34,7 +34,6 @@ export default function Aladin({
             target: `${ra}, ${dec}`,
             showProjectionControl: false,
             showZoomControl: false,
-            // showFullscreenControl: false,
             showLayersControl: true,
             showGotoControl: false,
             showFrame: false,
@@ -44,7 +43,7 @@ export default function Aladin({
         aladin.addCatalog(simbad);
 
         const crossMatches = alert ? (alert['cross_matches'] as Record<string, unknown> | undefined) : undefined;
-        const nedList = crossMatches ? crossMatches['NED_BetaV3'] : undefined;
+        const nedList = crossMatches ? crossMatches['NED'] : undefined;
         if (Array.isArray(nedList) && nedList.length > 0) {
             const ned_catalog = window.A.catalog({
                 name: 'NED',
