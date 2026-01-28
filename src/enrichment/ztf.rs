@@ -438,6 +438,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
+        let now = flare::Time::now().to_jd();
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -490,10 +492,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 doc! { "$set": {
                     "classifications": mongify(&classifications),
                     "properties": mongify(&properties),
+                    "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
                     "properties": mongify(&properties),
+                    "updated_at": now,
                 }}
             };
 

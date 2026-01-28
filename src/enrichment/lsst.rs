@@ -322,6 +322,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             );
         }
 
+        let now = flare::Time::now().to_jd();
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -339,6 +341,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             let update_alert_document = doc! {
                 "$set": {
                     "properties": mongify(&properties),
+                    "updated_at": now,
                 }
             };
 
