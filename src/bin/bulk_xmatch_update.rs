@@ -10,6 +10,7 @@ use boom::{
 use clap::Parser;
 use futures::stream::StreamExt;
 use indicatif::ProgressBar;
+use mongodb::options::{UpdateOneModel, WriteModel};
 use mongodb::{bson::doc, Collection};
 use tracing::{error, instrument};
 
@@ -46,30 +47,32 @@ async fn process_object(
     alert_aux_collection: Collection<AuxCollectionIdOnly>,
     db: mongodb::Database,
     xmatch_config: Vec<CatalogXmatchConfig>,
-) {
+) -> Option<WriteModel> {
     let (ra, dec) = obj.coordinates.get_radec();
 
     let xmatches = xmatch(ra, dec, &xmatch_config, &db).await;
     match xmatches {
         Ok(matches) => {
-            let update_result = alert_aux_collection
-                .update_one(
-                    doc! { "_id": &obj.object_id },
-                    doc! { "$set": { "cross_matches": mongify(&matches) } },
-                )
-                .await;
-            if let Err(e) = update_result {
-                error!(
-                    "Error updating cross-matches for object ID {}: {}",
-                    obj.object_id, e
-                );
-            }
+            let update_aux_document = doc! { "$set": {
+                "cross_matches": mongify(&matches),
+                "updated_at": flare::Time::now().to_jd(),
+            }};
+
+            let update = WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(alert_aux_collection.namespace())
+                    .filter(doc! {"_id": obj.object_id})
+                    .update(update_aux_document)
+                    .build(),
+            );
+            Some(update)
         }
         Err(e) => {
             error!(
                 "Error performing cross-match for object ID {}: {}",
                 obj.object_id, e
             );
+            None
         }
     }
 }
@@ -82,6 +85,7 @@ async fn worker(
 ) {
     let conf = load_config(Some(config_path)).expect("failed to load configuration");
     let db = conf.build_db().await.expect("failed to build database");
+    let client = db.client().clone();
     let alert_aux_collection: Collection<AuxCollectionIdOnly> =
         db.collection(&format!("{}_alerts_aux", survey));
     let xmatch_config = conf
@@ -94,28 +98,40 @@ async fn worker(
     while let Ok(obj) = receiver.recv().await {
         objs.push(obj);
         if objs.len() >= batch_size {
+            let mut updates = Vec::new();
             for obj in objs.drain(..) {
-                process_object(
+                match process_object(
                     obj,
                     alert_aux_collection.clone(),
                     db.clone(),
                     xmatch_config.clone(),
                 )
-                .await;
+                .await
+                {
+                    Some(update) => updates.push(update),
+                    None => continue,
+                }
             }
+            let _ = client.bulk_write(updates).await.unwrap().modified_count;
         }
     }
 
     if !objs.is_empty() {
+        let mut updates = Vec::new();
         for obj in objs.drain(..) {
-            process_object(
+            match process_object(
                 obj,
                 alert_aux_collection.clone(),
                 db.clone(),
                 xmatch_config.clone(),
             )
-            .await;
+            .await
+            {
+                Some(update) => updates.push(update),
+                None => continue,
+            }
         }
+        let _ = client.bulk_write(updates).await.unwrap().modified_count;
     }
 }
 
@@ -132,10 +148,10 @@ async fn run(args: Cli) {
         .await
         .expect("failed to get estimated document count");
     let progress_bar = ProgressBar::new(estimated_count as u64)
-        .with_message(format!("Updating {} alerts cross-matches", args.survey))
+        .with_message(format!("Updating {} objects cross-matches", args.survey))
         .with_style(
             indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} {msg} {wide_bar} {pos}/{len} ({eta})")
+                .template("{spinner:.green} {msg} {wide_bar} {pos}/{len} ({elapsed_precise}, {eta}, {per_sec})")
                 .unwrap(),
         );
 
@@ -167,6 +183,7 @@ async fn run(args: Cli) {
         workers.push(worker_handle);
     }
 
+    let start_time = std::time::Instant::now();
     while let Some(result) = cursor.next().await {
         match result {
             Ok(obj) => {
@@ -189,6 +206,14 @@ async fn run(args: Cli) {
             error!("Worker task failed: {}", e);
         }
     }
+
+    println!(
+        "Cross-match update completed in {:.2?} (survey: {}; processes: {}; batch size: {})",
+        start_time.elapsed(),
+        args.survey,
+        args.processes,
+        args.batch_size
+    );
 }
 #[tokio::main]
 async fn main() {
