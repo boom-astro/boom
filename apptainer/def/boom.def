@@ -10,8 +10,9 @@ From: rust:1.91.1-slim-trixie
     Cargo.toml /app/Cargo.toml
     Cargo.lock /app/Cargo.lock
     apache-avro-macros /app/apache-avro-macros
-    src /app/src
     data/models /app/data/models
+    data/ls_footprint_moc.fits /app/data/ls_footprint_moc.fits:ro
+    src /app/src
 
 %post
     apt-get update && \
