@@ -152,3 +152,26 @@ flowchart TD
     style HostlessTopic2 fill:#2d3f5f,color:#e0e0e0
     style UnknownTopic fill:#3a3a3a,color:#e0e0e0
 ```
+
+### ZTF star-galaxy score classification flow
+
+ZTF alerts determine if a transient is stellar, hosted (on a galaxy), or hostless
+using a combination of enrichment pipeline classification and star-galaxy scores.
+
+Note: The `*` below represents survey match status, e.g., `lsst-match` or
+`no-lsst-match`.
+
+```mermaid
+flowchart TD
+    Alert[New ZTF Alert] --> CheckStellar{Stellar flag<br/>from enrichment<br/>worker?}
+
+    CheckStellar -->|Yes| StellarTopic[Topic: babamul.ztf.*.stellar]
+
+    CheckStellar -->|No| CheckSGScore{Any sgscore<br/>valid and < 0.5?}
+    CheckSGScore -->|Yes| HostedTopic[Topic: babamul.ztf.*.hosted]
+    CheckSGScore -->|No| HostlessTopic[Topic: babamul.ztf.*.hostless]
+
+    style StellarTopic fill:#2d5f3f,color:#e0e0e0
+    style HostedTopic fill:#5f2d2d,color:#e0e0e0
+    style HostlessTopic fill:#2d3f5f,color:#e0e0e0
+```
