@@ -123,55 +123,87 @@ sequenceDiagram
     end
 ```
 
-### Archival catalog cross-match flow
+### Alert classification and topic assignment flow
 
-The classification suffix (stellar/hosted/hostless/unknown)
-is determined by cross-matching against archival catalogs like LSPSC.
-This happens independently of survey cross-matches.
+#### LSST alerts
 
-Note: The `*` below represents survey match status, e.g., `ztf-match` or
-`no-ztf-match`.
+LSST alerts are first classified based on LSPSC catalog matches, then assigned to topics
+based on their classification and whether they have a ZTF match.
 
 ```mermaid
 flowchart TD
-    Alert[New LSST Alert] --> CheckLSPSC{Has matches<br/>in LSPSC?}
+    LSST[New LSST Alert] --> CheckLSPSC{Has matches<br/>in LSPSC?}
 
     CheckLSPSC -->|No| CheckFootprint{In LSPSC<br/>footprint?}
-    CheckFootprint -->|Yes| HostlessTopic[Topic: babamul.lsst.*.hostless]
-    CheckFootprint -->|No| UnknownTopic[Topic: babamul.lsst.*.unknown]
+    CheckFootprint -->|Yes| LSST_Hostless[LSST Hostless]
+    CheckFootprint -->|No| LSST_Unknown[LSST Unknown]
 
-    CheckLSPSC -->|Yes| CheckStellar{Any match with<br/>distance ≤ 1.0″<br/>and score > 0.5?}
-    CheckStellar -->|Yes| StellarTopic[Topic: babamul.lsst.*.stellar]
-    CheckStellar -->|No| CheckHosted{Any match with<br/>distance ≤ 30″<br/>and score < 0.5?}
-    CheckHosted -->|Yes| HostedTopic[Topic: babamul.lsst.*.hosted]
-    CheckHosted -->|No| HostlessTopic2[Topic: babamul.lsst.*.hostless]
+    CheckLSPSC -->|Yes| CheckLSSTStellar{Any match with<br/>distance ≤ 1.0″<br/>and score > 0.5?}
+    CheckLSSTStellar -->|Yes| LSST_Stellar[LSST Stellar]
+    CheckLSSTStellar -->|No| CheckHosted{Any match with<br/>distance ≤ 30″<br/>and score < 0.5?}
+    CheckHosted -->|Yes| LSST_Hosted[LSST Hosted]
+    CheckHosted -->|No| LSST_Hostless
 
-    style StellarTopic fill:#2d5f3f,color:#e0e0e0
-    style HostedTopic fill:#5f2d2d,color:#e0e0e0
-    style HostlessTopic fill:#2d3f5f,color:#e0e0e0
-    style HostlessTopic2 fill:#2d3f5f,color:#e0e0e0
-    style UnknownTopic fill:#3a3a3a,color:#e0e0e0
+    LSST_Stellar --> CheckZTFMatch_Stellar{Has ZTF<br/>match?}
+    LSST_Hosted --> CheckZTFMatch_Hosted{Has ZTF<br/>match?}
+    LSST_Hostless --> CheckZTFMatch_Hostless{Has ZTF<br/>match?}
+    LSST_Unknown --> CheckZTFMatch_Unknown{Has ZTF<br/>match?}
+
+    CheckZTFMatch_Stellar -->|Yes| Topic1[babamul.lsst.ztf-match.stellar]
+    CheckZTFMatch_Stellar -->|No| Topic5[babamul.lsst.no-ztf-match.stellar]
+    CheckZTFMatch_Hosted -->|Yes| Topic2[babamul.lsst.ztf-match.hosted]
+    CheckZTFMatch_Hosted -->|No| Topic6[babamul.lsst.no-ztf-match.hosted]
+    CheckZTFMatch_Hostless -->|Yes| Topic3[babamul.lsst.ztf-match.hostless]
+    CheckZTFMatch_Hostless -->|No| Topic7[babamul.lsst.no-ztf-match.hostless]
+    CheckZTFMatch_Unknown -->|Yes| Topic4[babamul.lsst.ztf-match.unknown]
+    CheckZTFMatch_Unknown -->|No| Topic8[babamul.lsst.no-ztf-match.unknown]
+
+    style LSST_Stellar fill:#2d5f3f,color:#e0e0e0
+    style LSST_Hosted fill:#5f2d2d,color:#e0e0e0
+    style LSST_Hostless fill:#2d3f5f,color:#e0e0e0
+    style LSST_Unknown fill:#3a3a3a,color:#e0e0e0
+    style Topic1 fill:#2d5f3f,color:#e0e0e0
+    style Topic2 fill:#5f2d2d,color:#e0e0e0
+    style Topic3 fill:#2d3f5f,color:#e0e0e0
+    style Topic4 fill:#3a3a3a,color:#e0e0e0
+    style Topic5 fill:#2d5f3f,color:#e0e0e0
+    style Topic6 fill:#5f2d2d,color:#e0e0e0
+    style Topic7 fill:#2d3f5f,color:#e0e0e0
+    style Topic8 fill:#3a3a3a,color:#e0e0e0
 ```
 
-### ZTF star-galaxy score classification flow
+#### ZTF alerts
 
-ZTF alerts determine if a transient is stellar, hosted (on a galaxy), or hostless
-using a combination of enrichment pipeline classification and star-galaxy scores.
-
-Note: The `*` below represents survey match status, e.g., `lsst-match` or
-`no-lsst-match`.
+ZTF alerts are first classified based on stellar properties and star-galaxy scores, then assigned
+to topics based on their classification and whether they have an LSST match.
 
 ```mermaid
 flowchart TD
-    Alert[New ZTF Alert] --> CheckStellar{Stellar flag<br/>from enrichment<br/>worker?}
+    ZTF[New ZTF Alert] --> CheckStellar{Stellar flag<br/>from enrichment<br/>worker?}
 
-    CheckStellar -->|Yes| StellarTopic[Topic: babamul.ztf.*.stellar]
-
+    CheckStellar -->|Yes| ZTF_Stellar[ZTF Stellar]
     CheckStellar -->|No| CheckSGScore{Any sgscore<br/>valid and < 0.5?}
-    CheckSGScore -->|Yes| HostedTopic[Topic: babamul.ztf.*.hosted]
-    CheckSGScore -->|No| HostlessTopic[Topic: babamul.ztf.*.hostless]
+    CheckSGScore -->|Yes| ZTF_Hosted[ZTF Hosted]
+    CheckSGScore -->|No| ZTF_Hostless[ZTF Hostless]
 
-    style StellarTopic fill:#2d5f3f,color:#e0e0e0
-    style HostedTopic fill:#5f2d2d,color:#e0e0e0
-    style HostlessTopic fill:#2d3f5f,color:#e0e0e0
+    ZTF_Stellar --> CheckLSSTMatch_Stellar{Has LSST<br/>match?}
+    ZTF_Hosted --> CheckLSSTMatch_Hosted{Has LSST<br/>match?}
+    ZTF_Hostless --> CheckLSSTMatch_Hostless{Has LSST<br/>match?}
+
+    CheckLSSTMatch_Stellar -->|Yes| Topic9[babamul.ztf.lsst-match.stellar]
+    CheckLSSTMatch_Stellar -->|No| Topic12[babamul.ztf.no-lsst-match.stellar]
+    CheckLSSTMatch_Hosted -->|Yes| Topic10[babamul.ztf.lsst-match.hosted]
+    CheckLSSTMatch_Hosted -->|No| Topic13[babamul.ztf.no-lsst-match.hosted]
+    CheckLSSTMatch_Hostless -->|Yes| Topic11[babamul.ztf.lsst-match.hostless]
+    CheckLSSTMatch_Hostless -->|No| Topic14[babamul.ztf.no-lsst-match.hostless]
+
+    style ZTF_Stellar fill:#2d5f3f,color:#e0e0e0
+    style ZTF_Hosted fill:#5f2d2d,color:#e0e0e0
+    style ZTF_Hostless fill:#2d3f5f,color:#e0e0e0
+    style Topic9 fill:#2d5f3f,color:#e0e0e0
+    style Topic10 fill:#5f2d2d,color:#e0e0e0
+    style Topic11 fill:#2d3f5f,color:#e0e0e0
+    style Topic12 fill:#2d5f3f,color:#e0e0e0
+    style Topic13 fill:#5f2d2d,color:#e0e0e0
+    style Topic14 fill:#2d3f5f,color:#e0e0e0
 ```
