@@ -1480,6 +1480,112 @@ mod tests {
         );
     }
 
+    /// Test POST /babamul/tokens - Token limit enforcement
+    #[actix_rt::test]
+    async fn test_post_token_limit() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::delete_token),
+                ),
+        )
+        .await;
+
+        // Create 10 tokens (the maximum allowed)
+        let mut token_ids = Vec::new();
+        for i in 1..=10 {
+            let req = test::TestRequest::post()
+                .uri("/babamul/tokens")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "name": format!("Token {}", i),
+                    "expires_in_days": 30
+                }))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Token {} creation should succeed",
+                i
+            );
+
+            let body = read_json_response(resp).await;
+            token_ids.push(body["id"].as_str().unwrap().to_string());
+        }
+
+        // Try to create an 11th token - should fail
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Token 11",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "11th token creation should fail due to limit"
+        );
+
+        let body = read_str_response(resp).await;
+        assert!(
+            body.contains("Maximum number of tokens"),
+            "Error message should mention token limit"
+        );
+
+        // Delete one token
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_ids[0]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Now we should be able to create a new token
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "New Token After Delete",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Token creation should succeed after deleting one"
+        );
+
+        // Clean up: delete remaining tokens
+        for token_id in &token_ids[1..] {
+            let req = test::TestRequest::delete()
+                .uri(&format!("/babamul/tokens/{}", token_id))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            test::call_service(&app, req).await;
+        }
+    }
+
     /// Test GET /babamul/tokens - List all PATs
     #[actix_rt::test]
     async fn test_get_tokens() {

@@ -121,7 +121,7 @@ pub async fn get_tokens(
     request_body = TokenPost,
     responses(
         (status = 200, description = "Token created successfully", body = TokenResponse),
-        (status = 400, description = "Invalid request (e.g., empty name)"),
+        (status = 400, description = "Invalid request (e.g., empty name, token limit reached)"),
         (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
     ),
@@ -143,6 +143,25 @@ pub async fn post_token(
     let name = body.name.trim();
     if name.is_empty() {
         return response::bad_request("Token name cannot be empty");
+    }
+
+    // Check token limit (max 10 tokens per user)
+    let tokens_collection: mongodb::Collection<BabamulUserToken> =
+        db.collection("babamul_user_tokens");
+
+    match tokens_collection
+        .count_documents(doc! { "user_id": &current_user.id })
+        .await
+    {
+        Ok(count) => {
+            if count >= 10 {
+                return response::bad_request("Maximum number of tokens (10) reached. Please delete an existing token before creating a new one.");
+            }
+        }
+        Err(e) => {
+            eprintln!("Database error counting tokens: {}", e);
+            return response::internal_error("Failed to check token limit");
+        }
     }
 
     // Generate token: bbml_{36_random_chars}
@@ -172,8 +191,6 @@ pub async fn post_token(
     };
 
     // Store token in babamul_user_tokens collection
-    let tokens_collection: mongodb::Collection<BabamulUserToken> =
-        db.collection("babamul_user_tokens");
     match tokens_collection.insert_one(&token_doc).await {
         Ok(_) => HttpResponse::Ok().json(TokenResponse {
             id: token_doc._id,
