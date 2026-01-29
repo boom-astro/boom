@@ -1,7 +1,7 @@
 /// Functionality for working with personal access tokens (PATs).
 use crate::api::models::response;
 use crate::api::routes::babamul::{generate_random_string, BabamulUser};
-use actix_web::{post, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use chrono::Utc;
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -24,6 +24,15 @@ pub struct TokenResponse {
     pub expires_at: i64,
 }
 
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
+pub struct TokenPublic {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct BabamulUserToken {
     pub _id: String,     // UUID for the token
@@ -35,10 +44,74 @@ pub struct BabamulUserToken {
     pub last_used_at: Option<i64>,
 }
 
+impl BabamulUserToken {
+    /// Convert to a TokenPublic (without exposing the token_hash)
+    pub fn to_list_item(&self) -> TokenPublic {
+        TokenPublic {
+            id: self._id.clone(),
+            name: self.name.clone(),
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            last_used_at: self.last_used_at,
+        }
+    }
+}
+
 fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Get all tokens for the authenticated user
+#[utoipa::path(
+    get,
+    path = "/babamul/tokens",
+    responses(
+        (status = 200, description = "Tokens retrieved successfully", body = Vec<TokenPublic>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[get("/tokens")]
+pub async fn get_tokens(
+    db: web::Data<Database>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let tokens_collection: mongodb::Collection<BabamulUserToken> =
+        db.collection("babamul_user_tokens");
+
+    match tokens_collection
+        .find(doc! { "user_id": &current_user.id })
+        .await
+    {
+        Ok(cursor) => {
+            use futures::TryStreamExt;
+            match cursor.try_collect::<Vec<_>>().await {
+                Ok(tokens) => {
+                    let token_list: Vec<TokenPublic> =
+                        tokens.iter().map(|t| t.to_list_item()).collect();
+                    HttpResponse::Ok().json(token_list)
+                }
+                Err(e) => {
+                    eprintln!("Database error retrieving tokens: {}", e);
+                    response::internal_error("Failed to retrieve tokens")
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Database error querying tokens: {}", e);
+            response::internal_error("Failed to retrieve tokens")
+        }
+    }
 }
 
 /// Create a new token for the authenticated user

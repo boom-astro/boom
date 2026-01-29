@@ -64,6 +64,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_objects)
                     .service(routes::babamul::surveys::get_alert_cutouts)
                     .service(routes::babamul::surveys::get_alerts)
+                    .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token),
             )
         }
