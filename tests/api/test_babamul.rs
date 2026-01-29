@@ -1337,7 +1337,8 @@ mod tests {
                     web::scope("/babamul")
                         .wrap(from_fn(babamul_auth_middleware))
                         .service(routes::babamul::tokens::post_token)
-                        .service(routes::babamul::tokens::get_tokens),
+                        .service(routes::babamul::tokens::get_tokens)
+                        .service(routes::babamul::get_babamul_profile),
                 ),
         )
         .await;
@@ -1397,6 +1398,26 @@ mod tests {
             expires_at - created_at >= 30 * 86400 - 10
                 && expires_at - created_at <= 30 * 86400 + 10,
             "Token should expire in ~30 days"
+        );
+
+        // Test that the PAT can be used to authenticate and fetch user profile
+        let req = test::TestRequest::get()
+            .uri("/babamul/profile")
+            .insert_header(("Authorization", format!("Bearer {}", access_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PAT should authenticate successfully"
+        );
+
+        let profile_body = read_json_response(resp).await;
+        assert_eq!(
+            profile_body["data"]["email"].as_str().unwrap(),
+            test_user.user.email,
+            "Profile should return correct user email"
         );
 
         // Test creating token with empty name
