@@ -121,7 +121,7 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
         .await
         .expect("failed to create username index on users collection");
 
-    // Only create babamul_users collection if Babamul is enabled
+    // Only create babamul_users and babamul_user_tokens collections if Babamul is enabled
     if conf.babamul.enabled {
         // Create babamul_users collection with unique email index
         use crate::api::routes::babamul::BabamulUser;
@@ -139,7 +139,40 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
             .create_index(email_index)
             .await
             .expect("failed to create email index on babamul_users collection");
-        println!("Babamul database collection initialized");
+        // Create babamul_user_tokens collection with indexes
+        use crate::api::routes::babamul::tokens::BabamulUserToken;
+        let babamul_tokens_collection: mongodb::Collection<BabamulUserToken> =
+            db.collection("babamul_user_tokens");
+        // Unique index on token_hash for fast lookup during authentication
+        let token_hash_index = mongodb::IndexModel::builder()
+            .keys(doc! { "token_hash": 1})
+            .options(
+                mongodb::options::IndexOptions::builder()
+                    .unique(true)
+                    .build(),
+            )
+            .build();
+        let _ = babamul_tokens_collection
+            .create_index(token_hash_index)
+            .await
+            .expect("failed to create token_hash index on babamul_user_tokens collection");
+        // Index on user_id for efficient token listing and counting
+        let user_id_index = mongodb::IndexModel::builder()
+            .keys(doc! { "user_id": 1})
+            .build();
+        let _ = babamul_tokens_collection
+            .create_index(user_id_index)
+            .await
+            .expect("failed to create user_id index on babamul_user_tokens collection");
+        // Index on expires_at for efficient cleanup of expired tokens
+        let expires_at_index = mongodb::IndexModel::builder()
+            .keys(doc! { "expires_at": 1})
+            .build();
+        let _ = babamul_tokens_collection
+            .create_index(expires_at_index)
+            .await
+            .expect("failed to create expires_at index on babamul_user_tokens collection");
+        println!("Babamul database collections initialized");
     }
 
     // Initialize the API admin user if it does not exist
