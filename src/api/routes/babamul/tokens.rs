@@ -102,13 +102,13 @@ pub async fn get_tokens(
                     HttpResponse::Ok().json(token_list)
                 }
                 Err(e) => {
-                    eprintln!("Database error retrieving tokens: {}", e);
+                    tracing::error!("Database error retrieving tokens: {}", e);
                     response::internal_error("Failed to retrieve tokens")
                 }
             }
         }
         Err(e) => {
-            eprintln!("Database error querying tokens: {}", e);
+            tracing::error!("Database error querying tokens: {}", e);
             response::internal_error("Failed to retrieve tokens")
         }
     }
@@ -170,7 +170,7 @@ pub async fn post_token(
             }
         }
         Err(e) => {
-            eprintln!("Database error counting tokens: {}", e);
+            tracing::error!("Database error counting tokens: {}", e);
             return response::internal_error("Failed to check token limit");
         }
     }
@@ -211,7 +211,7 @@ pub async fn post_token(
             expires_at: token_doc.expires_at,
         }),
         Err(e) => {
-            eprintln!("Database error creating token: {}", e);
+            tracing::error!("Database error creating token: {}", e);
             response::internal_error("Failed to create token")
         }
     }
@@ -272,7 +272,7 @@ pub async fn delete_token(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Database error deleting token: {}", e);
+                    tracing::error!("Database error deleting token: {}", e);
                     response::internal_error("Failed to delete token")
                 }
             }
@@ -284,7 +284,7 @@ pub async fn delete_token(
             }))
         }
         Err(e) => {
-            eprintln!("Database error querying token: {}", e);
+            tracing::error!("Database error querying token: {}", e);
             response::internal_error("Failed to delete token")
         }
     }
