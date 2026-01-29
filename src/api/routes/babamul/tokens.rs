@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct TokenPost {
     pub name: String,                 // User-defined name for the token
-    pub expires_in_days: Option<u32>, // Optional expiration in days
+    pub expires_in_days: Option<u32>, // Optional expiration in days (1-1095, default: 365)
 }
 
 #[derive(Serialize, Deserialize, Clone, ToSchema)]
@@ -121,7 +121,7 @@ pub async fn get_tokens(
     request_body = TokenPost,
     responses(
         (status = 200, description = "Token created successfully", body = TokenResponse),
-        (status = 400, description = "Invalid request (e.g., empty name, token limit reached)"),
+        (status = 400, description = "Invalid request (e.g., empty name, invalid expiration, token limit reached)"),
         (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
     ),
@@ -143,6 +143,17 @@ pub async fn post_token(
     let name = body.name.trim();
     if name.is_empty() {
         return response::bad_request("Token name cannot be empty");
+    }
+
+    // Validate expires_in_days if provided
+    if let Some(days) = body.expires_in_days {
+        if days == 0 {
+            return response::bad_request("Token expiration must be at least 1 day");
+        }
+        if days > 1095 {
+            // 3 years * 365 days
+            return response::bad_request("Token expiration cannot exceed 3 years (1095 days)");
+        }
     }
 
     // Check token limit (max 10 tokens per user)

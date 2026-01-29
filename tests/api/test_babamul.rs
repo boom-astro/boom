@@ -1478,6 +1478,66 @@ mod tests {
                 && expires_at - created_at <= 365 * 86400 + 10,
             "Token should expire in ~365 days by default"
         );
+
+        // Test creating token with zero days expiration
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Zero Expiration Token",
+                "expires_in_days": 0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Zero days expiration should be rejected"
+        );
+
+        // Test creating token with expiration > 3 years
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Too Long Expiration Token",
+                "expires_in_days": 1096
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Expiration > 3 years should be rejected"
+        );
+
+        // Test creating token with exactly 3 years (should succeed)
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "3 Year Token",
+                "expires_in_days": 1095
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "3 years expiration should succeed"
+        );
+
+        let body = read_json_response(resp).await;
+        let created_at = body["created_at"].as_i64().unwrap();
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        assert!(
+            expires_at - created_at >= 1095 * 86400 - 10
+                && expires_at - created_at <= 1095 * 86400 + 10,
+            "Token should expire in ~1095 days"
+        );
     }
 
     /// Test POST /babamul/tokens - Token limit enforcement
