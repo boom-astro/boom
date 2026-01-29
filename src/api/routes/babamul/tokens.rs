@@ -101,7 +101,7 @@ pub async fn post_token(
     // Store token in babamul_user_tokens collection
     let tokens_collection: mongodb::Collection<BabamulUserToken> =
         db.collection("babamul_user_tokens");
-    match tokens_collection.insert_one(&token_doc, None).await {
+    match tokens_collection.insert_one(&token_doc).await {
         Ok(_) => HttpResponse::Ok().json(TokenResponse {
             id: token_doc._id,
             name: token_doc.name,
