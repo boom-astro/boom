@@ -272,6 +272,13 @@ pub async fn babamul_auth_middleware(
                 // Handle PAT authentication
                 use sha2::{Digest, Sha256};
 
+                // Validate token length to prevent slicing panics.
+                // Expected format: "bbml_" (5 chars) + 36-char secret = 41 chars total.
+                if token.len() != 41 {
+                    return Err(actix_web::error::ErrorUnauthorized(
+                        "Invalid Babamul personal access token",
+                    ));
+                }
                 // Extract the secret part after "bbml_"
                 let token_secret = &token[5..];
 
