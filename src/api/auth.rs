@@ -300,6 +300,19 @@ pub async fn babamul_auth_middleware(
                             return Err(actix_web::error::ErrorUnauthorized("Token has expired"));
                         }
 
+                        // Update last_used_at timestamp
+                        let update_result = tokens_collection
+                            .update_one(
+                                doc! { "_id": &token_doc._id },
+                                doc! { "$set": { "last_used_at": now } },
+                            )
+                            .await;
+
+                        if let Err(e) = update_result {
+                            tracing::warn!("Failed to update token last_used_at: {}", e);
+                            // Don't fail authentication if we can't update the timestamp
+                        }
+
                         // Fetch the babamul user from the database
                         let babamul_users_collection: mongodb::Collection<BabamulUser> =
                             db_app_data.collection("babamul_users");
