@@ -1,7 +1,7 @@
 /// Functionality for working with personal access tokens (PATs).
 use crate::api::models::response;
 use crate::api::routes::babamul::{generate_random_string, BabamulUser};
-use actix_web::{get, post, web, HttpResponse};
+use actix_web::{delete, get, post, web, HttpResponse};
 use chrono::Utc;
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -185,6 +185,79 @@ pub async fn post_token(
         Err(e) => {
             eprintln!("Database error creating token: {}", e);
             response::internal_error("Failed to create token")
+        }
+    }
+}
+
+/// Delete a token by ID
+#[utoipa::path(
+    delete,
+    path = "/babamul/tokens/{token_id}",
+    params(
+        ("token_id" = String, Path, description = "The ID of the token to delete")
+    ),
+    responses(
+        (status = 200, description = "Token deleted successfully"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Token not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[delete("/tokens/{token_id}")]
+pub async fn delete_token(
+    db: web::Data<Database>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    token_id: web::Path<String>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let token_id = token_id.into_inner();
+    let tokens_collection: mongodb::Collection<BabamulUserToken> =
+        db.collection("babamul_user_tokens");
+
+    // Verify the token belongs to the current user before deleting
+    match tokens_collection
+        .find_one(doc! { "_id": &token_id, "user_id": &current_user.id })
+        .await
+    {
+        Ok(Some(_)) => {
+            // Token belongs to the user, proceed with deletion
+            match tokens_collection
+                .delete_one(doc! { "_id": &token_id, "user_id": &current_user.id })
+                .await
+            {
+                Ok(result) => {
+                    if result.deleted_count > 0 {
+                        HttpResponse::Ok().json(serde_json::json!({
+                            "message": "Token deleted successfully"
+                        }))
+                    } else {
+                        HttpResponse::NotFound().json(serde_json::json!({
+                            "error": "Token not found"
+                        }))
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Database error deleting token: {}", e);
+                    response::internal_error("Failed to delete token")
+                }
+            }
+        }
+        Ok(None) => {
+            // Token doesn't exist or doesn't belong to the user
+            HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Token not found"
+            }))
+        }
+        Err(e) => {
+            eprintln!("Database error querying token: {}", e);
+            response::internal_error("Failed to delete token")
         }
     }
 }

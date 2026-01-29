@@ -1573,4 +1573,152 @@ mod tests {
             );
         }
     }
+
+    /// Test DELETE /babamul/tokens/{id} - Delete a PAT
+    #[actix_rt::test]
+    async fn test_delete_token() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::get_tokens)
+                        .service(routes::babamul::tokens::delete_token),
+                ),
+        )
+        .await;
+
+        // Create a token
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Token to Delete",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let token_id = body["id"].as_str().unwrap().to_string();
+
+        // Verify token exists by listing
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 1, "Should have 1 token before delete");
+
+        // Delete the token
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["message"].as_str().unwrap(),
+            "Token deleted successfully"
+        );
+
+        // Verify token is gone by listing
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 0, "Token should be deleted");
+
+        // Try to delete again - should get 404
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = read_json_response(resp).await;
+        assert_eq!(body["error"].as_str().unwrap(), "Token not found");
+    }
+
+    /// Test DELETE /babamul/tokens/{id} with unauthorized access (token belongs to another user)
+    #[actix_rt::test]
+    async fn test_delete_token_unauthorized() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create two test users
+        let user1 = TestUser::create(&database, &auth_app_data).await;
+        let user2 = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::delete_token),
+                ),
+        )
+        .await;
+
+        // User 1 creates a token
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", user1.token)))
+            .set_json(serde_json::json!({
+                "name": "User 1 Token",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let token_id = body["id"].as_str().unwrap().to_string();
+
+        // User 2 tries to delete User 1's token - should get 404
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_id))
+            .insert_header(("Authorization", format!("Bearer {}", user2.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Should not be able to delete another user's token"
+        );
+    }
 }
