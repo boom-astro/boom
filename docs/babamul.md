@@ -135,12 +135,12 @@ flowchart TD
     LSST[New LSST Alert] --> CheckLSPSC{Has matches<br/>in LSPSC?}
 
     CheckLSPSC -->|No| CheckFootprint{In LSPSC<br/>footprint?}
-    CheckFootprint -->|Yes| LSST_Hostless[LSST Hostless]
     CheckFootprint -->|No| LSST_Unknown[LSST Unknown]
+    CheckFootprint -->|Yes| LSST_Hostless[LSST Hostless]
 
-    CheckLSPSC -->|Yes| CheckLSSTStellar{Any match with<br/>distance ≤ 1.0″<br/>and score > 0.5?}
+    CheckLSPSC -->|Yes| CheckLSSTStellar{Any stellar match?}
     CheckLSSTStellar -->|Yes| LSST_Stellar[LSST Stellar]
-    CheckLSSTStellar -->|No| CheckHosted{Any match with<br/>distance ≤ 30″<br/>and score < 0.5?}
+    CheckLSSTStellar -->|No| CheckHosted{Any non-stellar match?}
     CheckHosted -->|Yes| LSST_Hosted[LSST Hosted]
     CheckHosted -->|No| LSST_Hostless
 
@@ -179,10 +179,10 @@ to topics based on their classification and whether they have an LSST match.
 
 ```mermaid
 flowchart TD
-    ZTF[New ZTF Alert] --> CheckStellar{Stellar flag<br/>from enrichment<br/>worker?}
+    ZTF[New ZTF Alert] --> CheckStellar{Any stellar sgscore?}
 
     CheckStellar -->|Yes| ZTF_Stellar[ZTF Stellar]
-    CheckStellar -->|No| CheckSGScore{Any sgscore<br/>valid and < 0.5?}
+    CheckStellar -->|No| CheckSGScore{Any valid</br>non-stellar sgscore?}
     CheckSGScore -->|Yes| ZTF_Hosted[ZTF Hosted]
     CheckSGScore -->|No| ZTF_Hostless[ZTF Hostless]
 
