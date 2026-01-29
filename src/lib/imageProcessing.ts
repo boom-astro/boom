@@ -337,7 +337,10 @@ export function bytes2image(bytes: Uint8Array | string | ArrayBuffer | undefined
   data = cleanupImage(data);
   
   data = normalizeImage(data, "minmax");
-  data = stretchImage(data, type, "log");
+  if (type !== "difference") {
+    const alpha = survey.toLowerCase() === "lsst" ? 10.0 : 1000.0;
+    data = stretchImage(data, type, "log", alpha);
+  }
   data = normalizeImage(data, "asymmetric_percentile");
   data = ensureFinite(data);
 
