@@ -7,7 +7,8 @@ use mongodb::Database;
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
-pub const PROTECTED_COLLECTION_NAMES: [&str; 3] = ["filters", "babamul_users", "users"];
+pub const PROTECTED_COLLECTION_NAMES: [&str; 4] =
+    ["filters", "babamul_users", "users", "babamul_user_tokens"];
 
 async fn init_api_admin_user(
     auth_config: &AuthConfig,

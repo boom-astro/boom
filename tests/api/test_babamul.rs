@@ -1318,4 +1318,259 @@ mod tests {
             "Should return 404 for non-existent credential"
         );
     }
+
+    /// Test POST /babamul/tokens - Create a new PAT
+    #[actix_rt::test]
+    async fn test_post_token() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::get_tokens),
+                ),
+        )
+        .await;
+
+        // Create a token with a valid name
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "My First Token",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Token creation should succeed"
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(body["id"].is_string(), "Response should have token id");
+        assert_eq!(body["name"].as_str().unwrap(), "My First Token");
+        assert!(
+            body["access_token"].is_string(),
+            "Response should have access_token"
+        );
+
+        let access_token = body["access_token"].as_str().unwrap();
+        assert!(
+            access_token.starts_with("bbml_"),
+            "Token should start with bbml_"
+        );
+        assert_eq!(
+            access_token.len(),
+            41,
+            "Token should be bbml_ (5 chars) + 36 random chars"
+        );
+
+        assert!(
+            body["created_at"].is_i64(),
+            "created_at should be timestamp"
+        );
+        assert!(
+            body["expires_at"].is_i64(),
+            "expires_at should be timestamp"
+        );
+
+        let created_at = body["created_at"].as_i64().unwrap();
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        assert!(
+            expires_at > created_at,
+            "expires_at should be after created_at"
+        );
+        assert!(
+            expires_at - created_at >= 30 * 86400 - 10
+                && expires_at - created_at <= 30 * 86400 + 10,
+            "Token should expire in ~30 days"
+        );
+
+        // Test creating token with empty name
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Empty name should be rejected"
+        );
+
+        // Test creating token with whitespace-only name
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "   ",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Whitespace-only name should be rejected"
+        );
+
+        // Test creating token with default expiration (365 days)
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Default Expiration Token"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Token creation with default expiration should succeed"
+        );
+
+        let body = read_json_response(resp).await;
+        let created_at = body["created_at"].as_i64().unwrap();
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        assert!(
+            expires_at - created_at >= 365 * 86400 - 10
+                && expires_at - created_at <= 365 * 86400 + 10,
+            "Token should expire in ~365 days by default"
+        );
+    }
+
+    /// Test GET /babamul/tokens - List all PATs
+    #[actix_rt::test]
+    async fn test_get_tokens() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::get_tokens),
+                ),
+        )
+        .await;
+
+        // Initially, user should have no tokens
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 0, "User should start with no tokens");
+
+        // Create three tokens
+        let token_names = vec!["Token 1", "Token 2", "Token 3"];
+        let mut created_token_ids = Vec::new();
+
+        for name in &token_names {
+            let req = test::TestRequest::post()
+                .uri("/babamul/tokens")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "name": name,
+                    "expires_in_days": 30
+                }))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = read_json_response(resp).await;
+            created_token_ids.push(body["id"].as_str().unwrap().to_string());
+        }
+
+        // List tokens
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 3, "User should have 3 tokens");
+
+        // Verify token structure and content
+        for (i, token) in tokens.iter().enumerate() {
+            assert!(token["id"].is_string(), "Token should have id");
+            assert!(token["name"].is_string(), "Token should have name");
+            assert_eq!(
+                token["name"].as_str().unwrap(),
+                token_names[i],
+                "Token name should match"
+            );
+            assert!(token["created_at"].is_i64(), "Token should have created_at");
+            assert!(token["expires_at"].is_i64(), "Token should have expires_at");
+            assert!(
+                token["last_used_at"].is_null(),
+                "Token should have null last_used_at initially"
+            );
+
+            // Token should NOT expose the token_hash or access_token
+            assert!(
+                token.get("token_hash").is_none(),
+                "Token hash should not be exposed"
+            );
+            assert!(
+                token.get("access_token").is_none(),
+                "Access token should not be exposed in list"
+            );
+            assert!(
+                token.get("user_id").is_none(),
+                "User ID should not be exposed"
+            );
+
+            // Verify this is one of the tokens we created
+            assert!(created_token_ids.contains(&token["id"].as_str().unwrap().to_string()));
+        }
+
+        // Verify token names are in the response (order may vary)
+        let returned_names: Vec<&str> =
+            tokens.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for name in &token_names {
+            assert!(
+                returned_names.contains(name),
+                "Token name should be in response"
+            );
+        }
+    }
 }
