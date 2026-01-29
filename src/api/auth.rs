@@ -291,10 +291,7 @@ pub async fn babamul_auth_middleware(
                 {
                     Ok(Some(token_doc)) => {
                         // Check if token is expired
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64;
+                        let now = flare::Time::now().to_utc().timestamp();
 
                         if now > token_doc.expires_at {
                             return Err(actix_web::error::ErrorUnauthorized("Token has expired"));

@@ -2,7 +2,7 @@
 use crate::api::models::response;
 use crate::api::routes::babamul::{generate_random_string, BabamulUser};
 use actix_web::{delete, get, post, web, HttpResponse};
-use chrono::Utc;
+use flare::Time;
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
@@ -183,7 +183,7 @@ pub async fn post_token(
     let token_hash = hash_token(&token_secret);
 
     // Calculate expiration
-    let now = Utc::now().timestamp();
+    let now = Time::now().to_utc().timestamp();
     let default_expires_days = 365;
     let expires_at = body
         .expires_in_days
