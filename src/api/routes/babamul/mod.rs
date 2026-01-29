@@ -314,7 +314,7 @@ pub async fn post_babamul_signup(
 }
 
 /// Generate a random alphanumeric string of specified length
-fn generate_random_string(length: usize) -> String {
+pub fn generate_random_string(length: usize) -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut rng = rand::rng();

@@ -267,52 +267,129 @@ pub async fn babamul_auth_middleware(
                 }
             };
 
-            // Validate the token and extract user_id
-            match auth_app_data.validate_token(token).await {
-                Ok(user_id) => {
-                    // Check if this is a babamul user
-                    if !user_id.starts_with("babamul:") {
-                        return Err(actix_web::error::ErrorForbidden(
-                            "Main API users cannot access Babamul endpoints",
-                        ));
-                    }
+            // Check if this is a personal access token (PAT)
+            if token.starts_with("bbml_") {
+                // Handle PAT authentication
+                use sha2::{Digest, Sha256};
 
-                    // Extract the actual user ID (remove "babamul:" prefix)
-                    let actual_user_id = user_id.trim_start_matches("babamul:");
+                // Extract the secret part after "bbml_"
+                let token_secret = &token[5..];
 
-                    // Fetch the babamul user from the database
-                    let babamul_users_collection: mongodb::Collection<BabamulUser> =
-                        db_app_data.collection("babamul_users");
+                // Hash the token for comparison
+                let mut hasher = Sha256::new();
+                hasher.update(token_secret.as_bytes());
+                let token_hash = format!("{:x}", hasher.finalize());
 
-                    match babamul_users_collection
-                        .find_one(doc! { "_id": actual_user_id })
-                        .await
-                    {
-                        Ok(Some(user)) => {
-                            // Check if user is activated
-                            if !user.is_activated {
-                                return Err(actix_web::error::ErrorForbidden(
-                                    "Account not activated. Please check your email for activation instructions.",
+                // Look up the token in babamul_user_tokens
+                let tokens_collection: mongodb::Collection<
+                    crate::api::routes::babamul::tokens::BabamulUserToken,
+                > = db_app_data.collection("babamul_user_tokens");
+
+                match tokens_collection
+                    .find_one(doc! { "token_hash": &token_hash })
+                    .await
+                {
+                    Ok(Some(token_doc)) => {
+                        // Check if token is expired
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
+
+                        if now > token_doc.expires_at {
+                            return Err(actix_web::error::ErrorUnauthorized("Token has expired"));
+                        }
+
+                        // Fetch the babamul user from the database
+                        let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                            db_app_data.collection("babamul_users");
+
+                        match babamul_users_collection
+                            .find_one(doc! { "_id": &token_doc.user_id })
+                            .await
+                        {
+                            Ok(Some(user)) => {
+                                // Check if user is activated
+                                if !user.is_activated {
+                                    return Err(actix_web::error::ErrorForbidden(
+                                        "Account not activated. Please check your email for activation instructions.",
+                                    ));
+                                }
+                                // Inject the user in the request
+                                req.extensions_mut().insert(user);
+                            }
+                            Ok(None) => {
+                                return Err(actix_web::error::ErrorUnauthorized(
+                                    "Babamul user not found",
                                 ));
                             }
-                            // Inject the user in the request
-                            req.extensions_mut().insert(user);
-                        }
-                        Ok(None) => {
-                            return Err(actix_web::error::ErrorUnauthorized(
-                                "Babamul user not found",
-                            ));
-                        }
-                        Err(e) => {
-                            tracing::error!("Database error fetching babamul user: {}", e);
-                            return Err(actix_web::error::ErrorInternalServerError(
-                                "Database error",
-                            ));
+                            Err(e) => {
+                                tracing::error!("Database error fetching babamul user: {}", e);
+                                return Err(actix_web::error::ErrorInternalServerError(
+                                    "Database error",
+                                ));
+                            }
                         }
                     }
+                    Ok(None) => {
+                        return Err(actix_web::error::ErrorUnauthorized(
+                            "Invalid personal access token",
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::error!("Database error looking up token: {}", e);
+                        return Err(actix_web::error::ErrorInternalServerError("Database error"));
+                    }
                 }
-                Err(_) => {
-                    return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+            } else {
+                // Handle JWT authentication
+                // Validate the token and extract user_id
+                match auth_app_data.validate_token(token).await {
+                    Ok(user_id) => {
+                        // Check if this is a babamul user
+                        if !user_id.starts_with("babamul:") {
+                            return Err(actix_web::error::ErrorForbidden(
+                                "Main API users cannot access Babamul endpoints",
+                            ));
+                        }
+
+                        // Extract the actual user ID (remove "babamul:" prefix)
+                        let actual_user_id = user_id.trim_start_matches("babamul:");
+
+                        // Fetch the babamul user from the database
+                        let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                            db_app_data.collection("babamul_users");
+
+                        match babamul_users_collection
+                            .find_one(doc! { "_id": actual_user_id })
+                            .await
+                        {
+                            Ok(Some(user)) => {
+                                // Check if user is activated
+                                if !user.is_activated {
+                                    return Err(actix_web::error::ErrorForbidden(
+                                        "Account not activated. Please check your email for activation instructions.",
+                                    ));
+                                }
+                                // Inject the user in the request
+                                req.extensions_mut().insert(user);
+                            }
+                            Ok(None) => {
+                                return Err(actix_web::error::ErrorUnauthorized(
+                                    "Babamul user not found",
+                                ));
+                            }
+                            Err(e) => {
+                                tracing::error!("Database error fetching babamul user: {}", e);
+                                return Err(actix_web::error::ErrorInternalServerError(
+                                    "Database error",
+                                ));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+                    }
                 }
             }
         }
