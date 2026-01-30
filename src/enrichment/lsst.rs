@@ -268,6 +268,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         } else {
             None
         };
+        debug!(input_queue = %input_queue, output_queue = %output_queue, "LSST Enrichment Worker configuration");
 
         Ok(LsstEnrichmentWorker {
             input_queue,

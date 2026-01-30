@@ -7,7 +7,6 @@ use actix_web::middleware::Next;
 use actix_web::{web, Error, HttpMessage};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use mongodb::bson::doc;
-use mongodb::Database;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,8 +26,10 @@ pub struct AuthProvider {
 }
 
 impl AuthProvider {
-    pub async fn new(config: &AppConfig, db: &Database) -> Result<Self, std::io::Error> {
-        let auth_config = &config.api.auth;
+    pub async fn new(
+        auth_config: &AuthConfig,
+        db: &mongodb::Database,
+    ) -> Result<Self, std::io::Error> {
         let encoding_key = EncodingKey::from_secret(auth_config.secret_key.as_bytes());
         let decoding_key = DecodingKey::from_secret(auth_config.secret_key.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
