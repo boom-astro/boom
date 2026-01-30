@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore | log
+# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore | log | show
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
@@ -48,13 +48,13 @@ stop_service() {
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
   && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] \
-  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|log} [args...]"
+  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ] && [ "$1" != "show" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|log|show} [args...]"
   exit 1
 fi
 
 # -----------------------------
-# 1. Build SIF files
+# Build SIF files
 # -----------------------------
 if [ "$1" = "build" ]; then
   # See build-sif.sh for the full explanation of the argument
@@ -63,7 +63,7 @@ if [ "$1" = "build" ]; then
 fi
 
 # -----------------------------
-# 2. Start services
+# Start services
 # -----------------------------
 if [ "$1" == "start" ]; then
   ARGS=("$BOOM_DIR")
@@ -84,7 +84,7 @@ if [ "$1" == "start" ]; then
 fi
 
 # -----------------------------
-# 3. Stop services
+# Stop services
 # -----------------------------
 if [ "$1" == "stop" ]; then
   target="$2"
@@ -152,7 +152,7 @@ if [ "$1" == "stop" ]; then
 fi
 
 # -----------------------------
-# 4. Restart services
+# Restart services
 # -----------------------------
 if [ "$1" == "restart" ]; then
   "$0" stop "$2"
@@ -161,7 +161,7 @@ if [ "$1" == "restart" ]; then
 fi
 
 # -----------------------------
-# 4. Health checks
+# Health checks
 # -----------------------------
 if [ "$1" == "health" ]; then
   apptainer instance list && echo
@@ -177,7 +177,7 @@ if [ "$1" == "health" ]; then
 fi
 
 # -----------------------------
-# 5. Run benchmark
+# Run benchmark
 # -----------------------------
 if [ "$1" == "benchmark" ]; then
   pip install pandas pyyaml astropy confluent-kafka
@@ -186,7 +186,7 @@ if [ "$1" == "benchmark" ]; then
 fi
 
 # -----------------------------
-# 6. Add filters
+# Add filters
 # -----------------------------
 if [ "$1" == "filters" ]; then
   path_to_file="$2"
@@ -195,7 +195,7 @@ if [ "$1" == "filters" ]; then
 fi
 
 # -----------------------------
-# 7. Backup MongoDB
+# Backup MongoDB
 # -----------------------------
 if [ "$1" == "backup" ]; then
   load_env # Load environment variables
@@ -209,7 +209,7 @@ if [ "$1" == "backup" ]; then
 fi
 
 # -----------------------------
-# 8. Restore MongoDB
+# Restore MongoDB
 # -----------------------------
 if [ "$1" == "restore" ]; then
   load_env # Load environment variables
@@ -228,7 +228,7 @@ if [ "$1" == "restore" ]; then
 fi
 
 # -----------------------------
-# 8. Display log
+# Display log
 # -----------------------------
 if [ "$1" == "log" ]; then
   survey="${2:-lsst}"
@@ -283,4 +283,28 @@ if [ "$1" == "log" ]; then
 
   echo -e "${BLUE}Displaying ${log_pattern} file(s):${END}"
   tail -f "${log_files[@]}"
+fi
+
+# -----------------------------
+# Show information from selected service
+# -----------------------------
+if [ "$1" == "show" ]; then
+  info_to_show="$2"
+  if [ -z "$info_to_show" ] || [ "$info_to_show" == "valkey" ]; then
+    if ! "$HEALTHCHECK_DIR/valkey-healthcheck.sh" 0 > /dev/null 2>&1; then
+      echo -e "${RED}Error: Valkey service is not running.${END}"
+      exit 1
+    fi
+    echo -e "${BLUE}Valkey keys and their lengths:${END}"
+    keys=$(apptainer exec instance://valkey valkey-cli keys "*")
+    if [ -z "$keys" ]; then
+      echo "  (no keys)"
+    else
+      echo "$keys" | while read key; do
+        list_len=$(apptainer exec instance://valkey valkey-cli llen "$key")
+        list_len_with_space=$(echo "$list_len" | sed ':a;s/\B[0-9]\{3\}\>/ &/;ta')
+        echo "  $key: $list_len_with_space"
+      done
+    fi
+  fi
 fi
