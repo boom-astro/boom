@@ -2,7 +2,7 @@ Bootstrap: docker
 From: rust:1.91.1-slim-trixie
 
 %environment
-    export PATH=/app:$PATH
+    export PATH=/app:/opt/kafka/bin:$PATH
     # Optional overrides
     export BOOM_DATABASE__HOST=localhost
 
@@ -15,12 +15,21 @@ From: rust:1.91.1-slim-trixie
     src /app/src
 
 %post
+    KAFKA_VERSION=4.1.1
+    SCALA_VERSION=2.13
     apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
       curl gcc g++ libhdf5-dev perl \
       make libsasl2-dev pkg-config \
-      libsasl2-2 ca-certificates && \
+      libsasl2-2 ca-certificates \
+      openjdk-25-jre-headless tar && \
     apt-get autoremove && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    # Install Kafka CLI tools
+    curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
+    tar -xzf /tmp/kafka.tgz -C /opt && \
+    ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
+    rm -f /tmp/kafka.tgz
 
     cd /app || exit 1
     cargo build --release
