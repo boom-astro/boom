@@ -454,35 +454,53 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
-            let metadata = self.acai_h_model.get_metadata(&[&alert])?;
+            // (we skip ML inference if features cannot be computed, e.g. missing required features)
             let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-
-            let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-            let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-            let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-            let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-            let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-
-            let metadata_btsbot = self
+            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
+            let btsbot_metadata_result = self
                 .btsbot_model
-                .get_metadata(&[&alert], &[all_bands_properties])?;
-            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
+                .get_metadata(&[&alert], &[all_bands_properties.clone()]);
 
-            let classifications = ZtfAlertClassifications {
-                acai_h: acai_h_scores[0],
-                acai_n: acai_n_scores[0],
-                acai_v: acai_v_scores[0],
-                acai_o: acai_o_scores[0],
-                acai_b: acai_b_scores[0],
-                btsbot: btsbot_scores[0],
+            let classifications = if let (Ok(metadata), Ok(btsbot_metadata)) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
+                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
+                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
+                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
+                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
+                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    candid
+                );
+                None
             };
 
-            let update_alert_document = doc! {
-                "$set": {
-                    // ML scores
-                    "classifications": mongify(&classifications),
-                    // properties
-                    "properties": mongify(&properties),
+            let update_alert_document = if let Some(classifications) = classifications {
+                doc! {
+                    "$set": {
+                        // ML scores
+                        "classifications": mongify(&classifications),
+                        // properties
+                        "properties": mongify(&properties),
+                    }
+                }
+            } else {
+                doc! {
+                    "$set": {
+                        // properties
+                        "properties": mongify(&properties),
+                    }
                 }
             };
 
