@@ -21,7 +21,7 @@ pub enum ModelError {
     ModelOutputToVecError,
     #[error("error converting array to tensor")]
     TensorConversionError,
-    #[error("missing feature in alert")]
+    #[error("missing feature in alert: {0}")]
     MissingFeature(&'static str),
 }
 

@@ -453,6 +453,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
+        let now = flare::Time::now().to_jd();
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -469,59 +471,76 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
-            let metadata = self.acai_h_model.get_metadata(&[&alert])?;
+            // (we skip ML inference if features cannot be computed, e.g. missing required features)
             let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-
-            let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-            let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-            let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-            let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-            let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-
-            let metadata_btsbot = self
+            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
+            let btsbot_metadata_result = self
                 .btsbot_model
-                .get_metadata(&[&alert], &[&all_bands_properties])?;
-            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
+                .get_metadata(&[&alert], &[&all_bands_properties]);
 
+            let triplet_cider = self.ciderimages_model.get_triplet(&[&cutouts])?;
             let metadata_cider = self
                 .ciderimages_model
                 .get_metadata(&[&alert], &[&all_bands_properties])?;
-            let triplet_cider = self.ciderimages_model.get_triplet(&[&cutouts])?;
-            let cider_img_scores = self
-                .ciderimages_model
-                .predict(&metadata_cider, &triplet_cider)?;
-
             let (photometry_data_array, photometry_mask) =
                 self.ciderphotometry_model.photometry_inputs(_lightcurve)?;
-            let cider_photo_scores = self
-                .ciderphotometry_model
-                .predict(&photometry_data_array, &photometry_mask)?;
 
-            let classifications = ZtfAlertClassifications {
-                acai_h: acai_h_scores[0],
-                acai_n: acai_n_scores[0],
-                acai_v: acai_v_scores[0],
-                acai_o: acai_o_scores[0],
-                acai_b: acai_b_scores[0],
-                btsbot: btsbot_scores[0],
-                cider_img_nuclear: cider_img_scores[0],
-                cider_img_snI: cider_img_scores[1],
-                cider_img_snII: cider_img_scores[2],
-                cider_img_cataclysmic: cider_img_scores[3],
-                cider_photo_snI: cider_photo_scores[0],
-                cider_photo_snII: cider_photo_scores[1],
-                cider_photo_cataclysmic: cider_photo_scores[2],
-                cider_photo_agn: cider_photo_scores[3],
-                cider_photo_tde: cider_photo_scores[4],
+            let classifications = if let (Ok(metadata),
+                Ok(btsbot_metadata),
+
+            ) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
+                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
+                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
+                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
+                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
+                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
+
+                let cider_img_scores = self
+                    .ciderimages_model
+                    .predict(&metadata_cider, &triplet_cider)?;
+                let cider_photo_scores = self
+                    .ciderphotometry_model
+                    .predict(&photometry_data_array, &photometry_mask)?;
+
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                    cider_img_nuclear: cider_img_scores[0],
+                    cider_img_snI: cider_img_scores[1],
+                    cider_img_snII: cider_img_scores[2],
+                    cider_img_cataclysmic: cider_img_scores[3],
+                    cider_photo_snI: cider_photo_scores[0],
+                    cider_photo_snII: cider_photo_scores[1],
+                    cider_photo_cataclysmic: cider_photo_scores[2],
+                    cider_photo_agn: cider_photo_scores[3],
+                    cider_photo_tde: cider_photo_scores[4],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    candid
+                );
+                None
             };
 
-            let update_alert_document = doc! {
-                "$set": {
-                    // ML scores
+            let update_alert_document = if let Some(classifications) = classifications {
+                doc! { "$set": {
                     "classifications": mongify(&classifications),
-                    // properties
                     "properties": mongify(&properties),
-                }
+                    "updated_at": now,
+                }}
+            } else {
+                doc! { "$set": {
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }}
             };
 
             let update = WriteModel::UpdateOne(
