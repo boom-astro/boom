@@ -287,67 +287,61 @@ pub async fn babamul_auth_middleware(
                 hasher.update(token_secret.as_bytes());
                 let token_hash = format!("{:x}", hasher.finalize());
 
-                // Look up the token, update last_used_at, and fetch the user in a single atomic operation
+                // Look up the token and update last_used_at in a single atomic operation
                 // Use aggregation pipeline to update token and join with user in one operation
                 let now = flare::Time::now().to_utc().timestamp();
-                let pipeline = vec![
-                    doc! { "$set": { "last_used_at": now } },
-                    doc! {
-                        "$lookup": {
-                            "from": "babamul_users",
-                            "localField": "user_id",
-                            "foreignField": "_id",
-                            "as": "user"
-                        }
-                    },
-                    doc! {
-                        "$unwind": {
-                            "path": "$user",
-                            "preserveNullAndEmptyArrays": false
-                        }
-                    },
-                ];
+                let tokens_collection: mongodb::Collection<
+                    crate::api::routes::babamul::tokens::BabamulUserToken,
+                > = db_app_data.collection("babamul_user_tokens");
 
-                // Use a raw document collection to get both token and user data in one call
-                let raw_collection: mongodb::Collection<mongodb::bson::Document> =
-                    db_app_data.collection("babamul_user_tokens");
-
-                match raw_collection
-                    .find_one_and_update(doc! { "token_hash": &token_hash }, pipeline)
+                match tokens_collection
+                    .find_one(doc! { "token_hash": &token_hash })
                     .await
                 {
-                    Ok(Some(result_doc)) => {
-                        // Deserialize token from result
-                        let token_doc: crate::api::routes::babamul::tokens::BabamulUserToken =
-                            mongodb::bson::from_document(result_doc.clone()).map_err(|e| {
-                                tracing::error!("Failed to deserialize token document: {}", e);
-                                actix_web::error::ErrorInternalServerError("Database error")
-                            })?;
+                    Ok(Some(token_doc)) => {
                         // Check if token is expired
                         if now > token_doc.expires_at {
                             return Err(actix_web::error::ErrorUnauthorized("Token has expired"));
                         }
-                        // Extract user from the joined document
-                        let user: BabamulUser = match result_doc.get_document("user") {
-                            Ok(user_doc) => mongodb::bson::from_document(user_doc.clone())
-                                .map_err(|e| {
-                                    tracing::error!("Failed to deserialize user document: {}", e);
-                                    actix_web::error::ErrorInternalServerError("Database error")
-                                })?,
-                            Err(_) => {
+
+                        // Update last_used_at timestamp
+                        let _ = tokens_collection
+                            .update_one(
+                                doc! { "_id": &token_doc._id },
+                                doc! { "$set": { "last_used_at": now } },
+                            )
+                            .await;
+
+                        // Fetch the babamul user from the database
+                        let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                            db_app_data.collection("babamul_users");
+
+                        match babamul_users_collection
+                            .find_one(doc! { "_id": &token_doc.user_id })
+                            .await
+                        {
+                            Ok(Some(user)) => {
+                                // Check if user is activated
+                                if !user.is_activated {
+                                    return Err(actix_web::error::ErrorForbidden(
+                                        "Account not activated. Please check your email for activation instructions.",
+                                    ));
+                                }
+                                // Inject the user in the request
+                                req.extensions_mut().insert(user);
+                            }
+                            Ok(None) => {
                                 return Err(actix_web::error::ErrorUnauthorized(
                                     "Babamul user not found",
                                 ));
                             }
-                        };
-                        // Check if user is activated
-                        if !user.is_activated {
-                            return Err(actix_web::error::ErrorForbidden(
-                                "Account not activated. Please check your email for activation instructions.",
-                            ));
+                            Err(e) => {
+                                tracing::error!("Database error fetching babamul user: {}", e);
+                                return Err(actix_web::error::ErrorInternalServerError(
+                                    "Database error",
+                                ));
+                            }
                         }
-                        // Inject the user in the request
-                        req.extensions_mut().insert(user);
                     }
                     Ok(None) => {
                         return Err(actix_web::error::ErrorUnauthorized(
@@ -355,7 +349,7 @@ pub async fn babamul_auth_middleware(
                         ));
                     }
                     Err(e) => {
-                        tracing::error!("Database error during PAT authentication: {}", e);
+                        tracing::error!("Database error looking up token: {}", e);
                         return Err(actix_web::error::ErrorInternalServerError("Database error"));
                     }
                 }
