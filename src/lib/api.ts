@@ -179,6 +179,9 @@ export async function createKafkaCredential(name: string): Promise<KafkaCredenti
     throw new Error(`Create kafka credential failed: ${res.status} ${txt}`);
   }
   const body = await parseResponseJson(res).catch(() => ({}));
+  if (body && typeof body === 'object' && 'credential' in body) {
+    return (body as { credential: KafkaCredential }).credential;
+  }
   return unwrapData<KafkaCredential>(body, {} as KafkaCredential);
 }
 
@@ -238,14 +241,14 @@ export type Alert = {
 
 export async function fetchAlerts(survey: string, params: AlertSearchParams): Promise<Alert[]> {
   const searchParams = new URLSearchParams();
-  
+
   // Add all defined parameters to the query string
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null) {
       searchParams.append(key, String(value));
     }
   });
-  
+
   const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/alerts?${searchParams.toString()}`;
   const res = await fetchWithAuth(url);
   if (!res.ok) {
@@ -286,7 +289,7 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
     object_id: value,
     limit: String(limit),
   });
-  
+
   const url = `${API_BASE}/objects?${searchParams.toString()}`;
   const res = await fetchWithAuth(url);
   if (!res.ok) {

@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils.ts";
 import { fetchProfile, fetchKafkaCredentials, createKafkaCredential, deleteKafkaCredential, type Profile as ProfileType, type KafkaCredential } from "@/lib/api";
 import { Copy, Plus, Trash } from "lucide-react";
 import { IconEye, IconEyeOff } from "@tabler/icons-react";
@@ -13,10 +14,12 @@ export default function Profile() {
   const [profile, setProfile] = useState<ProfileType>(null);
   const [credentials, setCredentials] = useState<KafkaCredential[]>([]);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [creating, setCreating] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [newCredentialName, setNewCredentialName] = useState("");
+  const [credentialToDelete, setCredentialToDelete] = useState<string | null>(null);
   const [revealedSecrets, setRevealedSecrets] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -47,36 +50,53 @@ export default function Profile() {
       return;
     }
 
-    setCreating(true);
+    // Loading state
+    const tempId = "loadingCred_" + Date.now();
+    setCreating((ids) => new Set([...ids, tempId]));
+    const loadingCred = {
+      id: tempId,
+      name: newCredentialName.trim(),
+      kafka_username: "...",
+      kafka_password: "...",
+    };
+    setShowCreateDialog(false);
+    setNewCredentialName("");
+    setCredentials((creds) => [...creds, loadingCred]);
+
     try {
-      const newCred = await createKafkaCredential(newCredentialName.trim());
-      setCredentials([...credentials, newCred]);
-      setNewCredentialName("");
-      setShowCreateDialog(false);
+      const newCred = await createKafkaCredential(loadingCred.name);
+      setCredentials((creds) => creds.map((c) => c.id === tempId ? newCred : c));
       // Auto-reveal the newly created credential's secret
-      setRevealedSecrets(new Set([...revealedSecrets, newCred.kafka_username]));
+      setRevealedSecrets(new Set([...revealedSecrets, newCred.id]));
       toast.success("Kafka credential created successfully");
-      // let's reload profile to reflect any changes
-      await loadData();
     } catch (error) {
+      setCredentials((creds) => creds.filter((c) => c.id !== tempId));
       toast.error(`Failed to create credential: ${error}`);
+      await loadData();
     } finally {
-      setCreating(false);
+      setCreating((ids) => new Set([...ids].filter(id => id !== tempId)));
     }
   }
 
-  async function handleDeleteCredential(credentialId: string) {
-    setDeleting(credentialId);
+  async function handleDeleteCredential() {
+    setShowDeleteDialog(false);
+    const idToDelete = credentialToDelete;
+    if (!idToDelete) {
+      toast.error("No credential selected for deletion");
+      return;
+    }
     try {
-      await deleteKafkaCredential(credentialId);
-      setCredentials(credentials.filter(cred => cred.id !== credentialId));
+      setDeleting((ids) => new Set([...ids, idToDelete]));
+      await deleteKafkaCredential(idToDelete);
+      setCredentials(creds => creds.filter(c => c.id !== idToDelete));
+      setRevealedSecrets((ids) => new Set([...ids].filter(id => id !== idToDelete)));
       toast.success("Kafka credential deleted successfully");
-      // let's reload profile to reflect any changes
-      await loadData();
     } catch (error) {
       toast.error(`Failed to delete credential: ${error}`);
+      await loadData();
     } finally {
-      setDeleting(null);
+      setDeleting((ids) => new Set([...ids].filter(id => id !== idToDelete)));
+      setCredentialToDelete(null);
     }
   }
 
@@ -164,18 +184,24 @@ export default function Profile() {
               {credentials.map((cred) => {
                 const isRevealed = revealedSecrets.has(cred.id);
                 return (
-                  <div key={cred.id} className="border rounded-lg p-4">
+                  <div key={cred.id} className={cn("border rounded-lg p-4",
+                    deleting.has(cred.id) && "shimmer-destructive",
+                    creating.has(cred.id) && "shimmer"
+                  )}>
                     <div className="flex items-start justify-between mb-3 flex-row">
                         <h3 className="font-semibold">{cred.name}</h3>
                         <Button
                           variant="ghost"
                           size="icon"
-                          onClick={() => setDeleting(cred.id)}
+                          onClick={() => {
+                            setCredentialToDelete(cred.id);
+                            setShowDeleteDialog(true);
+                          }}
+                          disabled={deleting.has(cred.id) || creating.has(cred.id)}
                         >
-                          <Trash className="h-4 w-4" />
+                          <Trash className="h-4 w-4 text-destructive" />
                         </Button>
                     </div>
-                    
                     <div className="space-y-3">
                       <div>
                         <Label className="text-xs text-muted-foreground">Kafka Username</Label>
@@ -192,12 +218,11 @@ export default function Profile() {
                           </Button>
                         </div>
                       </div>
-                      
                       <div>
                         <Label className="text-xs text-muted-foreground">Kafka Password</Label>
                         <div className="flex items-center gap-2 mt-1">
                           <code className="flex-1 bg-muted px-3 py-2 rounded text-sm font-mono">
-                            {isRevealed ? cred.kafka_password : "••••••••••••••••"}
+                            {creating.has(cred.id) || isRevealed ? cred.kafka_password : "••••••••••••••••"}
                           </code>
                           <Button
                             variant="ghost"
@@ -241,9 +266,7 @@ export default function Profile() {
               value={newCredentialName}
               onChange={(e) => setNewCredentialName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleCreateCredential();
-                }
+                if (e.key === "Enter") handleCreateCredential()
               }}
               className="mt-2"
             />
@@ -252,15 +275,15 @@ export default function Profile() {
             <Button variant="outline" onClick={() => setShowCreateDialog(false)}>
               Cancel
             </Button>
-            <Button onClick={handleCreateCredential} disabled={creating || !newCredentialName.trim()}>
-              {creating ? "Creating..." : "Create"}
+            <Button onClick={handleCreateCredential} disabled={!newCredentialName.trim()}>
+              Create
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Delete Credential Dialog */}
-      <Dialog open={deleting !== null} onOpenChange={() => setDeleting(null)}>
+      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Kafka Credential</DialogTitle>
@@ -269,14 +292,13 @@ export default function Profile() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
+            <Button variant="outline" onClick={() => setShowDeleteDialog(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={() => {
-              if (deleting) {
-                handleDeleteCredential(deleting);
-              }
-            }} disabled={deleting === null}>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteCredential}
+            >
               Delete
             </Button>
           </DialogFooter>

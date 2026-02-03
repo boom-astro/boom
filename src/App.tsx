@@ -6,7 +6,7 @@ import { AppSidebar } from "@/components/app-sidebar"
 import { SiteHeader } from "@/components/site-header"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { ThemeProvider } from "@/components/theme-provider"
-import { Toaster } from "sonner";
+import { Toaster } from "@/components/ui/sonner";
 
 const Query = lazy(() => import("@/pages/Query"));
 const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));

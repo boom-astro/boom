@@ -119,6 +119,50 @@
   }
 }
 
+.shimmer,
+.shimmer-destructive {
+  position: relative;
+  overflow: hidden;
+  opacity: 0.6;
+  pointer-events: none;
+  user-select: none;
+}
+
+.shimmer::after,
+.shimmer-destructive::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  animation: shimmer 1.5s infinite;
+}
+
+.shimmer::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    oklch(1 0 0 / 8%) 40%,
+    oklch(1 0 0 / 15%) 50%,
+    oklch(1 0 0 / 8%) 60%,
+    transparent 100%
+  );
+}
+
+.shimmer-destructive::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(239 68 68 / 15%) 40%,
+    rgb(239 68 68 / 25%) 50%,
+    rgb(239 68 68 / 15%) 60%,
+    transparent 100%
+  );
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
 /* for any element with class aladin-location, hide it */
 .aladin-horizontal-list.aladin-location {
   display: none;
@@ -131,7 +175,7 @@
 
 .aladin-tooltip-container.aladin-fullScreen-control.left {
   padding: 5px;
-  
+
   /* any aladin-btn in it should not have a border */
   .aladin-btn {
     border: none;
