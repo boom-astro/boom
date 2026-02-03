@@ -146,9 +146,28 @@ pub async fn post_token(
         last_used_at: None,
     };
 
+    let users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    // first, ensure no user has a token with the same hash (extremely unlikely, but just in case)
+    match users_collection
+        .find_one(doc! { "tokens.token_hash": &token_doc.token_hash })
+        .await
+    {
+        Ok(None) => {} // No collision, proceed
+        Ok(Some(_)) => {
+            tracing::error!(
+                "Token hash collision detected when creating token for user {}",
+                current_user.id
+            );
+            return response::internal_error("Failed to create token");
+        }
+        Err(e) => {
+            tracing::error!("Database error checking token hash uniqueness: {}", e);
+            return response::internal_error("Failed to create token");
+        }
+    }
+
     // Push it to the current_user's tokens array, making sure
     // there are no duplicates (by id and name)
-    let users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
     match users_collection
         .update_one(
             doc! { "_id": &current_user.id, "tokens.name": { "$ne": name }, "tokens.id": { "$ne": &token_id } },
