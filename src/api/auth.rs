@@ -290,58 +290,32 @@ pub async fn babamul_auth_middleware(
                 // Look up the token and update last_used_at in a single atomic operation
                 // Use aggregation pipeline to update token and join with user in one operation
                 let now = flare::Time::now().to_utc().timestamp();
-                let tokens_collection: mongodb::Collection<
-                    crate::api::routes::babamul::tokens::BabamulUserToken,
-                > = db_app_data.collection("babamul_user_tokens");
 
-                match tokens_collection
-                    .find_one(doc! { "token_hash": &token_hash })
+                // instead, tokens are now an embedded array in the babamul_users collection
+                let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                    db_app_data.collection("babamul_users");
+
+                match babamul_users_collection
+                    .find_one_and_update(
+                        doc! { "tokens.token_hash": &token_hash },
+                        doc! { "$set": { "tokens.$[token].last_used_at": now } },
+                    )
+                    .with_options(
+                        mongodb::options::FindOneAndUpdateOptions::builder()
+                            .array_filters(vec![doc! { "token.token_hash": &token_hash }])
+                            .build(),
+                    )
                     .await
                 {
-                    Ok(Some(token_doc)) => {
-                        // Check if token is expired
-                        if now > token_doc.expires_at {
-                            return Err(actix_web::error::ErrorUnauthorized("Token has expired"));
+                    Ok(Some(user)) => {
+                        // Check if user is activated
+                        if !user.is_activated {
+                            return Err(actix_web::error::ErrorForbidden(
+                                "Account not activated. Please check your email for activation instructions.",
+                            ));
                         }
-
-                        // Update last_used_at timestamp
-                        let _ = tokens_collection
-                            .update_one(
-                                doc! { "_id": &token_doc._id },
-                                doc! { "$set": { "last_used_at": now } },
-                            )
-                            .await;
-
-                        // Fetch the babamul user from the database
-                        let babamul_users_collection: mongodb::Collection<BabamulUser> =
-                            db_app_data.collection("babamul_users");
-
-                        match babamul_users_collection
-                            .find_one(doc! { "_id": &token_doc.user_id })
-                            .await
-                        {
-                            Ok(Some(user)) => {
-                                // Check if user is activated
-                                if !user.is_activated {
-                                    return Err(actix_web::error::ErrorForbidden(
-                                        "Account not activated. Please check your email for activation instructions.",
-                                    ));
-                                }
-                                // Inject the user in the request
-                                req.extensions_mut().insert(user);
-                            }
-                            Ok(None) => {
-                                return Err(actix_web::error::ErrorUnauthorized(
-                                    "Babamul user not found",
-                                ));
-                            }
-                            Err(e) => {
-                                tracing::error!("Database error fetching babamul user: {}", e);
-                                return Err(actix_web::error::ErrorInternalServerError(
-                                    "Database error",
-                                ));
-                            }
-                        }
+                        // Inject the user in the request
+                        req.extensions_mut().insert(user);
                     }
                     Ok(None) => {
                         return Err(actix_web::error::ErrorUnauthorized(

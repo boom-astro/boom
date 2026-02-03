@@ -1,6 +1,7 @@
 /// Functionality for working with personal access tokens (PATs).
 use crate::api::models::response;
-use crate::api::routes::babamul::{generate_random_string, BabamulUser};
+use crate::api::routes::babamul::{generate_random_string, BabamulUser, BabamulUserToken};
+use crate::utils::db::mongify;
 use actix_web::{delete, get, post, web, HttpResponse};
 use flare::Time;
 use mongodb::bson::doc;
@@ -33,30 +34,6 @@ pub struct TokenPublic {
     pub last_used_at: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct BabamulUserToken {
-    pub _id: String,     // UUID for the token
-    pub user_id: String, // Reference to babamul_user
-    pub name: String,
-    pub token_hash: String, // SHA256 hash of the token
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub last_used_at: Option<i64>,
-}
-
-impl BabamulUserToken {
-    /// Convert to a TokenPublic (without exposing the token_hash)
-    pub fn to_list_item(&self) -> TokenPublic {
-        TokenPublic {
-            id: self._id.clone(),
-            name: self.name.clone(),
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            last_used_at: self.last_used_at,
-        }
-    }
-}
-
 fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
@@ -75,10 +52,7 @@ fn hash_token(token: &str) -> String {
     tags=["Babamul"]
 )]
 #[get("/tokens")]
-pub async fn get_tokens(
-    db: web::Data<Database>,
-    current_user: Option<web::ReqData<BabamulUser>>,
-) -> HttpResponse {
+pub async fn get_tokens(current_user: Option<web::ReqData<BabamulUser>>) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
         None => {
@@ -86,32 +60,18 @@ pub async fn get_tokens(
         }
     };
 
-    let tokens_collection: mongodb::Collection<BabamulUserToken> =
-        db.collection("babamul_user_tokens");
-
-    match tokens_collection
-        .find(doc! { "user_id": &current_user.id })
-        .await
-    {
-        Ok(cursor) => {
-            use futures::TryStreamExt;
-            match cursor.try_collect::<Vec<_>>().await {
-                Ok(tokens) => {
-                    let token_list: Vec<TokenPublic> =
-                        tokens.iter().map(|t| t.to_list_item()).collect();
-                    HttpResponse::Ok().json(token_list)
-                }
-                Err(e) => {
-                    tracing::error!("Database error retrieving tokens: {}", e);
-                    response::internal_error("Failed to retrieve tokens")
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Database error querying tokens: {}", e);
-            response::internal_error("Failed to retrieve tokens")
-        }
-    }
+    let token_list: Vec<TokenPublic> = current_user
+        .tokens
+        .iter()
+        .map(|t| TokenPublic {
+            id: t.id.clone(),
+            name: t.name.clone(),
+            created_at: t.created_at,
+            expires_at: t.expires_at,
+            last_used_at: t.last_used_at,
+        })
+        .collect();
+    HttpResponse::Ok().json(token_list)
 }
 
 /// Create a new token for the authenticated user
@@ -157,22 +117,8 @@ pub async fn post_token(
     }
 
     // Check token limit (max 10 tokens per user)
-    let tokens_collection: mongodb::Collection<BabamulUserToken> =
-        db.collection("babamul_user_tokens");
-
-    match tokens_collection
-        .count_documents(doc! { "user_id": &current_user.id })
-        .await
-    {
-        Ok(count) => {
-            if count >= 10 {
-                return response::bad_request("Maximum number of tokens (10) reached. Please delete an existing token before creating a new one.");
-            }
-        }
-        Err(e) => {
-            tracing::error!("Database error counting tokens: {}", e);
-            return response::internal_error("Failed to check token limit");
-        }
+    if current_user.tokens.len() >= 10 {
+        return response::bad_request("Maximum number of tokens (10) reached. Please delete an existing token before creating a new one.");
     }
 
     // Generate token: bbml_{36_random_chars}
@@ -192,8 +138,7 @@ pub async fn post_token(
 
     let token_id = uuid::Uuid::new_v4().to_string();
     let token_doc = BabamulUserToken {
-        _id: token_id,
-        user_id: current_user.id.clone(),
+        id: token_id.clone(),
         name: name.to_string(),
         token_hash,
         created_at: now,
@@ -201,15 +146,47 @@ pub async fn post_token(
         last_used_at: None,
     };
 
-    // Store token in babamul_user_tokens collection
-    match tokens_collection.insert_one(&token_doc).await {
-        Ok(_) => HttpResponse::Ok().json(TokenResponse {
-            id: token_doc._id,
-            name: token_doc.name,
-            access_token: full_token,
-            created_at: token_doc.created_at,
-            expires_at: token_doc.expires_at,
-        }),
+    let users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    // first, ensure no user has a token with the same hash (extremely unlikely, but just in case)
+    match users_collection
+        .find_one(doc! { "tokens.token_hash": &token_doc.token_hash })
+        .await
+    {
+        Ok(None) => {} // No collision, proceed
+        Ok(Some(_)) => {
+            tracing::error!(
+                "Token hash collision detected when creating token for user {}",
+                current_user.id
+            );
+            return response::internal_error("Failed to create token");
+        }
+        Err(e) => {
+            tracing::error!("Database error checking token hash uniqueness: {}", e);
+            return response::internal_error("Failed to create token");
+        }
+    }
+
+    // Push it to the current_user's tokens array, making sure
+    // there are no duplicates (by id and name)
+    match users_collection
+        .update_one(
+            doc! { "_id": &current_user.id, "tokens.name": { "$ne": name }, "tokens.id": { "$ne": &token_id } },
+            doc! { "$push": { "tokens": mongify(&token_doc) } },
+        )
+        .await
+    {
+        Ok(update_result) => {
+            if update_result.matched_count == 0 {
+                return response::bad_request("A token with this name already exists");
+            }
+            HttpResponse::Ok().json(TokenResponse {
+                id: token_doc.id,
+                name: token_doc.name,
+                access_token: full_token,
+                created_at: token_doc.created_at,
+                expires_at: token_doc.expires_at,
+            })
+        }
         Err(e) => {
             tracing::error!("Database error creating token: {}", e);
             response::internal_error("Failed to create token")
@@ -246,45 +223,28 @@ pub async fn delete_token(
     };
 
     let token_id = token_id.into_inner();
-    let tokens_collection: mongodb::Collection<BabamulUserToken> =
-        db.collection("babamul_user_tokens");
 
-    // Verify the token belongs to the current user before deleting
-    match tokens_collection
-        .find_one(doc! { "_id": &token_id, "user_id": &current_user.id })
+    // Remove the token from the user's tokens array
+    let users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    match users_collection
+        .update_one(
+            doc! { "_id": &current_user.id },
+            doc! { "$pull": { "tokens": { "id": &token_id } } },
+        )
         .await
     {
-        Ok(Some(_)) => {
-            // Token belongs to the user, proceed with deletion
-            match tokens_collection
-                .delete_one(doc! { "_id": &token_id, "user_id": &current_user.id })
-                .await
-            {
-                Ok(result) => {
-                    if result.deleted_count > 0 {
-                        HttpResponse::Ok().json(serde_json::json!({
-                            "message": "Token deleted successfully"
-                        }))
-                    } else {
-                        HttpResponse::NotFound().json(serde_json::json!({
-                            "error": "Token not found"
-                        }))
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Database error deleting token: {}", e);
-                    response::internal_error("Failed to delete token")
-                }
+        Ok(update_result) => {
+            if update_result.modified_count == 0 {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "Token not found",
+                }));
             }
-        }
-        Ok(None) => {
-            // Token doesn't exist or doesn't belong to the user
-            HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Token not found"
+            HttpResponse::Ok().json(serde_json::json!({
+                "message": "Token deleted successfully"
             }))
         }
         Err(e) => {
-            tracing::error!("Database error querying token: {}", e);
+            tracing::error!("Database error deleting token: {}", e);
             response::internal_error("Failed to delete token")
         }
     }

@@ -43,6 +43,7 @@ mod tests {
                 is_activated: true,
                 created_at: 0,
                 kafka_credentials: vec![],
+                tokens: vec![],
             };
 
             let babamul_users_collection: mongodb::Collection<
