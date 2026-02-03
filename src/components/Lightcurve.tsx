@@ -25,7 +25,11 @@ type LightcurveData = {
     prv_candidates?: Detection[];
     fp_hists?: Detection[];
     prv_nondetections?: Detection[];
-    survey_matches?: Record<string, any>;
+    survey_matches?: Record<string, {
+        prv_candidates?: Detection[] | null;
+        fp_hists?: Detection[] | null;
+        prv_nondetections?: Detection[] | null;
+    }>;
 };
 
 function jd2mjd(jd: number) {
@@ -49,7 +53,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     const surveyMatchDetections = useMemo(() => {
         if (!survey_matches || !includeSurveyMatches) return [];
         const result: Detection[] = [];
-        for (const [_survey, data] of Object.entries(survey_matches)) {
+        for (const data of Object.values(survey_matches)) {
             if (data?.prv_candidates) {
                 result.push(...(Array.isArray(data.prv_candidates) ? data.prv_candidates : []));
             }
@@ -60,7 +64,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     const surveyMatchNondetections = useMemo(() => {
         if (!survey_matches || !includeSurveyMatches) return [];
         const result: Detection[] = [];
-        for (const [_survey, data] of Object.entries(survey_matches)) {
+        for (const data of Object.values(survey_matches)) {
             if (data?.prv_nondetections) {
                 result.push(...(Array.isArray(data.prv_nondetections) ? data.prv_nondetections : []));
             }
@@ -73,7 +77,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     const surveyMatchFpHists = useMemo(() => {
         if (!survey_matches || !includeSurveyMatches || !includeForcedPhot) return [];
         const result: Detection[] = [];
-        for (const [_survey, data] of Object.entries(survey_matches)) {
+        for (const data of Object.values(survey_matches)) {
             if (data?.fp_hists) {
                 const arr = Array.isArray(data.fp_hists) ? data.fp_hists : [];
                 for (const d of arr) {
@@ -89,7 +93,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     const surveyMatchNondetectionsFromFpHists = useMemo(() => {
         if (!survey_matches || !includeSurveyMatches) return [];
         const result: Detection[] = [];
-        for (const [_survey, data] of Object.entries(survey_matches)) {
+        for (const data of Object.values(survey_matches)) {
             if (data?.fp_hists) {
                 const arr = Array.isArray(data.fp_hists) ? data.fp_hists : [];
                 for (const d of arr) {
@@ -105,19 +109,19 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     // merge detections and non-detections into series grouped by band
     const detections = useMemo(() => {
         let arr: Detection[] = [];
-        let candidates_arr = candidates.map(d => ({
+        const candidates_arr = candidates.map(d => ({
             ...d,
             source: 'candidate' as const,
         }));
-        let fphists_arr = (includeForcedPhot ? fpHists : []).map(d => ({
+        const fphists_arr = (includeForcedPhot ? fpHists : []).map(d => ({
             ...d,
             source: 'fphist' as const,
         }));
-        let survey_candidates_arr = surveyMatchDetections.map(d => ({
+        const survey_candidates_arr = surveyMatchDetections.map(d => ({
             ...d,
             source: 'survey' as const,
         }));
-        let survey_fphists_arr = surveyMatchFpHists.map(d => ({
+        const survey_fphists_arr = surveyMatchFpHists.map(d => ({
             ...d,
             source: 'survey' as const,
         }));

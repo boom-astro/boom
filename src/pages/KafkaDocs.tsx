@@ -1,7 +1,8 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, lazy, Suspense } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ChevronDown, ChevronRight, Copy } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
@@ -11,6 +12,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { fetchKafkaCredentials, type KafkaCredential } from "@/lib/api";
+const KafkaMarkdownDocs = lazy(() => import('@/components/KafkaMarkdownDocs'));
 
 type TopicNode = {
   key: string;
@@ -93,7 +95,7 @@ const TOPIC_TREE: TopicNode[] = [
 const KAFKA_BOOTSTRAP = import.meta.env.VITE_KAFKA_DOMAIN ?? "kafka.boom.example.com:9092";
 
 function generatePython(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<KAFKA_USERNAME>", passwordVar = "<KAFKA_PASSWORD>") {
-  let autoCommitStr = autoCommit ? "True" : "False";
+  const autoCommitStr = autoCommit ? "True" : "False";
   const topicsList = topics.map(t => `"${t}"`).join(',\n    ');
   return `import fastavro
 from io import BytesIO
@@ -124,7 +126,7 @@ try:
         if msg.error():
             print(f"Consumer error: {msg.error()}")
             continue
-        
+
         # Deserialize Avro message
         bytes_io = BytesIO(msg.value())
         reader = fastavro.reader(bytes_io)
@@ -202,7 +204,7 @@ function CopyablePre({ code, label = "Copy snippet" }: { code: string; label?: s
 export default function KafkaDocs() {
   const [step, setStep] = useState<number>(0);
   const [selected, setSelected] = useState<string[]>([]);
-  
+
   // compute default collapsed nodes: groups whose immediate children are leaves
   function findLeafGroupKeys(nodes: TopicNode[]): string[] {
     const out: string[] = [];
@@ -229,6 +231,7 @@ export default function KafkaDocs() {
   const [offset, setOffset] = useState<string>("earliest");
   const [autoCommit, setAutoCommit] = useState<boolean>(false);
   const [lang, setLang] = useState<'python'|'rust'>('python');
+  const [showObjectAppearanceModal, setShowObjectAppearanceModal] = useState<boolean>(false);
 
   // Load kafka credentials on mount
   useEffect(() => {
@@ -296,8 +299,6 @@ export default function KafkaDocs() {
       ? generatePython(effectiveSelected, groupId, offset, autoCommit, clientIdForGeneration, clientSecretForGeneration)
       : generateRust(effectiveSelected, groupId, offset, autoCommit, clientIdForGeneration, clientSecretForGeneration);
   }, [effectiveSelected, groupId, offset, autoCommit, lang, clientIdForGeneration, clientSecretForGeneration]);
-
-  // topic toggling handled inline via Checkbox `onCheckedChange`
 
   function collectDescendantKeys(node: TopicNode): string[] {
     if (!node.children || node.children.length === 0) return [node.key];
@@ -385,6 +386,18 @@ export default function KafkaDocs() {
   return (
     <div className="px-4 lg:px-6">
       <div className="max-w-4xl mx-auto">
+        {/* Modal for object appearance documentation */}
+        <Dialog open={showObjectAppearanceModal} onOpenChange={setShowObjectAppearanceModal}>
+          <DialogContent className="!max-w-6xl max-h-[90vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Object appearance in output topics</DialogTitle>
+            </DialogHeader>
+            <Suspense fallback={<div className="text-center py-10">Loading documentation...</div>}>
+              <KafkaMarkdownDocs />
+            </Suspense>
+          </DialogContent>
+        </Dialog>
+
         <div className="flex items-center justify-between mb-4">
           <div>
             <h2 className="text-lg font-medium">Babamul — Kafka access guide</h2>
@@ -404,7 +417,7 @@ export default function KafkaDocs() {
           <Card className="min-h-[50vh]">
             <CardHeader>
               <CardTitle>1 — Pick topics</CardTitle>
-              <CardDescription>Choose one or more Babamul topics to read from.</CardDescription>
+              <CardDescription>Choose one or more Babamul topics to read from. <button onClick={() => setShowObjectAppearanceModal(true)} className="text-primary hover:underline cursor-pointer">Learn more about how objects will appear in topics</button>.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid gap-3">

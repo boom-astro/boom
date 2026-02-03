@@ -29,7 +29,7 @@ function LoginPageWrapper() {
   const location = useLocation();
 
   return <Login onLoginSuccess={() => {
-    let from = (location.state as any)?.from?.pathname || '/query';
+    let from = (location.state as { from: Location })?.from?.pathname || '/query';
     if (from === '/login' || from === '/signup' || from === '/landing' || from === '/') {
       from = '/query';
     }

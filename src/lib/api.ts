@@ -264,9 +264,7 @@ export async function fetchAlertCutouts(survey: string, candid: number): Promise
     const txt = await res.text().catch(() => "");
     throw new Error(`Fetch cutouts failed: ${res.status} ${txt}`);
   }
-  const body = await parseResponseJson(res).catch((_) => {
-    return {};
-  });
+  const body = await parseResponseJson(res).catch(() => ({}));
   const result = unwrapData<unknown>(body, {});
   return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
 }

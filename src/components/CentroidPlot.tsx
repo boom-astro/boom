@@ -25,7 +25,11 @@ function toColor(band?: string) {
 export default function CentroidPlot() {
   const current = useAppStore(state => state.currentSource);
   const prv = ((current && (current['data'] as Record<string, unknown> | undefined))?.['prv_candidates']) ?? [] as unknown[];
-  const survey_matches = ((current && (current['data'] as Record<string, unknown> | undefined))?.['survey_matches']) as Record<string, any> | undefined;
+  const survey_matches = ((current && (current['data'] as Record<string, unknown> | undefined))?.['survey_matches']) as Record<string, {
+    prv_candidates?: unknown[] | null;
+    fp_hists?: unknown[] | null;
+    prv_nondetections?: unknown[] | null;
+  }> | undefined;
 
   const [hoveredBand, setHoveredBand] = useState<string | null>(null);
   const [includeSurveyMatches, setIncludeSurveyMatches] = useState(true);
@@ -34,7 +38,7 @@ export default function CentroidPlot() {
   const surveyMatchDetections = useMemo(() => {
     if (!survey_matches || !includeSurveyMatches) return [];
     const result: unknown[] = [];
-    for (const [_survey, data] of Object.entries(survey_matches)) {
+    for (const data of Object.values(survey_matches)) {
       if (data?.prv_candidates) {
         result.push(...(Array.isArray(data.prv_candidates) ? data.prv_candidates : []));
       }

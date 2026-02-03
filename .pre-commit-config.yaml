@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: tsc
+        name: tsc
+        entry: bun run tsc --noEmit
+        language: system
+        pass_filenames: false
+        stages: [commit]
+      - id: lint
+        name: lint
+        entry: bun run lint
+        language: system
+        pass_filenames: false
+        stages: [commit]
