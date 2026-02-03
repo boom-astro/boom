@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { usePostHog } from 'posthog-js/react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -8,6 +9,7 @@ import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 const API_BASE = '/api/babamul';
 
 export default function SignupPage() {
+  const posthog = usePostHog();
   const navigate = useNavigate();
   const location = useLocation();
   const autoActivatedRef = useRef(false);
@@ -35,7 +37,7 @@ export default function SignupPage() {
   const [step, setStep] = useState<'email'|'code'|'done'>('email');
   const [message, setMessage] = useState<string | null>(null);
   const [activationCode, setActivationCode] = useState<string>('');
-  
+
   const [password, setPassword] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -46,6 +48,7 @@ export default function SignupPage() {
     setError(null);
     setMessage(null);
     setLoading(true);
+    posthog.capture('button_clicked', { button_name: 'signup' });
     try {
       const res = await fetch(`${API_BASE}/signup`, {
         method: 'POST',
