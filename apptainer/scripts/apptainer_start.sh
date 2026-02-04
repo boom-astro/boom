@@ -186,7 +186,7 @@ fi
 # -----------------------------
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   survey=$3
-  if [ -z "$survey" ]; then
+  if [ "$2" = "boom" ] && [ -z "$survey" ]; then
     if start_service "boom" "$2"; then
       echo && echo -e "${YELLOW}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
       if apptainer instance list | awk '{print $1}' | grep -xq "boom"; then
