@@ -1,4 +1,5 @@
 pub mod surveys;
+pub mod tokens;
 
 use crate::api::email::EmailService;
 use crate::api::models::response;
@@ -93,6 +94,16 @@ impl KafkaCredentialEncrypted {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct BabamulUserToken {
+    pub id: String, // UUID for the token
+    pub name: String,
+    pub token_hash: String, // SHA256 hash of the token
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUser {
     // Save in the database as _id, but we want to rename on the way out
     #[serde(rename = "_id")]
@@ -105,6 +116,7 @@ pub struct BabamulUser {
     pub created_at: i64, // Unix timestamp
     #[serde(default)]
     pub kafka_credentials: Vec<KafkaCredentialEncrypted>, // List of Kafka credentials (w/ encrypted passwords)
+    pub tokens: Vec<BabamulUserToken>, // List of API tokens
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -247,6 +259,7 @@ pub async fn post_babamul_signup(
                 is_activated,
                 created_at: flare::Time::now().to_utc().timestamp(),
                 kafka_credentials: Vec::new(), // Empty list, credentials created on demand
+                tokens: Vec::new(),            // Empty list of tokens
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -313,7 +326,7 @@ pub async fn post_babamul_signup(
 }
 
 /// Generate a random alphanumeric string of specified length
-fn generate_random_string(length: usize) -> String {
+pub fn generate_random_string(length: usize) -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut rng = rand::rng();

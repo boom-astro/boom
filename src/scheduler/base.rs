@@ -148,6 +148,20 @@ impl ThreadPool {
             self.config_path.clone(),
         ));
     }
+
+    /// Get the number of live (non-finished) workers in the pool.
+    /// This checks each worker's thread handle to see if it's still running.
+    pub fn live_worker_count(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|w| w.handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false))
+            .count()
+    }
+
+    /// Get the total number of workers in the pool (including finished ones).
+    pub fn total_worker_count(&self) -> usize {
+        self.workers.len()
+    }
 }
 
 // Shut down all workers from the thread pool and drop the threadpool
