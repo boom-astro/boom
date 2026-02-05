@@ -154,12 +154,7 @@ impl ThreadPool {
     pub fn live_worker_count(&self) -> usize {
         self.workers
             .iter()
-            .filter(|w| {
-                w.handle
-                    .as_ref()
-                    .map(|h| !h.is_finished())
-                    .unwrap_or(false)
-            })
+            .filter(|w| w.handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false))
             .count()
     }
 
