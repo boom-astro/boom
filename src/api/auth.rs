@@ -7,6 +7,7 @@ use actix_web::middleware::Next;
 use actix_web::{web, Error, HttpMessage};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use mongodb::bson::doc;
+use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
@@ -34,7 +35,7 @@ impl AuthProvider {
         let encoding_key = EncodingKey::from_secret(auth_config.secret_key.as_bytes());
         let decoding_key = DecodingKey::from_secret(auth_config.secret_key.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.validate_exp = config.token_expiration > 0; // Set to true if tokens should expire
+        validation.validate_exp = auth_config.token_expiration > 0; // Set to true if tokens should expire
 
         let users_collection: mongodb::Collection<User> = db.collection("users");
         debug!("AuthProvider initialized with users collection");
@@ -44,7 +45,7 @@ impl AuthProvider {
             decoding_key,
             validation,
             users_collection,
-            token_expiration: config.token_expiration,
+            token_expiration: auth_config.token_expiration,
         })
     }
 

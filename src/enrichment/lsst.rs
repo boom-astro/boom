@@ -398,7 +398,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
 impl LsstEnrichmentWorker {
     #[instrument(skip(self, alert), fields(candid = alert.candid), err)]
-    async fn get_alert_properties(
+    pub async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
