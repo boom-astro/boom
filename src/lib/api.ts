@@ -1,9 +1,5 @@
 // Always use the same-origin proxy; production should map /api to the backend via the web server
 const API_BASE = "/api/babamul";
-// import JSONbig from 'json-bigint';
-// import it with the native bigint support
-// var JSONbig = require('json-bigint');
-// would turn into var JSONbigNative = require('json-bigint')({ useNativeBigInt: true });
 
 export type TokenRecord = {
   access_token: string;
@@ -20,6 +16,10 @@ export type Profile = { username?: string; name?: string; email?: string; avatar
 // Kafka credential returned by `/babamul/kafka-credentials`
 export type KafkaCredential = { id: string; name: string; kafka_username: string; kafka_password: string };
 
+// Personal Access Token types
+export type TokenPublic = { id: string; name: string; created_at: number; expires_at: number; last_used_at: number | null };
+export type TokenResponse = { id: string; name: string; access_token: string; created_at: number; expires_at: number };
+
 const TOKEN_KEY = "api_token";
 const USERNAME_KEY = "api_user";
 
@@ -31,8 +31,6 @@ async function parseResponseJson(res: Response): Promise<unknown> {
   const bigIntRegex = /:\s*(-?\d{16,})(?![\d]*["])/g;
   const safeText = text.replace(bigIntRegex, (_, numStr) => `:"${numStr}"`);
   return JSON.parse(safeText);
-
-  // return data;
 }
 
 type DataEnvelope<T> = { data?: T };
@@ -197,6 +195,44 @@ export async function deleteKafkaCredential(credentials_id: string): Promise<voi
   // no content expected
 }
 
+export async function fetchTokens(): Promise<TokenPublic[]> {
+  const url = `${API_BASE}/tokens`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch tokens failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  const result = unwrapData<unknown>(body, []);
+  return Array.isArray(result) ? (result as TokenPublic[]) : [];
+}
+
+export async function createToken(name: string, expires_in_days?: number): Promise<TokenResponse> {
+  const url = `${API_BASE}/tokens`;
+  const res = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, expires_in_days }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Create token failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<TokenResponse>(body, {} as TokenResponse);
+}
+
+export async function deleteToken(tokenId: string): Promise<void> {
+  const url = `${API_BASE}/tokens/${encodeURIComponent(tokenId)}`;
+  const res = await fetchWithAuth(url, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Delete token failed: ${res.status} ${txt}`);
+  }
+}
+
 export type AlertSearchParams = {
   object_id?: string;
   ra?: number;
@@ -328,6 +364,10 @@ export default {
   fetchProfile,
   fetchKafkaCredentials,
   createKafkaCredential,
+  deleteKafkaCredential,
+  fetchTokens,
+  createToken,
+  deleteToken,
   fetchAlerts,
   fetchAlertCutouts,
   searchObjects,
