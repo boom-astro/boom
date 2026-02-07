@@ -4,8 +4,8 @@
 # $1 = boom directory
 # $2 = service to start:
 #      - all         : starts all services
-#      - boom        : starts both consumer and scheduler
 #      - api         : starts the Boom API service
+#      - boom        : starts boom instance and scheduler/consumer if survey name/date provided
 #      - consumer    : starts the consumer process
 #      - scheduler   : starts the scheduler process
 #      - mongo       : starts the MongoDB instance
@@ -46,7 +46,7 @@ current_datetime() {
 start_service() {
     local service="$1"
     local target="$2"
-    if [[ -z "$target" || "$target" = "all" || "$target" = "$service" ]]; then
+    if [[ "$target" = "all" || "$target" = "$service" ]]; then
         return 0
     fi
     return 1
@@ -187,26 +187,24 @@ fi
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   survey=$3
   if [ "$2" = "boom" ] && [ -z "$survey" ]; then
-    if start_service "boom" "$2"; then
-      echo && echo -e "${YELLOW}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
-      if apptainer instance list | awk '{print $1}' | grep -xq "boom"; then
-        echo && echo -e "${YELLOW}$(current_datetime) - Boom is already running${END}"
-      else
-        echo && echo "$(current_datetime) - Starting boom instance"
-        apptainer instance start --env-file .env \
-          --bind "$CONFIG_FILE:/app/config.yaml" \
-          "$SIF_DIR/boom.sif" "boom"
-        sleep 3
-      fi
+    echo && echo -e "${YELLOW}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
+    if apptainer instance list | awk '{print $1}' | grep -xq "boom"; then
+      echo && echo -e "${YELLOW}$(current_datetime) - Boom is already running${END}"
     else
-      echo && echo -e "${RED}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
-      echo -e "${BLUE}apptainer_start.sh start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
-      echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
-      echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
-      echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
-      echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
-      echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
+      echo && echo "$(current_datetime) - Starting boom instance"
+      apptainer instance start --env-file .env \
+        --bind "$CONFIG_FILE:/app/config.yaml" \
+        "$SIF_DIR/boom.sif" "boom"
+      sleep 3
     fi
+  elif [ -z "$survey" ]; then
+    echo && echo -e "${RED}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
+    echo -e "${BLUE}apptainer_start.sh start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
+    echo -e "  ${BLUE}<service>:${END} ${GREEN}boom | consumer | scheduler | mongo | kafka | valkey | prometheus | otel | listener | kuma | all${END}"
+    echo -e "  ${YELLOW}The following arguments are only required if starting <all|boom|consumer|scheduler>${END}:"
+    echo -e "  ${BLUE}[survey_name]:${END} ${GREEN}lsst | ztf | decam${END}"
+    echo -e "  ${BLUE}[date]:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional for lsst)${END}"
+    echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech${END} ${YELLOW}(only for ztf)${END}"
   else
     if apptainer instance list | awk '{print $1}' | grep -xq "boom${survey:+_$survey}"; then
       echo && echo -e "${YELLOW}$(current_datetime) - Boom is already running${END}"
