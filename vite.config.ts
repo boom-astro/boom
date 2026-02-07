@@ -3,26 +3,21 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
-const mermaidDependencies = [
+const mermaidChunk = [
   "mermaid",
   "cytoscape",
   "katex",
-  "chevrotain",
-  "parse5",
-  "langium",
-  "layout-base",
-  "lodash-es",
-  "micromark",
-  "dompurify",
-  "cose-base",
-  "marked",
-  "dagre-d3-es",
-  "vscode-languageserver-types",
-  "entities",
-  // and other deps related to markdown-rendering:
   "react-markdown",
   "remark-gfm",
   "rehype-raw",
+]
+const largeDeps = [
+  "chevrotain",
+  "langium",
+  "layout-base",
+  "lodash-es",
+  "marked",
+  "dagre-d3-es",
 ]
 
 // https://vite.dev/config/
@@ -33,22 +28,33 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  optimizeDeps: {
+    include: ['mermaid'],
+  },
   build: {
+    commonjsOptions: {
+      include: [/mermaid/, /node_modules/],
+    },
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (id.includes("node_modules")) {
+            // Mermaid and some of its dependencies in their own chunk
+            // to avoid bloating other chunks
+            for (const dep of mermaidChunk) {
+              if (id.includes(dep)) return "mermaid"
+            }
+            
+            // Large dependencies in their own chunks to avoid bloating vendor
+            for (const dep of largeDeps) {
+              if (id.includes(dep)) return dep
+            }
+
             if (id.includes("react-router")) return "router"
             if (id.includes("@radix-ui")) return "radix"
             if (id.includes("@dnd-kit")) return "dnd"
             if (id.includes("recharts")) return "charts"
             if (id.includes("lucide-react")) return "icons"
-
-            // Mermaid and its dependencies in their own chunk
-            // to avoid bloating other chunks
-            for (const dep of mermaidDependencies) {
-              if (id.includes(dep)) return "mermaid"
-            }
 
             // bundle pako (used to render gzipped data) separately
             if (id.includes("pako")) return "pako"
