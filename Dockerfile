@@ -39,7 +39,7 @@ COPY ./config/nginx.conf /etc/nginx/conf.d/default.conf
 COPY ./config/nginx-backend-not-found.conf /etc/nginx/extra-conf.d/backend-not-found.conf
 
 # Set and log the API origin at container start (runtime env is honored)
-RUN printf '#!/bin/sh\nset -e\nORIGIN=${VITE_API_PROXY_TARGET}\n# Replace placeholder if still present\nsed -i "s|__API_ORIGIN__|$ORIGIN|g" /etc/nginx/conf.d/default.conf\nAPI_ORIGIN=$(awk '\''$1=="proxy_pass"{gsub(";","",$2);print $2}'\'' /etc/nginx/conf.d/default.conf)\necho "[startup] VITE_API_PROXY_TARGET=${VITE_API_PROXY_TARGET}"\necho "[startup] API origin (proxy_pass): $API_ORIGIN"\n' > /docker-entrypoint.d/00-set-api-origin.sh \
+RUN printf '#!/bin/sh\nset -e\nORIGIN=https://${VITE_API_PROXY_TARGET}\n# Replace placeholder if still present\nsed -i "s|__API_ORIGIN__|$ORIGIN|g" /etc/nginx/conf.d/default.conf\nAPI_ORIGIN=$(awk '\''$1=="proxy_pass"{gsub(";","",$2);print $2}'\'' /etc/nginx/conf.d/default.conf)\necho "[startup] VITE_API_PROXY_TARGET=${VITE_API_PROXY_TARGET:-<unset>}"\necho "[startup] API origin (proxy_pass): $API_ORIGIN"\n' > /docker-entrypoint.d/00-set-api-origin.sh \
 	&& chmod +x /docker-entrypoint.d/00-set-api-origin.sh
 
 EXPOSE 80
