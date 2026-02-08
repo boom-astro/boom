@@ -43,6 +43,56 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     };
 }
 
+/// Initialize indexes for the gcn_events collection
+#[instrument(skip(db), fields(database = db.name()), err)]
+pub async fn initialize_gcn_indexes(db: &Database) -> Result<(), CreateIndexError> {
+    let gcn_collection: Collection<Document> = db.collection("gcn_events");
+
+    // 2dsphere index for geospatial queries on circular events
+    let index = doc! {
+        "coordinates.radec_geojson": "2dsphere",
+    };
+    create_index(&gcn_collection, index, false).await?;
+
+    // Compound index for querying active events by source
+    let index = doc! {
+        "source": 1,
+        "is_active": 1,
+        "expires_at": 1,
+    };
+    create_index(&gcn_collection, index, false).await?;
+
+    // Index for time-based queries
+    let index = doc! {
+        "trigger_time": 1,
+    };
+    create_index(&gcn_collection, index, false).await?;
+
+    // Sparse index for watchlist user lookups
+    create_index_with_options(
+        &gcn_collection,
+        doc! { "user_id": 1 },
+        IndexOptions::builder().sparse(true).build(),
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[instrument(skip(collection, index, options), fields(collection = collection.name()), err)]
+async fn create_index_with_options(
+    collection: &Collection<Document>,
+    index: Document,
+    options: IndexOptions,
+) -> Result<(), CreateIndexError> {
+    let index_model = IndexModel::builder()
+        .keys(index)
+        .options(options)
+        .build();
+    collection.create_index(index_model).await?;
+    Ok(())
+}
+
 // This function, for a given survey name (ZTF, LSST), will create
 // the required indexes on the alerts and alerts_aux collections
 #[instrument(skip(db), fields(database = db.name()), err)]
@@ -77,6 +127,12 @@ pub async fn initialize_survey_indexes(
         };
         create_index(&alerts_collection, index, false).await?;
     }
+
+    // Index for querying alerts by event matches
+    let index = doc! {
+        "event_matches.event_id": 1,
+    };
+    create_index(&alerts_aux_collection, index, false).await?;
 
     Ok(())
 }

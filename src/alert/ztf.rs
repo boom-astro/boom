@@ -4,6 +4,7 @@ use crate::{
         decam, lsst, AlertCutout,
     },
     conf::{self, AppConfig},
+    gcn::EventMatch,
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
@@ -599,6 +600,9 @@ pub struct ZtfObject {
     pub fp_hists: Vec<ZtfForcedPhot>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
     pub aliases: Option<ZtfAliases>,
+    /// Matches with GCN events and user watchlists
+    #[serde(default)]
+    pub event_matches: Vec<EventMatch>,
     pub coordinates: Coordinates,
     pub created_at: f64,
     pub updated_at: f64,
@@ -823,6 +827,7 @@ impl AlertWorker for ZtfAlertWorker {
                 fp_hists,
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
+                event_matches: Vec::new(), // Populated by event matching worker
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
                 updated_at: now,

@@ -7,6 +7,7 @@ use crate::{
         decam, ztf,
     },
     conf::{self, AppConfig, BoomConfigError},
+    gcn::EventMatch,
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
@@ -816,6 +817,9 @@ pub struct LsstObject {
     pub is_sso: bool,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
     pub aliases: Option<LsstAliases>,
+    /// Matches with GCN events and user watchlists
+    #[serde(default)]
+    pub event_matches: Vec<EventMatch>,
     pub coordinates: Coordinates,
     pub created_at: f64,
     pub updated_at: f64,
@@ -1036,6 +1040,7 @@ impl AlertWorker for LsstAlertWorker {
                 is_sso: ss_object_id.is_some(),
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
+                event_matches: Vec::new(), // Populated by event matching worker
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
                 updated_at: now,

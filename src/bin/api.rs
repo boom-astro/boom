@@ -100,6 +100,15 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
+                // Events and Watchlists
+                .service(routes::events::get_events)
+                .service(routes::events::get_event)
+                .service(routes::events::get_event_alerts)
+                .service(routes::watchlists::post_watchlist)
+                .service(routes::watchlists::get_watchlists)
+                .service(routes::watchlists::get_watchlist)
+                .service(routes::watchlists::patch_watchlist)
+                .service(routes::watchlists::delete_watchlist)
                 .wrap(Logger::default()),
         )
     })

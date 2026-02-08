@@ -1,3 +1,4 @@
+use crate::gcn::GcnSource;
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 use config::{Config, File, Value};
 use dotenvy;
@@ -396,6 +397,160 @@ fn default_babamul_retention_days() -> u32 {
     3
 }
 
+// GCN Configuration
+
+fn default_gcn_enabled() -> bool {
+    false
+}
+
+fn default_gcn_expiration_days() -> u32 {
+    14
+}
+
+fn default_gcn_backfill_lookback_days() -> u32 {
+    7
+}
+
+fn default_gcn_backfill_lookahead_days() -> u32 {
+    7
+}
+
+fn default_gcn_cache_refresh_secs() -> u64 {
+    60
+}
+
+fn default_watchlist_max_per_user() -> usize {
+    100
+}
+
+fn default_watchlist_max_radius_deg() -> f64 {
+    10.0
+}
+
+/// GCN Kafka consumer configuration
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct GcnConsumerConfig {
+    /// GCN client ID (from gcn.nasa.gov credentials)
+    pub client_id: String,
+    /// GCN client secret (from gcn.nasa.gov credentials)
+    pub client_secret: String,
+    /// List of GCN Kafka topics to subscribe to
+    #[serde(default)]
+    pub topics: Vec<String>,
+}
+
+/// Event expiration configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct GcnExpirationConfig {
+    /// Default expiration time in days for events without source-specific settings
+    #[serde(default = "default_gcn_expiration_days")]
+    pub default_days: u32,
+    /// Source-specific expiration times (overrides default)
+    #[serde(default)]
+    pub by_source: HashMap<GcnSource, u32>,
+}
+
+impl Default for GcnExpirationConfig {
+    fn default() -> Self {
+        GcnExpirationConfig {
+            default_days: default_gcn_expiration_days(),
+            by_source: HashMap::new(),
+        }
+    }
+}
+
+/// Backfill configuration for matching new events against historical alerts
+#[derive(Deserialize, Debug, Clone)]
+pub struct GcnBackfillConfig {
+    /// How many days back to look for alerts when a new event arrives
+    #[serde(default = "default_gcn_backfill_lookback_days")]
+    pub lookback_days: u32,
+    /// How many days forward from event trigger to consider alerts
+    #[serde(default = "default_gcn_backfill_lookahead_days")]
+    pub lookahead_days: u32,
+}
+
+impl Default for GcnBackfillConfig {
+    fn default() -> Self {
+        GcnBackfillConfig {
+            lookback_days: default_gcn_backfill_lookback_days(),
+            lookahead_days: default_gcn_backfill_lookahead_days(),
+        }
+    }
+}
+
+/// Active events cache configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct GcnCacheConfig {
+    /// How often to refresh the active events cache (seconds)
+    #[serde(default = "default_gcn_cache_refresh_secs")]
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for GcnCacheConfig {
+    fn default() -> Self {
+        GcnCacheConfig {
+            refresh_interval_secs: default_gcn_cache_refresh_secs(),
+        }
+    }
+}
+
+/// User watchlist configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct WatchlistConfig {
+    /// Maximum number of watchlist entries per user
+    #[serde(default = "default_watchlist_max_per_user")]
+    pub max_per_user: usize,
+    /// Maximum radius for circular watchlist entries (degrees)
+    #[serde(default = "default_watchlist_max_radius_deg")]
+    pub max_radius_deg: f64,
+}
+
+impl Default for WatchlistConfig {
+    fn default() -> Self {
+        WatchlistConfig {
+            max_per_user: default_watchlist_max_per_user(),
+            max_radius_deg: default_watchlist_max_radius_deg(),
+        }
+    }
+}
+
+/// GCN event crossmatching configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct GcnConfig {
+    /// Whether GCN event handling is enabled
+    #[serde(default = "default_gcn_enabled")]
+    pub enabled: bool,
+    /// GCN Kafka consumer settings
+    #[serde(default)]
+    pub consumer: GcnConsumerConfig,
+    /// Event expiration settings
+    #[serde(default)]
+    pub expiration: GcnExpirationConfig,
+    /// Backfill settings for historical alert matching
+    #[serde(default)]
+    pub backfill: GcnBackfillConfig,
+    /// Active events cache settings
+    #[serde(default)]
+    pub cache: GcnCacheConfig,
+    /// Watchlist settings
+    #[serde(default)]
+    pub watchlist: WatchlistConfig,
+}
+
+impl Default for GcnConfig {
+    fn default() -> Self {
+        GcnConfig {
+            enabled: default_gcn_enabled(),
+            consumer: GcnConsumerConfig::default(),
+            expiration: GcnExpirationConfig::default(),
+            backfill: GcnBackfillConfig::default(),
+            cache: GcnCacheConfig::default(),
+            watchlist: WatchlistConfig::default(),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
     pub n_workers: usize,
@@ -422,6 +577,9 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
+    /// GCN event crossmatching configuration
+    #[serde(default)]
+    pub gcn: GcnConfig,
 }
 
 impl AppConfig {

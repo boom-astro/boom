@@ -1,8 +1,10 @@
 pub mod auth;
 pub mod babamul;
 pub mod catalogs;
+pub mod events;
 pub mod filters;
 pub mod info;
 pub mod kafka;
 pub mod queries;
 pub mod users;
+pub mod watchlists;
