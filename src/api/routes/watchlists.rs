@@ -45,8 +45,8 @@ pub struct WatchlistUpdate {
     pub description: Option<String>,
     /// Whether the watchlist is active
     pub is_active: Option<bool>,
-    /// Extend expiration by this many days from now
-    pub extend_days: Option<u32>,
+    /// Set expiration to this many days from now
+    pub expires_in_days: Option<u32>,
 }
 
 /// Public representation of a watchlist entry
@@ -235,8 +235,10 @@ pub async fn post_watchlist(
 
     match gcn_collection.insert_one(&event).await {
         Ok(_) => {
-            let public = WatchlistPublic::from_event(&event).unwrap();
-            response::ok_ser("Watchlist created", public)
+            match WatchlistPublic::from_event(&event) {
+                Some(public) => response::ok_ser("Watchlist created", public),
+                None => response::internal_error("Failed to serialize watchlist"),
+            }
         }
         Err(e) => {
             error!("Failed to create watchlist: {}", e);
@@ -397,10 +399,10 @@ pub async fn patch_watchlist(
             ));
         }
     }
-    if let Some(days) = body.extend_days {
+    if let Some(days) = body.expires_in_days {
         if days == 0 || days > MAX_EXPIRES_IN_DAYS {
             return response::bad_request(&format!(
-                "Extension must be between 1 and {} days",
+                "Expiration must be between 1 and {} days",
                 MAX_EXPIRES_IN_DAYS
             ));
         }
@@ -445,8 +447,8 @@ pub async fn patch_watchlist(
         update_doc.insert("is_active", is_active);
     }
 
-    if let Some(extend_days) = body.extend_days {
-        let new_expires_at = now + extend_days as f64;
+    if let Some(expires_in_days) = body.expires_in_days {
+        let new_expires_at = now + expires_in_days as f64;
         update_doc.insert("expires_at", new_expires_at);
     }
 

@@ -1,6 +1,6 @@
 use crate::utils::spatial::Coordinates;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// GCN event sources/missions
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -37,7 +37,7 @@ impl std::fmt::Display for GcnSource {
 }
 
 /// GCN event type classification
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum GcnEventType {
     /// Gravitational wave event (LVK)
@@ -81,9 +81,9 @@ pub enum EventGeometry {
     HealPixMap {
         /// HEALPix nside parameter (determines resolution)
         nside: u32,
-        /// Nested pixel indices within the credible region
+        /// Nested pixel indices within the credible region (sorted for binary search)
         pixels: Vec<u64>,
-        /// Per-pixel probabilities (same length as pixels)
+        /// Per-pixel probabilities (parallel to pixels before sorting; reordered to match)
         probabilities: Vec<f64>,
         /// Credible level (e.g., 0.90 for 90% contour)
         credible_level: f64,
@@ -102,30 +102,39 @@ impl EventGeometry {
 
     /// Create a HEALPix skymap geometry.
     ///
-    /// # Panics
-    /// Panics if `nside` is not a power of 2, or if `pixels` and `probabilities`
+    /// Pixels are sorted internally for O(log n) lookups. Returns an error
+    /// if `nside` is not a power of 2 or if `pixels` and `probabilities`
     /// have different lengths.
     pub fn healpix(
         nside: u32,
         pixels: Vec<u64>,
         probabilities: Vec<f64>,
         credible_level: f64,
-    ) -> Self {
-        assert!(
-            nside.is_power_of_two(),
-            "nside must be a power of 2, got {nside}"
-        );
-        assert_eq!(
-            pixels.len(),
-            probabilities.len(),
-            "pixels and probabilities must have the same length"
-        );
-        EventGeometry::HealPixMap {
-            nside,
-            pixels,
-            probabilities,
-            credible_level,
+    ) -> Result<Self, WatchlistError> {
+        if !nside.is_power_of_two() || nside == 0 {
+            return Err(WatchlistError::InvalidGeometry(format!(
+                "nside must be a power of 2, got {nside}"
+            )));
         }
+        if pixels.len() != probabilities.len() {
+            return Err(WatchlistError::InvalidGeometry(format!(
+                "pixels and probabilities must have the same length ({} != {})",
+                pixels.len(),
+                probabilities.len()
+            )));
+        }
+
+        // Sort pixels (and probabilities in parallel) for O(log n) binary search
+        let mut pairs: Vec<(u64, f64)> = pixels.into_iter().zip(probabilities).collect();
+        pairs.sort_unstable_by_key(|(px, _)| *px);
+        let (sorted_pixels, sorted_probs): (Vec<u64>, Vec<f64>) = pairs.into_iter().unzip();
+
+        Ok(EventGeometry::HealPixMap {
+            nside,
+            pixels: sorted_pixels,
+            probabilities: sorted_probs,
+            credible_level,
+        })
     }
 
     /// Get the center coordinates if this is a circular geometry
@@ -149,8 +158,7 @@ impl EventGeometry {
             }
             EventGeometry::HealPixMap { nside, pixels, .. } => {
                 let pixel = ra_dec_to_healpix_nested(ra, dec, *nside);
-                let pixel_set: HashSet<&u64> = pixels.iter().collect();
-                pixel_set.contains(&pixel)
+                pixels.binary_search(&pixel).is_ok()
             }
         }
     }
@@ -167,8 +175,8 @@ impl EventGeometry {
             } => {
                 let pixel = ra_dec_to_healpix_nested(ra, dec, *nside);
                 pixels
-                    .iter()
-                    .position(|&p| p == pixel)
+                    .binary_search(&pixel)
+                    .ok()
                     .and_then(|idx| probabilities.get(idx).copied())
             }
         }
@@ -178,7 +186,8 @@ impl EventGeometry {
 /// Convert RA/Dec (degrees) to HEALPix nested pixel index
 fn ra_dec_to_healpix_nested(ra: f64, dec: f64, nside: u32) -> u64 {
     use cdshealpix::nested;
-    let depth = (nside as f64).log2() as u8;
+    // Use integer math for exact depth from power-of-2 nside
+    let depth = nside.trailing_zeros() as u8;
     let lon = ra.to_radians();
     let lat = dec.to_radians();
     nested::hash(depth, lon, lat)
@@ -187,7 +196,6 @@ fn ra_dec_to_healpix_nested(ra: f64, dec: f64, nside: u32) -> u64 {
 /// Great circle distance between two points in degrees
 fn great_circle_distance_deg(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
     use flare::spatial::great_circle_distance;
-    // flare::spatial::great_circle_distance takes degrees and returns degrees
     great_circle_distance(ra1, dec1, ra2, dec2)
 }
 
@@ -247,37 +255,6 @@ pub struct GcnEvent {
 }
 
 impl GcnEvent {
-    /// Create a new circular watchlist entry
-    pub fn new_watchlist(
-        id: String,
-        user_id: String,
-        name: String,
-        ra: f64,
-        dec: f64,
-        error_radius: f64,
-        expires_at: f64,
-    ) -> Self {
-        let now = flare::Time::now().to_jd();
-        GcnEvent {
-            id,
-            source: GcnSource::Custom,
-            event_type: GcnEventType::Watchlist,
-            trigger_time: now,
-            geometry: EventGeometry::circle(ra, dec, error_radius),
-            coordinates: Some(Coordinates::new(ra, dec)),
-            properties: HashMap::new(),
-            expires_at,
-            is_active: true,
-            user_id: Some(user_id),
-            name: Some(name),
-            description: None,
-            created_at: now,
-            updated_at: now,
-            supersedes: None,
-            superseded_by: None,
-        }
-    }
-
     /// Check if a position and time match this event
     pub fn matches(&self, ra: f64, dec: f64, alert_jd: f64) -> bool {
         if !self.is_active {

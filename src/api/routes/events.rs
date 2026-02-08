@@ -1,6 +1,6 @@
 use crate::api::models::response;
 use crate::api::routes::users::User;
-use crate::gcn::{EventGeometry, GcnEvent};
+use crate::gcn::{EventGeometry, GcnEvent, GcnSource};
 use actix_web::{get, web, HttpResponse};
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -12,11 +12,11 @@ use utoipa::{IntoParams, ToSchema};
 /// Query parameters for listing events
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct EventListQuery {
-    /// Filter by source (e.g., "lvk", "swift", "custom")
+    /// Filter by source (e.g., "lvk", "swift") — excludes "custom" watchlist events
     pub source: Option<String>,
     /// Only show active events (default: true)
     pub active_only: Option<bool>,
-    /// Maximum number of results (default: 100)
+    /// Maximum number of results (default: 100, max: 1000)
     pub limit: Option<i64>,
     /// Skip this many results (for pagination)
     pub skip: Option<u64>,
@@ -50,10 +50,20 @@ impl EventPublic {
             EventGeometry::HealPixMap { .. } => ("healpix".to_string(), None, None, None),
         };
 
+        // Use serde serialization for source/event_type so API values match DB and query values
+        let source = serde_json::to_value(&event.source)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{}", event.source));
+        let event_type = serde_json::to_value(&event.event_type)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{}", event.event_type));
+
         EventPublic {
             id: event.id.clone(),
-            source: format!("{}", event.source),
-            event_type: format!("{}", event.event_type),
+            source,
+            event_type,
             trigger_time: event.trigger_time,
             geometry_type,
             ra,
@@ -67,13 +77,14 @@ impl EventPublic {
     }
 }
 
-/// List active GCN events
+/// List active GCN events (excludes private watchlist entries)
 #[utoipa::path(
     get,
     path = "/events",
     params(EventListQuery),
     responses(
         (status = 200, description = "Events retrieved successfully", body = [EventPublic]),
+        (status = 400, description = "Invalid source parameter"),
         (status = 500, description = "Internal server error")
     ),
     tags = ["Events"]
@@ -88,21 +99,46 @@ pub async fn get_events(
 
     let mut filter = Document::new();
 
-    // Filter by source if provided
+    // Filter by source if provided — validate against known variants
     if let Some(source) = &query.source {
-        filter.insert("source", source.to_lowercase());
+        let source_lower = source.to_lowercase();
+        // Validate by attempting to deserialize as GcnSource
+        let source_json = format!("\"{}\"", source_lower);
+        match serde_json::from_str::<GcnSource>(&source_json) {
+            Ok(parsed) => {
+                // Reject custom — those are private watchlist entries
+                if parsed == GcnSource::Custom {
+                    return response::bad_request(
+                        "Cannot query custom/watchlist events via this endpoint. Use GET /watchlists instead.",
+                    );
+                }
+                // Use the serde-serialized form for the DB query
+                let db_value = serde_json::to_value(&parsed)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or(source_lower);
+                filter.insert("source", db_value);
+            }
+            Err(_) => {
+                return response::bad_request(
+                    "Invalid source. Valid values: lvk, swift, fermi, svom, einstein_probe, ice_cube",
+                );
+            }
+        }
+    } else {
+        // Default: exclude custom/watchlist events from public listing
+        filter.insert("source", doc! { "$ne": "custom" });
     }
 
     // Filter by active status (default to active only)
     let active_only = query.active_only.unwrap_or(true);
     if active_only {
         filter.insert("is_active", true);
-        // Also filter out expired events
         let now = flare::Time::now().to_jd();
         filter.insert("expires_at", doc! { "$gt": now });
     }
 
-    let limit = query.limit.unwrap_or(100).min(1000);
+    let limit = query.limit.unwrap_or(100).max(1).min(1000);
     let skip = query.skip.unwrap_or(0);
 
     let options = mongodb::options::FindOptions::builder()
@@ -170,7 +206,7 @@ pub async fn get_event(
 pub struct EventAlertsQuery {
     /// Survey to query (e.g., "ztf", "lsst")
     pub survey: String,
-    /// Maximum number of results (default: 100)
+    /// Maximum number of results (default: 100, max: 1000)
     pub limit: Option<i64>,
     /// Skip this many results (for pagination)
     pub skip: Option<u64>,
@@ -232,7 +268,7 @@ pub async fn get_event_alerts(
     let aux_collection_name = format!("{}_alerts_aux", survey);
     let aux_collection: Collection<Document> = db.collection(&aux_collection_name);
 
-    let limit = query.limit.unwrap_or(100).min(1000);
+    let limit = query.limit.unwrap_or(100).max(1).min(1000);
     let skip = query.skip.unwrap_or(0);
 
     let filter = doc! {

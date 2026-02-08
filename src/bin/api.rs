@@ -6,6 +6,7 @@ use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::db::initialize_gcn_indexes;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -29,6 +30,14 @@ async fn main() -> std::io::Result<()> {
         println!("Babamul API endpoints are ENABLED");
     } else {
         println!("Babamul API endpoints are DISABLED");
+    }
+
+    let gcn_is_enabled = config.gcn.enabled;
+    if gcn_is_enabled {
+        println!("GCN event and watchlist endpoints are ENABLED");
+        initialize_gcn_indexes(&database).await.unwrap();
+    } else {
+        println!("GCN event and watchlist endpoints are DISABLED");
     }
 
     // Create API docs from OpenAPI spec
@@ -70,6 +79,19 @@ async fn main() -> std::io::Result<()> {
             )
         }
 
+        // Conditionally register GCN event and watchlist endpoints if enabled
+        if gcn_is_enabled {
+            app = app
+                .service(routes::events::get_events)
+                .service(routes::events::get_event)
+                .service(routes::events::get_event_alerts)
+                .service(routes::watchlists::post_watchlist)
+                .service(routes::watchlists::get_watchlists)
+                .service(routes::watchlists::get_watchlist)
+                .service(routes::watchlists::patch_watchlist)
+                .service(routes::watchlists::delete_watchlist);
+        }
+
         app.service(
             actix_web::web::scope("")
                 .wrap(from_fn(auth_middleware))
@@ -100,15 +122,6 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
-                // Events and Watchlists
-                .service(routes::events::get_events)
-                .service(routes::events::get_event)
-                .service(routes::events::get_event_alerts)
-                .service(routes::watchlists::post_watchlist)
-                .service(routes::watchlists::get_watchlists)
-                .service(routes::watchlists::get_watchlist)
-                .service(routes::watchlists::patch_watchlist)
-                .service(routes::watchlists::delete_watchlist)
                 .wrap(Logger::default()),
         )
     })

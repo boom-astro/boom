@@ -61,7 +61,7 @@ mod model_tests {
             source: GcnSource::Lvk,
             event_type: GcnEventType::GravitationalWave,
             trigger_time: trigger_jd,
-            geometry: EventGeometry::healpix(nside, pixels, probs, 0.9),
+            geometry: EventGeometry::healpix(nside, pixels, probs, 0.9).unwrap(),
             coordinates: None,
             properties: HashMap::new(),
             expires_at: trigger_jd + expires_in_days,
@@ -344,58 +344,60 @@ mod model_tests {
     // ==================== HEALPix Validation Tests ====================
 
     #[test]
-    #[should_panic(expected = "nside must be a power of 2")]
     fn test_healpix_rejects_non_power_of_two_nside_3() {
-        EventGeometry::healpix(3, vec![1], vec![0.5], 0.9);
+        let result = EventGeometry::healpix(3, vec![1], vec![0.5], 0.9);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nside must be a power of 2"));
     }
 
     #[test]
-    #[should_panic(expected = "nside must be a power of 2")]
     fn test_healpix_rejects_non_power_of_two_nside_5() {
-        EventGeometry::healpix(5, vec![1], vec![0.5], 0.9);
+        let result = EventGeometry::healpix(5, vec![1], vec![0.5], 0.9);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "nside must be a power of 2")]
     fn test_healpix_rejects_non_power_of_two_nside_100() {
-        EventGeometry::healpix(100, vec![1], vec![0.5], 0.9);
+        let result = EventGeometry::healpix(100, vec![1], vec![0.5], 0.9);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "nside must be a power of 2")]
     fn test_healpix_rejects_nside_zero() {
-        EventGeometry::healpix(0, vec![], vec![], 0.9);
+        let result = EventGeometry::healpix(0, vec![], vec![], 0.9);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "pixels and probabilities must have the same length")]
     fn test_healpix_rejects_more_pixels_than_probs() {
-        EventGeometry::healpix(64, vec![1, 2, 3], vec![0.5, 0.5], 0.9);
+        let result = EventGeometry::healpix(64, vec![1, 2, 3], vec![0.5, 0.5], 0.9);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("same length"));
     }
 
     #[test]
-    #[should_panic(expected = "pixels and probabilities must have the same length")]
     fn test_healpix_rejects_more_probs_than_pixels() {
-        EventGeometry::healpix(64, vec![1], vec![0.5, 0.3], 0.9);
+        let result = EventGeometry::healpix(64, vec![1], vec![0.5, 0.3], 0.9);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_healpix_accepts_valid_nside_values() {
         for nside in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
-            let _ = EventGeometry::healpix(nside, vec![], vec![], 0.9);
+            assert!(EventGeometry::healpix(nside, vec![], vec![], 0.9).is_ok());
         }
     }
 
     #[test]
     fn test_healpix_accepts_empty_pixels() {
-        let geom = EventGeometry::healpix(64, vec![], vec![], 0.9);
+        let geom = EventGeometry::healpix(64, vec![], vec![], 0.9).unwrap();
         // No pixel should match
         assert!(!geom.contains(180.0, 45.0));
     }
 
     #[test]
     fn test_healpix_geometry_center_is_none() {
-        let geom = EventGeometry::healpix(64, vec![100, 101, 102], vec![0.1, 0.2, 0.7], 0.9);
+        let geom = EventGeometry::healpix(64, vec![100, 101, 102], vec![0.1, 0.2, 0.7], 0.9).unwrap();
         assert_eq!(geom.center(), None);
     }
 
@@ -411,7 +413,7 @@ mod model_tests {
         let dec = 45.0_f64;
         let pixel = nested::hash(depth, ra.to_radians(), dec.to_radians());
 
-        let geom = EventGeometry::healpix(nside, vec![pixel], vec![0.8], 0.9);
+        let geom = EventGeometry::healpix(nside, vec![pixel], vec![0.8], 0.9).unwrap();
         assert!(geom.contains(ra, dec));
     }
 
@@ -427,7 +429,7 @@ mod model_tests {
 
         // Create geometry with a *different* pixel
         let different_pixel = if pixel > 0 { pixel - 1 } else { pixel + 1 };
-        let geom = EventGeometry::healpix(nside, vec![different_pixel], vec![0.8], 0.9);
+        let geom = EventGeometry::healpix(nside, vec![different_pixel], vec![0.8], 0.9).unwrap();
         assert!(!geom.contains(ra, dec));
     }
 
@@ -445,14 +447,17 @@ mod model_tests {
             vec![pixel, pixel + 1, pixel + 2],
             vec![0.3, 0.5, 0.2],
             0.9,
-        );
+        )
+        .unwrap();
         let prob = geom.probability_at(ra, dec);
+        // After sorting, the probability for `pixel` should still be correct
+        assert!(prob.is_some());
         assert_eq!(prob, Some(0.3));
     }
 
     #[test]
     fn test_healpix_probability_at_missing_pixel() {
-        let geom = EventGeometry::healpix(64, vec![999999], vec![0.5], 0.9);
+        let geom = EventGeometry::healpix(64, vec![999999], vec![0.5], 0.9).unwrap();
         // Position that maps to a different pixel
         let prob = geom.probability_at(0.0, 0.0);
         // Likely a different pixel index
@@ -464,7 +469,7 @@ mod model_tests {
 
     #[test]
     fn test_healpix_probability_at_empty_map() {
-        let geom = EventGeometry::healpix(64, vec![], vec![], 0.9);
+        let geom = EventGeometry::healpix(64, vec![], vec![], 0.9).unwrap();
         assert_eq!(geom.probability_at(180.0, 45.0), None);
     }
 
@@ -491,7 +496,7 @@ mod model_tests {
 
     #[test]
     fn test_healpix_geometry_serialization_roundtrip() {
-        let healpix = EventGeometry::healpix(64, vec![100, 200, 300], vec![0.3, 0.5, 0.2], 0.9);
+        let healpix = EventGeometry::healpix(64, vec![100, 200, 300], vec![0.3, 0.5, 0.2], 0.9).unwrap();
         let json = serde_json::to_string(&healpix).unwrap();
         // HealPixMap -> heal_pix_map with snake_case renaming
         assert!(json.contains("\"type\":\"heal_pix_map\""));
@@ -706,32 +711,6 @@ mod model_tests {
         let json2 = serde_json::to_string(&event2).unwrap();
         assert!(json1.contains("\"superseded_by\":\"v2\""));
         assert!(json2.contains("\"supersedes\":\"v1\""));
-    }
-
-    // ==================== GcnEvent::new_watchlist ====================
-
-    #[test]
-    fn test_new_watchlist_constructor() {
-        let event = GcnEvent::new_watchlist(
-            "wl-123".to_string(),
-            "user-abc".to_string(),
-            "My Watchlist".to_string(),
-            45.0,
-            -30.0,
-            2.5,
-            2460100.0,
-        );
-        assert_eq!(event.id, "wl-123");
-        assert_eq!(event.source, GcnSource::Custom);
-        assert_eq!(event.event_type, GcnEventType::Watchlist);
-        assert_eq!(event.geometry.center(), Some((45.0, -30.0)));
-        assert_eq!(event.user_id, Some("user-abc".to_string()));
-        assert_eq!(event.name, Some("My Watchlist".to_string()));
-        assert_eq!(event.expires_at, 2460100.0);
-        assert!(event.is_active);
-        assert!(event.description.is_none());
-        assert!(event.supersedes.is_none());
-        assert!(event.superseded_by.is_none());
     }
 
     // ==================== EventMatch Tests ====================
@@ -970,7 +949,7 @@ mod watchlist_validation_tests {
             source: GcnSource::Lvk,
             event_type: GcnEventType::GravitationalWave,
             trigger_time: 2460000.0,
-            geometry: EventGeometry::healpix(64, vec![100], vec![0.5], 0.9),
+            geometry: EventGeometry::healpix(64, vec![100], vec![0.5], 0.9).unwrap(),
             coordinates: None,
             properties: HashMap::new(),
             expires_at: 2460030.0,

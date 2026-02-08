@@ -18,6 +18,9 @@ pub enum CacheError {
 ///
 /// The cache is refreshed periodically from MongoDB to ensure events
 /// are up-to-date without querying the database for each alert.
+/// Events are stored as `Arc<GcnEvent>` to avoid deep clones when
+/// returning candidates to callers.
+#[derive(Clone)]
 pub struct ActiveEventsCache {
     /// Cached active events and last refresh time, behind a single RwLock
     state: Arc<RwLock<CacheState>>,
@@ -30,13 +33,13 @@ pub struct ActiveEventsCache {
 }
 
 struct CacheState {
-    events: Vec<GcnEvent>,
+    events: Vec<Arc<GcnEvent>>,
     last_refresh: Option<Instant>,
 }
 
 impl ActiveEventsCache {
     /// Create a new cache with the given database and refresh interval.
-    pub fn new(db: Database, refresh_interval_secs: u64) -> Self {
+    pub fn new(db: Database, refresh_interval: Duration) -> Self {
         ActiveEventsCache {
             state: Arc::new(RwLock::new(CacheState {
                 events: Vec::new(),
@@ -44,7 +47,7 @@ impl ActiveEventsCache {
             })),
             refresh_mutex: Arc::new(Mutex::new(())),
             db,
-            refresh_interval: Duration::from_secs(refresh_interval_secs),
+            refresh_interval,
         }
     }
 
@@ -105,7 +108,7 @@ impl ActiveEventsCache {
 
         while let Some(result) = cursor.next().await {
             match result {
-                Ok(event) => events.push(event),
+                Ok(event) => events.push(Arc::new(event)),
                 Err(e) => {
                     warn!("Error reading event from cursor: {}", e);
                 }
@@ -136,8 +139,8 @@ impl ActiveEventsCache {
     }
 
     /// Get events that could potentially match an alert at the given time.
-    /// This filters events whose time windows include the alert time.
-    pub async fn get_candidates_for_time(&self, alert_jd: f64) -> Vec<GcnEvent> {
+    /// Returns Arc references to avoid deep cloning event data.
+    pub async fn get_candidates_for_time(&self, alert_jd: f64) -> Vec<Arc<GcnEvent>> {
         let state = self.state.read().await;
         state
             .events
@@ -146,19 +149,8 @@ impl ActiveEventsCache {
                 // Event must be active and not expired at alert time
                 e.is_active && alert_jd <= e.expires_at
             })
-            .cloned()
+            .cloned() // cheap Arc clone
             .collect()
-    }
-}
-
-impl Clone for ActiveEventsCache {
-    fn clone(&self) -> Self {
-        ActiveEventsCache {
-            state: Arc::clone(&self.state),
-            refresh_mutex: Arc::clone(&self.refresh_mutex),
-            db: self.db.clone(),
-            refresh_interval: self.refresh_interval,
-        }
     }
 }
 

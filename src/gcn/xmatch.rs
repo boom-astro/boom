@@ -1,4 +1,5 @@
 use crate::gcn::{cache::ActiveEventsCache, EventMatch, GcnEvent};
+use std::sync::Arc;
 use tracing::{debug, instrument};
 
 /// Error type for event crossmatch operations
@@ -33,18 +34,10 @@ pub async fn event_xmatch(
     // Refresh cache if needed
     cache.refresh_if_needed().await?;
 
-    // Get candidate events for this alert time
+    // Get candidate events for this alert time (Arc references — no deep clone)
     let candidates = cache.get_candidates_for_time(alert_jd).await;
 
-    let mut matches = Vec::new();
-
-    for event in candidates {
-        // Check if the alert falls within the event's geometry
-        if event.matches(ra, dec, alert_jd) {
-            let event_match = EventMatch::new(&event, ra, dec, alert_jd);
-            matches.push(event_match);
-        }
-    }
+    let matches = event_xmatch_from_refs(ra, dec, alert_jd, &candidates);
 
     if !matches.is_empty() {
         debug!(
@@ -56,8 +49,23 @@ pub async fn event_xmatch(
     Ok(matches)
 }
 
+/// Core matching logic shared by async and sync paths.
+fn event_xmatch_from_refs(
+    ra: f64,
+    dec: f64,
+    alert_jd: f64,
+    events: &[Arc<GcnEvent>],
+) -> Vec<EventMatch> {
+    let mut matches = Vec::new();
+    for event in events {
+        if event.matches(ra, dec, alert_jd) {
+            matches.push(EventMatch::new(event, ra, dec, alert_jd));
+        }
+    }
+    matches
+}
+
 /// Synchronous version of event_xmatch for use in contexts where async isn't available.
-/// Uses blocking operations - use with caution.
 #[instrument(skip(events), fields(ra = %ra, dec = %dec))]
 pub fn event_xmatch_sync(
     ra: f64,
