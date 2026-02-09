@@ -26,12 +26,12 @@ pub enum XmatchError {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct GeoJsonPoint {
     r#type: String,
-    coordinates: Vec<f64>,
+    pub coordinates: Vec<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Coordinates {
-    radec_geojson: GeoJsonPoint,
+    pub radec_geojson: GeoJsonPoint,
     l: Option<f64>,
     b: Option<f64>,
 }
