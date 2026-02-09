@@ -197,7 +197,6 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         flux_err: 10.0,
         snr: Some(100.0),
         band: Band::R,
-        zp: Some(8.9),
         ra: Some(ra_override.unwrap_or(150.0)),
         dec: Some(dec_override.unwrap_or(30.0)),
     };
