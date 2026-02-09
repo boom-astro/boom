@@ -934,6 +934,29 @@ mod tests {
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
         assert_eq!(fp_negative_det.band, Band::G);
+        // let's verify that the psf_flux is negative AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
+        assert!(fp_negative_det.psf_flux.unwrap() < 0.0);
+        let (magpsf, sigmapsf) = flux2mag(
+            -fp_negative_det.psf_flux.unwrap() / 1e9_f32, // convert back to Jy
+            fp_negative_det.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - 15.949999).abs() < 1e-6);
+        assert!((sigmapsf - 0.002316).abs() < 1e-6);
+        // let's also verify that forcediffimflux(unc) converts to psfFlux(Err) correctly
+        let factor = 10f32.powf((ZTF_ZP - fp_negative_det.fp_hist.magzpsci.unwrap()) / 2.5);
+        assert!(
+            (fp_negative_det.fp_hist.forcediffimflux.unwrap() * 1e9_f32 * factor
+                - fp_negative_det.psf_flux.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!(
+            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() * 1e9_f32 * factor
+                - fp_negative_det.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
 
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
@@ -943,6 +966,28 @@ mod tests {
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
         assert_eq!(fp_positive_det.band, Band::G);
+        // let's verify that the psf_flux is positive AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
+        assert!(fp_positive_det.psf_flux.unwrap() > 0.0);
+        let (magpsf, sigmapsf) = flux2mag(
+            fp_positive_det.psf_flux.unwrap() / 1e9_f32, // convert back to Jy
+            fp_positive_det.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - 20.801506).abs() < 1e-6);
+        assert!((sigmapsf - 0.3616859).abs() < 1e-6);
+        let factor = 10f32.powf((ZTF_ZP - fp_positive_det.fp_hist.magzpsci.unwrap()) / 2.5);
+        assert!(
+            (fp_positive_det.fp_hist.forcediffimflux.unwrap() * 1e9_f32 * factor
+                - fp_positive_det.psf_flux.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!(
+            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() * 1e9_f32 * factor
+                - fp_positive_det.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
 
         // validate the cutouts
         assert_eq!(avro_alert.cutout_science.len(), 13107);
