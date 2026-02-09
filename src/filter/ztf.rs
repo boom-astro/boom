@@ -229,7 +229,6 @@ pub async fn build_ztf_alerts(
                 flux: Some(flux),
                 flux_err,
                 band: format!("ztf{}", band),
-                zero_point: ZTF_ZP,
                 origin: Origin::Alert,
                 programid,
                 survey: Survey::Ztf,
@@ -254,7 +253,6 @@ pub async fn build_ztf_alerts(
                 flux: None, // for non-detections, flux is None
                 flux_err,
                 band: format!("ztf{}", band),
-                zero_point: ZTF_ZP,
                 origin: Origin::Alert,
                 programid,
                 survey: Survey::Ztf,
@@ -298,10 +296,9 @@ pub async fn build_ztf_alerts(
 
             photometry.push(Photometry {
                 jd,
-                flux: flux.map(|f| f * 1e9_f64 * factor), // convert to nJy and a fixed ZP
-                flux_err: flux_err * 1e9_f64 * factor,    // convert to nJy and a fixed ZP
+                flux,
+                flux_err,
                 band: format!("ztf{}", band),
-                zero_point: magzpsci,
                 origin: Origin::ForcedPhot,
                 programid,
                 survey: Survey::Ztf,

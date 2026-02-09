@@ -165,7 +165,7 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     None
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Origin {
     Alert,
     ForcedPhot,
@@ -177,7 +177,6 @@ pub struct Photometry {
     pub flux: Option<f64>, // in nJy
     pub flux_err: f64,     // in nJy
     pub band: String,
-    pub zero_point: f64,
     pub origin: Origin,
     pub programid: i32,
     pub survey: Survey,
