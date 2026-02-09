@@ -57,6 +57,12 @@ zune-inflate = { version = "0.2", default-features = false, features = [
     "std",
 ] }
 
+# Fitting dependencies
+argmin = "0.11.0"
+egobox-gp = "0.35.0"
+linfa = "0.8.1"
+plotters = "0.3"
+
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.10", features = ["coreml"] }

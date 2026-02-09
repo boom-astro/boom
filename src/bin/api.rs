@@ -100,6 +100,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
+                .service(routes::lightcurve::post_lightcurve_fit)
                 .wrap(Logger::default()),
         )
     })

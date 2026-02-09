@@ -4,5 +4,6 @@ pub mod catalogs;
 pub mod filters;
 pub mod info;
 pub mod kafka;
+pub mod lightcurve;
 pub mod queries;
 pub mod users;
