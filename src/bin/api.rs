@@ -6,6 +6,7 @@ use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::db::initialize_gcn_indexes;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -29,6 +30,14 @@ async fn main() -> std::io::Result<()> {
         println!("Babamul API endpoints are ENABLED");
     } else {
         println!("Babamul API endpoints are DISABLED");
+    }
+
+    let gcn_is_enabled = config.gcn.enabled;
+    if gcn_is_enabled {
+        println!("GCN watchlist endpoints are ENABLED");
+        initialize_gcn_indexes(&database).await.unwrap();
+    } else {
+        println!("GCN watchlist endpoints are DISABLED");
     }
 
     // Create API docs from OpenAPI spec
@@ -68,6 +77,16 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token),
             )
+        }
+
+        // Conditionally register watchlist endpoints if enabled
+        if gcn_is_enabled {
+            app = app
+                .service(routes::watchlists::post_watchlist)
+                .service(routes::watchlists::get_watchlists)
+                .service(routes::watchlists::get_watchlist)
+                .service(routes::watchlists::patch_watchlist)
+                .service(routes::watchlists::delete_watchlist);
         }
 
         app.service(
