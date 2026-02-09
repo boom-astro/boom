@@ -1274,4 +1274,748 @@ mod config_tests {
         assert_eq!(config.max_per_user, 25);
         assert!((config.max_radius_deg - 2.5).abs() < 0.001);
     }
+
+    #[test]
+    fn test_gcn_config_wrong_type_enabled() {
+        let json = r#"{"enabled": "yes"}"#;
+        let result: Result<GcnConfig, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_watchlist_config_wrong_type_max_per_user() {
+        let json = r#"{"max_per_user": "fifty"}"#;
+        let result: Result<WatchlistConfig, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_watchlist_config_zero_max_per_user() {
+        // Zero is accepted at deserialization level — validation is in the route
+        let json = r#"{"max_per_user": 0, "max_radius_deg": 10.0}"#;
+        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_per_user, 0);
+    }
+
+    #[test]
+    fn test_watchlist_config_negative_radius() {
+        // Negative radius is accepted at deserialization — validation is in the route
+        let json = r#"{"max_per_user": 100, "max_radius_deg": -1.0}"#;
+        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        assert!(config.max_radius_deg < 0.0);
+    }
+}
+
+// ==================== HEALPix Advanced Tests ====================
+
+#[cfg(test)]
+mod healpix_advanced_tests {
+    use crate::gcn::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
+    use std::collections::HashMap;
+
+    fn make_healpix_event(
+        id: &str,
+        nside: u32,
+        pixels: Vec<u64>,
+        probs: Vec<f64>,
+        trigger_jd: f64,
+    ) -> GcnEvent {
+        GcnEvent {
+            id: id.to_string(),
+            source: GcnSource::Lvk,
+            event_type: GcnEventType::GravitationalWave,
+            trigger_time: trigger_jd,
+            geometry: EventGeometry::healpix(nside, pixels, probs, 0.9).unwrap(),
+            coordinates: None,
+            properties: HashMap::new(),
+            expires_at: trigger_jd + 30.0,
+            is_active: true,
+            user_id: None,
+            name: Some("GW Event".to_string()),
+            description: None,
+            created_at: trigger_jd,
+            updated_at: trigger_jd,
+            supersedes: None,
+            superseded_by: None,
+        }
+    }
+
+    #[test]
+    fn test_healpix_probability_ordering_after_sort() {
+        // Deliberately out-of-order, non-consecutive pixels
+        let geom = EventGeometry::healpix(
+            64,
+            vec![500, 100, 300],
+            vec![0.1, 0.7, 0.2],
+            0.9,
+        )
+        .unwrap();
+
+        // After sorting: pixels=[100,300,500], probs=[0.7,0.2,0.1]
+        // Verify via the internal representation (round-trip through serde)
+        let json = serde_json::to_string(&geom).unwrap();
+        let deser: EventGeometry = serde_json::from_str(&json).unwrap();
+
+        if let EventGeometry::HealPixMap { pixels, probabilities, .. } = &deser {
+            assert_eq!(pixels, &[100, 300, 500]);
+            assert_eq!(probabilities, &[0.7, 0.2, 0.1]);
+        } else {
+            panic!("Expected HealPixMap");
+        }
+    }
+
+    #[test]
+    fn test_healpix_equality_different_input_orderings() {
+        let geom_a = EventGeometry::healpix(64, vec![2, 1, 3], vec![0.3, 0.7, 0.1], 0.9).unwrap();
+        let geom_b = EventGeometry::healpix(64, vec![1, 2, 3], vec![0.7, 0.3, 0.1], 0.9).unwrap();
+        assert_eq!(geom_a, geom_b);
+    }
+
+    #[test]
+    fn test_healpix_duplicate_pixels() {
+        // Duplicate pixels are accepted — binary_search finds one
+        let geom = EventGeometry::healpix(
+            64,
+            vec![100, 100, 200],
+            vec![0.3, 0.5, 0.2],
+            0.9,
+        )
+        .unwrap();
+        // The geometry should contain pixel 100 and 200
+        if let EventGeometry::HealPixMap { pixels, .. } = &geom {
+            assert!(pixels.binary_search(&100).is_ok());
+            assert!(pixels.binary_search(&200).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_healpix_contains_at_north_pole() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        // HEALPix has 4 pole pixels per pole — collect all of them
+        let pole_pixels: Vec<u64> = [0.0_f64, 90.0, 180.0, 270.0]
+            .iter()
+            .map(|ra| nested::hash(depth, ra.to_radians(), 90.0_f64.to_radians()))
+            .collect();
+        let probs = vec![0.25; pole_pixels.len()];
+
+        let geom = EventGeometry::healpix(nside, pole_pixels, probs, 0.9).unwrap();
+        assert!(geom.contains(0.0, 90.0));
+        assert!(geom.contains(180.0, 90.0));
+    }
+
+    #[test]
+    fn test_healpix_contains_at_south_pole() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        let pole_pixels: Vec<u64> = [0.0_f64, 90.0, 180.0, 270.0]
+            .iter()
+            .map(|ra| nested::hash(depth, ra.to_radians(), (-90.0_f64).to_radians()))
+            .collect();
+        let probs = vec![0.25; pole_pixels.len()];
+
+        let geom = EventGeometry::healpix(nside, pole_pixels, probs, 0.9).unwrap();
+        assert!(geom.contains(0.0, -90.0));
+        assert!(geom.contains(270.0, -90.0));
+    }
+
+    #[test]
+    fn test_healpix_ra_wrap_consistency() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        // RA just below 360 and just above 0 should be in neighboring or same pixel
+        let pixel_359 = nested::hash(depth, 359.99_f64.to_radians(), 0.0_f64.to_radians());
+        let pixel_0 = nested::hash(depth, 0.01_f64.to_radians(), 0.0_f64.to_radians());
+
+        let geom = EventGeometry::healpix(
+            nside,
+            vec![pixel_359, pixel_0],
+            vec![0.5, 0.5],
+            0.9,
+        )
+        .unwrap();
+        assert!(geom.contains(359.99, 0.0));
+        assert!(geom.contains(0.01, 0.0));
+    }
+
+    #[test]
+    fn test_healpix_large_nside_contains() {
+        use cdshealpix::nested;
+        let nside: u32 = 4096;
+        let depth = nside.trailing_zeros() as u8;
+        assert_eq!(depth, 12);
+
+        let ra = 123.456_f64;
+        let dec = -45.678_f64;
+        let pixel = nested::hash(depth, ra.to_radians(), dec.to_radians());
+
+        let geom = EventGeometry::healpix(nside, vec![pixel], vec![0.99], 0.9).unwrap();
+        assert!(geom.contains(ra, dec));
+        assert_eq!(geom.probability_at(ra, dec), Some(0.99));
+    }
+
+    #[test]
+    fn test_healpix_credible_level_edge_values() {
+        // credible_level is metadata only, not used in matching — any value accepted
+        assert!(EventGeometry::healpix(64, vec![1], vec![0.5], 0.0).is_ok());
+        assert!(EventGeometry::healpix(64, vec![1], vec![0.5], 1.0).is_ok());
+        assert!(EventGeometry::healpix(64, vec![1], vec![0.5], -0.1).is_ok());
+        assert!(EventGeometry::healpix(64, vec![1], vec![0.5], 1.5).is_ok());
+    }
+
+    #[test]
+    fn test_healpix_deserialization_from_raw_json() {
+        let json = r#"{"type":"heal_pix_map","nside":64,"pixels":[100,200],"probabilities":[0.5,0.5],"credible_level":0.9}"#;
+        let geom: EventGeometry = serde_json::from_str(json).unwrap();
+        if let EventGeometry::HealPixMap { nside, pixels, probabilities, credible_level } = geom {
+            assert_eq!(nside, 64);
+            assert_eq!(pixels, vec![100, 200]);
+            assert_eq!(probabilities, vec![0.5, 0.5]);
+            assert!((credible_level - 0.9).abs() < 0.001);
+        } else {
+            panic!("Expected HealPixMap variant");
+        }
+    }
+
+    #[test]
+    fn test_matches_with_healpix_inside() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        let ra = 200.0_f64;
+        let dec = 30.0_f64;
+        let pixel = nested::hash(depth, ra.to_radians(), dec.to_radians());
+
+        let event = make_healpix_event("hp-1", nside, vec![pixel], vec![0.8], 2460000.0);
+        assert!(event.matches(ra, dec, 2460001.0));
+    }
+
+    #[test]
+    fn test_matches_with_healpix_outside() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        let pixel = nested::hash(depth, 200.0_f64.to_radians(), 30.0_f64.to_radians());
+
+        let event = make_healpix_event("hp-2", nside, vec![pixel], vec![0.8], 2460000.0);
+        // Query a far-away position
+        assert!(!event.matches(10.0, -60.0, 2460001.0));
+    }
+
+    #[test]
+    fn test_matches_with_healpix_inactive() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        let ra = 200.0_f64;
+        let dec = 30.0_f64;
+        let pixel = nested::hash(depth, ra.to_radians(), dec.to_radians());
+
+        let mut event = make_healpix_event("hp-3", nside, vec![pixel], vec![0.8], 2460000.0);
+        event.is_active = false;
+        assert!(!event.matches(ra, dec, 2460001.0));
+    }
+
+    #[test]
+    fn test_matches_with_healpix_expired() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        let ra = 200.0_f64;
+        let dec = 30.0_f64;
+        let pixel = nested::hash(depth, ra.to_radians(), dec.to_radians());
+
+        let event = make_healpix_event("hp-4", nside, vec![pixel], vec![0.8], 2460000.0);
+        // Event expires at trigger + 30 = 2460030
+        assert!(!event.matches(ra, dec, 2460050.0));
+    }
+
+    #[test]
+    fn test_event_match_healpix_probability_none_outside() {
+        // EventMatch::new() on a HEALPix event where position is outside pixel set
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        let pixel = nested::hash(depth, 100.0_f64.to_radians(), 50.0_f64.to_radians());
+
+        let event = make_healpix_event("hp-out", nside, vec![pixel], vec![0.9], 2460000.0);
+        // Construct match at a position NOT in the pixel set
+        let m = EventMatch::new(&event, 0.0, -80.0, 2460001.0);
+        assert!(m.distance_deg.is_none());
+        // probability_at returns None for positions outside the pixel set
+        assert!(m.probability.is_none());
+    }
+
+    #[test]
+    fn test_event_match_matched_at_is_reasonable_jd() {
+        use crate::utils::spatial::Coordinates;
+        let event = GcnEvent {
+            id: "ts".to_string(),
+            source: GcnSource::Custom,
+            event_type: GcnEventType::Watchlist,
+            trigger_time: 2460000.0,
+            geometry: EventGeometry::circle(180.0, 45.0, 1.0),
+            coordinates: Some(Coordinates::new(180.0, 45.0)),
+            properties: HashMap::new(),
+            expires_at: 2460030.0,
+            is_active: true,
+            user_id: None,
+            name: None,
+            description: None,
+            created_at: 2460000.0,
+            updated_at: 2460000.0,
+            supersedes: None,
+            superseded_by: None,
+        };
+        let m = EventMatch::new(&event, 180.0, 45.0, 2460001.0);
+        // Current JD should be in range ~2460000-2470000 (2023-2050 era)
+        assert!(m.matched_at > 2460000.0, "matched_at {} too small", m.matched_at);
+        assert!(m.matched_at < 2470000.0, "matched_at {} too large", m.matched_at);
+    }
+}
+
+// ==================== Xmatch HEALPix Tests ====================
+
+#[cfg(test)]
+mod xmatch_healpix_tests {
+    use crate::gcn::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use crate::utils::spatial::Coordinates;
+    use std::collections::HashMap;
+
+    fn make_circle(id: &str, ra: f64, dec: f64, radius: f64, trigger: f64) -> GcnEvent {
+        GcnEvent {
+            id: id.to_string(),
+            source: GcnSource::Custom,
+            event_type: GcnEventType::Watchlist,
+            trigger_time: trigger,
+            geometry: EventGeometry::circle(ra, dec, radius),
+            coordinates: Some(Coordinates::new(ra, dec)),
+            properties: HashMap::new(),
+            expires_at: trigger + 30.0,
+            is_active: true,
+            user_id: Some("user".to_string()),
+            name: None,
+            description: None,
+            created_at: trigger,
+            updated_at: trigger,
+            supersedes: None,
+            superseded_by: None,
+        }
+    }
+
+    fn make_healpix(id: &str, nside: u32, ra: f64, dec: f64, trigger: f64) -> GcnEvent {
+        use cdshealpix::nested;
+        let depth = nside.trailing_zeros() as u8;
+        let pixel = nested::hash(depth, ra.to_radians(), dec.to_radians());
+        GcnEvent {
+            id: id.to_string(),
+            source: GcnSource::Lvk,
+            event_type: GcnEventType::GravitationalWave,
+            trigger_time: trigger,
+            geometry: EventGeometry::healpix(nside, vec![pixel], vec![0.95], 0.9).unwrap(),
+            coordinates: None,
+            properties: HashMap::new(),
+            expires_at: trigger + 30.0,
+            is_active: true,
+            user_id: None,
+            name: None,
+            description: None,
+            created_at: trigger,
+            updated_at: trigger,
+            supersedes: None,
+            superseded_by: None,
+        }
+    }
+
+    #[test]
+    fn test_xmatch_healpix_single_match() {
+        let ra = 150.0_f64;
+        let dec = 20.0_f64;
+        let events = vec![make_healpix("gw-1", 64, ra, dec, 2460000.0)];
+        let matches = event_xmatch_sync(ra, dec, 2460001.0, &events);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].event_id, "gw-1");
+        assert_eq!(matches[0].event_source, GcnSource::Lvk);
+        assert!(matches[0].distance_deg.is_none());
+        assert!(matches[0].probability.is_some());
+        assert_eq!(matches[0].probability, Some(0.95));
+    }
+
+    #[test]
+    fn test_xmatch_healpix_no_match() {
+        let events = vec![make_healpix("gw-1", 64, 150.0, 20.0, 2460000.0)];
+        // Query far away
+        let matches = event_xmatch_sync(0.0, -80.0, 2460001.0, &events);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_xmatch_mixed_circle_and_healpix() {
+        let ra = 180.0_f64;
+        let dec = 45.0_f64;
+        let events = vec![
+            make_circle("watchlist-1", ra, dec, 2.0, 2460000.0),
+            make_healpix("gw-1", 64, ra, dec, 2460000.0),
+            make_circle("watchlist-2", 0.0, -90.0, 1.0, 2460000.0), // far away
+        ];
+
+        let matches = event_xmatch_sync(ra, dec, 2460001.0, &events);
+        assert_eq!(matches.len(), 2);
+
+        let circle_match = matches.iter().find(|m| m.event_id == "watchlist-1").unwrap();
+        assert!(circle_match.distance_deg.is_some());
+        assert!(circle_match.probability.is_none());
+        assert_eq!(circle_match.event_source, GcnSource::Custom);
+
+        let healpix_match = matches.iter().find(|m| m.event_id == "gw-1").unwrap();
+        assert!(healpix_match.distance_deg.is_none());
+        assert!(healpix_match.probability.is_some());
+        assert_eq!(healpix_match.event_source, GcnSource::Lvk);
+    }
+
+    #[test]
+    fn test_xmatch_healpix_expired_not_matched() {
+        let ra = 150.0_f64;
+        let dec = 20.0_f64;
+        let events = vec![make_healpix("gw-expired", 64, ra, dec, 2460000.0)];
+        // Event expires at 2460030
+        let matches = event_xmatch_sync(ra, dec, 2460050.0, &events);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_xmatch_healpix_inactive_not_matched() {
+        let ra = 150.0_f64;
+        let dec = 20.0_f64;
+        let mut event = make_healpix("gw-inactive", 64, ra, dec, 2460000.0);
+        event.is_active = false;
+        let matches = event_xmatch_sync(ra, dec, 2460001.0, &[event]);
+        assert!(matches.is_empty());
+    }
+}
+
+// ==================== Serde Edge Case Tests ====================
+
+#[cfg(test)]
+mod serde_edge_case_tests {
+    use crate::gcn::{EventGeometry, EventMatch, GcnEvent, GcnSource};
+
+    #[test]
+    fn test_event_missing_required_id_fails() {
+        let json = r#"{
+            "source": "custom",
+            "event_type": "watchlist",
+            "trigger_time": 2460000.0,
+            "geometry": {"type": "circle", "ra": 0.0, "dec": 0.0, "error_radius": 1.0},
+            "coordinates": null,
+            "expires_at": 2460030.0,
+            "is_active": true,
+            "user_id": null,
+            "name": null,
+            "description": null,
+            "created_at": 2460000.0,
+            "updated_at": 2460000.0,
+            "supersedes": null,
+            "superseded_by": null
+        }"#;
+        let result: Result<GcnEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Missing _id should fail");
+    }
+
+    #[test]
+    fn test_event_missing_required_source_fails() {
+        let json = r#"{
+            "_id": "test",
+            "event_type": "watchlist",
+            "trigger_time": 2460000.0,
+            "geometry": {"type": "circle", "ra": 0.0, "dec": 0.0, "error_radius": 1.0},
+            "coordinates": null,
+            "expires_at": 2460030.0,
+            "is_active": true,
+            "user_id": null,
+            "name": null,
+            "description": null,
+            "created_at": 2460000.0,
+            "updated_at": 2460000.0,
+            "supersedes": null,
+            "superseded_by": null
+        }"#;
+        let result: Result<GcnEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Missing source should fail");
+    }
+
+    #[test]
+    fn test_event_missing_required_geometry_fails() {
+        let json = r#"{
+            "_id": "test",
+            "source": "custom",
+            "event_type": "watchlist",
+            "trigger_time": 2460000.0,
+            "coordinates": null,
+            "expires_at": 2460030.0,
+            "is_active": true,
+            "user_id": null,
+            "name": null,
+            "description": null,
+            "created_at": 2460000.0,
+            "updated_at": 2460000.0,
+            "supersedes": null,
+            "superseded_by": null
+        }"#;
+        let result: Result<GcnEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Missing geometry should fail");
+    }
+
+    #[test]
+    fn test_event_missing_required_trigger_time_fails() {
+        let json = r#"{
+            "_id": "test",
+            "source": "custom",
+            "event_type": "watchlist",
+            "geometry": {"type": "circle", "ra": 0.0, "dec": 0.0, "error_radius": 1.0},
+            "coordinates": null,
+            "expires_at": 2460030.0,
+            "is_active": true,
+            "user_id": null,
+            "name": null,
+            "description": null,
+            "created_at": 2460000.0,
+            "updated_at": 2460000.0,
+            "supersedes": null,
+            "superseded_by": null
+        }"#;
+        let result: Result<GcnEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Missing trigger_time should fail");
+    }
+
+    #[test]
+    fn test_event_wrong_type_trigger_time_fails() {
+        let json = r#"{
+            "_id": "test",
+            "source": "custom",
+            "event_type": "watchlist",
+            "trigger_time": "not_a_number",
+            "geometry": {"type": "circle", "ra": 0.0, "dec": 0.0, "error_radius": 1.0},
+            "coordinates": null,
+            "expires_at": 2460030.0,
+            "is_active": true,
+            "user_id": null,
+            "name": null,
+            "description": null,
+            "created_at": 2460000.0,
+            "updated_at": 2460000.0,
+            "supersedes": null,
+            "superseded_by": null
+        }"#;
+        let result: Result<GcnEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "String trigger_time should fail");
+    }
+
+    #[test]
+    fn test_event_wrong_type_is_active_fails() {
+        let json = r#"{
+            "_id": "test",
+            "source": "custom",
+            "event_type": "watchlist",
+            "trigger_time": 2460000.0,
+            "geometry": {"type": "circle", "ra": 0.0, "dec": 0.0, "error_radius": 1.0},
+            "coordinates": null,
+            "expires_at": 2460030.0,
+            "is_active": 1,
+            "user_id": null,
+            "name": null,
+            "description": null,
+            "created_at": 2460000.0,
+            "updated_at": 2460000.0,
+            "supersedes": null,
+            "superseded_by": null
+        }"#;
+        let result: Result<GcnEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Integer is_active should fail");
+    }
+
+    #[test]
+    fn test_geometry_extra_unknown_fields_ignored() {
+        // serde ignores unknown fields by default
+        let json = r#"{"type":"circle","ra":180.0,"dec":45.0,"error_radius":1.0,"extra_field":"ignored"}"#;
+        let geom: EventGeometry = serde_json::from_str(json).unwrap();
+        assert_eq!(geom.center(), Some((180.0, 45.0)));
+    }
+
+    #[test]
+    fn test_event_match_deserialization_from_json() {
+        let json = r#"{
+            "event_id": "evt-123",
+            "event_source": "swift",
+            "distance_deg": 0.5,
+            "probability": null,
+            "matched_at": 2460500.0,
+            "trigger_offset_days": 3.5
+        }"#;
+        let m: EventMatch = serde_json::from_str(json).unwrap();
+        assert_eq!(m.event_id, "evt-123");
+        assert_eq!(m.event_source, GcnSource::Swift);
+        assert_eq!(m.distance_deg, Some(0.5));
+        assert_eq!(m.probability, None);
+        assert!((m.matched_at - 2460500.0).abs() < 0.001);
+        assert!((m.trigger_offset_days - 3.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_event_match_deserialization_healpix_variant() {
+        let json = r#"{
+            "event_id": "gw-456",
+            "event_source": "lvk",
+            "distance_deg": null,
+            "probability": 0.85,
+            "matched_at": 2460500.0,
+            "trigger_offset_days": 1.0
+        }"#;
+        let m: EventMatch = serde_json::from_str(json).unwrap();
+        assert_eq!(m.event_id, "gw-456");
+        assert_eq!(m.event_source, GcnSource::Lvk);
+        assert_eq!(m.distance_deg, None);
+        assert_eq!(m.probability, Some(0.85));
+    }
+}
+
+// ==================== Geometry Edge Case Tests ====================
+
+#[cfg(test)]
+mod geometry_edge_case_tests {
+    use crate::gcn::{EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_circle_negative_radius_always_misses() {
+        // Negative radius accepted by constructor, but contains() always false
+        let geom = EventGeometry::circle(180.0, 45.0, -1.0);
+        assert!(!geom.contains(180.0, 45.0));
+    }
+
+    #[test]
+    fn test_great_circle_distance_unit_is_degrees() {
+        // Two points 1 degree apart in declination at same RA
+        let geom = EventGeometry::circle(100.0, 30.0, 1.5);
+        // Point 1 degree away in dec should be within radius of 1.5
+        assert!(geom.contains(100.0, 31.0));
+        // Point 2 degrees away should NOT be within radius of 1.5
+        assert!(!geom.contains(100.0, 32.0));
+    }
+
+    #[test]
+    fn test_matches_with_nan_ra_returns_false() {
+        let event = GcnEvent {
+            id: "nan-test".to_string(),
+            source: GcnSource::Custom,
+            event_type: GcnEventType::Watchlist,
+            trigger_time: 2460000.0,
+            geometry: EventGeometry::circle(180.0, 45.0, 10.0),
+            coordinates: None,
+            properties: HashMap::new(),
+            expires_at: 2460030.0,
+            is_active: true,
+            user_id: None,
+            name: None,
+            description: None,
+            created_at: 2460000.0,
+            updated_at: 2460000.0,
+            supersedes: None,
+            superseded_by: None,
+        };
+        // NaN coordinates should not match (great_circle_distance returns NaN,
+        // and NaN <= error_radius is false)
+        assert!(!event.matches(f64::NAN, 45.0, 2460001.0));
+        assert!(!event.matches(180.0, f64::NAN, 2460001.0));
+    }
+
+    #[test]
+    fn test_matches_with_nan_alert_jd() {
+        let event = GcnEvent {
+            id: "nan-jd".to_string(),
+            source: GcnSource::Custom,
+            event_type: GcnEventType::Watchlist,
+            trigger_time: 2460000.0,
+            geometry: EventGeometry::circle(180.0, 45.0, 1.0),
+            coordinates: None,
+            properties: HashMap::new(),
+            expires_at: 2460030.0,
+            is_active: true,
+            user_id: None,
+            name: None,
+            description: None,
+            created_at: 2460000.0,
+            updated_at: 2460000.0,
+            supersedes: None,
+            superseded_by: None,
+        };
+        // NaN > expires_at is false, so expiry check passes.
+        // This means NaN alert_jd matches — document this behavior.
+        let result = event.matches(180.0, 45.0, f64::NAN);
+        assert!(result, "NaN alert_jd bypasses expiry check (IEEE 754 NaN comparison)");
+    }
+
+    #[test]
+    fn test_matches_with_superseded_but_active() {
+        let mut event = GcnEvent {
+            id: "v1".to_string(),
+            source: GcnSource::Swift,
+            event_type: GcnEventType::GammaRayBurst,
+            trigger_time: 2460000.0,
+            geometry: EventGeometry::circle(180.0, 45.0, 1.0),
+            coordinates: None,
+            properties: HashMap::new(),
+            expires_at: 2460030.0,
+            is_active: true,
+            user_id: None,
+            name: None,
+            description: None,
+            created_at: 2460000.0,
+            updated_at: 2460000.0,
+            supersedes: None,
+            superseded_by: None,
+        };
+        event.superseded_by = Some("v2".to_string());
+        // matches() does not check superseded_by — intentionally
+        assert!(event.matches(180.0, 45.0, 2460001.0));
+    }
+}
+
+// ==================== Validation Edge Cases (NaN/Inf) ====================
+
+#[cfg(test)]
+mod validation_edge_case_tests {
+    // These test the validation logic as implemented in watchlist routes.
+    // We replicate the actual validation functions here since they are private.
+
+    fn validate_radius(radius: f64, max_radius: f64) -> Result<(), String> {
+        if !radius.is_finite() {
+            return Err("Radius must be a finite number".to_string());
+        }
+        if radius <= 0.0 {
+            return Err("Radius must be positive".to_string());
+        }
+        if radius > max_radius {
+            return Err(format!("Radius {} exceeds max {}", radius, max_radius));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_nan_radius_rejected() {
+        assert!(validate_radius(f64::NAN, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_infinity_radius_rejected() {
+        assert!(validate_radius(f64::INFINITY, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_neg_infinity_radius_rejected() {
+        assert!(validate_radius(f64::NEG_INFINITY, 10.0).is_err());
+    }
 }

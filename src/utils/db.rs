@@ -67,9 +67,9 @@ pub async fn initialize_gcn_indexes(db: &Database) -> Result<(), CreateIndexErro
     // Index for time-based queries
     create_index(&gcn_collection, doc! { "trigger_time": 1 }, false).await?;
 
-    // Sparse index for watchlist user lookups
+    // Compound sparse index for watchlist user lookups (queries filter on user_id + source)
     let index_model = IndexModel::builder()
-        .keys(doc! { "user_id": 1 })
+        .keys(doc! { "user_id": 1, "source": 1 })
         .options(IndexOptions::builder().sparse(true).build())
         .build();
     gcn_collection.create_index(index_model).await?;

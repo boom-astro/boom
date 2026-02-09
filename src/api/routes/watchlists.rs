@@ -105,6 +105,11 @@ fn validate_coordinates(ra: f64, dec: f64) -> Result<(), WatchlistError> {
 }
 
 fn validate_radius(radius: f64, max_radius: f64) -> Result<(), WatchlistError> {
+    if !radius.is_finite() {
+        return Err(WatchlistError::InvalidGeometry(
+            "Radius must be a finite number".to_string(),
+        ));
+    }
     if radius <= 0.0 {
         return Err(WatchlistError::InvalidGeometry(
             "Radius must be positive".to_string(),
@@ -153,9 +158,9 @@ pub async fn post_watchlist(
         ));
     }
 
-    // Validate description length
+    // Validate description length (checked after trim for accurate length)
     if let Some(desc) = &body.description {
-        if desc.len() > MAX_DESCRIPTION_LENGTH {
+        if desc.trim().len() > MAX_DESCRIPTION_LENGTH {
             return response::bad_request(&format!(
                 "Description must not exceed {} characters",
                 MAX_DESCRIPTION_LENGTH
@@ -226,7 +231,7 @@ pub async fn post_watchlist(
         is_active: true,
         user_id: Some(current_user.id.clone()),
         name: Some(name.to_string()),
-        description: body.description.clone(),
+        description: body.description.as_ref().map(|d| d.trim().to_string()),
         created_at: now,
         updated_at: now,
         supersedes: None,
@@ -335,9 +340,9 @@ pub async fn get_watchlist(
 
     match gcn_collection.find_one(filter).await {
         Ok(Some(event)) => {
-            // Check ownership
+            // Check ownership — return 404 to avoid leaking existence of other users' watchlists
             if event.user_id.as_ref() != Some(&current_user.id) && !current_user.is_admin {
-                return response::forbidden("You do not own this watchlist");
+                return response::not_found("Watchlist not found");
             }
 
             match WatchlistPublic::from_event(&event) {
@@ -411,24 +416,14 @@ pub async fn patch_watchlist(
     let watchlist_id = path.into_inner();
     let gcn_collection: Collection<GcnEvent> = db.collection("gcn_events");
 
-    // First, find the watchlist
-    let filter = doc! {
+    // Build filter with ownership check to prevent TOCTOU races.
+    // Admins can update any watchlist; regular users only their own.
+    let mut filter = doc! {
         "_id": &watchlist_id,
         "source": "custom",
     };
-
-    let event = match gcn_collection.find_one(filter.clone()).await {
-        Ok(Some(event)) => event,
-        Ok(None) => return response::not_found("Watchlist not found"),
-        Err(e) => {
-            error!("Failed to query watchlist {}: {}", watchlist_id, e);
-            return response::internal_error("Failed to retrieve watchlist");
-        }
-    };
-
-    // Check ownership
-    if event.user_id.as_ref() != Some(&current_user.id) && !current_user.is_admin {
-        return response::forbidden("You do not own this watchlist");
+    if !current_user.is_admin {
+        filter.insert("user_id", &current_user.id);
     }
 
     // Build update document
@@ -440,7 +435,7 @@ pub async fn patch_watchlist(
     }
 
     if let Some(description) = &body.description {
-        update_doc.insert("description", description);
+        update_doc.insert("description", description.trim());
     }
 
     if let Some(is_active) = body.is_active {
@@ -456,7 +451,10 @@ pub async fn patch_watchlist(
         .update_one(filter.clone(), doc! { "$set": update_doc })
         .await
     {
-        Ok(_) => {
+        Ok(result) => {
+            if result.matched_count == 0 {
+                return response::not_found("Watchlist not found");
+            }
             // Fetch updated document
             match gcn_collection.find_one(filter).await {
                 Ok(Some(updated_event)) => match WatchlistPublic::from_event(&updated_event) {
@@ -506,24 +504,14 @@ pub async fn delete_watchlist(
     let watchlist_id = path.into_inner();
     let gcn_collection: Collection<GcnEvent> = db.collection("gcn_events");
 
-    // First, find the watchlist to check ownership
-    let filter = doc! {
+    // Include ownership in the filter to prevent TOCTOU races.
+    // Admins can delete any watchlist; regular users only their own.
+    let mut filter = doc! {
         "_id": &watchlist_id,
         "source": "custom",
     };
-
-    let event = match gcn_collection.find_one(filter.clone()).await {
-        Ok(Some(event)) => event,
-        Ok(None) => return response::not_found("Watchlist not found"),
-        Err(e) => {
-            error!("Failed to query watchlist {}: {}", watchlist_id, e);
-            return response::internal_error("Failed to retrieve watchlist");
-        }
-    };
-
-    // Check ownership
-    if event.user_id.as_ref() != Some(&current_user.id) && !current_user.is_admin {
-        return response::forbidden("You do not own this watchlist");
+    if !current_user.is_admin {
+        filter.insert("user_id", &current_user.id);
     }
 
     match gcn_collection.delete_one(filter).await {
