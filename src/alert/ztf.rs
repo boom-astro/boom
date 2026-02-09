@@ -7,7 +7,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
-        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
+        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -35,8 +35,6 @@ pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
-
-const ZTF_ZP: f32 = 23.9;
 
 fn fid2band(fid: i32) -> Result<Band, AlertError> {
     match fid {
@@ -261,6 +259,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
+        let factor = 10f32.powf((magzpsci - ZTF_ZP) / 2.5);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
@@ -272,10 +271,10 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
                         Some(psf_flux_abs / psf_flux_err),
-                        Some(psf_flux * 1e9_f32), // convert to nJy
+                        Some(psf_flux * 1e9_f32 * factor), // convert to nJy and a fixed ZTF_ZP
                     )
                 } else {
-                    (None, None, None, None, Some(psf_flux * 1e9_f32)) // convert to nJy
+                    (None, None, None, None, Some(psf_flux * 1e9_f32 * factor)) // convert to nJy and a fixed ZTF_ZP
                 }
             }
             _ => (None, None, None, None, None),
@@ -286,7 +285,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some(psf_flux_err * 1e9_f32), // convert to nJy
+            psf_flux_err: Some(psf_flux_err * 1e9_f32 * factor), // convert to nJy and a fixed ZTF_ZP
             isdiffpos,
             snr,
             band,
