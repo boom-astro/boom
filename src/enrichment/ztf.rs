@@ -1,5 +1,5 @@
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
+use crate::enrichment::babamul::{Babamul, BabamulEnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
@@ -461,7 +461,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
+        let mut enriched_alerts: Vec<BabamulEnrichedZtfAlert> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
@@ -531,7 +531,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
+                let enriched_alert = BabamulEnrichedZtfAlert::from_alert_properties_and_cutouts(
                     alert,
                     Some(cutouts.cutout_science),
                     Some(cutouts.cutout_template),
