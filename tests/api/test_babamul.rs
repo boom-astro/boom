@@ -43,6 +43,7 @@ mod tests {
                 is_activated: true,
                 created_at: 0,
                 kafka_credentials: vec![],
+                tokens: vec![],
             };
 
             let babamul_users_collection: mongodb::Collection<
@@ -93,12 +94,14 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup),
+            ),
         )
         .await;
 
@@ -212,14 +215,16 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup)
-                .service(routes::babamul::post_babamul_activate)
-                .service(routes::babamul::post_babamul_auth),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup)
+                    .service(routes::babamul::post_babamul_activate)
+                    .service(routes::babamul::post_babamul_auth),
+            ),
         )
         .await;
 
@@ -367,12 +372,14 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .app_data(web::Data::new(EmailService::new()))
-                .service(routes::babamul::post_babamul_signup),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup),
+            ),
         )
         .await;
 
@@ -402,9 +409,11 @@ mod tests {
         let babamul_schemas = boom::api::routes::babamul::surveys::BabamulAvroSchemas::new();
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(babamul_schemas))
-                .service(routes::babamul::surveys::get_babamul_schema),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(babamul_schemas))
+                    .service(routes::babamul::surveys::get_babamul_schema),
+            ),
         )
         .await;
 
@@ -487,11 +496,13 @@ mod tests {
             .expect("Failed to insert test cutout");
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_alert_cutouts),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alert_cutouts),
+            ),
         )
         .await;
 
@@ -517,7 +528,7 @@ mod tests {
             "Response should contain correct candid"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -552,11 +563,13 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_alerts),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alerts),
+            ),
         )
         .await;
 
@@ -614,11 +627,13 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_alerts),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alerts),
+            ),
         )
         .await;
 
@@ -684,11 +699,13 @@ mod tests {
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_object),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_object),
+            ),
         )
         .await;
 
@@ -707,16 +724,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(
-            body["data"]["object_id"].as_str().unwrap(),
+            body["data"]["objectId"].as_str().unwrap(),
             &object_id,
-            "Response should contain correct object_id"
+            "Response should contain correct objectId"
         );
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -757,11 +774,13 @@ mod tests {
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::surveys::get_object),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_object),
+            ),
         )
         .await;
 
@@ -780,16 +799,16 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert_eq!(
-            body["data"]["object_id"].as_str().unwrap(),
+            body["data"]["objectId"].as_str().unwrap(),
             &object_id,
-            "Response should contain correct object_id"
+            "Response should contain correct objectId"
         );
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Cutout should be base64 encoded string"
         );
 
@@ -810,6 +829,92 @@ mod tests {
         );
     }
 
+    /// Test GET /babamul/objects validation for ZTF patterns
+    #[actix_rt::test]
+    async fn test_get_objects_validation() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_objects),
+            ),
+        )
+        .await;
+
+        // ZTF:
+        // Acceptable values
+        for value in ["Z", "ZT", "ZTF", "ZTF20a", "20a"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // Invalid values
+        for value in ["Z2", "ZTF231", "ZTF2a", "ZTF20aaaaaaaa"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject invalid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // LSST:
+        // Acceptable values
+        for value in ["L", "LS", "LSS", "LSST", "LSST1", "1", "LSST123", "123"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid object_id pattern '{}'",
+                value
+            );
+        }
+
+        // Invalid values
+        for value in ["L2", "LSSTA", "1a"] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", value))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject invalid object_id pattern '{}'",
+                value
+            );
+        }
+    }
+
     /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
     /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
     #[actix_rt::test]
@@ -823,14 +928,16 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::post_kafka_credentials)
-                .service(routes::babamul::get_kafka_credentials)
-                .service(routes::babamul::delete_kafka_credential),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential),
+            ),
         )
         .await;
 
@@ -983,14 +1090,16 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::post_kafka_credentials)
-                .service(routes::babamul::get_kafka_credentials)
-                .service(routes::babamul::delete_kafka_credential),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential),
+            ),
         )
         .await;
 
@@ -1103,14 +1212,16 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(config.clone()))
-                .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data.clone()))
-                .wrap(from_fn(babamul_auth_middleware))
-                .service(routes::babamul::post_kafka_credentials)
-                .service(routes::babamul::get_kafka_credentials)
-                .service(routes::babamul::delete_kafka_credential),
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential),
+            ),
         )
         .await;
 
@@ -1206,6 +1317,596 @@ mod tests {
             resp.status(),
             StatusCode::NOT_FOUND,
             "Should return 404 for non-existent credential"
+        );
+    }
+
+    /// Test POST /babamul/tokens - Create a new PAT
+    #[actix_rt::test]
+    async fn test_post_token() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::get_tokens)
+                        .service(routes::babamul::get_babamul_profile),
+                ),
+        )
+        .await;
+
+        // Create a token with a valid name
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "My First Token",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Token creation should succeed"
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(body["id"].is_string(), "Response should have token id");
+        assert_eq!(body["name"].as_str().unwrap(), "My First Token");
+        assert!(
+            body["access_token"].is_string(),
+            "Response should have access_token"
+        );
+
+        let access_token = body["access_token"].as_str().unwrap();
+        assert!(
+            access_token.starts_with("bbml_"),
+            "Token should start with bbml_"
+        );
+        assert_eq!(
+            access_token.len(),
+            41,
+            "Token should be bbml_ (5 chars) + 36 random chars"
+        );
+
+        assert!(
+            body["created_at"].is_i64(),
+            "created_at should be timestamp"
+        );
+        assert!(
+            body["expires_at"].is_i64(),
+            "expires_at should be timestamp"
+        );
+
+        let created_at = body["created_at"].as_i64().unwrap();
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        assert!(
+            expires_at > created_at,
+            "expires_at should be after created_at"
+        );
+        assert!(
+            expires_at - created_at >= 30 * 86400 - 10
+                && expires_at - created_at <= 30 * 86400 + 10,
+            "Token should expire in ~30 days"
+        );
+
+        // Test that the PAT can be used to authenticate and fetch user profile
+        let req = test::TestRequest::get()
+            .uri("/babamul/profile")
+            .insert_header(("Authorization", format!("Bearer {}", access_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PAT should authenticate successfully"
+        );
+
+        let profile_body = read_json_response(resp).await;
+        assert_eq!(
+            profile_body["data"]["email"].as_str().unwrap(),
+            test_user.user.email,
+            "Profile should return correct user email"
+        );
+
+        // Test creating token with empty name
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Empty name should be rejected"
+        );
+
+        // Test creating token with whitespace-only name
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "   ",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Whitespace-only name should be rejected"
+        );
+
+        // Test creating token with default expiration (365 days)
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Default Expiration Token"
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Token creation with default expiration should succeed"
+        );
+
+        let body = read_json_response(resp).await;
+        let created_at = body["created_at"].as_i64().unwrap();
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        assert!(
+            expires_at - created_at >= 365 * 86400 - 10
+                && expires_at - created_at <= 365 * 86400 + 10,
+            "Token should expire in ~365 days by default"
+        );
+
+        // Test creating token with zero days expiration
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Zero Expiration Token",
+                "expires_in_days": 0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Zero days expiration should be rejected"
+        );
+
+        // Test creating token with expiration > 3 years
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Too Long Expiration Token",
+                "expires_in_days": 1096
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Expiration > 3 years should be rejected"
+        );
+
+        // Test creating token with exactly 3 years (should succeed)
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "3 Year Token",
+                "expires_in_days": 1095
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "3 years expiration should succeed"
+        );
+
+        let body = read_json_response(resp).await;
+        let created_at = body["created_at"].as_i64().unwrap();
+        let expires_at = body["expires_at"].as_i64().unwrap();
+        assert!(
+            expires_at - created_at >= 1095 * 86400 - 10
+                && expires_at - created_at <= 1095 * 86400 + 10,
+            "Token should expire in ~1095 days"
+        );
+    }
+
+    /// Test POST /babamul/tokens - Token limit enforcement
+    #[actix_rt::test]
+    async fn test_post_token_limit() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::delete_token),
+                ),
+        )
+        .await;
+
+        // Create 10 tokens (the maximum allowed)
+        let mut token_ids = Vec::new();
+        for i in 1..=10 {
+            let req = test::TestRequest::post()
+                .uri("/babamul/tokens")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "name": format!("Token {}", i),
+                    "expires_in_days": 30
+                }))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Token {} creation should succeed",
+                i
+            );
+
+            let body = read_json_response(resp).await;
+            token_ids.push(body["id"].as_str().unwrap().to_string());
+        }
+
+        // Try to create an 11th token - should fail
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Token 11",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "11th token creation should fail due to limit"
+        );
+
+        let body = read_str_response(resp).await;
+        assert!(
+            body.contains("Maximum number of tokens"),
+            "Error message should mention token limit"
+        );
+
+        // Delete one token
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_ids[0]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Now we should be able to create a new token
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "New Token After Delete",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Token creation should succeed after deleting one"
+        );
+
+        // Clean up: delete remaining tokens
+        for token_id in &token_ids[1..] {
+            let req = test::TestRequest::delete()
+                .uri(&format!("/babamul/tokens/{}", token_id))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            test::call_service(&app, req).await;
+        }
+    }
+
+    /// Test GET /babamul/tokens - List all PATs
+    #[actix_rt::test]
+    async fn test_get_tokens() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::get_tokens),
+                ),
+        )
+        .await;
+
+        // Initially, user should have no tokens
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 0, "User should start with no tokens");
+
+        // Create three tokens
+        let token_names = vec!["Token 1", "Token 2", "Token 3"];
+        let mut created_token_ids = Vec::new();
+
+        for name in &token_names {
+            let req = test::TestRequest::post()
+                .uri("/babamul/tokens")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "name": name,
+                    "expires_in_days": 30
+                }))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = read_json_response(resp).await;
+            created_token_ids.push(body["id"].as_str().unwrap().to_string());
+        }
+
+        // List tokens
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 3, "User should have 3 tokens");
+
+        // Verify token structure and content
+        for (i, token) in tokens.iter().enumerate() {
+            assert!(token["id"].is_string(), "Token should have id");
+            assert!(token["name"].is_string(), "Token should have name");
+            assert_eq!(
+                token["name"].as_str().unwrap(),
+                token_names[i],
+                "Token name should match"
+            );
+            assert!(token["created_at"].is_i64(), "Token should have created_at");
+            assert!(token["expires_at"].is_i64(), "Token should have expires_at");
+            assert!(
+                token["last_used_at"].is_null(),
+                "Token should have null last_used_at initially"
+            );
+
+            // Token should NOT expose the token_hash or access_token
+            assert!(
+                token.get("token_hash").is_none(),
+                "Token hash should not be exposed"
+            );
+            assert!(
+                token.get("access_token").is_none(),
+                "Access token should not be exposed in list"
+            );
+            assert!(
+                token.get("user_id").is_none(),
+                "User ID should not be exposed"
+            );
+
+            // Verify this is one of the tokens we created
+            assert!(created_token_ids.contains(&token["id"].as_str().unwrap().to_string()));
+        }
+
+        // Verify token names are in the response (order may vary)
+        let returned_names: Vec<&str> =
+            tokens.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for name in &token_names {
+            assert!(
+                returned_names.contains(name),
+                "Token name should be in response"
+            );
+        }
+    }
+
+    /// Test DELETE /babamul/tokens/{id} - Delete a PAT
+    #[actix_rt::test]
+    async fn test_delete_token() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::get_tokens)
+                        .service(routes::babamul::tokens::delete_token),
+                ),
+        )
+        .await;
+
+        // Create a token
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "name": "Token to Delete",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let token_id = body["id"].as_str().unwrap().to_string();
+
+        // Verify token exists by listing
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 1, "Should have 1 token before delete");
+
+        // Delete the token
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["message"].as_str().unwrap(),
+            "Token deleted successfully"
+        );
+
+        // Verify token is gone by listing
+        let req = test::TestRequest::get()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let tokens = body.as_array().unwrap();
+        assert_eq!(tokens.len(), 0, "Token should be deleted");
+
+        // Try to delete again - should get 404
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_id))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = read_json_response(resp).await;
+        assert_eq!(body["error"].as_str().unwrap(), "Token not found");
+    }
+
+    /// Test DELETE /babamul/tokens/{id} with unauthorized access (token belongs to another user)
+    #[actix_rt::test]
+    async fn test_delete_token_unauthorized() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create two test users
+        let user1 = TestUser::create(&database, &auth_app_data).await;
+        let user2 = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::tokens::post_token)
+                        .service(routes::babamul::tokens::delete_token),
+                ),
+        )
+        .await;
+
+        // User 1 creates a token
+        let req = test::TestRequest::post()
+            .uri("/babamul/tokens")
+            .insert_header(("Authorization", format!("Bearer {}", user1.token)))
+            .set_json(serde_json::json!({
+                "name": "User 1 Token",
+                "expires_in_days": 30
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let token_id = body["id"].as_str().unwrap().to_string();
+
+        // User 2 tries to delete User 1's token - should get 404
+        let req = test::TestRequest::delete()
+            .uri(&format!("/babamul/tokens/{}", token_id))
+            .insert_header(("Authorization", format!("Bearer {}", user2.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Should not be able to delete another user's token"
         );
     }
 }

@@ -35,7 +35,7 @@ impl BabamulAvroSchemas {
     ),
     tags=["Schemas"]
 )]
-#[actix_web::get("/babamul/surveys/{survey}/schemas")]
+#[actix_web::get("/surveys/{survey}/schemas")]
 pub async fn get_babamul_schema(
     survey: web::Path<Survey>,
     babamul_avro_schemas: web::Data<BabamulAvroSchemas>,

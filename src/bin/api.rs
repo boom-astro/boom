@@ -40,37 +40,44 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
-            .app_data(web::Data::new(email_service.clone()))
-            .service(Scalar::with_url("/docs", api_doc.clone()))
-            .service(routes::info::get_health)
-            .service(routes::auth::post_auth);
+            .app_data(web::Data::new(email_service.clone()));
 
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {
             let babamul_avro_schemas = routes::babamul::surveys::BabamulAvroSchemas::new();
-            app = app
-                .app_data(web::Data::new(babamul_avro_schemas))
-                .service(Scalar::with_url("/babamul/docs", babamul_doc.clone()))
-                .service(routes::babamul::surveys::get_babamul_schema)
-                .service(routes::babamul::post_babamul_signup)
-                .service(routes::babamul::post_babamul_activate)
-                .service(routes::babamul::post_babamul_auth)
-                .service(
-                    actix_web::web::scope("")
-                        .wrap(from_fn(babamul_auth_middleware))
-                        .service(routes::babamul::get_babamul_profile)
-                        .service(routes::babamul::post_kafka_credentials)
-                        .service(routes::babamul::get_kafka_credentials)
-                        .service(routes::babamul::delete_kafka_credential)
-                        .service(routes::babamul::surveys::get_object)
-                        .service(routes::babamul::surveys::get_alert_cutouts)
-                        .service(routes::babamul::surveys::get_alerts),
-                )
+            app = app.service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(babamul_avro_schemas))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    // Public routes
+                    .service(Scalar::with_url("/docs", babamul_doc.clone()))
+                    .service(routes::babamul::surveys::get_babamul_schema)
+                    .service(routes::babamul::post_babamul_signup)
+                    .service(routes::babamul::post_babamul_activate)
+                    .service(routes::babamul::post_babamul_auth)
+                    // Protected routes
+                    .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::post_kafka_credentials)
+                    .service(routes::babamul::get_kafka_credentials)
+                    .service(routes::babamul::delete_kafka_credential)
+                    .service(routes::babamul::surveys::get_object)
+                    .service(routes::babamul::surveys::get_objects)
+                    .service(routes::babamul::surveys::get_alert_cutouts)
+                    .service(routes::babamul::surveys::get_alerts)
+                    .service(routes::babamul::tokens::get_tokens)
+                    .service(routes::babamul::tokens::post_token)
+                    .service(routes::babamul::tokens::delete_token),
+            )
         }
 
         app.service(
             actix_web::web::scope("")
                 .wrap(from_fn(auth_middleware))
+                // Public routes
+                .service(Scalar::with_url("/docs", api_doc.clone()))
+                .service(routes::info::get_health)
+                .service(routes::auth::post_auth)
+                // Protected routes
                 .service(routes::info::get_db_info)
                 .service(routes::kafka::get_kafka_acls)
                 .service(routes::kafka::delete_kafka_credentials)
@@ -92,9 +99,9 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
-                .service(routes::queries::post_pipeline_query),
+                .service(routes::queries::post_pipeline_query)
+                .wrap(Logger::default()),
         )
-        .wrap(Logger::default())
     })
     .bind(("0.0.0.0", port))?
     .run()

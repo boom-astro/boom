@@ -198,15 +198,20 @@ where
 
 // it should return an optional PhotometryMag
 impl ZtfPhotometry {
-    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
+        // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
+        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
+        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
         match (self.snr, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
-                time: self.jd,
-                mag: mag as f32,
-                mag_err: sig as f32,
-                band: self.band.clone(),
-            }),
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag: mag as f32,
+                    mag_err: sig as f32,
+                    band: self.band.clone(),
+                }),
+            },
             _ => None,
         }
     }
@@ -253,7 +258,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
                                 "ra": { "$add": [
@@ -276,9 +281,10 @@ pub struct ZtfSurveyMatches {
     pub lsst: Option<LsstMatch>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ZtfMatch {
-    // #[serde(rename = "_id")]
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,
@@ -432,6 +438,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
+        let now = flare::Time::now().to_jd();
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -448,36 +456,49 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
-            let metadata = self.acai_h_model.get_metadata(&[&alert])?;
+            // (we skip ML inference if features cannot be computed, e.g. missing required features)
             let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-
-            let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-            let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-            let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-            let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-            let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-
-            let metadata_btsbot = self
+            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
+            let btsbot_metadata_result = self
                 .btsbot_model
-                .get_metadata(&[&alert], &[all_bands_properties])?;
-            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
+                .get_metadata(&[&alert], &[all_bands_properties.clone()]);
 
-            let classifications = ZtfAlertClassifications {
-                acai_h: acai_h_scores[0],
-                acai_n: acai_n_scores[0],
-                acai_v: acai_v_scores[0],
-                acai_o: acai_o_scores[0],
-                acai_b: acai_b_scores[0],
-                btsbot: btsbot_scores[0],
+            let classifications = if let (Ok(metadata), Ok(btsbot_metadata)) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
+                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
+                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
+                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
+                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
+                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    candid
+                );
+                None
             };
 
-            let update_alert_document = doc! {
-                "$set": {
-                    // ML scores
+            let update_alert_document = if let Some(classifications) = classifications {
+                doc! { "$set": {
                     "classifications": mongify(&classifications),
-                    // properties
                     "properties": mongify(&properties),
-                }
+                    "updated_at": now,
+                }}
+            } else {
+                doc! { "$set": {
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }}
             };
 
             let update = WriteModel::UpdateOne(
@@ -573,12 +594,14 @@ impl ZtfEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -594,12 +617,14 @@ impl ZtfEnrichmentWorker {
                 let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
                 let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
                     .fp_hists
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
                     .collect();
                 let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
                 prepare_photometry(&mut lsst_lightcurve);

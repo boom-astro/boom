@@ -29,10 +29,18 @@ use opentelemetry::{
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
+
+/// Delay (in milliseconds) when the input queue is empty before checking again.
+/// This prevents busy-waiting when there's no work to do.
+const QUEUE_EMPTY_DELAY_MS: u64 = 500;
+
+/// Delay (in seconds) after a valkey/redis error before retrying.
+/// This prevents log spam when valkey is unavailable.
+const VALKEY_ERROR_DELAY_SECS: u64 = 5;
 
 // NOTE: Global instruments are defined here because reusing instruments is
 // considered a best practice. According to the `opentelemetry` crate,
@@ -353,7 +361,7 @@ impl SchemaRegistry {
                 if self.github_fallback_url.is_none() {
                     return Err(registry_error);
                 }
-                debug!(
+                warn!(
                     "Schema registry lookup failed for subject {} version {}, attempting GitHub fallback: {:?}",
                     subject,
                     version,
@@ -914,9 +922,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
-                info!("queue is empty");
+                trace!("queue is empty");
                 ACTIVE.add(-1, &active_attrs);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(QUEUE_EMPTY_DELAY_MS)).await;
                 command_check_countdown = 0;
                 continue;
             }
@@ -924,6 +932,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
                 log_error!(e, "failed to retrieve avro bytes");
                 ACTIVE.add(-1, &active_attrs);
                 ALERT_PROCESSED.add(1, &input_error_attrs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(VALKEY_ERROR_DELAY_SECS)).await;
+                command_check_countdown = 0;
                 continue;
             }
         };

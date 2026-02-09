@@ -1,4 +1,5 @@
 pub mod surveys;
+pub mod tokens;
 
 use crate::api::email::EmailService;
 use crate::api::models::response;
@@ -93,6 +94,16 @@ impl KafkaCredentialEncrypted {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct BabamulUserToken {
+    pub id: String, // UUID for the token
+    pub name: String,
+    pub token_hash: String, // SHA256 hash of the token
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUser {
     // Save in the database as _id, but we want to rename on the way out
     #[serde(rename = "_id")]
@@ -105,6 +116,7 @@ pub struct BabamulUser {
     pub created_at: i64, // Unix timestamp
     #[serde(default)]
     pub kafka_credentials: Vec<KafkaCredentialEncrypted>, // List of Kafka credentials (w/ encrypted passwords)
+    pub tokens: Vec<BabamulUserToken>, // List of API tokens
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -153,7 +165,7 @@ pub struct BabamulSignupResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/signup")]
+#[post("/signup")]
 pub async fn post_babamul_signup(
     db: web::Data<Database>,
     email_service: web::Data<EmailService>,
@@ -247,6 +259,7 @@ pub async fn post_babamul_signup(
                 is_activated,
                 created_at: flare::Time::now().to_utc().timestamp(),
                 kafka_credentials: Vec::new(), // Empty list, credentials created on demand
+                tokens: Vec::new(),            // Empty list of tokens
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -313,7 +326,7 @@ pub async fn post_babamul_signup(
 }
 
 /// Generate a random alphanumeric string of specified length
-fn generate_random_string(length: usize) -> String {
+pub fn generate_random_string(length: usize) -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut rng = rand::rng();
@@ -573,7 +586,7 @@ pub struct BabamulActivateResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/activate")]
+#[post("/activate")]
 pub async fn post_babamul_activate(
     db: web::Data<Database>,
     body: web::Json<BabamulActivatePost>,
@@ -658,6 +671,7 @@ pub async fn post_babamul_activate(
 
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct BabamulAuthPost {
+    #[serde(alias = "username")]
     pub email: String,
     pub password: String,
 }
@@ -683,7 +697,7 @@ pub struct BabamulAuthResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/auth")]
+#[post("/auth")]
 pub async fn post_babamul_auth(
     db: web::Data<Database>,
     auth: web::Data<AuthProvider>,
@@ -756,7 +770,7 @@ pub async fn post_babamul_auth(
     ),
     tags=["Babamul"]
 )]
-#[get("/babamul/profile")]
+#[get("/profile")]
 pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
@@ -792,7 +806,7 @@ pub struct CreateKafkaCredentialResponse {
     ),
     tags=["Babamul"]
 )]
-#[post("/babamul/kafka-credentials")]
+#[post("/kafka-credentials")]
 pub async fn post_kafka_credentials(
     db: web::Data<Database>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -892,7 +906,7 @@ pub async fn post_kafka_credentials(
     ),
     tags=["Babamul"]
 )]
-#[get("/babamul/kafka-credentials")]
+#[get("/kafka-credentials")]
 pub async fn get_kafka_credentials(
     config: web::Data<crate::conf::AppConfig>,
     current_user: Option<web::ReqData<BabamulUser>>,
@@ -944,7 +958,7 @@ pub struct DeleteKafkaCredentialResponse {
     ),
     tags=["Babamul"]
 )]
-#[delete("/babamul/kafka-credentials/{credential_id}")]
+#[delete("/kafka-credentials/{credential_id}")]
 pub async fn delete_kafka_credential(
     db: web::Data<Database>,
     current_user: Option<web::ReqData<BabamulUser>>,
