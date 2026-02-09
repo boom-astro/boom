@@ -259,7 +259,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
-        let factor = 10f32.powf((magzpsci - ZTF_ZP) / 2.5);
+        let factor = 10f32.powf((ZTF_ZP - magzpsci) / 2.5);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
