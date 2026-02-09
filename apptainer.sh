@@ -118,7 +118,10 @@ if [ "$1" == "stop" ]; then
       exit 0
     fi
     if apptainer instance list | grep -q "boom "; then
+      # If a generic "boom" instance is running, stop only that one
+      # and exit early to avoid stopping survey-specific instances.
       apptainer instance stop "boom"
+      exit 0
     fi
     if apptainer instance list | grep -q "boom_lsst"; then
       apptainer instance stop "boom_lsst"

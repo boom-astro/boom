@@ -187,7 +187,6 @@ fi
 if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "scheduler" "$2"; then
   survey=$3
   if [ "$2" = "boom" ] && [ -z "$survey" ]; then
-    echo && echo -e "${YELLOW}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
     if apptainer instance list | awk '{print $1}' | grep -xq "boom"; then
       echo && echo -e "${YELLOW}$(current_datetime) - Boom is already running${END}"
     else
@@ -195,8 +194,8 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       apptainer instance start --env-file .env \
         --bind "$CONFIG_FILE:/app/config.yaml" \
         "$SIF_DIR/boom.sif" "boom"
-      sleep 3
     fi
+    echo -e "${YELLOW}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
   elif [ -z "$survey" ]; then
     echo && echo -e "${RED}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
     echo -e "${BLUE}apptainer_start.sh start <service|all|'empty'> [survey_name] [date] [program_id] [scheduler_config_path]${END} ${YELLOW}('empty' will default to all}${END}"
