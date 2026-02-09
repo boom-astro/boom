@@ -687,6 +687,38 @@ fn test_compute_babamul_category_ztf() {
         category, "no-lsst-match.hosted",
         "ZTF alert with low sgscore2 should be hosted even if sgscore1 is high"
     );
+
+    // Test case 9: No LSST match + near_brightstar=true + star=false → "no-lsst-match.stellar"
+    let mut alert_near_brightstar =
+        create_mock_enriched_ztf_alert(1234567898, "ZTF21aaaaaai", false);
+    alert_near_brightstar.survey_matches = None;
+    alert_near_brightstar.properties.star = false;
+    alert_near_brightstar.properties.near_brightstar = true;
+    let category = alert_near_brightstar.compute_babamul_category();
+    assert_eq!(
+        category, "no-lsst-match.stellar",
+        "ZTF alert with near_brightstar=true and star=false should be no-lsst-match.stellar"
+    );
+
+    // Test case 10: LSST match + near_brightstar=true + star=false → "lsst-match.stellar"
+    let mut alert_lsst_near_brightstar =
+        create_mock_enriched_ztf_alert(1234567899, "ZTF21aaaaaaj", false);
+    alert_lsst_near_brightstar.survey_matches = Some(ZtfSurveyMatches {
+        lsst: Some(boom::enrichment::LsstMatch {
+            object_id: "LSST24aaaaaad".to_string(),
+            ra: 150.0,
+            dec: 30.0,
+            prv_candidates: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    alert_lsst_near_brightstar.properties.star = false;
+    alert_lsst_near_brightstar.properties.near_brightstar = true;
+    let category = alert_lsst_near_brightstar.compute_babamul_category();
+    assert_eq!(
+        category, "lsst-match.stellar",
+        "ZTF alert with LSST match, near_brightstar=true and star=false should be lsst-match.stellar"
+    );
 }
 
 #[tokio::test]

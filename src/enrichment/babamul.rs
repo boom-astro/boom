@@ -217,7 +217,7 @@ impl BabamulEnrichedZtfAlert {
         };
 
         // Already classified as stellar (by the enrichment worker), return that
-        if self.properties.star {
+        if self.properties.star || self.properties.near_brightstar {
             return category + "stellar";
         }
 
