@@ -15,5 +15,5 @@ pub use lsst::{
 };
 pub use ztf::{
     ZtfAlertClassifications, ZtfAlertForEnrichment, ZtfAlertProperties, ZtfEnrichmentWorker,
-    ZtfMatch, ZtfPhotometry, ZtfSurveyMatches,
+    ZtfForcedPhotometry, ZtfMatch, ZtfPhotometry, ZtfSurveyMatches,
 };
