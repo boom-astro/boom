@@ -275,15 +275,31 @@ pub async fn build_ztf_alerts(
             }
             let jd = doc.get_f64("jd")?;
             let magzpsci = doc.get_f64("magzpsci")?;
-            let flux = doc.get_f64("psfFlux").ok();
-            let flux_err = doc.get_f64("psfFluxErr")?;
+            // let flux = doc.get_f64("psfFlux").ok();
+            // let flux_err = doc.get_f64("psfFluxErr")?;
+            // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+            let flux = doc.get_f64("forcediffimflux").ok();
+            let flux_err = doc.get_f64("forcediffimfluxunc")?;
             let band = doc.get_str("band")?.to_string();
             let programid = doc.get_i32("programid")?;
 
+            // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
+            let factor = 10f64.powf((ZTF_ZP - magzpsci) / 2.5);
+            let flux = if flux != Some(-99999.0) && flux.map_or(false, |f| !f.is_nan()) {
+                flux.map(|f| f * 1e9_f64 * factor) // convert to a fixed ZP and nJy
+            } else {
+                None
+            };
+            let flux_err = if flux_err != -99999.0 && !flux_err.is_nan() {
+                flux_err * 1e9_f64 * factor // convert to a fixed ZP and nJy
+            } else {
+                return Err(FilterWorkerError::MissingFluxPSF);
+            };
+
             photometry.push(Photometry {
                 jd,
-                flux,
-                flux_err,
+                flux: flux.map(|f| f * 1e9_f64 * factor), // convert to nJy and a fixed ZP
+                flux_err: flux_err * 1e9_f64 * factor,    // convert to nJy and a fixed ZP
                 band: format!("ztf{}", band),
                 zero_point: magzpsci,
                 origin: Origin::ForcedPhot,

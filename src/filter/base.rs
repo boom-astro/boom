@@ -830,6 +830,8 @@ pub enum FilterWorkerError {
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
     KafkaConfigMissing(Survey),
+    #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
+    MissingFluxPSF,
 }
 
 #[async_trait::async_trait]
