@@ -6,8 +6,9 @@ use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
-use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
+use crate::enrichment::EnrichmentWorkerError;
 use crate::utils::derive_avro_schema::SerdavroWriter;
+use crate::utils::lightcurves::Band;
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
@@ -20,89 +21,88 @@ use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
+const ZTF_ZP: f64 = 23.9;
 
-// Wrapper around cutout bytes, so we can implement
-// AvroSchemaComponent for it, to serialize as bytes in Avro
-#[derive(Debug, serde::Deserialize)]
-pub struct CutoutBytes(Vec<u8>);
-
-// Wrapper for cross_matches that implements AvroSchemaComponent as a no-op
-// since we don't want to serialize it to Avro
-#[derive(Debug, Clone, Default)]
-pub struct CrossMatchesWrapper(
-    pub Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
-);
-
-impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
-    fn get_schema_in_ctxt(
-        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
-        _enclosing_namespace: &apache_avro::schema::Namespace,
-    ) -> apache_avro::Schema {
-        // Return null schema since this field is never serialized
-        apache_avro::Schema::Null
-    }
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlertPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: f64, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    pub ra: f64,
+    pub dec: f64,
 }
 
-impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
-    fn get_schema_in_ctxt(
-        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
-        _enclosing_namespace: &apache_avro::schema::Namespace,
-    ) -> apache_avro::Schema {
-        apache_avro::Schema::Bytes
-    }
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NonDetectionPhotometry {
+    pub jd: f64,
+    pub flux_err: f64, // in nJy
+    pub band: Band,
 }
 
-impl serde::Serialize for CutoutBytes {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        apache_avro::serde_avro_bytes::serialize(&self.0, serializer)
-    }
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForcedPhotometry {
+    pub jd: f64,
+    pub flux: Option<f64>, // in nJy
+    pub flux_err: f64,     // in nJy
+    pub band: Band,
 }
 
 /// Enriched LSST alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct EnrichedLsstAlert {
+pub struct BabamulEnrichedLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<LsstPhotometry>,
-    pub fp_hists: Vec<LsstPhotometry>,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: LsstAlertProperties,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<CutoutBytes>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<CutoutBytes>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
 }
 
-impl EnrichedLsstAlert {
+impl BabamulEnrichedLsstAlert {
     pub fn from_alert_properties_and_cutouts(
         alert: LsstAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
     ) -> (
         Self,
         std::collections::HashMap<String, Vec<serde_json::Value>>,
     ) {
         (
-            EnrichedLsstAlert {
+            BabamulEnrichedLsstAlert {
                 candid: alert.candid,
                 object_id: alert.object_id,
                 candidate: alert.candidate,
-                prv_candidates: alert.prv_candidates,
-                fp_hists: alert.fp_hists,
+                prv_candidates: alert
+                    .prv_candidates
+                    .into_iter()
+                    .map(|p| AlertPhotometry {
+                        jd: p.jd,
+                        flux: p.flux.unwrap(),
+                        flux_err: p.flux_err,
+                        band: p.band,
+                        ra: p.ra.unwrap(),
+                        dec: p.dec.unwrap(),
+                    })
+                    .collect(),
+                fp_hists: alert
+                    .fp_hists
+                    .into_iter()
+                    .map(|p| ForcedPhotometry {
+                        jd: p.jd,
+                        flux: p.flux,
+                        flux_err: p.flux_err,
+                        band: p.band,
+                    })
+                    .collect(),
                 properties,
-                cutout_science: cutout_science.map(CutoutBytes),
-                cutout_template: cutout_template.map(CutoutBytes),
-                cutout_difference: cutout_difference.map(CutoutBytes),
                 survey_matches: alert.survey_matches,
             },
             alert.cross_matches.unwrap_or_default(),
@@ -164,44 +164,81 @@ impl EnrichedLsstAlert {
 /// Enriched ZTF alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct EnrichedZtfAlert {
+pub struct BabamulEnrichedZtfAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<ZtfPhotometry>,
-    pub prv_nondetections: Vec<ZtfPhotometry>,
-    pub fp_hists: Vec<ZtfPhotometry>,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub prv_nondetections: Vec<NonDetectionPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: ZtfAlertProperties,
     pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<CutoutBytes>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<CutoutBytes>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<CutoutBytes>,
 }
 
-impl EnrichedZtfAlert {
+impl BabamulEnrichedZtfAlert {
     pub fn from_alert_properties_and_cutouts(
         alert: ZtfAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
         properties: ZtfAlertProperties,
     ) -> Self {
-        EnrichedZtfAlert {
+        BabamulEnrichedZtfAlert {
             survey_matches: alert.survey_matches,
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            prv_nondetections: alert.prv_nondetections,
-            fp_hists: alert.fp_hists,
+            // for prv_candidates, prv_nondetections, and fp_hists, we only include entries with programid=1 (public ZTF data)
+            prv_candidates: alert
+                .prv_candidates
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: alert
+                .prv_nondetections
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| NonDetectionPhotometry {
+                    jd: p.jd,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+            // ZTF's fp_hists data points each have their own zp (magzpsci),
+            // we convert them to a fixed ZP (ZTF_ZP) in nJy using the formula:
+            // flux_nJy = flux * 10^((zp - ZTF_ZP) / 2.5)
+            // TODO: do this upstream in the alert worker when we compute psfFlux and psfFluxErr,
+            // so we can have a fixed zeropoint for all ZTF photometry in the database directly.
+            fp_hists: alert
+                .fp_hists
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| {
+                    let factor = match p.zp {
+                        Some(zp) => 10f64.powf((zp - ZTF_ZP) / 2.5),
+                        None => {
+                            tracing::warn!(
+                                "ZTF alert fp_hist entry missing zp, skipping data point"
+                            );
+                            return None;
+                        }
+                    };
+                    Some(ForcedPhotometry {
+                        jd: p.jd,
+                        flux: p.flux.map(|f| f * factor),
+                        flux_err: p.flux_err * factor,
+                        band: p.band,
+                    })
+                })
+                .filter_map(|p| p)
+                .collect(),
             properties,
-            cutout_science: cutout_science.map(CutoutBytes),
-            cutout_template: cutout_template.map(CutoutBytes),
-            cutout_difference: cutout_difference.map(CutoutBytes),
         }
     }
 
@@ -244,8 +281,8 @@ impl EnrichedZtfAlert {
 }
 
 enum EnrichedAlert<'a> {
-    Lsst(&'a EnrichedLsstAlert),
-    Ztf(&'a EnrichedZtfAlert),
+    Lsst(&'a BabamulEnrichedLsstAlert),
+    Ztf(&'a BabamulEnrichedZtfAlert),
 }
 
 pub struct Babamul {
@@ -282,8 +319,8 @@ impl Babamul {
                 .expect("Failed to create Babamul Kafka producer");
 
         // Generate Avro schemas
-        let lsst_avro_schema = EnrichedLsstAlert::get_schema();
-        let ztf_avro_schema = EnrichedZtfAlert::get_schema();
+        let lsst_avro_schema = BabamulEnrichedLsstAlert::get_schema();
+        let ztf_avro_schema = BabamulEnrichedZtfAlert::get_schema();
 
         // Create Kafka Admin client
         let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
@@ -464,12 +501,12 @@ impl Babamul {
     pub async fn process_lsst_alerts(
         &self,
         alerts: Vec<(
-            EnrichedLsstAlert,
+            BabamulEnrichedLsstAlert,
             std::collections::HashMap<String, Vec<serde_json::Value>>,
         )>,
     ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
-        let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
+        let mut alerts_by_topic: HashMap<String, Vec<BabamulEnrichedLsstAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
         let min_reliability = 0.5;
@@ -516,25 +553,20 @@ impl Babamul {
     #[instrument(skip_all, err)]
     pub async fn process_ztf_alerts(
         &self,
-        alerts: Vec<EnrichedZtfAlert>,
+        alerts: Vec<BabamulEnrichedZtfAlert>,
     ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         // For now, we will just send all alerts to "babamul.none"
         // In the future, we will determine the topic based on the alert properties
-        let mut alerts_by_topic: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
+        let mut alerts_by_topic: HashMap<String, Vec<BabamulEnrichedZtfAlert>> = HashMap::new();
 
         // Iterate over the alerts
-        for mut alert in alerts {
+        for alert in alerts {
             // Only send public ZTF alerts (programid=1) to Babamul
             if alert.candidate.candidate.programid != 1 || alert.properties.rock {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
             }
-
-            // Filter photometry to only include public (programid=1)
-            alert.prv_candidates.retain(|p| p.programid == 1);
-            alert.prv_nondetections.retain(|p| p.programid == 1);
-            alert.fp_hists.retain(|p| p.programid == 1);
 
             // Determine which topic this alert should go to
             let category: String = alert.compute_babamul_category();

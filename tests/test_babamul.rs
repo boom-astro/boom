@@ -3,7 +3,7 @@ use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{
-        babamul::{EnrichedLsstAlert, EnrichedZtfAlert},
+        babamul::{BabamulEnrichedLsstAlert, BabamulEnrichedZtfAlert},
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
         ZtfAlertProperties,
     },
@@ -77,7 +77,11 @@ fn create_lspsc_cross_matches(
 }
 
 /// Create a mock enriched ZTF alert for testing
-fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -> EnrichedZtfAlert {
+fn create_mock_enriched_ztf_alert(
+    candid: i64,
+    object_id: &str,
+    is_rock: bool,
+) -> BabamulEnrichedZtfAlert {
     // Create a minimal Candidate and ZtfCandidate using defaults
     let mut inner_candidate = Candidate::default();
     inner_candidate.candid = candid;
@@ -96,7 +100,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         band: Band::G,
     };
 
-    EnrichedZtfAlert {
+    BabamulEnrichedZtfAlert {
         candid,
         object_id: object_id.to_string(),
         candidate,
@@ -111,9 +115,6 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
         },
-        cutout_science: None,
-        cutout_template: None,
-        cutout_difference: None,
         survey_matches: None,
     }
 }
@@ -127,7 +128,10 @@ async fn create_mock_enriched_lsst_alert(
     is_rock: bool,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
+) -> (
+    BabamulEnrichedLsstAlert,
+    HashMap<String, Vec<serde_json::Value>>,
+) {
     create_mock_enriched_lsst_alert_with_matches(
         candid,
         object_id,
@@ -152,7 +156,10 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
+) -> (
+    BabamulEnrichedLsstAlert,
+    HashMap<String, Vec<serde_json::Value>>,
+) {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
     dia_source.candid = candid;
@@ -217,11 +224,8 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         .await
         .unwrap();
 
-    EnrichedLsstAlert::from_alert_properties_and_cutouts(
+    BabamulEnrichedLsstAlert::from_alert_properties_and_cutouts(
         lsst_alert_for_enrichment,
-        None,
-        None,
-        None,
         properties,
     )
 }
@@ -668,7 +672,7 @@ async fn test_babamul_process_ztf_alerts() {
     let expected: std::collections::HashSet<String> =
         [ztf_obj1.clone(), ztf_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedZtfAlert::get_schema();
+    let schema = boom::enrichment::babamul::BabamulEnrichedZtfAlert::get_schema();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -727,7 +731,7 @@ async fn test_babamul_process_lsst_alerts() {
     let expected: std::collections::HashSet<String> =
         [lsst_obj1.clone(), lsst_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedLsstAlert::get_schema();
+    let schema = boom::enrichment::babamul::BabamulEnrichedLsstAlert::get_schema();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -1079,7 +1083,7 @@ async fn test_babamul_lsst_with_ztf_match() {
 
     // Try to decode and verify the ZTF match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
-    let schema = EnrichedLsstAlert::get_schema();
+    let schema = BabamulEnrichedLsstAlert::get_schema();
     let mut successful_decodes = 0;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -1337,7 +1341,7 @@ async fn test_babamul_ztf_with_lsst_match() {
 
     // Try to decode and verify the LSST match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
-    let schema = EnrichedZtfAlert::get_schema();
+    let schema = BabamulEnrichedZtfAlert::get_schema();
     let mut successful_decodes = 0;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
