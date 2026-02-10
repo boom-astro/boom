@@ -23,6 +23,7 @@ pub enum ModelError {
     MissingFeature(&'static str),
 }
 
+#[instrument(name = "models::load_model", skip(path), fields(model_path = %path) err)]
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 

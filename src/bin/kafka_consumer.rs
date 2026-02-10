@@ -73,7 +73,18 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
     Ok(date)
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
+#[instrument(skip_all, fields(
+        survey = %args.survey,
+        date = ?args.date,
+        program_id = ?args.program_id,
+        processes = args.processes,
+        clear = args.clear,
+        max_in_queue = args.max_in_queue,
+        simulated = args.simulated,
+        exit_on_eof = args.exit_on_eof,
+        deployment_env = %args.deployment_env
+    )
+)]
 async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let timestamp = NaiveDateTime::from(args.date.unwrap_or_else(|| {
         chrono::Utc::now()

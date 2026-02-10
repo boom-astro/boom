@@ -64,7 +64,7 @@ async fn main() {
         description: Some(description),
         active: true,
         user_id: "cli".to_string(),
-        survey: survey,
+        survey: survey.clone(),
         permissions: permissions,
         fv: vec![FilterVersion {
             fid: "v2e0fs".to_string(),
@@ -76,6 +76,20 @@ async fn main() {
         created_at: now_jd(),
         updated_at: now_jd(),
     };
+
+    let span = tracing::info_span!(
+        "cmd::add_filter",
+        survey = %survey,
+        filter_id = %filter_id,
+        filter_file = %filter_file,
+    );
+    let _guard = span.enter();
+    tracing::info!(
+        survey = %survey,
+        filter_id = %filter_id,
+        filter_file = %filter_file,
+        "Preparing to insert filter into MongoDB"
+    );
 
     // insert the filter into the database
     let config = AppConfig::from_default_path().unwrap();

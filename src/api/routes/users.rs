@@ -4,6 +4,7 @@ use futures::stream::StreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::{debug, warn};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -56,6 +57,10 @@ impl From<User> for UserPublic {
     ),
     tags=["Users"]
 )]
+#[tracing::instrument(name = "users::post_user", skip(db, body, current_user), fields(
+    http.method = "POST", 
+    http.route = "/api/users", username = %body.username, new_email = %body.email
+))]
 #[post("/users")]
 pub async fn post_user(
     db: web::Data<Database>,
@@ -63,7 +68,9 @@ pub async fn post_user(
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
     let current_user = current_user.unwrap();
+    debug!(user_id = %current_user.id, is_admin = current_user.is_admin, username = %body.username, "post_user endpoint hit");
     if !current_user.is_admin {
+        warn!(user_id = %current_user.id, "non-admin tried to create user");
         return HttpResponse::Forbidden().body("Only admins can create new users");
     }
     let user_collection: Collection<User> = db.collection("users");
@@ -110,8 +117,14 @@ pub async fn post_user(
     ),
     tags=["Users"]
 )]
+#[tracing::instrument(
+    name = "users::get_users",
+    skip(db),
+    fields(http.method = "GET", http.route = "/api/users")
+)]
 #[get("/users")]
 pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
+    debug!("get_users endpoint hit");
     let user_collection: Collection<UserPublic> = db.collection("users");
     let users = user_collection.find(doc! {}).await;
 
@@ -146,6 +159,10 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
     ),
     tags=["Users"]
 )]
+#[tracing::instrument(name = "users::delete_user", skip(db, path, current_user), fields(
+    http.method = "DELETE", 
+    http.route = "/api/users/{user_id}", user_id = %path
+))]
 #[delete("/users/{user_id}")]
 pub async fn delete_user(
     db: web::Data<Database>,
@@ -153,11 +170,13 @@ pub async fn delete_user(
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
     let current_user = current_user.unwrap();
+    let user_id = path.into_inner();
+    debug!(user_id = %user_id, admin_id = %current_user.id, is_admin = current_user.is_admin, "delete_user endpoint hit");
     if !current_user.is_admin {
+        warn!(user_id = %current_user.id, "non-admin tried to delete user");
         return HttpResponse::Forbidden().body("Only admins can delete users");
     }
     // TODO: Ensure the caller is authorized to delete this user
-    let user_id = path.into_inner();
     let user_collection: Collection<UserPublic> = db.collection("users");
 
     match user_collection.delete_one(doc! { "_id": &user_id }).await {

@@ -45,7 +45,7 @@ const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(3
 // MetadataPartition values, neither of which implement Clone. We use a custom
 // Metadata type to capture the topic and partition information from the rdkafka
 // types, which can then can be returned to the caller.
-#[instrument(skip_all, err)]
+#[instrument(skip(client), fields(topic_name = %topic_name), err)]
 fn get_partition_ids(
     client: &BaseConsumer,
     topic_name: &str,
@@ -68,7 +68,11 @@ fn get_partition_ids(
 }
 
 // check that the topic exists and return the number of partitions
-#[instrument(skip_all, err)]
+#[instrument(skip(username, password), err, fields(
+    topic_name = %topic_name,
+    bootstrap_servers = %bootstrap_servers,
+    group_id = %group_id,
+))]
 pub fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -100,7 +104,11 @@ pub fn check_kafka_topic_partitions(
     Ok(partition_ids.map(|ids| ids.len()))
 }
 
-#[instrument(skip_all, err)]
+#[instrument(err, fields(
+    topic_name = %topic_name,
+    bootstrap_servers = %bootstrap_servers,
+    expected_nb_partitions = %expected_nb_partitions,
+))]
 pub async fn initialize_topic(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -152,7 +160,10 @@ pub async fn initialize_topic(
     Ok(nb_partitions)
 }
 
-#[instrument(skip_all, err)]
+#[instrument(err, fields(
+    topic_name = %topic_name,
+    bootstrap_servers = %bootstrap_servers,
+))]
 pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(), KafkaError> {
     let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
@@ -163,7 +174,10 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
     Ok(())
 }
 
-#[instrument(skip_all, err)]
+#[instrument(err, fields(
+    topic_name = %topic_name,
+    bootstrap_servers = %bootstrap_servers,
+))]
 pub fn count_messages(
     bootstrap_servers: &str,
     topic_name: &str,
@@ -215,6 +229,12 @@ pub trait AlertProducer {
     }
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>>;
     fn default_nb_partitions(&self) -> usize;
+    #[instrument(skip(self), err, fields(
+        topic = %topic.as_deref().unwrap_or("<auto>"),
+        server_url = %self.server_url(),
+        data_dir = %self.data_directory(),
+        limit = self.limit(),
+    ))]
     async fn produce(
         &self,
         topic: Option<String>,
@@ -398,7 +418,10 @@ pub trait AlertConsumer: Sized {
     fn topic_name(&self, timestamp: i64) -> String;
     fn output_queue(&self) -> String;
     fn survey(&self) -> crate::utils::enums::Survey;
-    #[instrument(skip(self))]
+    #[instrument(skip(self), err, fields(
+        output_queue = %self.output_queue(),
+        config_path = %config_path,
+    ))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
         let mut con = config
@@ -415,7 +438,13 @@ pub trait AlertConsumer: Sized {
         );
         Ok(())
     }
-    #[instrument(skip(self))]
+    #[instrument(skip(self, kafka_config, config_path), err, fields(
+        topic = %topic.as_deref().unwrap_or("<auto>"),
+        timestamp = timestamp,
+        max_in_queue = max_in_queue.unwrap_or(15000),
+        exit_on_eof = exit_on_eof,
+        survey = ?self.survey(),
+    ))]
     async fn consume(
         &self,
         topic: Option<String>,
@@ -539,7 +568,13 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
     Ok(())
 }
 
-#[instrument(skip(config, survey_consumer_config))]
+#[instrument(skip(config, survey_consumer_config), err, fields(
+    topic = %topic,
+    consumer_id = %id,
+    output_queue = %output_queue,
+    max_in_queue = max_in_queue,
+    exit_on_eof = exit_on_eof,
+))]
 pub async fn consumer(
     id: &str,
     topic: &str,

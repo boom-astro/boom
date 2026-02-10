@@ -27,6 +27,7 @@ use mongodb::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::vec;
+use tracing::debug;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -64,12 +65,15 @@ impl From<Filter> for FilterPublic {
     }
 }
 
+#[tracing::instrument(name = "filters::run_test_pipeline", skip(db, catalog, pipeline), fields(survey = ?catalog), err)]
 async fn run_test_pipeline(
     db: web::Data<Database>,
     catalog: &Survey,
     mut pipeline: Vec<Document>,
 ) -> Result<(), FilterError> {
-    let collection: Collection<Document> = db.collection(format!("{}_alerts", catalog).as_str());
+    debug!(survey = ?catalog, "running test filter pipeline");
+    let collection: Collection<mongodb::bson::Document> =
+        db.collection(format!("{}_alerts", catalog).as_str());
     // get the latest candid from the alerts collection
     let result = collection
         .find_one(doc! {})
@@ -113,6 +117,7 @@ async fn run_test_pipeline(
     }
 }
 
+#[tracing::instrument(name = "filters::build_and_test_filter_version", skip(db, survey, pipeline, permissions), fields(survey = ?survey), err)]
 async fn build_and_test_filter_version(
     db: web::Data<Database>,
     survey: &Survey,
@@ -142,6 +147,11 @@ struct FilterVersionPost {
     ),
     tags=["Filters"]
 )]
+#[tracing::instrument(name = "filters::post_filter_version", skip(db, filter_id, body, current_user), fields(
+    http.method = "POST", 
+    http.route = "/api/filters/{filter_id}/versions", 
+    filter_id = %filter_id
+))]
 #[post("/filters/{filter_id}/versions")]
 pub async fn post_filter_version(
     db: web::Data<Database>,
@@ -240,6 +250,10 @@ pub struct FilterPost {
     ),
     tags=["Filters"]
 )]
+#[tracing::instrument(name = "filters::post_filter", skip(db, body, current_user), fields(
+    http.method = "POST", 
+    http.route = "/api/filters", survey = ?body.survey
+))]
 #[post("/filters")]
 pub async fn post_filter(
     db: web::Data<Database>,
@@ -328,6 +342,10 @@ struct FilterPatch {
     ),
     tags=["Filters"]
 )]
+#[tracing::instrument(name = "filters::patch_filter", skip(db, filter_id, body, current_user), fields(
+    http.method = "PATCH", 
+    http.route = "/api/filters/{filter_id}", filter_id = %filter_id
+))]
 #[patch("/filters/{filter_id}")]
 pub async fn patch_filter(
     db: web::Data<Database>,
@@ -412,6 +430,8 @@ pub async fn patch_filter(
     ),
     tags=["Filters"]
 )]
+#[tracing::instrument(name = "filters::get_filters", skip(db, current_user), fields(
+    http.method = "GET", http.route = "/api/filters"))]
 #[get("/filters")]
 pub async fn get_filters(
     db: web::Data<Database>,
@@ -460,6 +480,10 @@ pub async fn get_filters(
     ),
     tags=["Filters"]
 )]
+#[tracing::instrument(name = "filters::get_filter", skip(db, path, current_user), fields(
+    http.method = "GET", 
+    http.route = "/api/filters/{filter_id}", filter_id = %path
+))]
 #[get("/filters/{filter_id}")]
 pub async fn get_filter(
     db: web::Data<Database>,
@@ -636,6 +660,10 @@ impl FilterTestResponse {
     ),
     tags=["Filters"]
 )]
+#[tracing::instrument(name = "filters::post_filter_test", skip(db, body, current_user), fields(
+    http.method = "POST", 
+    http.route = "/api/filters/test", survey = ?body.survey
+))]
 #[post("/filters/test")]
 pub async fn post_filter_test(
     db: web::Data<Database>,

@@ -4,6 +4,7 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use std::env;
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -23,6 +24,7 @@ impl EmailService {
     ///
     /// Optional:
     /// - `EMAIL_ENABLED`: Set to "false" to disable email (defaults to true if SMTP vars are set)
+    #[instrument(name = "email::service::new", skip_all)]
     pub fn new() -> Self {
         // Check if email should be enabled
         let enabled = env::var("EMAIL_ENABLED")
@@ -31,7 +33,7 @@ impl EmailService {
             .unwrap_or(true);
 
         if !enabled {
-            println!("Email service is DISABLED (EMAIL_ENABLED=false)");
+            info!("Email service is DISABLED (EMAIL_ENABLED=false)");
             return Self {
                 mailer: None,
                 from_address: String::new(),
@@ -46,9 +48,16 @@ impl EmailService {
         let from_address = env::var("SMTP_FROM_ADDRESS")
             .unwrap_or_else(|_| "noreply@boom.example.com".to_string());
 
+        debug!(
+            has_username = smtp_username.is_some(),
+            has_password = smtp_password.is_some(),
+            has_server = smtp_server.is_some(),
+            "Configuring SMTP configuration from environment"
+        );
+
         // If any SMTP config is missing, disable email
         if smtp_username.is_none() || smtp_password.is_none() || smtp_server.is_none() {
-            println!(
+            warn!(
                 "Email service is DISABLED (missing SMTP configuration: SMTP_USERNAME, SMTP_PASSWORD, or SMTP_SERVER)"
             );
             return Self {
@@ -64,8 +73,8 @@ impl EmailService {
         let mailer = match SmtpTransport::relay(&smtp_server.unwrap()) {
             Ok(transport) => Some(transport.credentials(creds).build()),
             Err(e) => {
-                eprintln!("Failed to create SMTP transport: {}", e);
-                println!("Email service is DISABLED (SMTP transport creation failed)");
+                error!("Failed to create SMTP transport: {}", e);
+                warn!("Email service is DISABLED (SMTP transport creation failed)");
                 return Self {
                     mailer: None,
                     from_address,
@@ -74,7 +83,7 @@ impl EmailService {
             }
         };
 
-        println!("Email service is ENABLED (SMTP configured)");
+        info!("Email service is ENABLED (SMTP configured)");
         Self {
             mailer,
             from_address,
@@ -88,6 +97,8 @@ impl EmailService {
     }
 
     /// Send an activation email to a new Babamul user
+    #[instrument(name = "email::service::send_activation_email", 
+    skip(self, to_email, activation_code), fields(to_email = %to_email), err)]
     pub fn send_activation_email(
         &self,
         to_email: &str,
@@ -156,10 +167,12 @@ impl EmailService {
             .send(&email)
             .map_err(|e| format!("Failed to send email: {}", e))?;
 
+        info!("Activation email sent");
         Ok(())
     }
 
     /// Send a test email to verify SMTP configuration
+    #[instrument(name = "email::service::send_test_email", skip(self), fields(to_email = %to_email), err)]
     pub fn send_test_email(&self, to_email: &str) -> Result<(), String> {
         if !self.enabled {
             return Err("Email service is not enabled".to_string());
@@ -188,6 +201,7 @@ impl EmailService {
             .send(&email)
             .map_err(|e| format!("Failed to send email: {}", e))?;
 
+        info!("Test email sent");
         Ok(())
     }
 }

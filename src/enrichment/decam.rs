@@ -7,7 +7,7 @@ use crate::utils::lightcurves::{
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
 
 pub fn create_decam_alert_pipeline() -> Vec<Document> {
     vec![
@@ -102,7 +102,7 @@ pub struct DecamEnrichmentWorker {
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for DecamEnrichmentWorker {
-    #[instrument(err)]
+    #[instrument(err, skip(config_path))]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
@@ -112,6 +112,8 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let input_queue = "DECAM_alerts_enrichment_queue".to_string();
         let output_queue = "DECAM_alerts_filter_queue".to_string();
 
+        debug!(input_queue = %input_queue, output_queue = %output_queue,
+            "DECAM Enrichment Worker configuration");
         Ok(DecamEnrichmentWorker {
             input_queue,
             output_queue,
@@ -129,7 +131,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         self.output_queue.clone()
     }
 
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all, fields(batch_size = candids.len()), err)]
     async fn process_alerts(
         &mut self,
         candids: &[i64],
@@ -137,11 +139,17 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let alerts: Vec<DecamAlertForEnrichment> =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
 
+        debug!(
+            alerts = alerts.len(),
+            candids = candids.len(),
+            "fetched alerts"
+        );
+
         if alerts.len() != candids.len() {
             warn!(
-                "only {} alerts fetched from {} candids",
-                alerts.len(),
-                candids.len()
+                alerts = alerts.len(),
+                candids = candids.len(),
+                "alert/candid mismatch"
             );
         }
 
@@ -181,6 +189,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
+        debug!("processed DECAM {} alerts", processed_alerts.len());
         Ok(processed_alerts)
     }
 }

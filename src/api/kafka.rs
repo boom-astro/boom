@@ -1,6 +1,7 @@
 //! Functionality for working with Kafka in the API.
 use std::collections::HashMap;
 use std::process::Command;
+use tracing::{debug, error, info};
 
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct KafkaAclEntry {
@@ -47,15 +48,19 @@ async fn get_acls_internal(
         map
     }
 
+    let broker = broker.to_string();
+    debug!(%broker, "Fetching Kafka ACLs");
+
     // Try to find the right command name
     let acls_cli = if which::which("kafka-acls").is_ok() {
         "kafka-acls"
     } else {
         "kafka-acls.sh"
     };
+    info!(%acls_cli, %broker, "Using Kafka ACLs CLI command");
 
     let acls_cli_str = acls_cli.to_string();
-    let broker_str = broker.to_string();
+    let broker_str = broker.clone();
     let kafka_username_clone = kafka_username.map(|s| s.to_string());
 
     // Build and execute the Kafka CLI command in a blocking task
@@ -213,6 +218,8 @@ pub async fn delete_acls_for_username(
     // Fetch ACLs for this specific client using the new method
     let user_acls = get_acls_for_username(kafka_username, broker).await?;
 
+    info!(num_acls = user_acls.len(), kafka_username = %kafka_username, "Deleting Kafka ACLs for user");
+
     let mut errors: Vec<String> = Vec::new();
     for acl in user_acls {
         let resource_flag = match acl.resource_type.as_str() {
@@ -288,16 +295,19 @@ pub async fn delete_acls_for_username(
             let msg = stderr.to_string();
             if !(msg.contains("No ACLs found") || msg.contains("No matching ACLs found")) {
                 errors.push(msg);
+            } else {
+                debug!(
+                    kafka_username = %kafka_username,
+                    resource = %acl.resource_name,
+                    "No matching ACLs found while deleting"
+                );
             }
         }
     }
 
     if !errors.is_empty() {
         let combined = errors.join("; ");
-        eprintln!(
-            "Error deleting ACLs for user {}: {}",
-            kafka_username, combined
-        );
+        error!(kafka_username = %kafka_username, error = %combined, "Failed to delete Kafka ACLs");
         return Err(format!(
             "Failed to delete ACLs for user {}: {}",
             kafka_username, combined
@@ -305,6 +315,7 @@ pub async fn delete_acls_for_username(
         .into());
     }
 
+    info!(kafka_username = %kafka_username, "Successfully deleted Kafka ACLs for user");
     Ok(())
 }
 

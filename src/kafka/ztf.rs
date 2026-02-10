@@ -133,6 +133,13 @@ impl AlertProducer for ZtfAlertProducer {
     fn default_nb_partitions(&self) -> usize {
         ZTF_DEFAULT_NB_PARTITIONS
     }
+    #[instrument(skip(self), err, fields(
+        date = %self.date.format("%Y%m%d"),
+        program_id = ?self.program_id,
+        server_url = %self.server_url,
+        working_dir = %self.working_dir,
+        limit = self.limit,
+    ))]
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
         let date_str = self.date.format("%Y%m%d").to_string();
         info!(

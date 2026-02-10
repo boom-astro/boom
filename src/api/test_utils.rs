@@ -1,5 +1,7 @@
 use mongodb::{bson, Database};
+use tracing::instrument;
 
+#[instrument(name = "test_utils::create_test_catalog", skip(db), ret)]
 pub async fn create_test_catalog(db: &Database) -> String {
     let name = format!("test_catalog_{}", uuid::Uuid::new_v4());
     let collection = db.collection(&name);
@@ -23,10 +25,12 @@ pub async fn create_test_catalog(db: &Database) -> String {
     name
 }
 
+#[instrument(name = "test_utils::delete_test_catalog", skip(db))]
 pub async fn delete_test_catalog(db: &Database, name: &str) {
     db.collection::<bson::Document>(name).drop().await.unwrap();
 }
 
+#[instrument(name = "test_utils::read_str_response", skip(resp), ret)]
 pub async fn read_str_response<B>(resp: actix_web::dev::ServiceResponse<B>) -> String
 where
     B: actix_web::body::MessageBody,
@@ -36,6 +40,7 @@ where
 }
 
 // we read a json response in all of our tests, so let's make a helper function for that
+#[instrument(name = "test_utils::read_json_response", skip(resp), ret)]
 pub async fn read_json_response<B>(resp: actix_web::dev::ServiceResponse<B>) -> serde_json::Value
 where
     B: actix_web::body::MessageBody,

@@ -3,6 +3,7 @@ use actix_web::{post, web, HttpResponse};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
+use tracing::{debug, warn};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -38,8 +39,10 @@ pub struct FailedAuthResponse {
     ),
     tags=["Auth"]
 )]
+#[tracing::instrument(name = "auth::post_auth", skip(auth, body), fields(username = %body.username))]
 #[post("/auth")]
 pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Form<AuthPost>) -> HttpResponse {
+    debug!(username = %body.username, "post_auth endpoint hit");
     // Check if the user exists and the password matches
     match auth
         .create_token_for_user(&body.username, &body.password)
@@ -57,6 +60,7 @@ pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Form<AuthPost>)
                 || e.kind() == std::io::ErrorKind::InvalidInput
             {
                 // if the error is NotFound (username or password is incorrect), return a 401
+                warn!(username = %body.username, "authentication failed: invalid credentials");
                 HttpResponse::Unauthorized().json(FailedAuthResponse {
                     error: "invalid_client".into(),
                     error_description: "Invalid username or password".into(),

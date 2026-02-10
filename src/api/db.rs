@@ -4,11 +4,14 @@ use crate::conf::{AppConfig, AuthConfig, BoomConfigError};
 
 use mongodb::bson::doc;
 use mongodb::Database;
+use tracing::{debug, error, info};
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
 pub const PROTECTED_COLLECTION_NAMES: [&str; 3] = ["filters", "babamul_users", "users"];
 
+#[tracing::instrument(name = "db::init_api_admin_user", skip(auth_config, users_collection), 
+fields(admin_username = %auth_config.admin_username), err)]
 async fn init_api_admin_user(
     auth_config: &AuthConfig,
     users_collection: &mongodb::Collection<User>,
@@ -16,6 +19,8 @@ async fn init_api_admin_user(
     let admin_username = auth_config.admin_username.clone();
     let admin_password = auth_config.admin_password.clone();
     let admin_email = auth_config.admin_email.clone();
+
+    info!("ensuring API admin user exists");
 
     // Check if the admin user already exists
     let existing_user = users_collection
@@ -25,10 +30,7 @@ async fn init_api_admin_user(
 
     if existing_user.is_none() {
         // Create the admin user if it does not exist
-        println!(
-            "Admin user does not exist, creating a new one with username: {}",
-            admin_username
-        );
+        info!(%admin_username, "admin user does not exist, creating");
         let admin_user = User {
             id: uuid::Uuid::new_v4().to_string(),
             username: admin_username.clone(),
@@ -39,7 +41,7 @@ async fn init_api_admin_user(
         };
         match users_collection.insert_one(admin_user).await {
             Ok(_) => {
-                println!("Admin user created successfully.");
+                info!("admin user created successfully");
                 return Ok(());
             }
             Err(e) => {
@@ -49,15 +51,13 @@ async fn init_api_admin_user(
                 // if the user already exists we just re-fetch the existing_user
                 // and if that somehow fails, we return an error
                 if !e.to_string().contains("E11000 duplicate key error") {
-                    eprintln!("Failed to create admin user: {}", e);
+                    error!("Failed to create admin user: {}", e);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         "Failed to create admin user",
                     ));
                 } else {
-                    println!(
-                        "Admin user already exists, but was created in another instance. Updating the user."
-                    );
+                    info!("admin user was created in another instance, re-fetching");
                     let existing_user = users_collection
                         .find_one(doc! { "username": &admin_username })
                         .await
@@ -76,13 +76,13 @@ async fn init_api_admin_user(
     // if the admin user exists, check that the password matches and email matches
     // if one of them does not, update the user
     if let Some(existing_user) = existing_user {
-        if !bcrypt::verify(&admin_password, &existing_user.password).unwrap_or(false)
+        let needs_update = !bcrypt::verify(&admin_password, &existing_user.password)
+            .unwrap_or(false)
             || existing_user.email != admin_email
-            || !existing_user.is_admin
-        {
-            println!(
-                "Admin user already exists, but password or email does not match with the one in the config. Updating the user."
-            );
+            || !existing_user.is_admin;
+
+        if needs_update {
+            info!(%admin_username, "admin user exists but needs update");
             // Update the existing user with the new password and email
             let updated_user = User {
                 id: existing_user.id.clone(),
@@ -96,12 +96,16 @@ async fn init_api_admin_user(
                 .replace_one(doc! { "_id": &existing_user.id }, updated_user)
                 .await
                 .expect("failed to update admin user");
+            debug!("admin user updated");
+        } else {
+            debug!(%admin_username, "admin user already up to date");
         }
     }
 
     Ok(())
 }
 
+#[tracing::instrument(name = "db::build_db_api", skip(conf), err)]
 pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
     let db = conf.build_db().await?;
 
@@ -119,10 +123,12 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
         .create_index(username_index)
         .await
         .expect("failed to create username index on users collection");
+    debug!("users.username index ensured");
 
     // Only create the babamul_users collection if Babamul is enabled
     if conf.babamul.enabled {
         // Create babamul_users collection with unique email index
+        info!("Babamul enabled, ensuring babamul_users collection");
         use crate::api::routes::babamul::BabamulUser;
         let babamul_users_collection: mongodb::Collection<BabamulUser> =
             db.collection("babamul_users");
@@ -181,7 +187,7 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
 
     // Initialize the API admin user if it does not exist
     if let Err(e) = init_api_admin_user(&conf.api.auth, &users_collection).await {
-        eprintln!("Failed to initialize API admin user: {}", e);
+        error!("Failed to initialize API admin user: {}", e);
     }
     Ok(db)
 }
