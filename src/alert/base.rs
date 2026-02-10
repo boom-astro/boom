@@ -230,6 +230,8 @@ pub enum AlertError {
     UnknownFid(i32),
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("concurrent modification detected")]
+    ConcurrentModification,
 }
 
 #[derive(Debug, PartialEq)]
