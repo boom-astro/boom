@@ -15,3 +15,6 @@ scripts/convert2onnx/models_output/
 tests/throughput/config.yaml
 tests/throughput/cats150.filter.json
 logs
+*_dump.gz
+*.jsonl
+simbad_cache
