@@ -48,12 +48,10 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
       - name: Download NED catalog from Google Drive
-        if: steps.cache-ned-catalog.outputs.cache-hit != 'true'
         run: |
           mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
       - name: Download auxiliary ZTF alerts from Google Drive
-        if: steps.cache-aux-ztf-alerts.outputs.cache-hit != 'true'
         run: |
           mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=126uLk7xah2EpJR741ziPO-cxQ43nZUoL -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
