@@ -49,9 +49,10 @@ echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 # IF we are in LOW_STORAGE mode (read from ENV, defaults to false), we now clean up the data in ./data/alerts
 if [ "$LOW_STORAGE" = "true" ]; then
     echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up data in ./data/alerts to save space"
-    rm -rf ./data/alerts/ztf/public/20250311
-    rm -rf ./data/alerts/kowalski.NED.json.gz
-    rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+    chmod -R u+w ./data/alerts 2>/dev/null || true
+    rm -rf ./data/alerts/ztf/public/20250311 || true
+    rm -rf ./data/alerts/kowalski.NED.json.gz || true
+    rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
 fi
 
 
