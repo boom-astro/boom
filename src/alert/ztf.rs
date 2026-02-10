@@ -624,7 +624,7 @@ pub struct ZtfAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
-    alert_aux_collection_doc: mongodb::Collection<Document>,
+    alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
@@ -676,12 +676,15 @@ impl ZtfAlertWorker {
         &self,
         object_id: String,
     ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
-        Ok(self
-            .alert_aux_collection_doc
+        let result = self
+            .alert_aux_collection_update
             .find_one(doc! { "_id": &object_id })
+            .projection(
+                doc! { "prv_candidates": 1, "prv_nondetections": 1, "fp_hists": 1, "version": 1 },
+            )
             .await
-            .inspect_err(as_error!())?
-            .and_then(|doc| mongodb::bson::from_document(doc).ok()))
+            .inspect_err(as_error!())?;
+        Ok(result)
     }
 
     #[instrument(
@@ -740,9 +743,9 @@ impl ZtfAlertWorker {
 
         let update_doc = doc! {
             "$push": {
-                "prv_candidates": { "$each": new_prv_candidates_docs },
-                "prv_nondetections": { "$each": new_prv_nondetections_docs },
-                "fp_hists": { "$each": new_fp_hists_docs },
+                "prv_candidates": { "$each": new_prv_candidates_docs, "$sort": { "jd": 1 } },
+                "prv_nondetections": { "$each": new_prv_nondetections_docs, "$sort": { "jd": 1 } },
+                "fp_hists": { "$each": new_fp_hists_docs, "$sort": { "jd": 1 } },
             },
             "$set": {
                 "aliases": mongify(survey_matches),
@@ -877,7 +880,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_aux_collection_doc = db.collection::<Document>(&ALERT_AUX_COLLECTION);
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
@@ -896,7 +899,7 @@ impl AlertWorker for ZtfAlertWorker {
             schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
-            alert_aux_collection_doc,
+            alert_aux_collection_update,
         };
         Ok(worker)
     }
@@ -982,12 +985,8 @@ impl AlertWorker for ZtfAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                let existing_alert_aux: Option<AlertAuxForUpdate> = self
-                    .alert_aux_collection_doc
-                    .find_one(doc! { "_id": &object_id })
-                    .await
-                    .inspect_err(as_error!())?
-                    .and_then(|doc| mongodb::bson::from_document(doc).ok());
+                let existing_alert_aux: Option<AlertAuxForUpdate> =
+                    self.get_existing_aux(object_id.clone()).await?;
                 self.update_aux_v2_with_retries(
                     &object_id,
                     &obj.prv_candidates,
