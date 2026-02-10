@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TOLERANCE_PERCENTAGE: 5.0 # 5% tolerance for wall time increase
+  # If true, data required to bootstrap MongoDB and the Kafka producer 
+  # are deleted before we start processing to save storage space. 
+  # This is useful for CI environments where storage is limited.
+  LOW_STORAGE: true
 
 jobs:
   test:

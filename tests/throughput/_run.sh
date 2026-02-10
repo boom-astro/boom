@@ -46,6 +46,15 @@ END_TIME=$(date +%s)
 STARTUP_TIME=$((END_TIME - START_TIME))
 echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 
+# IF we are in LOW_STORAGE mode (read from ENV, defaults to false), we now clean up the data in ./data/alerts
+if [ "$LOW_STORAGE" = "true" ]; then
+    echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up data in ./data/alerts to save space"
+    rm -rf ./data/alerts/ztf/public/20250311
+    rm -rf ./data/alerts/kowalski.NED.json.gz
+    rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+fi
+
+
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
