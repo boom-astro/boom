@@ -2,6 +2,11 @@
 
 COMPOSE_CONFIG="tests/throughput/compose.yaml"
 
+# If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
+if [ "$LOW_STORAGE" = "true" ]; then
+    COMPOSE_CONFIG="$COMPOSE_CONFIG -f tests/throughput/compose.low-storage.yaml"
+fi
+
 # Logs folder is the first argument to the script
 LOGS_DIR=${1:-logs/boom}
 
@@ -46,17 +51,12 @@ END_TIME=$(date +%s)
 STARTUP_TIME=$((END_TIME - START_TIME))
 echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 
-# IF we are in LOW_STORAGE mode (read from ENV, defaults to false), we now clean up the data in ./data/alerts
+# IF we are in LOW_STORAGE mode, clean up the downloaded files (producer files are not mounted)
 if [ "$LOW_STORAGE" = "true" ]; then
-    echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up data in ./data/alerts to save space"
-    # Make all files writable before deletion to avoid permission issues
-    find ./data/alerts -type f -exec chmod u+w {} + 2>/dev/null || true
-    find ./data/alerts -type d -exec chmod u+w {} + 2>/dev/null || true
-    rm -rf ./data/alerts/ztf/public/20250311 || true
+    echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up downloaded files to save space"
     rm -rf ./data/alerts/kowalski.NED.json.gz || true
     rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
 fi
-
 
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
