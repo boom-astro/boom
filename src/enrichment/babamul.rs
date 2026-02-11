@@ -64,7 +64,7 @@ impl serde::Serialize for CutoutBytes {
 /// Enriched LSST alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct BabamulEnrichedLsstAlert {
+pub struct BabamulLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
@@ -72,37 +72,25 @@ pub struct BabamulEnrichedLsstAlert {
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub properties: LsstAlertProperties,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<CutoutBytes>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<CutoutBytes>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<CutoutBytes>,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
 }
 
-impl BabamulEnrichedLsstAlert {
-    pub fn from_alert_properties_and_cutouts(
+impl BabamulLsstAlert {
+    pub fn from_alert_and_properties(
         alert: LsstAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
     ) -> (
         Self,
         std::collections::HashMap<String, Vec<serde_json::Value>>,
     ) {
         (
-            BabamulEnrichedLsstAlert {
+            BabamulLsstAlert {
                 candid: alert.candid,
                 object_id: alert.object_id,
                 candidate: alert.candidate,
                 prv_candidates: alert.prv_candidates,
                 fp_hists: alert.fp_hists,
                 properties,
-                cutout_science: cutout_science.map(CutoutBytes),
-                cutout_template: cutout_template.map(CutoutBytes),
-                cutout_difference: cutout_difference.map(CutoutBytes),
                 survey_matches: alert.survey_matches,
             },
             alert.cross_matches.unwrap_or_default(),
@@ -164,7 +152,7 @@ impl BabamulEnrichedLsstAlert {
 /// Enriched ZTF alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct BabamulEnrichedZtfAlert {
+pub struct BabamulZtfAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
@@ -174,23 +162,14 @@ pub struct BabamulEnrichedZtfAlert {
     pub fp_hists: Vec<ZtfPhotometry>,
     pub properties: ZtfAlertProperties,
     pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<CutoutBytes>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<CutoutBytes>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<CutoutBytes>,
 }
 
-impl BabamulEnrichedZtfAlert {
-    pub fn from_alert_properties_and_cutouts(
+impl BabamulZtfAlert {
+    pub fn from_alert_and_properties(
         alert: ZtfAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
         properties: ZtfAlertProperties,
     ) -> Self {
-        BabamulEnrichedZtfAlert {
+        BabamulZtfAlert {
             survey_matches: alert.survey_matches,
             candid: alert.candid,
             object_id: alert.object_id,
@@ -199,9 +178,6 @@ impl BabamulEnrichedZtfAlert {
             prv_nondetections: alert.prv_nondetections,
             fp_hists: alert.fp_hists,
             properties,
-            cutout_science: cutout_science.map(CutoutBytes),
-            cutout_template: cutout_template.map(CutoutBytes),
-            cutout_difference: cutout_difference.map(CutoutBytes),
         }
     }
 
@@ -244,8 +220,8 @@ impl BabamulEnrichedZtfAlert {
 }
 
 enum EnrichedAlert<'a> {
-    Lsst(&'a BabamulEnrichedLsstAlert),
-    Ztf(&'a BabamulEnrichedZtfAlert),
+    Lsst(&'a BabamulLsstAlert),
+    Ztf(&'a BabamulZtfAlert),
 }
 
 pub struct Babamul {
@@ -282,8 +258,8 @@ impl Babamul {
                 .expect("Failed to create Babamul Kafka producer");
 
         // Generate Avro schemas
-        let lsst_avro_schema = BabamulEnrichedLsstAlert::get_schema();
-        let ztf_avro_schema = BabamulEnrichedZtfAlert::get_schema();
+        let lsst_avro_schema = BabamulLsstAlert::get_schema();
+        let ztf_avro_schema = BabamulZtfAlert::get_schema();
 
         // Create Kafka Admin client
         let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
@@ -464,12 +440,12 @@ impl Babamul {
     pub async fn process_lsst_alerts(
         &self,
         alerts: Vec<(
-            BabamulEnrichedLsstAlert,
+            BabamulLsstAlert,
             std::collections::HashMap<String, Vec<serde_json::Value>>,
         )>,
     ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
-        let mut alerts_by_topic: HashMap<String, Vec<BabamulEnrichedLsstAlert>> = HashMap::new();
+        let mut alerts_by_topic: HashMap<String, Vec<BabamulLsstAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
         let min_reliability = 0.5;
@@ -516,12 +492,12 @@ impl Babamul {
     #[instrument(skip_all, err)]
     pub async fn process_ztf_alerts(
         &self,
-        alerts: Vec<BabamulEnrichedZtfAlert>,
+        alerts: Vec<BabamulZtfAlert>,
     ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         // For now, we will just send all alerts to "babamul.none"
         // In the future, we will determine the topic based on the alert properties
-        let mut alerts_by_topic: HashMap<String, Vec<BabamulEnrichedZtfAlert>> = HashMap::new();
+        let mut alerts_by_topic: HashMap<String, Vec<BabamulZtfAlert>> = HashMap::new();
 
         // Iterate over the alerts
         for mut alert in alerts {
