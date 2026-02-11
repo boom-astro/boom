@@ -167,6 +167,7 @@ pub async fn get_object(
             let mut alert_cursor = match alerts_collection
                 .find(doc! {
                     "objectId": &object_id,
+                    "candidate.programid": 1, // Babamul only returns public ZTF alerts
                 })
                 .with_options(find_options_recent)
                 .await
@@ -308,9 +309,22 @@ pub async fn get_object(
                 cutout_difference: serde_json::json!(
                     BASE64_STANDARD.encode(&cutouts.cutout_difference)
                 ),
-                prv_candidates: aux_entry.prv_candidates,
-                prv_nondetections: aux_entry.prv_nondetections,
-                fp_hists: aux_entry.fp_hists,
+                // Limit photometry to programid 1 (public ZTF alerts)
+                prv_candidates: aux_entry
+                    .prv_candidates
+                    .into_iter()
+                    .filter(|c| c.prv_candidate.programid == 1)
+                    .collect(),
+                prv_nondetections: aux_entry
+                    .prv_nondetections
+                    .into_iter()
+                    .filter(|c| c.prv_candidate.programid == 1)
+                    .collect(),
+                fp_hists: aux_entry
+                    .fp_hists
+                    .into_iter()
+                    .filter(|c| c.fp_hist.programid == 1)
+                    .collect(),
                 classifications: newest_alert.classifications,
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
@@ -427,9 +441,22 @@ pub async fn get_object(
                             object_id: ztf_obj.object_id,
                             ra: ztf_radec.0,
                             dec: ztf_radec.1,
-                            prv_candidates: ztf_obj.prv_candidates,
-                            prv_nondetections: ztf_obj.prv_nondetections,
-                            fp_hists: ztf_obj.fp_hists,
+                            // Limit photometry to programid 1 (public ZTF alerts)
+                            prv_candidates: ztf_obj
+                                .prv_candidates
+                                .into_iter()
+                                .filter(|c| c.prv_candidate.programid == 1)
+                                .collect(),
+                            prv_nondetections: ztf_obj
+                                .prv_nondetections
+                                .into_iter()
+                                .filter(|c| c.prv_candidate.programid == 1)
+                                .collect(),
+                            fp_hists: ztf_obj
+                                .fp_hists
+                                .into_iter()
+                                .filter(|c| c.fp_hist.programid == 1)
+                                .collect(),
                             distance_arcsec: flare::spatial::great_circle_distance(
                                 ra,
                                 dec,

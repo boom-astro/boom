@@ -101,7 +101,11 @@ pub async fn get_alerts(
         }
     };
     let survey = path.into_inner();
-    let mut filter_doc = Document::new();
+    let mut filter_doc = if survey == Survey::Ztf {
+        doc! {"candidate.programid": 1} // Babamul only returns public ZTF alerts
+    } else {
+        doc! {}
+    };
 
     // We need to have at least object_id OR position OR time range (less than 1 jd)
     if query.object_id.is_none()
@@ -362,7 +366,11 @@ pub async fn cone_search_alerts(
     }
     let radius_radians = (radius_arcsec / 3600.0).to_radians();
 
-    let mut base_filter_doc = Document::new();
+    let mut base_filter_doc = if survey == Survey::Ztf {
+        doc! {"candidate.programid": 1} // Babamul only returns public ZTF alerts
+    } else {
+        doc! {}
+    };
 
     if query.start_jd.is_some() || query.end_jd.is_some() {
         let mut jd_filter = Document::new();
