@@ -8,11 +8,12 @@ use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
 use crate::utils::spatial::Coordinates;
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use utoipa::ToSchema;
 
@@ -641,4 +642,77 @@ pub async fn get_objects(
         }
         Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ObjectsConeSearchQuery {
+    survey: Survey,
+    coordinates: HashMap<String, [f64; 2]>,
+    radius_arcsec: f64,
+}
+
+/// Perform a cone search around given coordinates for a specified survey.
+#[utoipa::path(
+    post,
+    path = "/babamul/objects/cone_search",
+    request_body = ObjectsConeSearchQuery,
+    responses(
+        (status = 200, description = "Cone search results", body = HashMap<String, Vec<SearchObjectResult>>),
+        (status = 400, description = "Invalid query parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/objects/cone_search")]
+pub async fn cone_search_objects(
+    query: web::Json<ObjectsConeSearchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let radius_arcsec = query.radius_arcsec;
+    if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
+        return response::bad_request("radius_arcsec must be between 0 and 600");
+    }
+
+    let radius_radians = (radius_arcsec / 3600.0).to_radians();
+    let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
+
+    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", query.survey));
+    for (name, coords) in query.coordinates.iter() {
+        let filter = doc! {
+            "coordinates.radec_geojson": {
+                "$nearSphere": [coords[0] - 180.0, coords[1]],
+                "$maxDistance": radius_radians,
+            }
+        };
+
+        match collection.find(filter).await {
+            Ok(mut cursor) => {
+                let mut matches = vec![];
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    matches.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra: obj.coordinates.get_radec().0,
+                        dec: obj.coordinates.get_radec().1,
+                        survey: query.survey.clone(),
+                    });
+                }
+                results.insert(name.clone(), matches);
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error performing cone search for {}: {}",
+                    name, error
+                ));
+            }
+        }
+    }
+    response::ok_ser("Cone search completed", results)
 }
