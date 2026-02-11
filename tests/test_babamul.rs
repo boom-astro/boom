@@ -3,7 +3,7 @@ use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{
-        babamul::{BabamulLsstAlert, BabamulZtfAlert},
+        babamul::{BabamulLsstAlert, BabamulZtfAlert, ForcedPhotometry},
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
         ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
     },
@@ -148,7 +148,12 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         candidate,
         prv_candidates: vec![],
         prv_nondetections: vec![],
-        fp_hists: vec![fp_as_photometry],
+        fp_hists: vec![ForcedPhotometry {
+            jd: fp_as_photometry.jd,
+            flux: fp_as_photometry.flux,
+            flux_err: fp_as_photometry.flux_err,
+            band: fp_as_photometry.band,
+        }],
         properties: ZtfAlertProperties {
             rock: is_rock,
             star: false,
@@ -259,13 +264,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         .await
         .unwrap();
 
-    BabamulLsstAlert::from_alert_and_properties(
-        lsst_alert_for_enrichment,
-        None,
-        None,
-        None,
-        properties,
-    )
+    BabamulLsstAlert::from_alert_and_properties(lsst_alert_for_enrichment, properties)
 }
 
 /// Consume messages from a Kafka topic and return them as a vector of byte arrays.

@@ -6,9 +6,9 @@ use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
-use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
-use crate::utils::derive_avro_schema::SerdavroWriter;
-use apache_avro::{AvroSchema, Schema, Writer};
+use crate::enrichment::EnrichmentWorkerError;
+use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
+use apache_avro::{AvroSchema, DeflateSettings, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
@@ -21,44 +21,37 @@ use tracing::{info, instrument};
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
 
-// Wrapper around cutout bytes, so we can implement
-// AvroSchemaComponent for it, to serialize as bytes in Avro
-#[derive(Debug, serde::Deserialize)]
-pub struct CutoutBytes(Vec<u8>);
-
-// Wrapper for cross_matches that implements AvroSchemaComponent as a no-op
-// since we don't want to serialize it to Avro
-#[derive(Debug, Clone, Default)]
-pub struct CrossMatchesWrapper(
-    pub Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
-);
-
-impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
-    fn get_schema_in_ctxt(
-        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
-        _enclosing_namespace: &apache_avro::schema::Namespace,
-    ) -> apache_avro::Schema {
-        // Return null schema since this field is never serialized
-        apache_avro::Schema::Null
-    }
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlertPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: f64, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    pub ra: f64,
+    pub dec: f64,
 }
 
-impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
-    fn get_schema_in_ctxt(
-        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
-        _enclosing_namespace: &apache_avro::schema::Namespace,
-    ) -> apache_avro::Schema {
-        apache_avro::Schema::Bytes
-    }
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NonDetectionPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
 }
 
-impl serde::Serialize for CutoutBytes {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        apache_avro::serde_avro_bytes::serialize(&self.0, serializer)
-    }
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForcedPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
 }
 
 /// Enriched LSST alert
@@ -69,8 +62,8 @@ pub struct BabamulLsstAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<LsstPhotometry>,
-    pub fp_hists: Vec<LsstPhotometry>,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: LsstAlertProperties,
     pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
 }
@@ -88,8 +81,28 @@ impl BabamulLsstAlert {
                 candid: alert.candid,
                 object_id: alert.object_id,
                 candidate: alert.candidate,
-                prv_candidates: alert.prv_candidates,
-                fp_hists: alert.fp_hists,
+                prv_candidates: alert
+                    .prv_candidates
+                    .into_iter()
+                    .map(|p| AlertPhotometry {
+                        jd: p.jd,
+                        flux: p.flux.unwrap(),
+                        flux_err: p.flux_err,
+                        band: p.band,
+                        ra: p.ra.unwrap(),
+                        dec: p.dec.unwrap(),
+                    })
+                    .collect(),
+                fp_hists: alert
+                    .fp_hists
+                    .into_iter()
+                    .map(|p| ForcedPhotometry {
+                        jd: p.jd,
+                        flux: p.flux,
+                        flux_err: p.flux_err,
+                        band: p.band,
+                    })
+                    .collect(),
                 properties,
                 survey_matches: alert.survey_matches,
             },
@@ -157,9 +170,9 @@ pub struct BabamulZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<ZtfPhotometry>,
-    pub prv_nondetections: Vec<ZtfPhotometry>,
-    pub fp_hists: Vec<ZtfPhotometry>,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub prv_nondetections: Vec<NonDetectionPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: ZtfAlertProperties,
     pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
 }
@@ -174,9 +187,41 @@ impl BabamulZtfAlert {
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            prv_nondetections: alert.prv_nondetections,
-            fp_hists: alert.fp_hists,
+            // for prv_candidates, prv_nondetections, and fp_hists, we only include entries with programid=1 (public ZTF data)
+            prv_candidates: alert
+                .prv_candidates
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: alert
+                .prv_nondetections
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| NonDetectionPhotometry {
+                    jd: p.jd,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+            fp_hists: alert
+                .fp_hists
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| ForcedPhotometry {
+                    jd: p.jd,
+                    flux: p.flux,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
             properties,
         }
     }
@@ -340,7 +385,7 @@ impl Babamul {
                 let mut writer = Writer::with_codec(
                     &self.lsst_avro_schema,
                     Vec::new(),
-                    apache_avro::Codec::Snappy,
+                    apache_avro::Codec::Deflate(DeflateSettings::default()),
                 );
                 writer
                     .append_serdavro(a)
@@ -353,7 +398,7 @@ impl Babamul {
                 let mut writer = Writer::with_codec(
                     &self.ztf_avro_schema,
                     Vec::new(),
-                    apache_avro::Codec::Snappy,
+                    apache_avro::Codec::Deflate(DeflateSettings::default()),
                 );
                 writer
                     .append_serdavro(a)
@@ -500,17 +545,12 @@ impl Babamul {
         let mut alerts_by_topic: HashMap<String, Vec<BabamulZtfAlert>> = HashMap::new();
 
         // Iterate over the alerts
-        for mut alert in alerts {
+        for alert in alerts {
             // Only send public ZTF alerts (programid=1) to Babamul
             if alert.candidate.candidate.programid != 1 || alert.properties.rock {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
             }
-
-            // Filter photometry to only include public (programid=1)
-            alert.prv_candidates.retain(|p| p.programid == 1);
-            alert.prv_nondetections.retain(|p| p.programid == 1);
-            alert.fp_hists.retain(|p| p.programid == 1);
 
             // Determine which topic this alert should go to
             let category: String = alert.compute_babamul_category();
