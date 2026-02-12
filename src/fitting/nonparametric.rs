@@ -4,13 +4,13 @@ use scirs2_core::ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
 use sklears_core::traits::{Fit, Predict, Untrained};
 use sklears_gaussian_process::{
+    kernels::{ConstantKernel, ProductKernel, SumKernel, WhiteKernel, RBF},
     GaussianProcessRegressor, GprTrained, Kernel,
-    kernels::{ConstantKernel, ProductKernel, RBF, SumKernel, WhiteKernel},
 };
 
 use super::common::{
-    BandData, compute_decay_rate, compute_fwhm, compute_rise_rate, extract_decay_timescale,
-    extract_rise_timescale, finite_or_none,
+    compute_decay_rate, compute_fwhm, compute_rise_rate, extract_decay_timescale,
+    extract_rise_timescale, finite_or_none, BandData,
 };
 
 /// Result of nonparametric GP fitting for a single band.
