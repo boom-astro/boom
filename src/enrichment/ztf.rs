@@ -464,11 +464,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let fitting_result = tokio::task::spawn_blocking(move || {
                 let mag_bands = photometry_to_mag_bands(&lc);
                 let nonparametric = fit_nonparametric(&mag_bands);
-                let flux_bands = photometry_to_flux_bands(&lc);
-                let parametric = fit_parametric(&flux_bands);
+                // let flux_bands = photometry_to_flux_bands(&lc);
+                // let parametric = fit_parametric(&flux_bands);
                 LightcurveFittingResult {
                     nonparametric,
-                    parametric,
+                    parametric: Vec::new(),
                 }
             })
             .await
