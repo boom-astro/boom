@@ -673,7 +673,6 @@ pub async fn get_objects(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ObjectsConeSearchQuery {
-    survey: Survey,
     coordinates: HashMap<String, [f64; 2]>,
     radius_arcsec: f64,
 }
@@ -681,7 +680,10 @@ struct ObjectsConeSearchQuery {
 /// Perform a cone search around given coordinates for a specified survey.
 #[utoipa::path(
     post,
-    path = "/babamul/objects/cone_search",
+    path = "/babamul/surveys/{survey}/objects/cone_search",
+    params(
+        ("survey" = Survey, Path, description = "Survey to search in (e.g., ztf, lsst)"),
+    ),
     request_body = ObjectsConeSearchQuery,
     responses(
         (status = 200, description = "Cone search results", body = HashMap<String, Vec<SearchObjectResult>>),
@@ -690,8 +692,9 @@ struct ObjectsConeSearchQuery {
     ),
     tags=["Surveys"]
 )]
-#[post("/objects/cone_search")]
+#[post("/surveys/{survey}/objects/cone_search")]
 pub async fn cone_search_objects(
+    path: web::Path<Survey>,
     query: web::Json<ObjectsConeSearchQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
@@ -711,7 +714,8 @@ pub async fn cone_search_objects(
     let radius_radians = (radius_arcsec / 3600.0).to_radians();
     let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
 
-    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", query.survey));
+    let survey = path.into_inner();
+    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
     for (name, coords) in query.coordinates.iter() {
         let filter = doc! {
             "coordinates.radec_geojson": {
@@ -728,7 +732,7 @@ pub async fn cone_search_objects(
                         object_id: obj.object_id,
                         ra: obj.coordinates.get_radec().0,
                         dec: obj.coordinates.get_radec().1,
-                        survey: query.survey.clone(),
+                        survey: survey.clone(),
                     });
                 }
                 results.insert(name.clone(), matches);

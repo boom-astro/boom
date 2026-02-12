@@ -480,7 +480,7 @@ pub async fn cone_search_alerts(
             }
             return response::ok(
                 &format!("found alerts matching query"),
-                serde_json::json!(AlertsConeSearchResult::ZtfAlerts(results)),
+                serde_json::json!(results),
             );
         }
         Survey::Lsst => {
@@ -534,7 +534,7 @@ pub async fn cone_search_alerts(
             }
             return response::ok(
                 &format!("found alerts matching query"),
-                serde_json::json!(AlertsConeSearchResult::LsstAlerts(results)),
+                serde_json::json!(results),
             );
         }
         _ => {
