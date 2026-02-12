@@ -190,6 +190,29 @@ struct PredictiveFeatures {
     gp_n_inflections: f64,
 }
 
+fn nan_predictive_features(t0: f64, t_last: f64) -> PredictiveFeatures {
+    PredictiveFeatures {
+        gp_dfdt_now: f64::NAN,
+        gp_dfdt_next: f64::NAN,
+        gp_d2fdt2_now: f64::NAN,
+        gp_predicted_mag_1d: f64::NAN,
+        gp_predicted_mag_2d: f64::NAN,
+        gp_time_to_peak: t0 - t_last,
+        gp_extrap_slope: f64::NAN,
+        gp_sigma_f: f64::NAN,
+        gp_peak_to_peak: f64::NAN,
+        gp_snr_max: f64::NAN,
+        gp_dfdt_max: f64::NAN,
+        gp_dfdt_min: f64::NAN,
+        gp_frac_of_peak: f64::NAN,
+        gp_post_var_mean: f64::NAN,
+        gp_post_var_max: f64::NAN,
+        gp_skewness: f64::NAN,
+        gp_kurtosis: f64::NAN,
+        gp_n_inflections: f64::NAN,
+    }
+}
+
 fn compute_predictive_features(
     gp: &GaussianProcessRegressor<GprTrained>,
     t_last: f64,
@@ -209,7 +232,10 @@ fn compute_predictive_features(
         t_last + 3.0 * dt,
     ];
     let xq = Array2::from_shape_fn((tq.len(), 1), |(i, _)| tq[i]);
-    let y = gp.predict(&xq).unwrap().to_vec();
+    let y = match gp.predict(&xq) {
+        Ok(arr) => arr.to_vec(),
+        Err(_) => return nan_predictive_features(t0, t_last),
+    };
 
     let f_m1 = y[0];
     let f_0 = y[1];
@@ -584,7 +610,7 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                 let rise_rate = compute_rise_rate(&times_pred, &pred);
                 let decay_rate = compute_decay_rate(&times_pred, &pred);
 
-                let t_last = *band_data.times.last().unwrap();
+                let t_last = band_data.times.last().copied().unwrap_or(t_max);
                 let predictive = compute_predictive_features(
                     &gp_fit,
                     t_last,

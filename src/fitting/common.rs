@@ -37,6 +37,11 @@ pub fn photometry_to_mag_bands(photometry: &[PhotometryMag]) -> HashMap<String, 
 
     let mut bands: HashMap<String, BandData> = HashMap::new();
     for p in photometry {
+        let mag = p.mag as f64;
+        let mag_err = p.mag_err as f64;
+        if !mag.is_finite() || !mag_err.is_finite() {
+            continue;
+        }
         let band_name = band_to_string(&p.band);
         let entry = bands.entry(band_name).or_insert_with(|| BandData {
             times: Vec::new(),
@@ -44,8 +49,8 @@ pub fn photometry_to_mag_bands(photometry: &[PhotometryMag]) -> HashMap<String, 
             errors: Vec::new(),
         });
         entry.times.push(p.time - jd_min);
-        entry.values.push(p.mag as f64);
-        entry.errors.push(p.mag_err as f64);
+        entry.values.push(mag);
+        entry.errors.push(mag_err);
     }
 
     bands
@@ -119,8 +124,9 @@ pub fn extract_rise_timescale(times: &[f64], mags: &[f64], peak_idx: usize) -> f
         return f64::NAN;
     }
     let peak_mag = mags[peak_idx];
-    let baseline = if peak_idx > 1 {
-        mags[..peak_idx.min(3)].iter().sum::<f64>() / mags[..peak_idx.min(3)].len() as f64
+    let n = peak_idx.min(3);
+    let baseline = if n > 0 {
+        mags[..n].iter().sum::<f64>() / n as f64
     } else {
         peak_mag + 0.5
     };
