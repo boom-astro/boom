@@ -1,6 +1,10 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
+use crate::fitting::{
+    fit_nonparametric, fit_parametric, photometry_to_flux_bands, photometry_to_mag_bands,
+    LightcurveFittingResult,
+};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
@@ -452,8 +456,23 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, all_bands_properties, programid, _lightcurve) =
+            let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
+
+            // Lightcurve fitting (GP nonparametric + SVI parametric)
+            let lc = lightcurve.clone();
+            let fitting_result = tokio::task::spawn_blocking(move || {
+                let mag_bands = photometry_to_mag_bands(&lc);
+                let nonparametric = fit_nonparametric(&mag_bands);
+                let flux_bands = photometry_to_flux_bands(&lc);
+                let parametric = fit_parametric(&flux_bands);
+                LightcurveFittingResult {
+                    nonparametric,
+                    parametric,
+                }
+            })
+            .await
+            .map_err(|e| EnrichmentWorkerError::Serialization(format!("{}", e)))?;
 
             // Now, prepare inputs for ML models and run inference
             // (we skip ML inference if features cannot be computed, e.g. missing required features)
@@ -492,11 +511,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 doc! { "$set": {
                     "classifications": mongify(&classifications),
                     "properties": mongify(&properties),
+                    "lightcurve_fitting": mongify(&fitting_result),
                     "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
                     "properties": mongify(&properties),
+                    "lightcurve_fitting": mongify(&fitting_result),
                     "updated_at": now,
                 }}
             };
