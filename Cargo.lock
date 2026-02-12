@@ -631,6 +631,7 @@ dependencies = [
  "apache-avro-derive",
  "apache-avro-macros",
  "argmin",
+ "argmin-math",
  "async-trait",
  "base64 0.22.1",
  "bcrypt",
