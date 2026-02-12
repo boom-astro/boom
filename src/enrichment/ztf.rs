@@ -456,15 +456,32 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
 
-            // Lightcurve fitting (GP nonparametric + SVI parametric)
+            // Lightcurve fitting (GP nonparametric)
             let lc = lightcurve.clone();
-            let fitting_result = tokio::task::spawn_blocking(move || {
-                let mag_bands = photometry_to_mag_bands(&lc);
-                let nonparametric = fit_nonparametric(&mag_bands);
-                LightcurveFittingResult { nonparametric }
-            })
+            let fitting_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::task::spawn_blocking(move || {
+                    let mag_bands = photometry_to_mag_bands(&lc);
+                    let nonparametric = fit_nonparametric(&mag_bands);
+                    LightcurveFittingResult { nonparametric }
+                }),
+            )
             .await
-            .map_err(|e| EnrichmentWorkerError::Serialization(format!("{}", e)))?;
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    warn!("Lightcurve fitting panicked for candid {}: {}", candid, e);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                    }
+                }
+                Err(_) => {
+                    warn!("Lightcurve fitting timed out (60s) for candid {}", candid);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                    }
+                }
+            };
 
             // Now, prepare inputs for ML models and run inference
             // (we skip ML inference if features cannot be computed, e.g. missing required features)
