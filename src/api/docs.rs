@@ -98,8 +98,11 @@ pub struct ApiDoc;
         routes::babamul::surveys::schemas::get_babamul_schema,
         routes::babamul::surveys::objects::get_object,
         routes::babamul::surveys::objects::get_objects,
+        routes::babamul::surveys::objects::cone_search_objects,
+        routes::babamul::surveys::xmatches::get_object_xmatches,
         routes::babamul::surveys::alerts::get_alert_cutouts,
         routes::babamul::surveys::alerts::get_alerts,
+        routes::babamul::surveys::alerts::cone_search_alerts,
     ),
     security(
         ("babamul_jwt_token" = [])

@@ -17,7 +17,7 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
 
@@ -153,7 +153,7 @@ impl BabamulLsstAlert {
                 Some(s) => s,
                 None => continue,
             };
-            if score < IS_HOSTED_SCORE_THRESH {
+            if score <= IS_HOSTED_SCORE_THRESH {
                 label = "hosted";
                 break;
             }
@@ -254,7 +254,7 @@ impl BabamulZtfAlert {
 
         for score in sgscores.iter().flatten() {
             // Only consider valid scores (>= 0)
-            if *score >= 0.0 && *score < ZTF_HOSTED_SG_SCORE_THRESH {
+            if *score >= 0.0 && *score <= ZTF_HOSTED_SG_SCORE_THRESH {
                 return category + "hosted";
             }
         }
@@ -337,7 +337,7 @@ impl Babamul {
     {
         let mut total_sent: usize = 0;
         for (topic_name, alerts) in alerts_by_topic {
-            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+            tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
             // Check topic exists with the desired retention policy
             self.check_topic(&topic_name).await?;
@@ -349,7 +349,7 @@ impl Babamul {
                 payloads.push(payload);
             }
 
-            info!(
+            tracing::debug!(
                 "Prepared {} payloads for topic {}",
                 payloads.len(),
                 topic_name
@@ -493,7 +493,7 @@ impl Babamul {
         let mut alerts_by_topic: HashMap<String, Vec<BabamulLsstAlert>> = HashMap::new();
 
         // Determine if this alert is worth sending to Babamul
-        let min_reliability = 0.5;
+        let min_reliability = 0.2;
 
         // Iterate over the alerts
         for (mut alert, cross_matches) in alerts {
@@ -525,7 +525,7 @@ impl Babamul {
 
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No LSST alerts to send to Babamul");
+            tracing::debug!("No LSST alerts to send to Babamul");
             return Ok(0);
         }
 
@@ -562,12 +562,12 @@ impl Babamul {
         }
 
         for (topic_name, alerts) in &alerts_by_topic {
-            info!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
+            tracing::debug!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
         }
 
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No ZTF alerts to send to Babamul");
+            tracing::debug!("No ZTF alerts to send to Babamul");
             return Ok(0);
         }
 

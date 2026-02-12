@@ -8,11 +8,12 @@ use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
 use crate::utils::spatial::Coordinates;
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use utoipa::ToSchema;
 
@@ -166,6 +167,7 @@ pub async fn get_object(
             let mut alert_cursor = match alerts_collection
                 .find(doc! {
                     "objectId": &object_id,
+                    "candidate.programid": 1, // Babamul only returns public ZTF alerts
                 })
                 .with_options(find_options_recent)
                 .await
@@ -307,9 +309,22 @@ pub async fn get_object(
                 cutout_difference: serde_json::json!(
                     BASE64_STANDARD.encode(&cutouts.cutout_difference)
                 ),
-                prv_candidates: aux_entry.prv_candidates,
-                prv_nondetections: aux_entry.prv_nondetections,
-                fp_hists: aux_entry.fp_hists,
+                // Limit photometry to programid 1 (public ZTF alerts)
+                prv_candidates: aux_entry
+                    .prv_candidates
+                    .into_iter()
+                    .filter(|c| c.prv_candidate.programid == 1)
+                    .collect(),
+                prv_nondetections: aux_entry
+                    .prv_nondetections
+                    .into_iter()
+                    .filter(|c| c.prv_candidate.programid == 1)
+                    .collect(),
+                fp_hists: aux_entry
+                    .fp_hists
+                    .into_iter()
+                    .filter(|c| c.fp_hist.programid == 1)
+                    .collect(),
                 classifications: newest_alert.classifications,
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
@@ -426,9 +441,22 @@ pub async fn get_object(
                             object_id: ztf_obj.object_id,
                             ra: ztf_radec.0,
                             dec: ztf_radec.1,
-                            prv_candidates: ztf_obj.prv_candidates,
-                            prv_nondetections: ztf_obj.prv_nondetections,
-                            fp_hists: ztf_obj.fp_hists,
+                            // Limit photometry to programid 1 (public ZTF alerts)
+                            prv_candidates: ztf_obj
+                                .prv_candidates
+                                .into_iter()
+                                .filter(|c| c.prv_candidate.programid == 1)
+                                .collect(),
+                            prv_nondetections: ztf_obj
+                                .prv_nondetections
+                                .into_iter()
+                                .filter(|c| c.prv_candidate.programid == 1)
+                                .collect(),
+                            fp_hists: ztf_obj
+                                .fp_hists
+                                .into_iter()
+                                .filter(|c| c.fp_hist.programid == 1)
+                                .collect(),
                             distance_arcsec: flare::spatial::great_circle_distance(
                                 ra,
                                 dec,
@@ -641,4 +669,81 @@ pub async fn get_objects(
         }
         Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ObjectsConeSearchQuery {
+    coordinates: HashMap<String, [f64; 2]>,
+    radius_arcsec: f64,
+}
+
+/// Perform a cone search around given coordinates for a specified survey.
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/objects/cone_search",
+    params(
+        ("survey" = Survey, Path, description = "Survey to search in (e.g., ztf, lsst)"),
+    ),
+    request_body = ObjectsConeSearchQuery,
+    responses(
+        (status = 200, description = "Cone search results", body = HashMap<String, Vec<SearchObjectResult>>),
+        (status = 400, description = "Invalid query parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/objects/cone_search")]
+pub async fn cone_search_objects(
+    path: web::Path<Survey>,
+    query: web::Json<ObjectsConeSearchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let radius_arcsec = query.radius_arcsec;
+    if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
+        return response::bad_request("radius_arcsec must be between 0 and 600");
+    }
+
+    let radius_radians = (radius_arcsec / 3600.0).to_radians();
+    let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
+
+    let survey = path.into_inner();
+    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
+    for (name, coords) in query.coordinates.iter() {
+        let filter = doc! {
+            "coordinates.radec_geojson": {
+                "$nearSphere": [coords[0] - 180.0, coords[1]],
+                "$maxDistance": radius_radians,
+            }
+        };
+
+        match collection.find(filter).await {
+            Ok(mut cursor) => {
+                let mut matches = vec![];
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    matches.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra: obj.coordinates.get_radec().0,
+                        dec: obj.coordinates.get_radec().1,
+                        survey: survey.clone(),
+                    });
+                }
+                results.insert(name.clone(), matches);
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error performing cone search for {}: {}",
+                    name, error
+                ));
+            }
+        }
+    }
+    response::ok_ser("Cone search completed", results)
 }
