@@ -1,26 +1,25 @@
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
+use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::fitting::{
-    fit_nonparametric, fit_parametric, photometry_to_flux_bands, photometry_to_mag_bands,
-    LightcurveFittingResult,
+    LightcurveFittingResult, fit_nonparametric, fit_parametric, photometry_to_flux_bands,
+    photometry_to_mag_bands,
 };
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag,
+    AllBandsProperties, Band, PerBandProperties, PhotometryMag, analyze_photometry,
+    prepare_photometry,
 };
 use crate::{
     alert::ZtfCandidate,
     enrichment::{
-        fetch_alert_cutouts, fetch_alerts,
+        EnrichmentWorker, EnrichmentWorkerError, fetch_alert_cutouts, fetch_alerts,
         models::{AcaiModel, BtsBotModel, Model},
-        EnrichmentWorker, EnrichmentWorkerError,
     },
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use tracing::{instrument, trace, warn};

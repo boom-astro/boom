@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
 use scirs2_core::ndarray::{Array1, Array2, Axis};
+use serde::{Deserialize, Serialize};
 use sklears_core::traits::{Fit, Predict, Untrained};
 use sklears_gaussian_process::{
-    kernels::{ConstantKernel, ProductKernel, SumKernel, WhiteKernel, RBF},
     GaussianProcessRegressor, GprTrained, Kernel,
+    kernels::{ConstantKernel, ProductKernel, RBF, SumKernel, WhiteKernel},
 };
-use serde::{Deserialize, Serialize};
 
 use super::common::{
-    compute_decay_rate, compute_fwhm, compute_rise_rate, extract_decay_timescale,
-    extract_rise_timescale, finite_or_none, BandData,
+    BandData, compute_decay_rate, compute_fwhm, compute_rise_rate, extract_decay_timescale,
+    extract_rise_timescale, finite_or_none,
 };
 
 /// Result of nonparametric GP fitting for a single band.
@@ -88,7 +88,13 @@ impl FastGP {
         let weighted_errors: Vec<f64> = times
             .iter()
             .zip(errors.iter())
-            .map(|(t, e)| if t <= &early_time_cutoff { *e * 0.7 } else { *e })
+            .map(|(t, e)| {
+                if t <= &early_time_cutoff {
+                    *e * 0.7
+                } else {
+                    *e
+                }
+            })
             .collect();
 
         let avg_error_var = if !weighted_errors.is_empty() {
@@ -536,8 +542,7 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                     if cnt > 0 {
                         let mean_pred_std_obs = sum / cnt as f64;
                         if mean_pred_std_obs > 1e-12 && rms_residual.is_finite() {
-                            let mut scale =
-                                (rms_residual / mean_pred_std_obs).max(0.05).min(5.0);
+                            let mut scale = (rms_residual / mean_pred_std_obs).max(0.05).min(5.0);
                             scale *= 0.6; // conservative shrinkage
                             for v in std_vec.iter_mut() {
                                 *v *= scale;
@@ -549,8 +554,7 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                 // Compute chi2 and features
                 let mut chi2 = 0.0;
                 let mut baseline_var = 0.0;
-                let mean_mag =
-                    band_data.values.iter().sum::<f64>() / band_data.values.len() as f64;
+                let mean_mag = band_data.values.iter().sum::<f64>() / band_data.values.len() as f64;
                 for i in 0..band_data.values.len() {
                     let residual = band_data.values[i] - pred_at_obs[i];
                     let err_sq = band_data.errors[i] * band_data.errors[i] + 1e-10;
