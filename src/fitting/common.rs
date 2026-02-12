@@ -2,10 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils::lightcurves::{mag2flux, Band, PhotometryMag};
+use crate::utils::lightcurves::{Band, PhotometryMag};
 
 use super::nonparametric::NonparametricBandResult;
-use super::parametric::ParametricBandResult;
 
 /// Per-band time/value/error triplet for fitting.
 #[derive(Debug, Clone)]
@@ -15,11 +14,10 @@ pub struct BandData {
     pub errors: Vec<f64>,
 }
 
-/// Combined result of nonparametric + parametric lightcurve fitting.
+/// Result of nonparametric lightcurve fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightcurveFittingResult {
     pub nonparametric: Vec<NonparametricBandResult>,
-    pub parametric: Vec<ParametricBandResult>,
 }
 
 /// Convert `PhotometryMag` to per-band magnitude data.
@@ -51,41 +49,6 @@ pub fn photometry_to_mag_bands(photometry: &[PhotometryMag]) -> HashMap<String, 
         entry.times.push(p.time - jd_min);
         entry.values.push(mag);
         entry.errors.push(mag_err);
-    }
-
-    bands
-}
-
-/// Convert `PhotometryMag` to per-band flux data.
-///
-/// Groups by band, converts JD to relative time, and converts mag to flux
-/// using `mag2flux()` with ZP = 23.9.
-pub fn photometry_to_flux_bands(photometry: &[PhotometryMag]) -> HashMap<String, BandData> {
-    if photometry.is_empty() {
-        return HashMap::new();
-    }
-
-    let jd_min = photometry
-        .iter()
-        .map(|p| p.time)
-        .fold(f64::INFINITY, f64::min);
-
-    let zp: f32 = 23.9;
-    let mut bands: HashMap<String, BandData> = HashMap::new();
-    for p in photometry {
-        let (flux, flux_err) = mag2flux(p.mag, p.mag_err, zp);
-        if !flux.is_finite() || !flux_err.is_finite() || flux <= 0.0 || flux_err <= 0.0 {
-            continue;
-        }
-        let band_name = band_to_string(&p.band);
-        let entry = bands.entry(band_name).or_insert_with(|| BandData {
-            times: Vec::new(),
-            values: Vec::new(),
-            errors: Vec::new(),
-        });
-        entry.times.push(p.time - jd_min);
-        entry.values.push(flux as f64);
-        entry.errors.push(flux_err as f64);
     }
 
     bands

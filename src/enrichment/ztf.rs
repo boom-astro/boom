@@ -1,10 +1,7 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
-use crate::fitting::{
-    fit_nonparametric, fit_parametric, photometry_to_flux_bands, photometry_to_mag_bands,
-    LightcurveFittingResult,
-};
+use crate::fitting::{fit_nonparametric, photometry_to_mag_bands, LightcurveFittingResult};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
@@ -464,12 +461,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let fitting_result = tokio::task::spawn_blocking(move || {
                 let mag_bands = photometry_to_mag_bands(&lc);
                 let nonparametric = fit_nonparametric(&mag_bands);
-                // let flux_bands = photometry_to_flux_bands(&lc);
-                // let parametric = fit_parametric(&flux_bands);
-                LightcurveFittingResult {
-                    nonparametric,
-                    parametric: Vec::new(),
-                }
+                LightcurveFittingResult { nonparametric }
             })
             .await
             .map_err(|e| EnrichmentWorkerError::Serialization(format!("{}", e)))?;
