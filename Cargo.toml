@@ -33,6 +33,8 @@ ndarray = "0.16.1"
 sklears-gaussian-process = "0.1.0-beta.1"
 sklears-core = "0.1.0-beta.1"
 scirs2-core = { version = "0.1.5", default-features = false, features = ["random", "linalg"] }
+argmin = "0.11.0"
+argmin-math = { version = "0.5", features = ["vec"] }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
 opentelemetry_sdk = "0.31.0"
