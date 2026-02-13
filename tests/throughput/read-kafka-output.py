@@ -16,12 +16,8 @@ consumer_conf = {
     "auto.offset.reset": "earliest",
 }
 consumer = Consumer(consumer_conf)
-topics = [
-    "babamul.ztf.no-lsst-match.hosted",
-    "babamul.ztf.no-lsst-match.hostless",
-    "babamul.ztf.no-lsst-match.stellar",
-]
-consumer.subscribe(topics)
+topic_pattern = "^babamul\\.ztf\\..*"
+consumer.subscribe([topic_pattern])
 n_alerts = 0
 try:
     while True:
@@ -35,6 +31,6 @@ finally:
     consumer.close()
 
 if n_alerts != 28548:
-    raise ValueError(f"Expected 28548 alerts, but got {n_alerts}")
+    raise AssertionError(f"Expected 28548 alerts, but got {n_alerts}")
 
-print(f"Read {n_alerts} alerts from topics {topics}")
+print(f"Read {n_alerts} alerts from all Kafka topics matching {topic_pattern}")
