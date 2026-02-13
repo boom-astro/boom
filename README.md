@@ -208,7 +208,7 @@ RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- 
 
 This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
 This benchmark uses Docker to build the image and run the benchmark, but it can also be run with Apptainer.
-The step to run the benchmark are as follows:
+The steps to run the benchmark are as follows:
 
 ### Build Image
 ```bash
