@@ -179,6 +179,13 @@ impl EventGeometry {
                 "nside must be a power of 2, got {nside}"
             )));
         }
+        // cdshealpix supports max depth 29 (nside = 2^29 = 536870912)
+        let depth = nside.trailing_zeros();
+        if depth > 29 {
+            return Err(WatchlistError::InvalidGeometry(format!(
+                "nside exceeds maximum supported value 2^29, got 2^{depth}"
+            )));
+        }
         if pixels.len() != probabilities.len() {
             return Err(WatchlistError::InvalidGeometry(format!(
                 "pixels and probabilities must have the same length ({} != {})",

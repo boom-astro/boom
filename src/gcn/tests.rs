@@ -388,6 +388,30 @@ mod model_tests {
     }
 
     #[test]
+    fn test_healpix_accepts_max_nside_2pow29() {
+        let nside = 1u32 << 29; // 536870912 — maximum depth supported by cdshealpix
+        assert!(EventGeometry::healpix(nside, vec![], vec![], 0.9).is_ok());
+    }
+
+    #[test]
+    fn test_healpix_rejects_nside_2pow30() {
+        let nside = 1u32 << 30;
+        let result = EventGeometry::healpix(nside, vec![], vec![], 0.9);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_healpix_rejects_nside_2pow31() {
+        // 2^31 is not representable as a power-of-2 u32 (would be i32::MIN as unsigned),
+        // but 2147483648u32 overflows. This test documents that the is_power_of_two()
+        // check handles the u32 boundary correctly.
+        let nside = 1u32.wrapping_shl(31);
+        let result = EventGeometry::healpix(nside, vec![], vec![], 0.9);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_healpix_accepts_empty_pixels() {
         let geom = EventGeometry::healpix(64, vec![], vec![], 0.9).unwrap();
         // No pixel should match
