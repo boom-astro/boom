@@ -43,6 +43,40 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     };
 }
 
+/// Initialize indexes for the gcn_events collection
+#[instrument(skip(db), fields(database = db.name()), err)]
+pub async fn initialize_gcn_indexes(db: &Database) -> Result<(), CreateIndexError> {
+    let gcn_collection: Collection<Document> = db.collection("gcn_events");
+
+    // 2dsphere index for geospatial queries on circular events
+    create_index(
+        &gcn_collection,
+        doc! { "coordinates.radec_geojson": "2dsphere" },
+        false,
+    )
+    .await?;
+
+    // Compound index for querying active events by source
+    create_index(
+        &gcn_collection,
+        doc! { "source": 1, "is_active": 1, "expires_at": 1 },
+        false,
+    )
+    .await?;
+
+    // Index for time-based queries
+    create_index(&gcn_collection, doc! { "trigger_time": 1 }, false).await?;
+
+    // Compound sparse index for watchlist user lookups (queries filter on user_id + source)
+    let index_model = IndexModel::builder()
+        .keys(doc! { "user_id": 1, "source": 1 })
+        .options(IndexOptions::builder().sparse(true).build())
+        .build();
+    gcn_collection.create_index(index_model).await?;
+
+    Ok(())
+}
+
 // This function, for a given survey name (ZTF, LSST), will create
 // the required indexes on the alerts and alerts_aux collections
 #[instrument(skip(db), fields(database = db.name()), err)]

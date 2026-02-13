@@ -409,6 +409,56 @@ pub struct SurveyWorkerConfig {
     pub filter: WorkerConfig,
 }
 
+// ==================== GCN / Watchlist Configuration ====================
+
+fn default_gcn_enabled() -> bool {
+    false
+}
+
+fn default_watchlist_max_per_user() -> usize {
+    100
+}
+
+fn default_watchlist_max_radius_deg() -> f64 {
+    10.0
+}
+
+/// User watchlist configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct WatchlistConfig {
+    #[serde(default = "default_watchlist_max_per_user")]
+    pub max_per_user: usize,
+    #[serde(default = "default_watchlist_max_radius_deg")]
+    pub max_radius_deg: f64,
+}
+
+impl Default for WatchlistConfig {
+    fn default() -> Self {
+        WatchlistConfig {
+            max_per_user: default_watchlist_max_per_user(),
+            max_radius_deg: default_watchlist_max_radius_deg(),
+        }
+    }
+}
+
+/// GCN event crossmatching configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct GcnConfig {
+    #[serde(default = "default_gcn_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub watchlist: WatchlistConfig,
+}
+
+impl Default for GcnConfig {
+    fn default() -> Self {
+        GcnConfig {
+            enabled: default_gcn_enabled(),
+            watchlist: WatchlistConfig::default(),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -417,6 +467,8 @@ pub struct AppConfig {
     pub redis: RedisConfig,
     #[serde(default)]
     pub babamul: BabamulConfig,
+    #[serde(default)]
+    pub gcn: GcnConfig,
     pub kafka: KafkaConfig,
     #[serde(default)]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
