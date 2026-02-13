@@ -146,23 +146,6 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
-## Running BOOM in production
-
-To run the consumer and the scheduler with Docker, you can open a shell in the `boom` container with:
-```bash
-docker exec -it -w /app boom /bin/bash
-```
-Then you can run the binaries with:
-```bash
-./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
-./scheduler <SURVEY> [CONFIG_PATH]
-```
-Or you can run them directly with:
-```bash
-docker exec -it -w /app boom ./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
-docker exec -it -w /app boom ./scheduler <SURVEY> [CONFIG_PATH]
-```
-
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
 - You should then see some `received alerts len: <nb_alerts>` messages, which means that the enrichment worker is processing the alerts successfully.
