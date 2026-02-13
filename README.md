@@ -81,7 +81,7 @@ code.
 2. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode:
 
    - With docker, using the provided `docker-compose.yaml` file:
-      ```bash
+     ```bash
      docker compose --profile api up -d
      ```
      This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
