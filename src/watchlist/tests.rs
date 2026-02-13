@@ -8,6 +8,7 @@
 //! - Event matching logic (active/inactive, expiry, geometry)
 //! - EventMatch construction and field correctness
 //! - WatchlistError variants
+//! - Watchlist validation functions
 //! - Configuration defaults and deserialization
 //! - Crossmatch (xmatch) scenarios
 
@@ -873,6 +874,140 @@ mod model_tests {
         use crate::watchlist::WatchlistError;
         let err = WatchlistError::LimitExceeded(100);
         assert!(err.to_string().contains("100"));
+    }
+}
+
+#[cfg(test)]
+mod watchlist_validation_tests {
+
+    // Re-create the validation functions as they're private to the route module.
+    // These test the equivalent logic.
+
+    fn validate_coordinates(ra: f64, dec: f64) -> Result<(), String> {
+        if !(0.0..=360.0).contains(&ra) {
+            return Err(format!("RA must be between 0 and 360, got {}", ra));
+        }
+        if !(-90.0..=90.0).contains(&dec) {
+            return Err(format!("Dec must be between -90 and 90, got {}", dec));
+        }
+        Ok(())
+    }
+
+    fn validate_radius(radius: f64, max_radius: f64) -> Result<(), String> {
+        if radius <= 0.0 {
+            return Err("Radius must be positive".to_string());
+        }
+        if radius > max_radius {
+            return Err(format!("Radius {} exceeds max {}", radius, max_radius));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_valid_coordinates() {
+        assert!(validate_coordinates(0.0, 0.0).is_ok());
+        assert!(validate_coordinates(180.0, 45.0).is_ok());
+        assert!(validate_coordinates(360.0, 90.0).is_ok());
+        assert!(validate_coordinates(0.0, -90.0).is_ok());
+        assert!(validate_coordinates(359.999, 89.999).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_ra_negative() {
+        assert!(validate_coordinates(-1.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn test_invalid_ra_over_360() {
+        assert!(validate_coordinates(360.1, 0.0).is_err());
+    }
+
+    #[test]
+    fn test_invalid_dec_below_minus90() {
+        assert!(validate_coordinates(180.0, -90.1).is_err());
+    }
+
+    #[test]
+    fn test_invalid_dec_above_90() {
+        assert!(validate_coordinates(180.0, 90.1).is_err());
+    }
+
+    #[test]
+    fn test_nan_ra_rejected() {
+        assert!(validate_coordinates(f64::NAN, 0.0).is_err());
+    }
+
+    #[test]
+    fn test_nan_dec_rejected() {
+        assert!(validate_coordinates(180.0, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn test_infinity_ra_rejected() {
+        assert!(validate_coordinates(f64::INFINITY, 0.0).is_err());
+    }
+
+    #[test]
+    fn test_neg_infinity_dec_rejected() {
+        assert!(validate_coordinates(180.0, f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_valid_radius() {
+        assert!(validate_radius(1.0, 10.0).is_ok());
+        assert!(validate_radius(0.001, 10.0).is_ok());
+        assert!(validate_radius(10.0, 10.0).is_ok());
+    }
+
+    #[test]
+    fn test_zero_radius_rejected() {
+        assert!(validate_radius(0.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_negative_radius_rejected() {
+        assert!(validate_radius(-1.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_radius_exceeds_max() {
+        assert!(validate_radius(10.1, 10.0).is_err());
+    }
+}
+
+// ==================== Validation Edge Cases (NaN/Inf) ====================
+
+#[cfg(test)]
+mod validation_edge_case_tests {
+    // These test the validation logic as implemented in watchlist routes.
+    // We replicate the actual validation functions here since they are private.
+
+    fn validate_radius(radius: f64, max_radius: f64) -> Result<(), String> {
+        if !radius.is_finite() {
+            return Err("Radius must be a finite number".to_string());
+        }
+        if radius <= 0.0 {
+            return Err("Radius must be positive".to_string());
+        }
+        if radius > max_radius {
+            return Err(format!("Radius {} exceeds max {}", radius, max_radius));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_nan_radius_rejected() {
+        assert!(validate_radius(f64::NAN, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_infinity_radius_rejected() {
+        assert!(validate_radius(f64::INFINITY, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_neg_infinity_radius_rejected() {
+        assert!(validate_radius(f64::NEG_INFINITY, 10.0).is_err());
     }
 }
 

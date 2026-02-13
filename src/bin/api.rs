@@ -32,7 +32,8 @@ async fn main() -> std::io::Result<()> {
         println!("Babamul API endpoints are DISABLED");
     }
 
-    if config.watchlist.enabled {
+    let watchlist_is_enabled = config.watchlist.enabled;
+    if watchlist_is_enabled {
         println!("Watchlist module is ENABLED");
         initialize_watchlist_indexes(&database).await.unwrap();
     } else {
@@ -81,15 +82,14 @@ async fn main() -> std::io::Result<()> {
             )
         }
 
-        app.service(
-            actix_web::web::scope("")
-                .wrap(from_fn(auth_middleware))
-                // Public routes
-                .service(Scalar::with_url("/docs", api_doc.clone()))
-                .service(routes::info::get_health)
-                .service(routes::auth::post_auth)
-                // Protected routes
-                .service(routes::info::get_db_info)
+        let mut main_scope = actix_web::web::scope("")
+            .wrap(from_fn(auth_middleware))
+            // Public routes
+            .service(Scalar::with_url("/docs", api_doc.clone()))
+            .service(routes::info::get_health)
+            .service(routes::auth::post_auth)
+            // Protected routes
+            .service(routes::info::get_db_info)
                 .service(routes::kafka::get_kafka_acls)
                 .service(routes::kafka::delete_kafka_credentials)
                 .service(routes::filters::post_filter)
@@ -110,9 +110,19 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
-                .service(routes::queries::post_pipeline_query)
-                .wrap(Logger::default()),
-        )
+                .service(routes::queries::post_pipeline_query);
+
+        // Conditionally register watchlist endpoints inside the auth scope
+        if watchlist_is_enabled {
+            main_scope = main_scope
+                .service(routes::watchlists::post_watchlist)
+                .service(routes::watchlists::get_watchlists)
+                .service(routes::watchlists::get_watchlist)
+                .service(routes::watchlists::patch_watchlist)
+                .service(routes::watchlists::delete_watchlist);
+        }
+
+        app.service(main_scope.wrap(Logger::default()))
     })
     .bind(("0.0.0.0", port))?
     .run()
