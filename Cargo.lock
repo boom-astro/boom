@@ -424,6 +424,7 @@ dependencies = [
  "argmin-math",
  "num-traits",
  "paste",
+ "rand 0.9.2",
  "rand_xoshiro",
  "thiserror 2.0.18",
  "web-time",
@@ -440,6 +441,7 @@ dependencies = [
  "num-complex",
  "num-integer",
  "num-traits",
+ "rand 0.9.2",
  "thiserror 2.0.18",
 ]
 
@@ -619,6 +621,8 @@ dependencies = [
  "apache-avro",
  "apache-avro-derive",
  "apache-avro-macros",
+ "argmin",
+ "argmin-math",
  "async-trait",
  "base64 0.22.1",
  "bcrypt",

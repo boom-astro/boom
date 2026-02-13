@@ -447,11 +447,11 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
         let alpha_candidates = vec![avg_error_var.max(1e-6), avg_error_var.max(1e-4)];
 
         // Compute minimum lengthscale from data sampling
-        let mut dt_vec: Vec<f64> = Vec::new();
-        for w in 1..times_arr.len() {
-            dt_vec.push(times_arr[w] - times_arr[w - 1]);
-        }
-        dt_vec.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut dt_vec: Vec<f64> = (1..times_arr.len())
+            .map(|w| times_arr[w] - times_arr[w - 1])
+            .filter(|d| d.is_finite())
+            .collect();
+        dt_vec.sort_by(|a, b| a.total_cmp(b));
         let median_dt = if !dt_vec.is_empty() {
             dt_vec[dt_vec.len() / 2]
         } else {
@@ -593,7 +593,8 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                 let peak_idx = pred
                     .iter()
                     .enumerate()
-                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .filter(|(_, v)| v.is_finite())
+                    .min_by(|(_, a), (_, b)| a.total_cmp(b))
                     .map(|(i, _)| i)
                     .unwrap_or(0);
                 let t0 = times_pred[peak_idx];
@@ -610,7 +611,11 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                 let rise_rate = compute_rise_rate(&times_pred, &pred);
                 let decay_rate = compute_decay_rate(&times_pred, &pred);
 
-                let t_last = band_data.times.last().copied().unwrap_or(t_max);
+                let t_last = band_data
+                    .times
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
                 let predictive = compute_predictive_features(
                     &gp_fit,
                     t_last,
@@ -658,4 +663,230 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // subsample_data
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_subsample_no_change_when_below_max() {
+        let times = vec![0.0, 1.0, 2.0];
+        let mags = vec![20.0, 19.0, 20.0];
+        let errors = vec![0.1, 0.1, 0.1];
+        let (t, m, e) = subsample_data(&times, &mags, &errors, 10);
+        assert_eq!(t, times);
+        assert_eq!(m, mags);
+        assert_eq!(e, errors);
+    }
+
+    #[test]
+    fn test_subsample_reduces_length() {
+        let n = 100;
+        let times: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mags: Vec<f64> = vec![20.0; n];
+        let errors: Vec<f64> = vec![0.1; n];
+        let (t, m, e) = subsample_data(&times, &mags, &errors, 25);
+        assert_eq!(t.len(), 25);
+        assert_eq!(m.len(), 25);
+        assert_eq!(e.len(), 25);
+    }
+
+    // -----------------------------------------------------------------------
+    // fit_nonparametric
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fit_nonparametric_empty() {
+        let bands: HashMap<String, BandData> = HashMap::new();
+        let results = fit_nonparametric(&bands);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fit_nonparametric_insufficient_points() {
+        let mut bands = HashMap::new();
+        bands.insert(
+            "r".to_string(),
+            BandData {
+                times: vec![0.0, 1.0, 2.0],
+                values: vec![20.0, 19.0, 20.0],
+                errors: vec![0.1, 0.1, 0.1],
+            },
+        );
+        // Needs >= 5 points per band
+        let results = fit_nonparametric(&bands);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fit_nonparametric_zero_duration() {
+        let mut bands = HashMap::new();
+        // All times are the same → duration = 0 → empty result
+        bands.insert(
+            "r".to_string(),
+            BandData {
+                times: vec![0.0; 10],
+                values: vec![20.0; 10],
+                errors: vec![0.1; 10],
+            },
+        );
+        let results = fit_nonparametric(&bands);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fit_nonparametric_synthetic_lightcurve() {
+        // Synthetic transient: brightens then fades over 30 days
+        let n = 20;
+        let mut times = Vec::with_capacity(n);
+        let mut values = Vec::with_capacity(n);
+        let mut errors = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = (i as f64) * 30.0 / (n - 1) as f64;
+            // Parabolic lightcurve with peak (minimum mag) at t=15
+            let mag = 18.0 + 0.02 * (t - 15.0).powi(2);
+            times.push(t);
+            values.push(mag);
+            errors.push(0.05);
+        }
+
+        let mut bands = HashMap::new();
+        bands.insert(
+            "r".to_string(),
+            BandData {
+                times,
+                values,
+                errors,
+            },
+        );
+
+        let results = fit_nonparametric(&bands);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.band, "r");
+        assert_eq!(r.n_obs, n);
+
+        // Peak magnitude should be close to 18.0
+        assert!(r.peak_mag.is_some());
+        let peak = r.peak_mag.unwrap();
+        assert!(
+            (peak - 18.0).abs() < 1.0,
+            "peak_mag {} too far from 18.0",
+            peak
+        );
+
+        // t0 should be near 15.0
+        assert!(r.t0.is_some());
+        let t0 = r.t0.unwrap();
+        assert!((t0 - 15.0).abs() < 5.0, "t0 {} too far from 15.0", t0);
+
+        // chi2 should be finite
+        assert!(r.chi2.is_some());
+
+        // GP predictive features should be present
+        assert!(r.gp_sigma_f.is_some());
+        assert!(r.gp_peak_to_peak.is_some());
+    }
+
+    #[test]
+    fn test_fit_nonparametric_multiple_bands() {
+        // Two bands with enough data
+        let n = 10;
+        let make_band = |offset: f64| -> BandData {
+            let mut times = Vec::with_capacity(n);
+            let mut values = Vec::with_capacity(n);
+            let mut errors = Vec::with_capacity(n);
+            for i in 0..n {
+                let t = (i as f64) * 20.0 / (n - 1) as f64;
+                let mag = 19.0 + offset + 0.03 * (t - 10.0).powi(2);
+                times.push(t);
+                values.push(mag);
+                errors.push(0.05);
+            }
+            BandData {
+                times,
+                values,
+                errors,
+            }
+        };
+
+        let mut bands = HashMap::new();
+        bands.insert("r".to_string(), make_band(0.0));
+        bands.insert("g".to_string(), make_band(0.5));
+
+        let results = fit_nonparametric(&bands);
+        assert_eq!(results.len(), 2);
+
+        let band_names: Vec<&str> = results.iter().map(|r| r.band.as_str()).collect();
+        assert!(band_names.contains(&"r"));
+        assert!(band_names.contains(&"g"));
+    }
+
+    #[test]
+    fn test_fit_nonparametric_result_bson_safe() {
+        // All Option<f64> fields should be Some(finite) or None, never Some(NaN/Inf)
+        let n = 15;
+        let mut times = Vec::with_capacity(n);
+        let mut values = Vec::with_capacity(n);
+        let mut errors = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = (i as f64) * 25.0 / (n - 1) as f64;
+            let mag = 19.0 + 0.01 * (t - 12.5).powi(2);
+            times.push(t);
+            values.push(mag);
+            errors.push(0.08);
+        }
+
+        let mut bands = HashMap::new();
+        bands.insert(
+            "r".to_string(),
+            BandData {
+                times,
+                values,
+                errors,
+            },
+        );
+
+        let results = fit_nonparametric(&bands);
+        for r in &results {
+            // Helper to check that Option<f64> is never Some(NaN/Inf)
+            let check = |opt: &Option<f64>, name: &str| {
+                if let Some(v) = opt {
+                    assert!(v.is_finite(), "{} was Some({}) — not BSON-safe", name, v);
+                }
+            };
+            check(&r.rise_time, "rise_time");
+            check(&r.decay_time, "decay_time");
+            check(&r.t0, "t0");
+            check(&r.peak_mag, "peak_mag");
+            check(&r.chi2, "chi2");
+            check(&r.baseline_chi2, "baseline_chi2");
+            check(&r.fwhm, "fwhm");
+            check(&r.rise_rate, "rise_rate");
+            check(&r.decay_rate, "decay_rate");
+            check(&r.gp_dfdt_now, "gp_dfdt_now");
+            check(&r.gp_dfdt_next, "gp_dfdt_next");
+            check(&r.gp_d2fdt2_now, "gp_d2fdt2_now");
+            check(&r.gp_predicted_mag_1d, "gp_predicted_mag_1d");
+            check(&r.gp_predicted_mag_2d, "gp_predicted_mag_2d");
+            check(&r.gp_time_to_peak, "gp_time_to_peak");
+            check(&r.gp_extrap_slope, "gp_extrap_slope");
+            check(&r.gp_sigma_f, "gp_sigma_f");
+            check(&r.gp_peak_to_peak, "gp_peak_to_peak");
+            check(&r.gp_snr_max, "gp_snr_max");
+            check(&r.gp_dfdt_max, "gp_dfdt_max");
+            check(&r.gp_dfdt_min, "gp_dfdt_min");
+            check(&r.gp_frac_of_peak, "gp_frac_of_peak");
+            check(&r.gp_post_var_mean, "gp_post_var_mean");
+            check(&r.gp_post_var_max, "gp_post_var_max");
+            check(&r.gp_skewness, "gp_skewness");
+            check(&r.gp_kurtosis, "gp_kurtosis");
+            check(&r.gp_n_inflections, "gp_n_inflections");
+        }
+    }
 }
