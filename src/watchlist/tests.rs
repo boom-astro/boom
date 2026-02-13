@@ -1,4 +1,4 @@
-//! Comprehensive tests for the GCN module
+//! Comprehensive tests for the watchlist module
 //!
 //! These tests cover:
 //! - Data model edge cases and validation
@@ -13,7 +13,7 @@
 
 #[cfg(test)]
 mod model_tests {
-    use crate::gcn::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
+    use crate::watchlist::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
     use crate::utils::spatial::Coordinates;
     use std::collections::HashMap;
 
@@ -824,7 +824,7 @@ mod model_tests {
 
     #[test]
     fn test_watchlist_error_not_found() {
-        use crate::gcn::WatchlistError;
+        use crate::watchlist::WatchlistError;
         let err = WatchlistError::NotFound("test-id".to_string());
         let msg = err.to_string();
         assert!(msg.contains("test-id"));
@@ -833,14 +833,14 @@ mod model_tests {
 
     #[test]
     fn test_watchlist_error_unauthorized() {
-        use crate::gcn::WatchlistError;
+        use crate::watchlist::WatchlistError;
         let err = WatchlistError::Unauthorized;
         assert!(err.to_string().contains("unauthorized"));
     }
 
     #[test]
     fn test_watchlist_error_invalid_geometry() {
-        use crate::gcn::WatchlistError;
+        use crate::watchlist::WatchlistError;
         let err = WatchlistError::InvalidGeometry("test reason".to_string());
         let msg = err.to_string();
         assert!(msg.contains("test reason"));
@@ -849,7 +849,7 @@ mod model_tests {
 
     #[test]
     fn test_watchlist_error_radius_too_large() {
-        use crate::gcn::WatchlistError;
+        use crate::watchlist::WatchlistError;
         let err = WatchlistError::RadiusTooLarge(15.0, 10.0);
         let msg = err.to_string();
         assert!(msg.contains("15"));
@@ -858,7 +858,7 @@ mod model_tests {
 
     #[test]
     fn test_watchlist_error_limit_exceeded() {
-        use crate::gcn::WatchlistError;
+        use crate::watchlist::WatchlistError;
         let err = WatchlistError::LimitExceeded(100);
         assert!(err.to_string().contains("100"));
     }
@@ -866,7 +866,7 @@ mod model_tests {
 
 #[cfg(test)]
 mod xmatch_tests {
-    use crate::gcn::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use crate::watchlist::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use crate::utils::spatial::Coordinates;
     use std::collections::HashMap;
 
@@ -1145,88 +1145,88 @@ mod xmatch_tests {
 
 #[cfg(test)]
 mod config_tests {
-    use crate::conf::{GcnConfig, WatchlistConfig};
-
-    #[test]
-    fn test_gcn_config_defaults() {
-        let config = GcnConfig::default();
-        assert!(!config.enabled);
-        assert_eq!(config.watchlist.max_per_user, 100);
-        assert!((config.watchlist.max_radius_deg - 10.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_gcn_config_full_deserialization() {
-        let json = r#"{
-            "enabled": true,
-            "watchlist": {
-                "max_per_user": 50,
-                "max_radius_deg": 5.0
-            }
-        }"#;
-        let config: GcnConfig = serde_json::from_str(json).unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.watchlist.max_per_user, 50);
-        assert!((config.watchlist.max_radius_deg - 5.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_gcn_config_partial_uses_defaults() {
-        let json = r#"{"enabled": true}"#;
-        let config: GcnConfig = serde_json::from_str(json).unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.watchlist.max_per_user, 100);
-    }
-
-    #[test]
-    fn test_gcn_config_disabled_by_default() {
-        let json = r#"{}"#;
-        let config: GcnConfig = serde_json::from_str(json).unwrap();
-        assert!(!config.enabled);
-    }
+    use crate::conf::{WatchlistConfig, WatchlistLimitsConfig};
 
     #[test]
     fn test_watchlist_config_defaults() {
         let config = WatchlistConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.limits.max_per_user, 100);
+        assert!((config.limits.max_radius_deg - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_watchlist_config_full_deserialization() {
+        let json = r#"{
+            "enabled": true,
+            "limits": {
+                "max_per_user": 50,
+                "max_radius_deg": 5.0
+            }
+        }"#;
+        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.limits.max_per_user, 50);
+        assert!((config.limits.max_radius_deg - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_watchlist_config_partial_uses_defaults() {
+        let json = r#"{"enabled": true}"#;
+        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.limits.max_per_user, 100);
+    }
+
+    #[test]
+    fn test_watchlist_config_disabled_by_default() {
+        let json = r#"{}"#;
+        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_watchlist_limits_config_defaults() {
+        let config = WatchlistLimitsConfig::default();
         assert_eq!(config.max_per_user, 100);
         assert!((config.max_radius_deg - 10.0).abs() < 0.001);
     }
 
     #[test]
-    fn test_watchlist_config_deserialization() {
+    fn test_watchlist_limits_config_deserialization() {
         let json = r#"{"max_per_user": 25, "max_radius_deg": 2.5}"#;
-        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        let config: WatchlistLimitsConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.max_per_user, 25);
         assert!((config.max_radius_deg - 2.5).abs() < 0.001);
     }
 
     #[test]
-    fn test_gcn_config_wrong_type_enabled() {
+    fn test_watchlist_config_wrong_type_enabled() {
         let json = r#"{"enabled": "yes"}"#;
-        let result: Result<GcnConfig, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_watchlist_config_wrong_type_max_per_user() {
-        let json = r#"{"max_per_user": "fifty"}"#;
         let result: Result<WatchlistConfig, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_watchlist_config_zero_max_per_user() {
+    fn test_watchlist_limits_config_wrong_type_max_per_user() {
+        let json = r#"{"max_per_user": "fifty"}"#;
+        let result: Result<WatchlistLimitsConfig, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_watchlist_limits_config_zero_max_per_user() {
         // Zero is accepted at deserialization level — validation is in the route
         let json = r#"{"max_per_user": 0, "max_radius_deg": 10.0}"#;
-        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        let config: WatchlistLimitsConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.max_per_user, 0);
     }
 
     #[test]
-    fn test_watchlist_config_negative_radius() {
+    fn test_watchlist_limits_config_negative_radius() {
         // Negative radius is accepted at deserialization — validation is in the route
         let json = r#"{"max_per_user": 100, "max_radius_deg": -1.0}"#;
-        let config: WatchlistConfig = serde_json::from_str(json).unwrap();
+        let config: WatchlistLimitsConfig = serde_json::from_str(json).unwrap();
         assert!(config.max_radius_deg < 0.0);
     }
 }
@@ -1235,7 +1235,7 @@ mod config_tests {
 
 #[cfg(test)]
 mod healpix_advanced_tests {
-    use crate::gcn::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
+    use crate::watchlist::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     fn make_healpix_event(
@@ -1506,7 +1506,7 @@ mod healpix_advanced_tests {
 
 #[cfg(test)]
 mod xmatch_healpix_tests {
-    use crate::gcn::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use crate::watchlist::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use crate::utils::spatial::Coordinates;
     use std::collections::HashMap;
 
@@ -1626,7 +1626,7 @@ mod xmatch_healpix_tests {
 
 #[cfg(test)]
 mod serde_edge_case_tests {
-    use crate::gcn::{EventGeometry, EventMatch, GcnEvent, GcnSource};
+    use crate::watchlist::{EventGeometry, EventMatch, GcnEvent, GcnSource};
 
     #[test]
     fn test_event_missing_required_id_fails() {
@@ -1811,7 +1811,7 @@ mod serde_edge_case_tests {
 
 #[cfg(test)]
 mod geometry_edge_case_tests {
-    use crate::gcn::{EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use crate::watchlist::{EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     #[test]
@@ -1912,7 +1912,7 @@ mod geometry_edge_case_tests {
 
 #[cfg(test)]
 mod source_serialization_tests {
-    use crate::gcn::GcnSource;
+    use crate::watchlist::GcnSource;
 
     /// Verify that GcnSource::Custom serializes to "custom", which is the value
     /// used in MongoDB query filters.
@@ -1952,7 +1952,7 @@ mod source_serialization_tests {
 
 #[cfg(test)]
 mod deserialization_safety_tests {
-    use crate::gcn::EventGeometry;
+    use crate::watchlist::EventGeometry;
 
     #[test]
     fn test_healpix_deserialized_unsorted_pixels_are_sorted() {
@@ -2030,7 +2030,7 @@ mod deserialization_safety_tests {
 
 #[cfg(test)]
 mod matches_guard_tests {
-    use crate::gcn::{EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use crate::watchlist::{EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     fn make_active_event() -> GcnEvent {

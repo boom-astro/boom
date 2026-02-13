@@ -43,9 +43,9 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     };
 }
 
-/// Initialize indexes for the gcn_events collection
+/// Initialize indexes for the watchlist (gcn_events) collection
 #[instrument(skip(db), fields(database = db.name()), err)]
-pub async fn initialize_gcn_indexes(db: &Database) -> Result<(), CreateIndexError> {
+pub async fn initialize_watchlist_indexes(db: &Database) -> Result<(), CreateIndexError> {
     let gcn_collection: Collection<Document> = db.collection("gcn_events");
 
     // 2dsphere index for geospatial queries on circular events

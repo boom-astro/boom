@@ -1,4 +1,4 @@
-use crate::gcn::{EventMatch, GcnEvent};
+use crate::watchlist::{EventMatch, GcnEvent};
 use tracing::instrument;
 
 /// Match an alert position against a list of events synchronously.
@@ -36,7 +36,7 @@ pub fn event_xmatch_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gcn::{EventGeometry, GcnEventType, GcnSource};
+    use crate::watchlist::{EventGeometry, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     fn create_test_event(ra: f64, dec: f64, radius: f64, trigger_jd: f64) -> GcnEvent {
