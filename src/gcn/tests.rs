@@ -456,14 +456,15 @@ mod model_tests {
 
     #[test]
     fn test_healpix_probability_at_missing_pixel() {
-        let geom = EventGeometry::healpix(64, vec![999999], vec![0.5], 0.9).unwrap();
-        // Position that maps to a different pixel
-        let prob = geom.probability_at(0.0, 0.0);
-        // Likely a different pixel index
-        if prob.is_some() {
-            // If by chance it maps to 999999, that's okay too
-            assert_eq!(prob, Some(0.5));
-        }
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+        // Get the actual pixel for (0.0, 0.0)
+        let pixel_at_origin = nested::hash(depth, 0.0_f64.to_radians(), 0.0_f64.to_radians());
+        // Use a different pixel that definitely won't match (0.0, 0.0)
+        let different_pixel = if pixel_at_origin == 0 { 1 } else { 0 };
+        let geom = EventGeometry::healpix(nside, vec![different_pixel], vec![0.5], 0.9).unwrap();
+        assert_eq!(geom.probability_at(0.0, 0.0), None);
     }
 
     #[test]
@@ -1881,5 +1882,45 @@ mod geometry_edge_case_tests {
         event.superseded_by = Some("v2".to_string());
         // matches() does not check superseded_by — intentionally
         assert!(event.matches(180.0, 45.0, 2460001.0));
+    }
+}
+
+// ==================== GcnSource Serialization Consistency ====================
+
+#[cfg(test)]
+mod source_serialization_tests {
+    use crate::gcn::GcnSource;
+
+    /// Verify that GcnSource::Custom serializes to "custom", which is the value
+    /// used in MongoDB query filters.
+    #[test]
+    fn test_gcn_source_custom_serializes_to_custom() {
+        let serialized = serde_json::to_string(&GcnSource::Custom).unwrap();
+        assert_eq!(serialized, "\"custom\"");
+    }
+
+    /// Verify all source variants serialize to lowercase snake_case as expected
+    /// by MongoDB queries.
+    #[test]
+    fn test_all_sources_serialize_to_expected_values() {
+        let cases = vec![
+            (GcnSource::Lvk, "lvk"),
+            (GcnSource::Swift, "swift"),
+            (GcnSource::Fermi, "fermi"),
+            (GcnSource::Svom, "svom"),
+            (GcnSource::EinsteinProbe, "einstein_probe"),
+            (GcnSource::IceCube, "ice_cube"),
+            (GcnSource::Custom, "custom"),
+        ];
+
+        for (source, expected) in cases {
+            let serialized = serde_json::to_string(&source).unwrap();
+            assert_eq!(
+                serialized,
+                format!("\"{}\"", expected),
+                "GcnSource::{:?} serialized unexpectedly",
+                source
+            );
+        }
     }
 }
