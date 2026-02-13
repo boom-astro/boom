@@ -447,11 +447,11 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
         let alpha_candidates = vec![avg_error_var.max(1e-6), avg_error_var.max(1e-4)];
 
         // Compute minimum lengthscale from data sampling
-        let mut dt_vec: Vec<f64> = Vec::new();
-        for w in 1..times_arr.len() {
-            dt_vec.push(times_arr[w] - times_arr[w - 1]);
-        }
-        dt_vec.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut dt_vec: Vec<f64> = (1..times_arr.len())
+            .map(|w| times_arr[w] - times_arr[w - 1])
+            .filter(|d| d.is_finite())
+            .collect();
+        dt_vec.sort_by(|a, b| a.total_cmp(b));
         let median_dt = if !dt_vec.is_empty() {
             dt_vec[dt_vec.len() / 2]
         } else {
@@ -593,7 +593,8 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                 let peak_idx = pred
                     .iter()
                     .enumerate()
-                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .filter(|(_, v)| v.is_finite())
+                    .min_by(|(_, a), (_, b)| a.total_cmp(b))
                     .map(|(i, _)| i)
                     .unwrap_or(0);
                 let t0 = times_pred[peak_idx];
@@ -610,7 +611,11 @@ pub fn fit_nonparametric(bands: &HashMap<String, BandData>) -> Vec<Nonparametric
                 let rise_rate = compute_rise_rate(&times_pred, &pred);
                 let decay_rate = compute_decay_rate(&times_pred, &pred);
 
-                let t_last = band_data.times.last().copied().unwrap_or(t_max);
+                let t_last = band_data
+                    .times
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
                 let predictive = compute_predictive_features(
                     &gp_fit,
                     t_last,

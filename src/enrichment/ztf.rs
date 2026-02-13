@@ -460,12 +460,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 self.get_alert_properties(&alert).await?;
 
             // Lightcurve fitting (GP nonparametric + SVI parametric)
-            let lc = lightcurve.clone();
             let fitting_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(60),
                 tokio::task::spawn_blocking(move || {
-                    let mag_bands = photometry_to_mag_bands(&lc);
-                    let flux_bands = photometry_to_flux_bands(&lc);
+                    let mag_bands = photometry_to_mag_bands(&lightcurve);
+                    let flux_bands = photometry_to_flux_bands(&lightcurve);
                     let nonparametric = fit_nonparametric(&mag_bands);
                     let parametric = fit_parametric(&flux_bands);
                     LightcurveFittingResult {

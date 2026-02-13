@@ -110,7 +110,7 @@ pub fn median(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values.sort_by(|a, b| a.total_cmp(b));
     let mid = values.len() / 2;
     if values.len() % 2 == 0 {
         Some((values[mid - 1] + values[mid]) / 2.0)

@@ -1494,7 +1494,7 @@ fn median_f64(xs: &mut [f64]) -> Option<f64> {
     if xs.is_empty() {
         return None;
     }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.sort_by(|a, b| a.total_cmp(b));
     let mid = xs.len() / 2;
     if xs.len() % 2 == 0 {
         Some((xs[mid - 1] + xs[mid]) / 2.0)
