@@ -6,3 +6,4 @@ pub mod info;
 pub mod kafka;
 pub mod queries;
 pub mod users;
+pub mod watchlists;
