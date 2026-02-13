@@ -1853,10 +1853,9 @@ mod geometry_edge_case_tests {
             supersedes: None,
             superseded_by: None,
         };
-        // NaN > expires_at is false, so expiry check passes.
-        // This means NaN alert_jd matches — document this behavior.
+        // NaN alert_jd is rejected early by the is_finite() guard.
         let result = event.matches(180.0, 45.0, f64::NAN);
-        assert!(result, "NaN alert_jd bypasses expiry check (IEEE 754 NaN comparison)");
+        assert!(!result, "NaN alert_jd must not match");
     }
 
     #[test]
@@ -1922,5 +1921,136 @@ mod source_serialization_tests {
                 source
             );
         }
+    }
+}
+
+// ==================== Deserialization Safety Tests ====================
+
+#[cfg(test)]
+mod deserialization_safety_tests {
+    use crate::gcn::EventGeometry;
+
+    #[test]
+    fn test_healpix_deserialized_unsorted_pixels_are_sorted() {
+        // Simulate data from MongoDB where pixels may not be pre-sorted.
+        // The custom Deserialize impl must sort them so binary_search works.
+        let json = r#"{
+            "type": "heal_pix_map",
+            "nside": 64,
+            "pixels": [300, 100, 200],
+            "probabilities": [0.3, 0.1, 0.2],
+            "credible_level": 0.9
+        }"#;
+        let geom: EventGeometry = serde_json::from_str(json).unwrap();
+        match &geom {
+            EventGeometry::HealPixMap {
+                pixels,
+                probabilities,
+                ..
+            } => {
+                assert_eq!(pixels, &[100, 200, 300], "pixels must be sorted");
+                assert_eq!(
+                    probabilities,
+                    &[0.1, 0.2, 0.3],
+                    "probabilities must be reordered to match sorted pixels"
+                );
+            }
+            _ => panic!("expected HealPixMap"),
+        }
+    }
+
+    #[test]
+    fn test_healpix_deserialized_contains_works_with_unsorted_input() {
+        use cdshealpix::nested;
+        let nside: u32 = 64;
+        let depth = (nside as f64).log2() as u8;
+
+        // Get the actual pixel for a known position
+        let pixel = nested::hash(depth, 45.0_f64.to_radians(), 30.0_f64.to_radians());
+
+        // Provide pixels deliberately out of order, with our target in the middle
+        let other1 = if pixel > 0 { pixel - 1 } else { pixel + 2 };
+        let other2 = pixel + 1;
+        let mut pixels = vec![other2, pixel, other1];
+        // Ensure all pixels are distinct
+        pixels.sort();
+        pixels.dedup();
+        // Deliberately unsort
+        pixels.reverse();
+
+        let probs: Vec<f64> = pixels.iter().map(|_| 0.5).collect();
+
+        let json = format!(
+            r#"{{"type":"heal_pix_map","nside":{},"pixels":{:?},"probabilities":{:?},"credible_level":0.9}}"#,
+            nside, pixels, probs
+        );
+        let geom: EventGeometry = serde_json::from_str(&json).unwrap();
+
+        // This would fail with false negative if pixels weren't sorted on deser
+        assert!(
+            geom.contains(45.0, 30.0),
+            "deserialized HealPixMap must find positions correctly"
+        );
+    }
+
+    #[test]
+    fn test_circle_deserialization_round_trip() {
+        let original = EventGeometry::circle(123.456, -45.678, 2.5);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: EventGeometry = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+}
+
+// ==================== matches() Guard Tests ====================
+
+#[cfg(test)]
+mod matches_guard_tests {
+    use crate::gcn::{EventGeometry, GcnEvent, GcnEventType, GcnSource};
+    use std::collections::HashMap;
+
+    fn make_active_event() -> GcnEvent {
+        GcnEvent {
+            id: "guard-test".to_string(),
+            source: GcnSource::Custom,
+            event_type: GcnEventType::Watchlist,
+            trigger_time: 2460000.0,
+            geometry: EventGeometry::circle(180.0, 45.0, 5.0),
+            coordinates: None,
+            properties: HashMap::new(),
+            expires_at: 2460030.0,
+            is_active: true,
+            user_id: None,
+            name: None,
+            description: None,
+            created_at: 2460000.0,
+            updated_at: 2460000.0,
+            supersedes: None,
+            superseded_by: None,
+        }
+    }
+
+    #[test]
+    fn test_matches_rejects_positive_infinity_alert_jd() {
+        let event = make_active_event();
+        assert!(
+            !event.matches(180.0, 45.0, f64::INFINITY),
+            "Infinity alert_jd must not match"
+        );
+    }
+
+    #[test]
+    fn test_matches_rejects_negative_infinity_alert_jd() {
+        let event = make_active_event();
+        assert!(
+            !event.matches(180.0, 45.0, f64::NEG_INFINITY),
+            "-Infinity alert_jd must not match"
+        );
+    }
+
+    #[test]
+    fn test_matches_accepts_valid_alert_jd_in_range() {
+        let event = make_active_event();
+        assert!(event.matches(180.0, 45.0, 2460015.0));
     }
 }

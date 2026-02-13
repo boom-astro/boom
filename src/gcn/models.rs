@@ -64,8 +64,13 @@ impl std::fmt::Display for GcnEventType {
     }
 }
 
-/// Spatial geometry for event localization
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Spatial geometry for event localization.
+///
+/// **Invariant:** For `HealPixMap`, the `pixels` array is always sorted in
+/// ascending order and `probabilities` is reordered to match. This is
+/// enforced by the constructor, and by a custom `Deserialize` impl that
+/// re-sorts after loading from JSON/BSON.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventGeometry {
     /// Simple circular region
@@ -88,6 +93,64 @@ pub enum EventGeometry {
         /// Credible level (e.g., 0.90 for 90% contour)
         credible_level: f64,
     },
+}
+
+/// Raw mirror of `EventGeometry` used only for deserialization, so that we can
+/// post-process (sort pixels) without writing a fully manual `Deserialize`.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum EventGeometryRaw {
+    Circle {
+        ra: f64,
+        dec: f64,
+        error_radius: f64,
+    },
+    HealPixMap {
+        nside: u32,
+        pixels: Vec<u64>,
+        probabilities: Vec<f64>,
+        credible_level: f64,
+    },
+}
+
+impl<'de> Deserialize<'de> for EventGeometry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = EventGeometryRaw::deserialize(deserializer)?;
+        Ok(match raw {
+            EventGeometryRaw::Circle {
+                ra,
+                dec,
+                error_radius,
+            } => EventGeometry::Circle {
+                ra,
+                dec,
+                error_radius,
+            },
+            EventGeometryRaw::HealPixMap {
+                nside,
+                pixels,
+                probabilities,
+                credible_level,
+            } => {
+                // Re-sort pixels to uphold the binary-search invariant even
+                // when data comes from an external source (e.g. MongoDB).
+                let mut pairs: Vec<(u64, f64)> =
+                    pixels.into_iter().zip(probabilities).collect();
+                pairs.sort_unstable_by_key(|(px, _)| *px);
+                let (sorted_pixels, sorted_probs): (Vec<u64>, Vec<f64>) =
+                    pairs.into_iter().unzip();
+                EventGeometry::HealPixMap {
+                    nside,
+                    pixels: sorted_pixels,
+                    probabilities: sorted_probs,
+                    credible_level,
+                }
+            }
+        })
+    }
 }
 
 impl EventGeometry {
@@ -258,6 +321,11 @@ impl GcnEvent {
     /// Check if a position and time match this event
     pub fn matches(&self, ra: f64, dec: f64, alert_jd: f64) -> bool {
         if !self.is_active {
+            return false;
+        }
+        // Reject non-finite alert_jd — NaN would bypass the expiry comparison
+        // (IEEE 754: NaN > x is always false) and Infinity is meaningless.
+        if !alert_jd.is_finite() {
             return false;
         }
         if alert_jd > self.expires_at {
