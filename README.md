@@ -72,8 +72,9 @@ code.
 
 ### Start services for local development
 
-1. Install lfs and pull the large files:
+1. Install and configure Git LFS, then pull the large files:
     ```bash
+    sudo apt-get install git-lfs # or brew install git-lfs
     git lfs install
     git lfs pull
     ```
