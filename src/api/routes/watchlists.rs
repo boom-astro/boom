@@ -6,11 +6,17 @@ use crate::utils::spatial::Coordinates;
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
+use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use mongodb::{Collection, Database};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::error;
 use utoipa::ToSchema;
+
+/// Serialized value of GcnSource::Custom for use in MongoDB queries.
+/// This avoids hardcoding "custom" strings that could silently break
+/// if the enum variant or serde rename_all strategy changes.
+const SOURCE_CUSTOM: &str = "custom";
 
 /// Maximum allowed length for watchlist name
 const MAX_NAME_LENGTH: usize = 256;
@@ -193,7 +199,7 @@ pub async fn post_watchlist(
     let user_count = match gcn_collection
         .count_documents(doc! {
             "user_id": &current_user.id,
-            "source": "custom",
+            "source": SOURCE_CUSTOM,
         })
         .await
     {
@@ -275,7 +281,7 @@ pub async fn get_watchlists(
 
     let filter = doc! {
         "user_id": &current_user.id,
-        "source": "custom",
+        "source": SOURCE_CUSTOM,
     };
 
     match gcn_collection.find(filter).await {
@@ -334,7 +340,7 @@ pub async fn get_watchlist(
 
     let filter = doc! {
         "_id": &watchlist_id,
-        "source": "custom",
+        "source": SOURCE_CUSTOM,
     };
 
     match gcn_collection.find_one(filter).await {
@@ -396,7 +402,7 @@ pub async fn patch_watchlist(
         }
     }
     if let Some(desc) = &body.description {
-        if desc.len() > MAX_DESCRIPTION_LENGTH {
+        if desc.trim().len() > MAX_DESCRIPTION_LENGTH {
             return response::bad_request(&format!(
                 "Description must not exceed {} characters",
                 MAX_DESCRIPTION_LENGTH
@@ -419,7 +425,7 @@ pub async fn patch_watchlist(
     // Admins can update any watchlist; regular users only their own.
     let mut filter = doc! {
         "_id": &watchlist_id,
-        "source": "custom",
+        "source": SOURCE_CUSTOM,
     };
     if !current_user.is_admin {
         filter.insert("user_id", &current_user.id);
@@ -446,27 +452,20 @@ pub async fn patch_watchlist(
         update_doc.insert("expires_at", new_expires_at);
     }
 
+    let options = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::After)
+        .build();
+
     match gcn_collection
-        .update_one(filter.clone(), doc! { "$set": update_doc })
+        .find_one_and_update(filter, doc! { "$set": update_doc })
+        .with_options(options)
         .await
     {
-        Ok(result) => {
-            if result.matched_count == 0 {
-                return response::not_found("Watchlist not found");
-            }
-            // Fetch updated document
-            match gcn_collection.find_one(filter).await {
-                Ok(Some(updated_event)) => match WatchlistPublic::from_event(&updated_event) {
-                    Some(public) => response::ok_ser("Watchlist updated", public),
-                    None => response::internal_error("Invalid watchlist geometry"),
-                },
-                Ok(None) => response::not_found("Watchlist not found after update"),
-                Err(e) => {
-                    error!("Failed to read watchlist {} after update: {}", watchlist_id, e);
-                    response::internal_error("Failed to retrieve updated watchlist")
-                }
-            }
-        }
+        Ok(Some(updated_event)) => match WatchlistPublic::from_event(&updated_event) {
+            Some(public) => response::ok_ser("Watchlist updated", public),
+            None => response::internal_error("Invalid watchlist geometry"),
+        },
+        Ok(None) => response::not_found("Watchlist not found"),
         Err(e) => {
             error!("Failed to update watchlist {}: {}", watchlist_id, e);
             response::internal_error("Failed to update watchlist")
@@ -507,7 +506,7 @@ pub async fn delete_watchlist(
     // Admins can delete any watchlist; regular users only their own.
     let mut filter = doc! {
         "_id": &watchlist_id,
-        "source": "custom",
+        "source": SOURCE_CUSTOM,
     };
     if !current_user.is_admin {
         filter.insert("user_id", &current_user.id);

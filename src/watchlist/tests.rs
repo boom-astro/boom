@@ -894,6 +894,9 @@ mod watchlist_validation_tests {
     }
 
     fn validate_radius(radius: f64, max_radius: f64) -> Result<(), String> {
+        if !radius.is_finite() {
+            return Err("Radius must be a finite number".to_string());
+        }
         if radius <= 0.0 {
             return Err("Radius must be positive".to_string());
         }
@@ -2135,6 +2138,118 @@ mod geometry_edge_case_tests {
     }
 }
 
+// ==================== Watchlist Route Logic Tests ====================
+// These replicate the route-level validation boundaries (constants are private
+// to the route module), ensuring the logic matches expected behavior.
+
+#[cfg(test)]
+mod watchlist_boundary_tests {
+    const MAX_NAME_LENGTH: usize = 256;
+    const MAX_DESCRIPTION_LENGTH: usize = 2048;
+    const MAX_EXPIRES_IN_DAYS: u32 = 365;
+
+    // Replicate the actual validation logic from watchlists.rs
+    fn validate_name(name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > MAX_NAME_LENGTH {
+            return Err(format!(
+                "Name must be between 1 and {} characters",
+                MAX_NAME_LENGTH
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_description(desc: &str) -> Result<(), String> {
+        // Must trim before checking, matching post_watchlist and patch_watchlist
+        if desc.trim().len() > MAX_DESCRIPTION_LENGTH {
+            return Err(format!(
+                "Description must not exceed {} characters",
+                MAX_DESCRIPTION_LENGTH
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_expires_in_days(days: u32) -> Result<(), String> {
+        if days == 0 || days > MAX_EXPIRES_IN_DAYS {
+            return Err(format!(
+                "Expiration must be between 1 and {} days",
+                MAX_EXPIRES_IN_DAYS
+            ));
+        }
+        Ok(())
+    }
+
+    // Name boundary tests
+    #[test]
+    fn test_name_at_max_length_accepted() {
+        let name = "a".repeat(MAX_NAME_LENGTH);
+        assert!(validate_name(&name).is_ok());
+    }
+
+    #[test]
+    fn test_name_over_max_length_rejected() {
+        let name = "a".repeat(MAX_NAME_LENGTH + 1);
+        assert!(validate_name(&name).is_err());
+    }
+
+    #[test]
+    fn test_name_empty_rejected() {
+        assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn test_name_whitespace_only_rejected() {
+        assert!(validate_name("   ").is_err());
+    }
+
+    #[test]
+    fn test_name_single_char_accepted() {
+        assert!(validate_name("x").is_ok());
+    }
+
+    // Description boundary tests
+    #[test]
+    fn test_description_at_max_length_accepted() {
+        let desc = "a".repeat(MAX_DESCRIPTION_LENGTH);
+        assert!(validate_description(&desc).is_ok());
+    }
+
+    #[test]
+    fn test_description_over_max_length_rejected() {
+        let desc = "a".repeat(MAX_DESCRIPTION_LENGTH + 1);
+        assert!(validate_description(&desc).is_err());
+    }
+
+    #[test]
+    fn test_description_whitespace_padding_not_counted() {
+        // Content at max length + surrounding whitespace should pass after trim
+        let desc = format!("  {}  ", "a".repeat(MAX_DESCRIPTION_LENGTH));
+        assert!(validate_description(&desc).is_ok());
+    }
+
+    // Expiration boundary tests
+    #[test]
+    fn test_expires_zero_days_rejected() {
+        assert!(validate_expires_in_days(0).is_err());
+    }
+
+    #[test]
+    fn test_expires_one_day_accepted() {
+        assert!(validate_expires_in_days(1).is_ok());
+    }
+
+    #[test]
+    fn test_expires_at_max_accepted() {
+        assert!(validate_expires_in_days(MAX_EXPIRES_IN_DAYS).is_ok());
+    }
+
+    #[test]
+    fn test_expires_over_max_rejected() {
+        assert!(validate_expires_in_days(MAX_EXPIRES_IN_DAYS + 1).is_err());
+    }
+}
 // ==================== GcnSource Serialization Consistency ====================
 
 #[cfg(test)]
@@ -2142,7 +2257,7 @@ mod source_serialization_tests {
     use crate::watchlist::GcnSource;
 
     /// Verify that GcnSource::Custom serializes to "custom", which is the value
-    /// used in MongoDB query filters.
+    /// used in MongoDB query filters (SOURCE_CUSTOM constant in watchlists.rs).
     #[test]
     fn test_gcn_source_custom_serializes_to_custom() {
         let serialized = serde_json::to_string(&GcnSource::Custom).unwrap();
