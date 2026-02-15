@@ -1,7 +1,10 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
-use crate::fitting::{fit_nonparametric, photometry_to_mag_bands, LightcurveFittingResult};
+use crate::fitting::{
+    fit_nonparametric, fit_parametric, photometry_to_flux_bands, photometry_to_mag_bands,
+    LightcurveFittingResult,
+};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
@@ -456,14 +459,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
 
-            // Lightcurve fitting (GP nonparametric)
-            let lc = lightcurve.clone();
+            // Lightcurve fitting (GP nonparametric + SVI parametric)
             let fitting_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(60),
                 tokio::task::spawn_blocking(move || {
-                    let mag_bands = photometry_to_mag_bands(&lc);
+                    let mag_bands = photometry_to_mag_bands(&lightcurve);
+                    let flux_bands = photometry_to_flux_bands(&lightcurve);
                     let nonparametric = fit_nonparametric(&mag_bands);
-                    LightcurveFittingResult { nonparametric }
+                    let parametric = fit_parametric(&flux_bands);
+                    LightcurveFittingResult {
+                        nonparametric,
+                        parametric,
+                    }
                 }),
             )
             .await
@@ -473,12 +480,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     warn!("Lightcurve fitting panicked for candid {}: {}", candid, e);
                     LightcurveFittingResult {
                         nonparametric: vec![],
+                        parametric: vec![],
                     }
                 }
                 Err(_) => {
                     warn!("Lightcurve fitting timed out (60s) for candid {}", candid);
                     LightcurveFittingResult {
                         nonparametric: vec![],
+                        parametric: vec![],
                     }
                 }
             };
