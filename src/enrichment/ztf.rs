@@ -10,7 +10,10 @@ use crate::{
     alert::ZtfCandidate,
     enrichment::{
         fetch_alert_cutouts, fetch_alerts,
-        models::{AcaiModel, BtsBotModel, Model},
+        models::{
+            ztf::{AcaiModel, BtsBotModel},
+            Model,
+        },
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
@@ -457,7 +460,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // Now, prepare inputs for ML models and run inference
             // (we skip ML inference if features cannot be computed, e.g. missing required features)
-            let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
+            let triplet = self.acai_h_model.get_triplet(&[&cutouts], 63, 63)?;
             let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
             let btsbot_metadata_result = self
                 .btsbot_model

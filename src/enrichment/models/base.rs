@@ -58,25 +58,23 @@ pub trait Model {
     fn get_triplet(
         &self,
         alert_cutouts: &[&AlertCutout],
+        cutout_size: usize,
+        cropped_size: usize,
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        let mut triplets = Array::zeros((alert_cutouts.len(), 63, 63, 3));
+        let mut triplets = Array::zeros((alert_cutouts.len(), cropped_size, cropped_size, 3));
         for i in 0..alert_cutouts.len() {
             let (cutout_science, cutout_template, cutout_difference) =
-                prepare_triplet(alert_cutouts[i])?;
+                prepare_triplet(alert_cutouts[i], cutout_size, cropped_size)?;
             for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
                 .iter()
                 .enumerate()
             {
                 let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
-                let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
+                let cutout_array =
+                    Array::from_shape_vec((cropped_size, cropped_size), cutout.to_vec())?;
                 slice.assign(&cutout_array);
             }
         }
         Ok(triplets)
     }
-    fn predict(
-        &mut self,
-        metadata_features: &Array<f32, Dim<[usize; 2]>>,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, ModelError>;
 }

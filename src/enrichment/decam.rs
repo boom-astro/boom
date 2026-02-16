@@ -1,13 +1,49 @@
 use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
+use crate::enrichment::{
+    fetch_alert_cutouts, fetch_alerts,
+    models::{decam::DecamDrbModel, Model},
+    EnrichmentWorker, EnrichmentWorkerError,
+};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Represents DECAM photometry data we retrieve from the database
+pub struct DecamPhotometry {
+    pub jd: f64,
+    pub magap: Option<f64>,
+    pub sigmagap: Option<f64>,
+    pub band: Band,
+    pub snr: Option<f64>,
+}
+
+// it should return an optional PhotometryMag
+impl DecamPhotometry {
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
+        // If snr, magap, and sigmagap are all present, this returns Some(PhotometryMag)
+        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
+        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
+        match (self.snr, self.magap, self.sigmagap) {
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag: mag as f32,
+                    mag_err: sig as f32,
+                    band: self.band.clone(),
+                }),
+            },
+            _ => None,
+        }
+    }
+}
 
 pub fn create_decam_alert_pipeline() -> Vec<Document> {
     vec![
@@ -58,13 +94,15 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                 "objectId": 1,
                 "candidate": 1,
                 "prv_candidates.jd": 1,
-                "prv_candidates.magpsf": 1,
-                "prv_candidates.sigmapsf": 1,
+                "prv_candidates.magap": 1,
+                "prv_candidates.sigmagap": 1,
                 "prv_candidates.band": 1,
+                "prv_candidates.snr": 1,
                 "fp_hists.jd": 1,
-                "fp_hists.magpsf": 1,
-                "fp_hists.sigmapsf": 1,
+                "fp_hists.magap": 1,
+                "fp_hists.sigmagap": 1,
                 "fp_hists.band": 1,
+                "fp_hists.snr": 1,
             }
         },
     ]
@@ -80,8 +118,8 @@ pub struct DecamAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: DecamCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<DecamPhotometry>,
+    pub fp_hists: Vec<DecamPhotometry>,
 }
 
 /// DECAM alert properties computed during enrichment
@@ -92,12 +130,20 @@ pub struct DecamAlertProperties {
     pub photstats: PerBandProperties,
 }
 
+/// DECAM alert ML classifier scores
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+pub struct DecamAlertClassifications {
+    pub drb: f32,
+}
+
 pub struct DecamEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
+    alert_cutout_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
+    drb_model: DecamDrbModel,
 }
 
 #[async_trait::async_trait]
@@ -108,16 +154,22 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("DECAM_alerts");
+        let alert_cutout_collection = db.collection("DECAM_alerts_cutouts");
 
         let input_queue = "DECAM_alerts_enrichment_queue".to_string();
         let output_queue = "DECAM_alerts_filter_queue".to_string();
+
+        // we load the DRB model here, but we will likely need to load more models in the future
+        let drb_model = DecamDrbModel::new("data/models/DECam_mnv3_CNN.onnx")?;
 
         Ok(DecamEnrichmentWorker {
             input_queue,
             output_queue,
             client,
             alert_collection,
+            alert_cutout_collection,
             alert_pipeline: create_decam_alert_pipeline(),
+            drb_model,
         })
     }
 
@@ -149,6 +201,17 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             return Ok(vec![]);
         }
 
+        let mut candid_to_cutouts =
+            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
+
+        if candid_to_cutouts.len() != alerts.len() {
+            warn!(
+                "only {} cutouts fetched from {} candids",
+                candid_to_cutouts.len(),
+                alerts.len()
+            );
+        }
+
         let now = flare::Time::now().to_jd();
 
         // we keep it very simple for now, let's run on 1 alert at a time
@@ -157,11 +220,21 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         let mut processed_alerts = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
+            let cutouts = candid_to_cutouts
+                .remove(&candid)
+                .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             let properties = self.get_alert_properties(&alert).await?;
 
+            // Now, prepare inputs for ML models and run inference
+            let triplet = self.drb_model.get_triplet(&[&cutouts], 121, 31)?;
+            let drb_score = self.drb_model.predict(&triplet)?;
+
+            let classifications = DecamAlertClassifications { drb: drb_score[0] };
+
             let update_alert_document = doc! {
                 "$set": {
+                    "classifications": mongify(&classifications),
                     "properties": mongify(&properties),
                     "updated_at": now,
                 }
@@ -190,8 +263,18 @@ impl DecamEnrichmentWorker {
         &self,
         alert: &DecamAlertForEnrichment,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
-        let prv_candidates = alert.prv_candidates.clone();
-        let fp_hists = alert.fp_hists.clone();
+        let prv_candidates: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(None))
+            .collect();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();

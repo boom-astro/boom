@@ -8,8 +8,6 @@ const NAXIS2_BYTES: &[u8] = "NAXIS2  =".as_bytes();
 const NAXIS1_BYTES_LEN: usize = NAXIS1_BYTES.len();
 const NAXIS2_BYTES_LEN: usize = NAXIS2_BYTES.len();
 const FITS_HEADER_LEN: usize = 2880; // FITS headers are in blocks of 2880 bytes
-const NAXIS_STANDARD: usize = 63;
-const NB_PIXELS: usize = NAXIS_STANDARD * NAXIS_STANDARD;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CutoutError {
@@ -19,6 +17,8 @@ pub enum CutoutError {
     DecodeGzip(#[from] zune_inflate::errors::InflateDecodeErrors),
     #[error("integer parsing error")]
     ParseInt(#[from] std::num::ParseIntError),
+    #[error("Cutout size or cropped size is invalid")]
+    InvalidCutoutOrCropSize(String),
 }
 
 fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
@@ -30,7 +30,7 @@ fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
 }
 
 /// Converts a buffer of bytes from a gzipped FITS file to a vector of flattened 2D image data
-pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
+pub fn buffer_to_image(buffer: &[u8], naxis_standard: usize) -> Result<Vec<f32>, CutoutError> {
     let mut decoder = DeflateDecoder::new_with_options(
         buffer,
         DeflateOptions::default()
@@ -98,14 +98,14 @@ pub fn buffer_to_image(buffer: &[u8]) -> Result<Vec<f32>, CutoutError> {
     // so if NAXIS1 is not NAXIS_STANDARD, we need to add NAXIS_STANDARD - NAXIS1 zeros to the start and end of each row
     // and if NAXIS2 is not NAXIS_STANDARD, we need to add NAXIS_STANDARD - NAXIS2 zeros to the start and end of the vector
 
-    let offset1 = ((NAXIS_STANDARD - naxis1) as f32 / 2.0).ceil() as usize;
-    let offset2 = ((NAXIS_STANDARD - naxis2) as f32 / 2.0).ceil() as usize;
+    let offset1 = ((naxis_standard - naxis1) as f32 / 2.0).ceil() as usize;
+    let offset2 = ((naxis_standard - naxis2) as f32 / 2.0).ceil() as usize;
     if (offset1, offset2) != (0, 0) {
-        let mut new_image_data = vec![0.0; NB_PIXELS];
+        let mut new_image_data = vec![0.0; naxis_standard * naxis_standard];
         for i in 0..naxis2 {
             for j in 0..naxis1 {
                 let k = i * naxis1 + j;
-                let k_new = (i + offset2) * NAXIS_STANDARD + (j + offset1);
+                let k_new = (i + offset2) * naxis_standard + (j + offset1);
                 new_image_data[k_new] = image_data[k];
             }
         }
@@ -137,22 +137,54 @@ pub fn normalize_image(image: Vec<f32>) -> Result<Vec<f32>, CutoutError> {
     Ok(normalized)
 }
 
+pub fn crop_center(image: Vec<f32>, image_size: usize, crop_size: usize) -> Vec<f32> {
+    let mut cropped = vec![0.0; crop_size * crop_size];
+    let offset = (image_size - crop_size) / 2;
+    for i in 0..crop_size {
+        for j in 0..crop_size {
+            let k = (i + offset) * image_size + (j + offset);
+            let k_crop = i * crop_size + j;
+            cropped[k_crop] = image[k];
+        }
+    }
+    cropped
+}
+
 /// Prepares a cutout image for ML models
 /// It reads the image from the alert document
 /// decompresses it, normalizes it and returns it as a flattened 2D array of floats
-fn prepare_cutout(cutout: &[u8]) -> Result<Vec<f32>, CutoutError> {
-    let cutout = buffer_to_image(cutout)?;
+fn prepare_cutout(
+    cutout: &[u8],
+    cutout_size: usize,
+    cropped_size: usize,
+) -> Result<Vec<f32>, CutoutError> {
+    let cutout = buffer_to_image(cutout, cutout_size)?;
     let cutout = normalize_image(cutout)?;
-    Ok(cutout)
+    if cropped_size < cutout_size {
+        Ok(crop_center(cutout, cutout_size, cropped_size))
+    } else {
+        Ok(cutout)
+    }
 }
 
 /// Prepares a triplet of cutouts for ML models
 pub fn prepare_triplet(
     alert_cutouts: &AlertCutout,
+    cutout_size: usize,
+    cropped_size: usize,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), CutoutError> {
-    let cutout_science = prepare_cutout(&alert_cutouts.cutout_science)?;
-    let cutout_template = prepare_cutout(&alert_cutouts.cutout_template)?;
-    let cutout_difference = prepare_cutout(&alert_cutouts.cutout_difference)?;
+    // the cutout size and cropped size need to be odd numbers, otherwise there is no central pixel
+    if cutout_size % 2 == 0 || cropped_size % 2 == 0 {
+        return Err(CutoutError::InvalidCutoutOrCropSize(format!(
+            "cutout_size and cropped_size must be odd numbers, got cutout_size={} and cropped_size={}",
+            cutout_size, cropped_size
+        )));
+    }
+    let cutout_science = prepare_cutout(&alert_cutouts.cutout_science, cutout_size, cropped_size)?;
+    let cutout_template =
+        prepare_cutout(&alert_cutouts.cutout_template, cutout_size, cropped_size)?;
+    let cutout_difference =
+        prepare_cutout(&alert_cutouts.cutout_difference, cutout_size, cropped_size)?;
 
     Ok((cutout_science, cutout_template, cutout_difference))
 }
