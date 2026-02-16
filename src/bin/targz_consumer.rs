@@ -160,8 +160,13 @@ async fn process_tarball(
         // Get the file path within the tarball
         let path = entry.path()?;
 
-        // Check if it's an .avro file
-        if path.extension().and_then(|s| s.to_str()) == Some("avro") {
+        // Check if it's an .avro file and doesn't start with "._" (to skip hidden files created by macOS)
+        if path.extension().and_then(|s| s.to_str()) == Some("avro")
+            && !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map_or(false, |s| s.starts_with("._"))
+        {
             // Read the file contents as bytes
             let mut buffer = Vec::new();
             entry.read_to_end(&mut buffer)?;
