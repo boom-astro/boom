@@ -917,6 +917,15 @@ mod tests {
         assert_eq!(detection.prv_candidate.diffmaglim.is_some(), true);
         assert_eq!(detection.prv_candidate.isdiffpos.is_some(), true);
 
+        // let's also verify that we can recover the original magpsf and sigmapsf from the flux and flux_err for the detection
+        let (magpsf, sigmapsf) = flux2mag(
+            detection.psf_flux.unwrap() / 1e9_f32,     // convert back to Jy
+            detection.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - detection.prv_candidate.magpsf.unwrap()).abs() < 1e-6);
+        assert!((sigmapsf - detection.prv_candidate.sigmapsf.unwrap()).abs() < 1e-6);
+
         // validate the fp_hists
         let fp_hists = avro_alert.clone().fp_hists;
         assert!(fp_hists.is_some());
