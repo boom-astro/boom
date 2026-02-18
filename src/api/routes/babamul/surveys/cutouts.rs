@@ -23,7 +23,6 @@ struct AlertCandidOnly {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct CutoutQuery {
-    survey: Survey,
     candid: Option<i64>,
     object_id: Option<String>,
     which: Option<WhichCutouts>,

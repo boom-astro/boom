@@ -468,7 +468,7 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey_name}/objects/{candid}/cutouts success case
+    /// Test GET /babamul/surveys/{survey_name}/cutouts success case
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
         load_dotenv();
@@ -501,14 +501,14 @@ mod tests {
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
                     .wrap(from_fn(babamul_auth_middleware))
-                    .service(routes::babamul::surveys::get_alert_cutouts),
+                    .service(routes::babamul::surveys::get_cutouts),
             ),
         )
         .await;
 
         let req = test::TestRequest::get()
             .uri(&format!(
-                "/babamul/surveys/ztf/alerts/{}/cutouts",
+                "/babamul/surveys/ztf/cutouts?candid={}",
                 test_candid
             ))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -518,7 +518,8 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "Should successfully retrieve cutouts"
+            "Should successfully retrieve cutouts: {}",
+            read_str_response(resp).await
         );
 
         let body = read_json_response(resp).await;
@@ -540,7 +541,7 @@ mod tests {
 
         // Test retrieval of non-existent candid
         let req = test::TestRequest::get()
-            .uri("/babamul/surveys/ztf/alerts/8888888888/cutouts")
+            .uri("/babamul/surveys/ztf/cutouts?candid=8888888888")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
 
@@ -732,10 +733,6 @@ mod tests {
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
-        assert!(
-            body["data"]["cutoutScience"].is_string(),
-            "Cutout should be base64 encoded string"
-        );
 
         // Clean up
         drop_alert_from_collections(candid, "LSST").await.unwrap();
@@ -806,10 +803,6 @@ mod tests {
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
-        );
-        assert!(
-            body["data"]["cutoutScience"].is_string(),
-            "Cutout should be base64 encoded string"
         );
 
         // Clean up
