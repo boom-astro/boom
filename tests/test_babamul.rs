@@ -88,13 +88,27 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
     inner_candidate.fid = 1; // g-band
     inner_candidate.programid = 1; // public
 
-    let candidate = ZtfCandidate {
-        candidate: inner_candidate,
-        psf_flux: 1000.0,
-        psf_flux_err: 10.0,
-        snr: 100.0,
-        band: Band::G,
-    };
+    let candidate = ZtfCandidate::try_from(inner_candidate.clone()).unwrap();
+
+    // let's make sure that the flux and flux_err generated when converting from Candidate to ZtfCandidate
+    // can be converted back to the original magpsf and sigmapsf using the same ZP, to verify that the conversion is consistent
+    let (new_magpsf, new_sigmapsf) = flux2mag(
+        candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
+        candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
+        ZTF_ZP,
+    );
+    assert!(
+        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-6,
+        "Magnitude conversion mismatch: expected {}, got {}",
+        candidate.candidate.magpsf,
+        new_magpsf
+    );
+    assert!(
+        (new_sigmapsf - candidate.candidate.sigmapsf).abs() < 1e-6,
+        "Magnitude error conversion mismatch: expected {}, got {}",
+        candidate.candidate.sigmapsf,
+        new_sigmapsf
+    );
 
     let magpsf = 15.949999;
     let sigmapsf = 0.002316;

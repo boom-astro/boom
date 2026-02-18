@@ -480,6 +480,29 @@ async fn test_filter_ztf_alert() {
     assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
     assert!((magpsf_err - magpsf_err_from_flux).abs() < 1e-6);
 
+    // let's do a similar validation for the first prv_candidates point, where the ZP is fixed at ZTF_ZP
+    let alert_points = alert
+        .photometry
+        .iter()
+        .filter(|p| p.origin == Origin::Alert && p.flux.is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        !alert_points.is_empty(),
+        "No Alert photometry points with flux found"
+    );
+    let prv_candidate_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460423.9562384 && p.origin == Origin::Alert && p.flux.is_some())
+        .unwrap();
+    assert!(prv_candidate_point.flux.is_some());
+    let flux = prv_candidate_point.flux.unwrap();
+    let flux_err = prv_candidate_point.flux_err;
+    let (magpsf_prv_candidate, magpsf_err_prv_candidate) =
+        flux2mag((flux.abs() * 1e-9) as f32, (flux_err * 1e-9) as f32, ZTF_ZP);
+    assert!((magpsf_prv_candidate - 16.8002).abs() < 1e-4);
+    assert!((magpsf_err_prv_candidate - 0.1788).abs() < 1e-4);
+
     let filter_passed = alert
         .filters
         .iter()
