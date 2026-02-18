@@ -260,8 +260,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
         // Use f64 for intermediate ZP scaling to match precision of enrichment/filter paths
-        let zp_scaling_factor =
-            10f64.powf((ZTF_ZP as f64 - magzpsci as f64) / 2.5);
+        let zp_scaling_factor = 10f64.powf((ZTF_ZP as f64 - magzpsci as f64) / 2.5);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
@@ -966,13 +965,15 @@ mod tests {
         assert!(
             (fp_negative_det.fp_hist.forcediffimflux.unwrap() as f64 * 1e9_f64 * zp_scaling_factor
                 - fp_negative_det.psf_flux.unwrap() as f64)
-            .abs()
+                .abs()
                 < 1e-3
         );
         assert!(
-            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64 * 1e9_f64 * zp_scaling_factor
+            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64
+                * 1e9_f64
+                * zp_scaling_factor
                 - fp_negative_det.psf_flux_err.unwrap() as f64)
-            .abs()
+                .abs()
                 < 1e-3
         );
 
@@ -998,13 +999,15 @@ mod tests {
         assert!(
             (fp_positive_det.fp_hist.forcediffimflux.unwrap() as f64 * 1e9_f64 * zp_scaling_factor
                 - fp_positive_det.psf_flux.unwrap() as f64)
-            .abs()
+                .abs()
                 < 1e-3
         );
         assert!(
-            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64 * 1e9_f64 * zp_scaling_factor
+            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64
+                * 1e9_f64
+                * zp_scaling_factor
                 - fp_positive_det.psf_flux_err.unwrap() as f64)
-            .abs()
+                .abs()
                 < 1e-3
         );
 

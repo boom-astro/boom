@@ -85,10 +85,7 @@ pub async fn get_cutouts(
             "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
             "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
         });
-        return response::ok(
-            &format!("cutouts found for candid: {}", candid),
-            resp,
-        );
+        return response::ok(&format!("cutouts found for candid: {}", candid), resp);
     }
 
     if let Some(object_id) = &query.object_id {
@@ -164,10 +161,7 @@ pub async fn get_cutouts(
             "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
             "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
         });
-        return response::ok(
-            &format!("cutouts found for objectId: {}", object_id),
-            resp,
-        );
+        return response::ok(&format!("cutouts found for objectId: {}", object_id), resp);
     }
 
     response::not_found("candid or objectId query parameter must be provided")

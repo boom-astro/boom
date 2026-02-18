@@ -453,11 +453,7 @@ pub async fn cone_search_alerts(
                     .chain(filter_doc.into_iter())
                     .collect();
 
-                let mut alert_cursor = match alerts_collection
-                    .find(filter_doc)
-                    .limit(10000)
-                    .await
-                {
+                let mut alert_cursor = match alerts_collection.find(filter_doc).limit(10000).await {
                     Ok(cursor) => cursor,
                     Err(error) => {
                         return response::internal_error(&format!(
@@ -482,10 +478,7 @@ pub async fn cone_search_alerts(
                 }
                 results.insert(object_id.clone(), alert_results);
             }
-            return response::ok(
-                "found alerts matching query",
-                serde_json::json!(results),
-            );
+            return response::ok("found alerts matching query", serde_json::json!(results));
         }
         Survey::Lsst => {
             // similar to above but for LSST collection
@@ -511,11 +504,7 @@ pub async fn cone_search_alerts(
                     .into_iter()
                     .chain(filter_doc.into_iter())
                     .collect();
-                let mut alert_cursor = match alerts_collection
-                    .find(filter_doc)
-                    .limit(10000)
-                    .await
-                {
+                let mut alert_cursor = match alerts_collection.find(filter_doc).limit(10000).await {
                     Ok(cursor) => cursor,
                     Err(error) => {
                         return response::internal_error(&format!(
@@ -540,10 +529,7 @@ pub async fn cone_search_alerts(
                 }
                 results.insert(object_id.clone(), alert_results);
             }
-            return response::ok(
-                "found alerts matching query",
-                serde_json::json!(results),
-            );
+            return response::ok("found alerts matching query", serde_json::json!(results));
         }
         _ => {
             return response::bad_request(
