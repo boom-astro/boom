@@ -1,6 +1,6 @@
 use crate::alert::{
-    AlertCutout, LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate,
-    ZtfForcedPhot, ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
+    LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate, ZtfForcedPhot,
+    ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
 };
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
@@ -9,7 +9,6 @@ use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertPr
 use crate::utils::enums::Survey;
 use crate::utils::spatial::Coordinates;
 use actix_web::{get, post, web, HttpResponse};
-use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use regex::Regex;
@@ -56,12 +55,6 @@ struct ZtfObj {
     object_id: String,
     candidate: ZtfCandidate,
     properties: Option<ZtfAlertProperties>,
-    #[serde(rename = "cutoutScience")]
-    cutout_science: serde_json::Value,
-    #[serde(rename = "cutoutTemplate")]
-    cutout_template: serde_json::Value,
-    #[serde(rename = "cutoutDifference")]
-    cutout_difference: serde_json::Value,
     prv_candidates: Vec<ZtfPrvCandidate>,
     prv_nondetections: Vec<ZtfPrvCandidate>,
     fp_hists: Vec<ZtfForcedPhot>,
@@ -95,12 +88,6 @@ struct LsstObj {
     object_id: String,
     candidate: LsstCandidate,
     properties: Option<LsstAlertProperties>,
-    #[serde(rename = "cutoutScience")]
-    cutout_science: serde_json::Value,
-    #[serde(rename = "cutoutTemplate")]
-    cutout_template: serde_json::Value,
-    #[serde(rename = "cutoutDifference")]
-    cutout_difference: serde_json::Value,
     prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
@@ -156,8 +143,6 @@ pub async fn get_object(
         Survey::Ztf => {
             let alerts_collection: Collection<EnrichedZtfAlert> =
                 db.collection(&format!("{}_alerts", survey));
-            let cutout_collection: Collection<AlertCutout> =
-                db.collection(&format!("{}_alerts_cutouts", survey));
             let aux_collection: Collection<ZtfObject> =
                 db.collection(&format!("{}_alerts_aux", survey));
             let lsst_aux_collection: Collection<LsstObject> =
@@ -212,26 +197,6 @@ pub async fn get_object(
             };
             // reverse classification history, to have it in chronological order
             classifications_history.reverse();
-
-            // using the candid, query the cutout collection for the cutouts
-            let candid = newest_alert.candid;
-            let cutouts = match cutout_collection
-                .find_one(doc! {
-                    "_id": candid,
-                })
-                .await
-            {
-                Ok(Some(cutouts)) => cutouts,
-                Ok(None) => {
-                    return response::not_found(&format!("no cutouts found for candid {}", candid));
-                }
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
-            };
 
             // Get crossmatches and light curve data from aux collection
             let aux_entry = match aux_collection
@@ -304,11 +269,6 @@ pub async fn get_object(
                 object_id: object_id.clone(),
                 candidate: newest_alert.candidate,
                 properties: newest_alert.properties,
-                cutout_science: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_science)),
-                cutout_template: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_template)),
-                cutout_difference: serde_json::json!(
-                    BASE64_STANDARD.encode(&cutouts.cutout_difference)
-                ),
                 // Limit photometry to programid 1 (public ZTF alerts)
                 prv_candidates: aux_entry
                     .prv_candidates
@@ -335,8 +295,6 @@ pub async fn get_object(
         Survey::Lsst => {
             let alerts_collection: Collection<EnrichedLsstAlert> =
                 db.collection(&format!("{}_alerts", survey));
-            let cutout_collection: Collection<AlertCutout> =
-                db.collection(&format!("{}_alerts_cutouts", survey));
             let aux_collection: Collection<LsstObject> =
                 db.collection(&format!("{}_alerts_aux", survey));
             let ztf_aux_collection: Collection<ZtfObject> =
@@ -370,25 +328,7 @@ pub async fn get_object(
                     ));
                 }
             };
-            // using the candid, query the cutout collection for the cutouts
-            let candid = newest_alert.candid;
-            let cutouts = match cutout_collection
-                .find_one(doc! {
-                    "_id": candid,
-                })
-                .await
-            {
-                Ok(Some(cutouts)) => cutouts,
-                Ok(None) => {
-                    return response::not_found(&format!("no cutouts found for candid {}", candid));
-                }
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
-            };
+
             // Get crossmatches and light curve data from aux collection
             let aux_entry = match aux_collection
                 .find_one(doc! {
@@ -474,11 +414,6 @@ pub async fn get_object(
                 object_id: object_id.clone(),
                 candidate: newest_alert.candidate,
                 properties: newest_alert.properties,
-                cutout_science: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_science)),
-                cutout_template: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_template)),
-                cutout_difference: serde_json::json!(
-                    BASE64_STANDARD.encode(&cutouts.cutout_difference)
-                ),
                 prv_candidates: aux_entry.prv_candidates,
                 fp_hists: aux_entry.fp_hists,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
