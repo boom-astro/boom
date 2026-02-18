@@ -97,8 +97,8 @@ fn create_mock_enriched_ztf_alert(
     // let's make sure that the flux and flux_err generated when converting from Candidate to ZtfCandidate
     // can be converted back to the original magpsf and sigmapsf using the same ZP, to verify that the conversion is consistent
     let (new_magpsf, new_sigmapsf) = flux2mag(
-        candidate.psf_flux / 1e9_f32,     // convert back to Jy
-        candidate.psf_flux_err / 1e9_f32, // convert back to Jy
+        candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
+        candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
         ZTF_ZP,
     );
     assert!(
