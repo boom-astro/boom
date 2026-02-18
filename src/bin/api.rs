@@ -64,7 +64,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_object_xmatches)
                     .service(routes::babamul::surveys::get_objects)
                     .service(routes::babamul::surveys::cone_search_objects)
-                    .service(routes::babamul::surveys::get_alert_cutouts)
+                    .service(routes::babamul::surveys::get_cutouts)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
                     .service(routes::babamul::tokens::get_tokens)
