@@ -259,7 +259,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
-        let factor = 10f32.powf((ZTF_ZP - magzpsci) / 2.5);
+        let zp_scaling_factor = 10f32.powf((ZTF_ZP - magzpsci) / 2.5);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
@@ -271,10 +271,16 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
                         Some(psf_flux_abs / psf_flux_err),
-                        Some(psf_flux * 1e9_f32 * factor), // convert to nJy and a fixed ZTF_ZP
+                        Some(psf_flux * 1e9_f32 * zp_scaling_factor), // convert to nJy and a fixed ZTF_ZP
                     )
                 } else {
-                    (None, None, None, None, Some(psf_flux * 1e9_f32 * factor)) // convert to nJy and a fixed ZTF_ZP
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(psf_flux * 1e9_f32 * zp_scaling_factor),
+                    ) // convert to nJy and a fixed ZTF_ZP
                 }
             }
             _ => (None, None, None, None, None),
@@ -285,7 +291,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some(psf_flux_err * 1e9_f32 * factor), // convert to nJy and a fixed ZTF_ZP
+            psf_flux_err: Some(psf_flux_err * 1e9_f32 * zp_scaling_factor), // convert to nJy and a fixed ZTF_ZP
             isdiffpos,
             snr,
             band,
@@ -953,15 +959,16 @@ mod tests {
         assert!((magpsf - 15.949999).abs() < 1e-6);
         assert!((sigmapsf - 0.002316).abs() < 1e-6);
         // let's also verify that forcediffimflux(unc) converts to psfFlux(Err) correctly
-        let factor = 10f32.powf((ZTF_ZP - fp_negative_det.fp_hist.magzpsci.unwrap()) / 2.5);
+        let zp_scaling_factor =
+            10f32.powf((ZTF_ZP - fp_negative_det.fp_hist.magzpsci.unwrap()) / 2.5);
         assert!(
-            (fp_negative_det.fp_hist.forcediffimflux.unwrap() * 1e9_f32 * factor
+            (fp_negative_det.fp_hist.forcediffimflux.unwrap() * 1e9_f32 * zp_scaling_factor
                 - fp_negative_det.psf_flux.unwrap())
             .abs()
                 < 1e-6
         );
         assert!(
-            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() * 1e9_f32 * factor
+            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() * 1e9_f32 * zp_scaling_factor
                 - fp_negative_det.psf_flux_err.unwrap())
             .abs()
                 < 1e-6
@@ -984,15 +991,16 @@ mod tests {
         );
         assert!((magpsf - 20.801506).abs() < 1e-6);
         assert!((sigmapsf - 0.3616859).abs() < 1e-6);
-        let factor = 10f32.powf((ZTF_ZP - fp_positive_det.fp_hist.magzpsci.unwrap()) / 2.5);
+        let zp_scaling_factor =
+            10f32.powf((ZTF_ZP - fp_positive_det.fp_hist.magzpsci.unwrap()) / 2.5);
         assert!(
-            (fp_positive_det.fp_hist.forcediffimflux.unwrap() * 1e9_f32 * factor
+            (fp_positive_det.fp_hist.forcediffimflux.unwrap() * 1e9_f32 * zp_scaling_factor
                 - fp_positive_det.psf_flux.unwrap())
             .abs()
                 < 1e-6
         );
         assert!(
-            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() * 1e9_f32 * factor
+            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() * 1e9_f32 * zp_scaling_factor
                 - fp_positive_det.psf_flux_err.unwrap())
             .abs()
                 < 1e-6
