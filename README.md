@@ -219,8 +219,7 @@ The steps to run the benchmark are as follows:
 
 ### Download Data
 ```bash
-  mkdir -p ./tests/data/alerts/ztf/public/20250311
-  gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./tests/data/alerts/kowalski.NED.json.gz
+  uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./tests/data/alerts/kowalski.NED.json.gz
 ```
 
 ### Start Benchmark
