@@ -87,7 +87,7 @@ pub async fn get_cutouts(
         });
         return response::ok(
             &format!("cutouts found for candid: {}", candid),
-            serde_json::json!(resp),
+            resp,
         );
     }
 
@@ -109,10 +109,10 @@ pub async fn get_cutouts(
                 .sort(doc! { "candidate.jd": -1 })
                 .build(),
             WhichCutouts::Brightest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { "candidate.magpsf": -1 }) // Lowest mag is brightest, so sort in descending order
+                .sort(doc! { "candidate.magpsf": 1 }) // Lowest mag is brightest, so sort in ascending order
                 .build(),
             WhichCutouts::Faintest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { "candidate.magpsf": 1 }) // Highest mag is faintest, so sort in ascending order
+                .sort(doc! { "candidate.magpsf": -1 }) // Highest mag is faintest, so sort in descending order
                 .build(),
         };
 
@@ -166,7 +166,7 @@ pub async fn get_cutouts(
         });
         return response::ok(
             &format!("cutouts found for objectId: {}", object_id),
-            serde_json::json!(resp),
+            resp,
         );
     }
 

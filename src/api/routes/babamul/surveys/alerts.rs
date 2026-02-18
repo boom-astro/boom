@@ -140,10 +140,9 @@ pub async fn get_alerts(
     } else if let (Some(ra), Some(dec), Some(radius_arcsec)) =
         (query.ra, query.dec, query.radius_arcsec)
     {
-        // if the radius is > 600 arcsec (10 arcmin), reject the query to avoid expensive searches
-        if radius_arcsec > 600.0 {
+        if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
             return response::bad_request(
-                "Radius too large, maximum allowed is 600 arcseconds (10 arcminutes)",
+                "Invalid radius, must be greater than 0 and less than or equal to 600 arcseconds (10 arcminutes)",
             );
         }
         // Add cone search filter
@@ -226,6 +225,7 @@ pub async fn get_alerts(
             let mut alert_cursor = match alerts_collection
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
+                .limit(10000)
                 .await
             {
                 Ok(cursor) => cursor,
@@ -251,7 +251,7 @@ pub async fn get_alerts(
                 results.push(alert_doc);
             }
             return response::ok(
-                &format!("found {} objects matching query", results.len()),
+                &format!("found {} alerts matching query", results.len()),
                 serde_json::json!(results),
             );
         }
@@ -261,6 +261,7 @@ pub async fn get_alerts(
             let mut alert_cursor = match alerts_collection
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
+                .limit(10000)
                 .await
             {
                 Ok(cursor) => cursor,
@@ -286,7 +287,7 @@ pub async fn get_alerts(
                 results.push(alert_doc);
             }
             return response::ok(
-                &format!("found {} objects matching query", results.len()),
+                &format!("found {} alerts matching query", results.len()),
                 serde_json::json!(results),
             );
         }
@@ -446,14 +447,17 @@ pub async fn cone_search_alerts(
                     }
                 };
                 let mut filter_doc = base_filter_doc.clone();
-                // filter_doc.extend(center_sphere);
                 // we need to make sure that the condition on coordinates is at the start of the filter document to take advantage of geospatial indexing
                 filter_doc = center_sphere
                     .into_iter()
                     .chain(filter_doc.into_iter())
                     .collect();
 
-                let mut alert_cursor = match alerts_collection.find(filter_doc).await {
+                let mut alert_cursor = match alerts_collection
+                    .find(filter_doc)
+                    .limit(10000)
+                    .await
+                {
                     Ok(cursor) => cursor,
                     Err(error) => {
                         return response::internal_error(&format!(
@@ -479,7 +483,7 @@ pub async fn cone_search_alerts(
                 results.insert(object_id.clone(), alert_results);
             }
             return response::ok(
-                &format!("found alerts matching query"),
+                "found alerts matching query",
                 serde_json::json!(results),
             );
         }
@@ -507,7 +511,11 @@ pub async fn cone_search_alerts(
                     .into_iter()
                     .chain(filter_doc.into_iter())
                     .collect();
-                let mut alert_cursor = match alerts_collection.find(filter_doc).await {
+                let mut alert_cursor = match alerts_collection
+                    .find(filter_doc)
+                    .limit(10000)
+                    .await
+                {
                     Ok(cursor) => cursor,
                     Err(error) => {
                         return response::internal_error(&format!(
@@ -533,7 +541,7 @@ pub async fn cone_search_alerts(
                 results.insert(object_id.clone(), alert_results);
             }
             return response::ok(
-                &format!("found alerts matching query"),
+                "found alerts matching query",
                 serde_json::json!(results),
             );
         }

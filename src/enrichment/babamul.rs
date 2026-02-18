@@ -84,6 +84,7 @@ impl BabamulLsstAlert {
                 prv_candidates: alert
                     .prv_candidates
                     .into_iter()
+                    .filter(|p| p.flux.is_some() && p.ra.is_some() && p.dec.is_some())
                     .map(|p| AlertPhotometry {
                         jd: p.jd,
                         flux: p.flux.unwrap(),
@@ -191,7 +192,7 @@ impl BabamulZtfAlert {
             prv_candidates: alert
                 .prv_candidates
                 .into_iter()
-                .filter(|p| p.programid == 1)
+                .filter(|p| p.programid == 1 && p.flux.is_some() && p.ra.is_some() && p.dec.is_some())
                 .map(|p| AlertPhotometry {
                     jd: p.jd,
                     flux: p.flux.unwrap(),

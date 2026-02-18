@@ -271,8 +271,6 @@ pub async fn build_ztf_alerts(
             }
             let jd = doc.get_f64("jd")?;
             let magzpsci = doc.get_f64("magzpsci")?;
-            // let flux = doc.get_f64("psfFlux").ok();
-            // let flux_err = doc.get_f64("psfFluxErr")?;
             // TODO: read from psfFlux once that is moved to a fixed ZP in the database
             let flux = doc.get_f64("forcediffimflux").ok();
             let flux_err = doc.get_f64("forcediffimfluxunc")?;
