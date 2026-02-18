@@ -47,18 +47,18 @@ jobs:
         id: cache-ned-catalog
         uses: actions/cache@v4
         with:
-          path: ./data/alerts/kowalski.NED.json.gz
+          path: ./tests/data/alerts/kowalski.NED.json.gz
           key: ned-catalog-v1
       - name: Download NED catalog from Google Drive
         if: steps.cache-ned-catalog.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ./data/alerts
-          uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
+          mkdir -p ./tests/data/alerts
+          uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./tests/data/alerts/kowalski.NED.json.gz
       - name: Cache ZTF alerts
         id: cache-ztf-alerts
         uses: actions/cache@v4
         with:
-          path: ./data/alerts/ztf/public/20250311
+          path: ./tests/data/alerts/ztf/public/20250311
           key: ztf-alerts-v1
       - name: Run test
         run: |
