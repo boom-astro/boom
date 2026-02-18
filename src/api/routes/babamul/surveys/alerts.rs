@@ -351,8 +351,9 @@ pub async fn cone_search_alerts(
     };
     let survey = path.into_inner();
     let coordinates = &query.coordinates;
-    // we must have more tha 0 and less than 1000 coordinate pairs to prevent expensive queries that could potentially timeout the server
-    if coordinates.len() == 0 || coordinates.len() > 1000 {
+    // we must have more than 0 and less than 1000 coordinate pairs
+    // to prevent expensive queries that could potentially timeout the server
+    if coordinates.is_empty() || coordinates.len() > 1000 {
         return response::bad_request(
             "Invalid number of coordinate pairs, must be between 1 and 1000",
         );

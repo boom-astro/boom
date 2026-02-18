@@ -646,12 +646,21 @@ pub async fn cone_search_objects(
         return response::bad_request("radius_arcsec must be between 0 and 600");
     }
 
+    // we must have more than 0 and less than 1000 coordinate pairs
+    // to prevent expensive queries that could potentially timeout the server
+    let coordinates = &query.coordinates;
+    if coordinates.is_empty() || coordinates.len() > 1000 {
+        return response::bad_request(
+            "Must provide between 1 and 1000 coordinate pairs for cone search",
+        );
+    }
+
     let radius_radians = (radius_arcsec / 3600.0).to_radians();
     let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
 
     let survey = path.into_inner();
     let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
-    for (name, coords) in query.coordinates.iter() {
+    for (name, coords) in coordinates {
         let filter = doc! {
             "coordinates.radec_geojson": {
                 "$nearSphere": [coords[0] - 180.0, coords[1]],

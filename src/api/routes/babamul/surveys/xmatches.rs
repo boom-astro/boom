@@ -54,8 +54,7 @@ pub async fn get_object_xmatches(
             survey
         ));
     }
-    let aux_collection: Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", survey.to_string()));
+    let aux_collection: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
 
     let aux_entry = match aux_collection
         .find_one(doc! {

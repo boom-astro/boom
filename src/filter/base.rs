@@ -572,10 +572,10 @@ pub async fn run_filter(
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {
-    if candids.len() == 0 {
+    if candids.is_empty() {
         return Ok(vec![]);
     }
-    if pipeline.len() == 0 {
+    if pipeline.is_empty() {
         return Err(FilterError::InvalidFilterPipeline(
             "filter pipeline is empty".to_string(),
         ));
