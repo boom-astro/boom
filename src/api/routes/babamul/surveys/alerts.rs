@@ -1,10 +1,9 @@
-use crate::alert::{AlertCutout, LsstCandidate, ZtfCandidate};
+use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
 use actix_web::{get, post, web, HttpResponse};
-use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, Document},
@@ -543,61 +542,4 @@ pub async fn cone_search_alerts(
             );
         }
     }
-}
-
-// we also want an endpoint that given a candid, grabs the cutouts from the cutouts collection
-#[utoipa::path(
-    get,
-    path = "/babamul/surveys/{survey}/alerts/{candid}/cutouts",
-    params(
-        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
-        ("candid" = i64, Path, description = "Candid of the alert to retrieve cutouts for"),
-    ),
-    responses(
-        (status = 200, description = "Cutouts retrieved successfully", body = serde_json::Value),
-        (status = 404, description = "Cutouts not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tags=["Surveys"]
-)]
-#[get("/surveys/{survey}/alerts/{candid}/cutouts")]
-pub async fn get_alert_cutouts(
-    path: web::Path<(Survey, i64)>,
-    current_user: Option<web::ReqData<BabamulUser>>,
-    db: web::Data<Database>,
-) -> HttpResponse {
-    let _current_user = match current_user {
-        Some(user) => user,
-        None => {
-            return HttpResponse::Unauthorized().body("Unauthorized");
-        }
-    };
-    let (survey, candid) = path.into_inner();
-
-    let cutout_collection: Collection<AlertCutout> =
-        db.collection(&format!("{}_alerts_cutouts", survey));
-    let cutouts = match cutout_collection
-        .find_one(doc! {
-            "_id": candid,
-        })
-        .await
-    {
-        Ok(Some(cutouts)) => cutouts,
-        Ok(None) => {
-            return response::not_found(&format!("no cutouts found for candid {}", candid));
-        }
-        Err(error) => {
-            return response::internal_error(&format!("error getting documents: {}", error));
-        }
-    };
-    let resp = serde_json::json!({
-        "candid": candid,
-        "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
-        "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
-        "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
-    });
-    return response::ok(
-        &format!("cutouts found for candid: {}", candid),
-        serde_json::json!(resp),
-    );
 }

@@ -51,6 +51,19 @@ pub enum Band {
     U,
 }
 
+impl ToString for Band {
+    fn to_string(&self) -> String {
+        match self {
+            Band::G => "g".to_string(),
+            Band::R => "r".to_string(),
+            Band::I => "i".to_string(),
+            Band::Z => "z".to_string(),
+            Band::Y => "y".to_string(),
+            Band::U => "u".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct PhotometryMag {
     #[serde(alias = "jd")]

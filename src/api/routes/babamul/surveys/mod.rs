@@ -1,11 +1,12 @@
 pub mod alerts;
+pub mod cutouts;
 pub mod objects;
 pub mod schemas;
 pub mod xmatches;
 
 pub use alerts::cone_search_alerts;
-pub use alerts::get_alert_cutouts;
 pub use alerts::get_alerts;
+pub use cutouts::get_cutouts;
 pub use objects::cone_search_objects;
 pub use objects::get_object;
 pub use objects::get_objects;
