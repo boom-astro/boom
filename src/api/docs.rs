@@ -99,7 +99,7 @@ pub struct ApiDoc;
         routes::babamul::surveys::objects::get_object,
         routes::babamul::surveys::objects::get_objects,
         routes::babamul::surveys::objects::cone_search_objects,
-        routes::babamul::surveys::xmatches::get_object_xmatches,
+        routes::babamul::surveys::objects::get_object_xmatches,
         routes::babamul::surveys::cutouts::get_cutouts,
         routes::babamul::surveys::alerts::get_alerts,
         routes::babamul::surveys::alerts::cone_search_alerts,

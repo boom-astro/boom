@@ -324,7 +324,7 @@ enum AlertsConeSearchResult {
 
 #[utoipa::path(
     post,
-    path = "/babamul/surveys/{survey}/alerts/cone_search",
+    path = "/babamul/surveys/{survey}/alerts/cone-search",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
     ),
@@ -336,7 +336,7 @@ enum AlertsConeSearchResult {
     ),
     tags=["Surveys"]
 )]
-#[post("/surveys/{survey}/alerts/cone_search")]
+#[post("/surveys/{survey}/alerts/cone-search")]
 pub async fn cone_search_alerts(
     path: web::Path<Survey>,
     query: web::Json<AlertsConeSearchQuery>,
