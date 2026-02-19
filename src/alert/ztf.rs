@@ -687,6 +687,102 @@ impl ZtfAlertWorker {
         Ok(result)
     }
 
+    #[instrument(skip(self, prv_candidates, existing_prv_candidates,), err)]
+    async fn prepare_prv_candidates_update(
+        self: &mut Self,
+        prv_candidates: &Vec<ZtfPrvCandidate>,
+        existing_prv_candidates: &Vec<LightcurveJdOnly>,
+    ) -> Result<(Vec<Document>, bool), AlertError> {
+        // if there is no new data, no update needed
+        if prv_candidates.is_empty() {
+            return Ok((vec![], false));
+        }
+
+        // if there is no existing data, we can just append without sorting
+        if existing_prv_candidates.is_empty() {
+            let new_prv_candidates_docs: Vec<Document> =
+                prv_candidates.iter().map(|pc| mongify(pc)).collect();
+            return Ok((new_prv_candidates_docs, false));
+        }
+
+        let min_new_jd_prv_candidate = prv_candidates
+            .iter()
+            .map(|pc| pc.prv_candidate.jd)
+            .fold(f64::INFINITY, f64::min);
+        let (existing_prv_candidate_jds, max_existing_jd_prv_candidate) = existing_prv_candidates
+            .iter()
+            .fold((HashSet::new(), None::<f64>), |(mut set, max_jd), pc| {
+                set.insert(pc.jd.to_bits());
+                let max_jd = match max_jd {
+                    Some(jd) => Some(jd.max(pc.jd)),
+                    None => Some(pc.jd),
+                };
+                (set, max_jd)
+            });
+
+        // if all new data is newer than existing data, we can just append without sorting
+        // else, we need to do the full update with sorting
+        if min_new_jd_prv_candidate > max_existing_jd_prv_candidate.unwrap() {
+            let new_prv_candidates_docs: Vec<Document> =
+                prv_candidates.iter().map(|pc| mongify(pc)).collect();
+            Ok((new_prv_candidates_docs, false))
+        } else {
+            let new_prv_candidates_docs: Vec<Document> = prv_candidates
+                .iter()
+                .filter(|pc| !existing_prv_candidate_jds.contains(&pc.prv_candidate.jd.to_bits()))
+                .map(|pc| mongify(pc))
+                .collect();
+            Ok((new_prv_candidates_docs, true))
+        }
+    }
+
+    async fn prepare_fp_hists_update(
+        self: &mut Self,
+        fp_hists: &Vec<ZtfForcedPhot>,
+        existing_fp_hists: &Vec<LightcurveJdOnly>,
+    ) -> Result<(Vec<Document>, bool), AlertError> {
+        // if there is no new data, no update needed
+        if fp_hists.is_empty() {
+            return Ok((vec![], false));
+        }
+
+        // if there is no existing data, we can just append without sorting
+        if existing_fp_hists.is_empty() {
+            let new_fp_hists_docs: Vec<Document> = fp_hists.iter().map(|pc| mongify(pc)).collect();
+            return Ok((new_fp_hists_docs, false));
+        }
+
+        let min_new_jd_fp_hist = fp_hists
+            .iter()
+            .map(|pc| pc.fp_hist.jd)
+            .fold(f64::INFINITY, f64::min);
+        let (existing_fp_hist_jds, max_existing_jd_fp_hist) = existing_fp_hists.iter().fold(
+            (HashSet::new(), None::<f64>),
+            |(mut set, max_jd), pc| {
+                set.insert(pc.jd.to_bits());
+                let max_jd = match max_jd {
+                    Some(jd) => Some(jd.max(pc.jd)),
+                    None => Some(pc.jd),
+                };
+                (set, max_jd)
+            },
+        );
+
+        // if all new data is newer than existing data, we can just append without sorting
+        // else, we need to do the full update with sorting
+        if min_new_jd_fp_hist > max_existing_jd_fp_hist.unwrap() {
+            let new_fp_hists_docs: Vec<Document> = fp_hists.iter().map(|pc| mongify(pc)).collect();
+            Ok((new_fp_hists_docs, false))
+        } else {
+            let new_fp_hists_docs: Vec<Document> = fp_hists
+                .iter()
+                .filter(|pc| !existing_fp_hist_jds.contains(&pc.fp_hist.jd.to_bits()))
+                .map(|pc| mongify(pc))
+                .collect();
+            Ok((new_fp_hists_docs, true))
+        }
+    }
+
     #[instrument(
         skip(
             self,
@@ -698,7 +794,7 @@ impl ZtfAlertWorker {
         ),
         err
     )]
-    async fn update_aux_v2(
+    async fn update_aux(
         self: &mut Self,
         object_id: &str,
         prv_candidates: &Vec<ZtfPrvCandidate>,
@@ -708,45 +804,58 @@ impl ZtfAlertWorker {
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
     ) -> Result<(), AlertError> {
-        let existing_prv_candidate_jds: HashSet<u64> = existing_alert_aux
-            .prv_candidates
-            .iter()
-            .map(|pc| pc.jd.to_bits())
-            .collect::<HashSet<u64>>();
-        let existing_prv_nondetection_jds: HashSet<u64> = existing_alert_aux
-            .prv_nondetections
-            .iter()
-            .map(|pc| pc.jd.to_bits())
-            .collect::<HashSet<u64>>();
-        let existing_fp_hist_jds: HashSet<u64> = existing_alert_aux
-            .fp_hists
-            .iter()
-            .map(|pc| pc.jd.to_bits())
-            .collect::<HashSet<u64>>();
         let current_version = existing_alert_aux.version;
+        let (new_prv_candidates_docs, need_sort_prv_candidates) = self
+            .prepare_prv_candidates_update(prv_candidates, &existing_alert_aux.prv_candidates)
+            .await?;
+        let (new_prv_nondetections_docs, need_sort_prv_nondetections) = self
+            .prepare_prv_candidates_update(prv_nondetections, &existing_alert_aux.prv_nondetections)
+            .await?;
+        let (new_fp_hists_docs, need_sort_fp_hists) = self
+            .prepare_fp_hists_update(fp_hists, &existing_alert_aux.fp_hists)
+            .await?;
 
-        let new_prv_candidates_docs: Vec<Document> = prv_candidates
-            .iter()
-            .filter(|pc| !existing_prv_candidate_jds.contains(&pc.prv_candidate.jd.to_bits()))
-            .map(|pc| mongify(pc))
-            .collect();
-        let new_prv_nondetections_docs: Vec<Document> = prv_nondetections
-            .iter()
-            .filter(|pc| !existing_prv_nondetection_jds.contains(&pc.prv_candidate.jd.to_bits()))
-            .map(|pc| mongify(pc))
-            .collect();
-        let new_fp_hists_docs: Vec<Document> = fp_hists
-            .iter()
-            .filter(|pc| !existing_fp_hist_jds.contains(&pc.fp_hist.jd.to_bits()))
-            .map(|pc| mongify(pc))
-            .collect();
+        let mut push_updates = Document::new();
+        if !new_prv_candidates_docs.is_empty() {
+            if need_sort_prv_candidates {
+                push_updates.insert(
+                    "prv_candidates",
+                    doc! { "$each": new_prv_candidates_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert("prv_candidates", doc! { "$each": new_prv_candidates_docs });
+            }
+        }
+        if !new_prv_nondetections_docs.is_empty() {
+            if need_sort_prv_nondetections {
+                push_updates.insert(
+                    "prv_nondetections",
+                    doc! { "$each": new_prv_nondetections_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert(
+                    "prv_nondetections",
+                    doc! { "$each": new_prv_nondetections_docs },
+                );
+            }
+        }
+        if !new_fp_hists_docs.is_empty() {
+            if need_sort_fp_hists {
+                push_updates.insert(
+                    "fp_hists",
+                    doc! { "$each": new_fp_hists_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert("fp_hists", doc! { "$each": new_fp_hists_docs });
+            }
+        }
 
+        if push_updates.is_empty() {
+            // if there is no new data to push, we can skip the update
+            return Ok(());
+        }
         let update_doc = doc! {
-            "$push": {
-                "prv_candidates": { "$each": new_prv_candidates_docs, "$sort": { "jd": 1 } },
-                "prv_nondetections": { "$each": new_prv_nondetections_docs, "$sort": { "jd": 1 } },
-                "fp_hists": { "$each": new_fp_hists_docs, "$sort": { "jd": 1 } },
-            },
+            "$push": push_updates,
             "$set": {
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
@@ -783,7 +892,7 @@ impl ZtfAlertWorker {
         ),
         err
     )]
-    async fn update_aux_v2_with_retries(
+    async fn update_aux_with_retries(
         self: &mut Self,
         object_id: &str,
         prv_candidates: &Vec<ZtfPrvCandidate>,
@@ -794,11 +903,10 @@ impl ZtfAlertWorker {
         mut existing_alert_aux: AlertAuxForUpdate,
         n_retries: usize,
     ) -> Result<(), AlertError> {
-        // here we call update_aux_v2 with retries
         // at every retry, we fetch the existing alert aux again
         for attempt in 0..=n_retries {
             match self
-                .update_aux_v2(
+                .update_aux(
                     object_id,
                     prv_candidates,
                     prv_nondetections,
@@ -936,7 +1044,7 @@ impl AlertWorker for ZtfAlertWorker {
             Some(candidates) => candidates,
             None => Vec::new(),
         };
-        let fp_hists = match avro_alert.fp_hists.take() {
+        let mut fp_hists = match avro_alert.fp_hists.take() {
             Some(hists) => hists,
             None => Vec::new(),
         };
@@ -961,8 +1069,28 @@ impl AlertWorker for ZtfAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
-        let (prv_candidates, prv_nondetections) =
+        let (mut prv_candidates, mut prv_nondetections) =
             self.format_prv_candidates(prv_candidates, &candidate);
+
+        // let's make sure all 3 arrays are sorted by jd ascending
+        prv_candidates.sort_by(|a, b| {
+            a.prv_candidate
+                .jd
+                .partial_cmp(&b.prv_candidate.jd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        prv_nondetections.sort_by(|a, b| {
+            a.prv_candidate
+                .jd
+                .partial_cmp(&b.prv_candidate.jd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        fp_hists.sort_by(|a, b| {
+            a.fp_hist
+                .jd
+                .partial_cmp(&b.fp_hist.jd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -987,7 +1115,7 @@ impl AlertWorker for ZtfAlertWorker {
             if let Err(AlertError::AlertAuxExists) = result {
                 let existing_alert_aux: Option<AlertAuxForUpdate> =
                     self.get_existing_aux(object_id.clone()).await?;
-                self.update_aux_v2_with_retries(
+                self.update_aux_with_retries(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.prv_nondetections,
@@ -1003,7 +1131,7 @@ impl AlertWorker for ZtfAlertWorker {
                 result.inspect_err(as_error!())?;
             }
         } else {
-            self.update_aux_v2_with_retries(
+            self.update_aux_with_retries(
                 &object_id,
                 &prv_candidates,
                 &prv_nondetections,
