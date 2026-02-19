@@ -2277,4 +2277,254 @@ mod tests {
         assert!(body["message"].is_string(), "Should include a message");
         assert!(body["data"].is_object(), "Should return results as object");
     }
+
+    /// Test GET /babamul/surveys/{survey}/alerts radius validation
+    #[actix_rt::test]
+    async fn test_get_alerts_radius_validation() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alerts),
+            ),
+        )
+        .await;
+
+        // Zero radius should be rejected
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/alerts?ra=180.0&dec=0.0&radius_arcsec=0")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Zero radius should be rejected"
+        );
+
+        // Negative radius should be rejected
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/alerts?ra=180.0&dec=0.0&radius_arcsec=-10")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Negative radius should be rejected"
+        );
+
+        // Radius > 600 arcsec should be rejected
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/alerts?ra=180.0&dec=0.0&radius_arcsec=601")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Radius > 600 arcsec should be rejected"
+        );
+    }
+
+    /// Test that survey endpoints reject unauthenticated requests.
+    /// The babamul_auth_middleware returns Err(ErrorUnauthorized) for missing auth,
+    /// so we call the service directly and check the error status code.
+    #[actix_rt::test]
+    async fn test_survey_endpoints_require_auth() {
+        use actix_web::dev::Service;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_alerts)
+                    .service(routes::babamul::surveys::get_object_xmatches)
+                    .service(routes::babamul::surveys::get_cutouts)
+                    .service(routes::babamul::surveys::cone_search_alerts)
+                    .service(routes::babamul::surveys::cone_search_objects),
+            ),
+        )
+        .await;
+
+        // All GET endpoints should reject unauthenticated requests
+        let uris = vec![
+            "/babamul/surveys/ztf/alerts?ra=180.0&dec=0.0&radius_arcsec=10",
+            "/babamul/surveys/ztf/objects/ZTF_test/cross-matches",
+            "/babamul/surveys/ztf/cutouts?candid=12345",
+        ];
+
+        for uri in uris {
+            let req = test::TestRequest::get().uri(uri).to_request();
+            let result = app.call(req).await;
+            match result {
+                Ok(resp) => {
+                    assert_eq!(
+                        resp.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "Should return 401 for unauthenticated request to {}",
+                        uri
+                    );
+                }
+                Err(err) => {
+                    assert_eq!(
+                        err.as_response_error().status_code(),
+                        StatusCode::UNAUTHORIZED,
+                        "Should return 401 for unauthenticated request to {}, got error: {}",
+                        uri,
+                        err
+                    );
+                }
+            }
+        }
+
+        // POST endpoints should also reject unauthenticated requests
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .set_json(serde_json::json!({
+                "coordinates": {"p1": [180.0, 0.0]},
+                "radius_arcsec": 10.0
+            }))
+            .to_request();
+
+        let result = app.call(req).await;
+        match result {
+            Ok(resp) => {
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "Should return 401 for unauthenticated cone search"
+                );
+            }
+            Err(err) => {
+                assert_eq!(
+                    err.as_response_error().status_code(),
+                    StatusCode::UNAUTHORIZED,
+                    "Should return 401 for unauthenticated cone search, got error: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    /// Test GET /babamul/surveys/{survey}/cutouts by objectId (tests Brightest/Faintest sort)
+    #[actix_rt::test]
+    async fn test_get_cutouts_by_object_id() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        // Insert a ZTF alert so we have cutouts associated with an objectId
+        let mut alert_worker = ztf_alert_worker().await;
+        let (candid, object_id, _, _, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf)
+                .ra(150.0)
+                .dec(20.0)
+                .get()
+                .await;
+        let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_cutouts),
+            ),
+        )
+        .await;
+
+        // Request cutouts by objectId (default: brightest)
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/cutouts?object_id={}",
+                &object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cutouts by objectId should succeed: {}",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(
+            body["data"]["cutout_science"].is_string(),
+            "Should have science cutout"
+        );
+
+        // Test all `which` variants
+        for which in &["first", "last", "brightest", "faintest"] {
+            let req = test::TestRequest::get()
+                .uri(&format!(
+                    "/babamul/surveys/ztf/cutouts?object_id={}&which={}",
+                    &object_id, which
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Cutouts with which={} should succeed: {}",
+                which,
+                read_str_response(resp).await
+            );
+        }
+
+        // Test non-existent objectId
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/cutouts?object_id=ZTF_nonexistent_obj")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Non-existent objectId should return 404"
+        );
+
+        // Test missing both candid and object_id
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/cutouts")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Missing both candid and object_id should return 400"
+        );
+
+        // Clean up
+        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+    }
 }
