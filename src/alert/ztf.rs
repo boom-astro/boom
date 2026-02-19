@@ -680,7 +680,7 @@ impl ZtfAlertWorker {
             .alert_aux_collection_update
             .find_one(doc! { "_id": &object_id })
             .projection(
-                doc! { "prv_candidates": 1, "prv_nondetections": 1, "fp_hists": 1, "version": 1 },
+                doc! { "prv_candidates.jd": 1, "prv_nondetections.jd": 1, "fp_hists.jd": 1, "version": 1 },
             )
             .await
             .inspect_err(as_error!())?;
