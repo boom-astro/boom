@@ -23,13 +23,13 @@ parser = argparse.ArgumentParser(description="Benchmark BOOM")
 parser.add_argument(
     "--n-alert-workers",
     type=int,
-    default=5,
+    default=6,
     help="Number of alert workers to use for benchmarking.",
 )
 parser.add_argument(
     "--n-enrichment-workers",
     type=int,
-    default=4,
+    default=3,
     help="Number of machine learning workers to use for benchmarking.",
 )
 parser.add_argument(
