@@ -90,6 +90,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
     inner_candidate.sigmapsf = 0.1;
     inner_candidate.fid = 1; // g-band
     inner_candidate.programid = 1; // public
+    inner_candidate.drb = Some(1.0); // DRB value
 
     let candidate = ZtfCandidate::try_from(inner_candidate.clone()).unwrap();
 
@@ -754,10 +755,15 @@ async fn test_babamul_process_ztf_alerts() {
     let alert2 = create_mock_enriched_ztf_alert(1234567891, &ztf_obj2, false);
 
     // Process the alerts
-    let _result = babamul
+    let count = babamul
         .process_ztf_alerts(vec![alert1, alert2])
         .await
         .unwrap();
+    assert_eq!(
+        count, 2,
+        "Expected to process 2 ZTF alerts, but processed {}",
+        count
+    );
 
     // Consume messages from Kafka topic and verify our specific alerts are present
     let messages = consume_kafka_messages(topic, &config).await;
