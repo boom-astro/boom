@@ -17,9 +17,11 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
+const LSST_MIN_RELIABILITY: f32 = 0.2;
+const ZTF_MIN_DRB: f32 = 0.2;
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -54,6 +56,151 @@ pub struct ForcedPhotometry {
     pub band: Band,
 }
 
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct BabamulSurveyMatch {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub prv_nondetections: Vec<NonDetectionPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
+}
+
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct BabamulSurveyMatches {
+    pub ztf: Option<BabamulSurveyMatch>,
+    pub lsst: Option<BabamulSurveyMatch>,
+}
+
+impl Default for BabamulSurveyMatches {
+    fn default() -> Self {
+        BabamulSurveyMatches {
+            ztf: None,
+            lsst: None,
+        }
+    }
+}
+
+impl TryFrom<crate::enrichment::ztf::ZtfMatch> for BabamulSurveyMatch {
+    type Error = EnrichmentWorkerError;
+
+    fn try_from(ztf_match: crate::enrichment::ztf::ZtfMatch) -> Result<Self, Self::Error> {
+        Ok(BabamulSurveyMatch {
+            object_id: ztf_match.object_id,
+            ra: ztf_match.ra,
+            dec: ztf_match.dec,
+            prv_candidates: ztf_match
+                .prv_candidates
+                .into_iter()
+                .filter(|p| {
+                    p.programid == 1 && p.flux.is_some() && p.ra.is_some() && p.dec.is_some()
+                })
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: ztf_match
+                .prv_nondetections
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| NonDetectionPhotometry {
+                    jd: p.jd,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+            fp_hists: ztf_match
+                .fp_hists
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| ForcedPhotometry {
+                    jd: p.jd,
+                    flux: p.flux,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+        })
+    }
+}
+
+impl TryFrom<crate::enrichment::lsst::LsstMatch> for BabamulSurveyMatch {
+    type Error = EnrichmentWorkerError;
+
+    fn try_from(lsst_match: crate::enrichment::lsst::LsstMatch) -> Result<Self, Self::Error> {
+        Ok(BabamulSurveyMatch {
+            object_id: lsst_match.object_id,
+            ra: lsst_match.ra,
+            dec: lsst_match.dec,
+            prv_candidates: lsst_match
+                .prv_candidates
+                .into_iter()
+                // Only include measurements with valid flux and coordinates (should always be true for prv_candidates)
+                .filter(|p| p.flux.is_some() && p.ra.is_some() && p.dec.is_some())
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: vec![], // LSST matches don't have nondetections
+            fp_hists: lsst_match
+                .fp_hists
+                .into_iter()
+                .map(|p| ForcedPhotometry {
+                    jd: p.jd,
+                    flux: p.flux,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+        })
+    }
+}
+
+impl TryFrom<Option<crate::enrichment::lsst::LsstSurveyMatches>> for BabamulSurveyMatches {
+    type Error = EnrichmentWorkerError;
+
+    fn try_from(
+        opt: Option<crate::enrichment::lsst::LsstSurveyMatches>,
+    ) -> Result<Self, Self::Error> {
+        match opt {
+            Some(lsst_matches) => Ok(BabamulSurveyMatches {
+                ztf: lsst_matches.ztf.map(|m| m.try_into()).transpose()?,
+                lsst: None, // Naturally, no LSST match for an LSST alert
+            }),
+            None => Ok(BabamulSurveyMatches::default()),
+        }
+    }
+}
+
+impl TryFrom<Option<crate::enrichment::ztf::ZtfSurveyMatches>> for BabamulSurveyMatches {
+    type Error = EnrichmentWorkerError;
+
+    fn try_from(
+        opt: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
+    ) -> Result<Self, Self::Error> {
+        match opt {
+            Some(ztf_matches) => Ok(BabamulSurveyMatches {
+                ztf: None, // Naturally, no ZTF match for a ZTF alert
+                lsst: ztf_matches.lsst.map(|m| m.try_into()).transpose()?,
+            }),
+            None => Ok(BabamulSurveyMatches::default()),
+        }
+    }
+}
+
 /// Enriched LSST alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -65,18 +212,21 @@ pub struct BabamulLsstAlert {
     pub prv_candidates: Vec<AlertPhotometry>,
     pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: LsstAlertProperties,
-    pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
+    pub survey_matches: BabamulSurveyMatches,
 }
 
 impl BabamulLsstAlert {
     pub fn from_alert_and_properties(
         alert: LsstAlertForEnrichment,
         properties: LsstAlertProperties,
-    ) -> (
-        Self,
-        std::collections::HashMap<String, Vec<serde_json::Value>>,
-    ) {
+    ) -> Result<
         (
+            Self,
+            std::collections::HashMap<String, Vec<serde_json::Value>>,
+        ),
+        EnrichmentWorkerError,
+    > {
+        Ok((
             BabamulLsstAlert {
                 candid: alert.candid,
                 object_id: alert.object_id,
@@ -84,6 +234,8 @@ impl BabamulLsstAlert {
                 prv_candidates: alert
                     .prv_candidates
                     .into_iter()
+                    // Only include measurements with valid flux and coordinates (should always be true for prv_candidates)
+                    .filter(|p| p.flux.is_some() && p.ra.is_some() && p.dec.is_some())
                     .map(|p| AlertPhotometry {
                         jd: p.jd,
                         flux: p.flux.unwrap(),
@@ -104,10 +256,10 @@ impl BabamulLsstAlert {
                     })
                     .collect(),
                 properties,
-                survey_matches: alert.survey_matches,
+                survey_matches: alert.survey_matches.try_into()?,
             },
             alert.cross_matches.unwrap_or_default(),
-        )
+        ))
     }
 
     pub fn compute_babamul_category(
@@ -116,12 +268,10 @@ impl BabamulLsstAlert {
     ) -> String {
         // If we have a ZTF match, category starts with "ztf-match."
         // Otherwise, "no-ztf-match."
-        let category = match &self.survey_matches {
-            Some(survey_matches) => match &survey_matches.ztf {
-                Some(_) => "ztf-match.".to_string(),
-                None => "no-ztf-match.".to_string(),
-            },
-            None => "no-ztf-match.".to_string(),
+        let category = if self.survey_matches.ztf.is_some() {
+            "ztf-match.".to_string()
+        } else {
+            "no-ztf-match.".to_string()
         };
 
         // The enrichment worker already uses the LSPSC matches to classify stars
@@ -153,7 +303,7 @@ impl BabamulLsstAlert {
                 Some(s) => s,
                 None => continue,
             };
-            if score < IS_HOSTED_SCORE_THRESH {
+            if score <= IS_HOSTED_SCORE_THRESH {
                 label = "hosted";
                 break;
             }
@@ -174,16 +324,15 @@ pub struct BabamulZtfAlert {
     pub prv_nondetections: Vec<NonDetectionPhotometry>,
     pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: ZtfAlertProperties,
-    pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
+    pub survey_matches: BabamulSurveyMatches,
 }
 
 impl BabamulZtfAlert {
     pub fn from_alert_and_properties(
         alert: ZtfAlertForEnrichment,
         properties: ZtfAlertProperties,
-    ) -> Self {
-        BabamulZtfAlert {
-            survey_matches: alert.survey_matches,
+    ) -> Result<Self, EnrichmentWorkerError> {
+        Ok(BabamulZtfAlert {
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,
@@ -191,7 +340,10 @@ impl BabamulZtfAlert {
             prv_candidates: alert
                 .prv_candidates
                 .into_iter()
-                .filter(|p| p.programid == 1)
+                // Only include measurements with valid flux and coordinates (should always be true for prv_candidates)
+                .filter(|p| {
+                    p.programid == 1 && p.flux.is_some() && p.ra.is_some() && p.dec.is_some()
+                })
                 .map(|p| AlertPhotometry {
                     jd: p.jd,
                     flux: p.flux.unwrap(),
@@ -223,18 +375,17 @@ impl BabamulZtfAlert {
                 })
                 .collect(),
             properties,
-        }
+            survey_matches: alert.survey_matches.try_into()?,
+        })
     }
 
     pub fn compute_babamul_category(&self) -> String {
         // If we have an LSST match, category starts with "lsst-match."
         // Otherwise, "no-lsst-match."
-        let category = match &self.survey_matches {
-            Some(survey_matches) => match &survey_matches.lsst {
-                Some(_) => "lsst-match.".to_string(),
-                None => "no-lsst-match.".to_string(),
-            },
-            None => "no-lsst-match.".to_string(),
+        let category = if self.survey_matches.lsst.is_some() {
+            "lsst-match.".to_string()
+        } else {
+            "no-lsst-match.".to_string()
         };
 
         // Already classified as stellar (by the enrichment worker), return that
@@ -254,7 +405,7 @@ impl BabamulZtfAlert {
 
         for score in sgscores.iter().flatten() {
             // Only consider valid scores (>= 0)
-            if *score >= 0.0 && *score < ZTF_HOSTED_SG_SCORE_THRESH {
+            if *score >= 0.0 && *score <= ZTF_HOSTED_SG_SCORE_THRESH {
                 return category + "hosted";
             }
         }
@@ -337,7 +488,7 @@ impl Babamul {
     {
         let mut total_sent: usize = 0;
         for (topic_name, alerts) in alerts_by_topic {
-            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+            tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
             // Check topic exists with the desired retention policy
             self.check_topic(&topic_name).await?;
@@ -349,7 +500,7 @@ impl Babamul {
                 payloads.push(payload);
             }
 
-            info!(
+            tracing::debug!(
                 "Prepared {} payloads for topic {}",
                 payloads.len(),
                 topic_name
@@ -492,21 +643,9 @@ impl Babamul {
         // Create a hash map for alerts to send to each topic
         let mut alerts_by_topic: HashMap<String, Vec<BabamulLsstAlert>> = HashMap::new();
 
-        // Determine if this alert is worth sending to Babamul
-        let min_reliability = 0.5;
-
         // Iterate over the alerts
-        for (mut alert, cross_matches) in alerts {
-            // Filter ZTF matches to only include public (programid=1)
-            if let Some(ref mut survey_matches) = alert.survey_matches {
-                if let Some(ref mut ztf_match) = survey_matches.ztf {
-                    ztf_match.prv_candidates.retain(|p| p.programid == 1);
-                    ztf_match.prv_nondetections.retain(|p| p.programid == 1);
-                    ztf_match.fp_hists.retain(|p| p.programid == 1);
-                }
-            }
-
-            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < min_reliability
+        for (alert, cross_matches) in alerts {
+            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < LSST_MIN_RELIABILITY
                 || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
                 || alert.properties.rock
             {
@@ -523,9 +662,13 @@ impl Babamul {
                 .push(alert);
         }
 
+        for (topic_name, alerts) in &alerts_by_topic {
+            tracing::debug!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
+        }
+
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No LSST alerts to send to Babamul");
+            tracing::debug!("No LSST alerts to send to Babamul");
             return Ok(0);
         }
 
@@ -546,8 +689,11 @@ impl Babamul {
 
         // Iterate over the alerts
         for alert in alerts {
-            // Only send public ZTF alerts (programid=1) to Babamul
-            if alert.candidate.candidate.programid != 1 || alert.properties.rock {
+            // Only send public ZTF alerts (programid=1), non-rocks, and with sufficient DRB to Babamul
+            if alert.candidate.candidate.programid != 1
+                || alert.properties.rock
+                || alert.candidate.candidate.drb.unwrap_or(0.0) < ZTF_MIN_DRB
+            {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
             }
@@ -562,12 +708,12 @@ impl Babamul {
         }
 
         for (topic_name, alerts) in &alerts_by_topic {
-            info!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
+            tracing::debug!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
         }
 
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No ZTF alerts to send to Babamul");
+            tracing::debug!("No ZTF alerts to send to Babamul");
             return Ok(0);
         }
 

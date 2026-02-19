@@ -531,7 +531,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = BabamulZtfAlert::from_alert_and_properties(alert, properties);
+                let enriched_alert =
+                    BabamulZtfAlert::from_alert_and_properties(alert, properties).unwrap();
                 enriched_alerts.push(enriched_alert);
             }
         }
