@@ -2,7 +2,6 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, skip_serializing_none};
 use utoipa::ToSchema;
 
 pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitude
@@ -75,37 +74,42 @@ pub struct PhotometryMag {
     pub band: Band,
 }
 
-#[serde_as]
-#[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandRateProperties {
+    #[serde(default)]
     pub rate: f32,
+    #[serde(default)]
     pub rate_error: f32,
+    #[serde(default)]
     pub red_chi2: f32,
+    #[serde(default)]
     pub nb_data: i32,
+    #[serde(default)]
     pub dt: f32,
 }
 
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
-// #[serde_as]
-// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandProperties {
+    #[serde(default)]
     pub peak_jd: f64,
+    #[serde(default)]
     pub peak_mag: f32,
+    #[serde(default)]
     pub peak_mag_err: f32,
+    #[serde(default)]
     pub dt: f32,
+    #[serde(default)]
     pub rising: Option<BandRateProperties>,
+    #[serde(default)]
     pub fading: Option<BandRateProperties>,
 }
 
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
-// #[serde_as]
-// #[skip_serializing_none]
 #[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 pub struct PerBandProperties {

@@ -2056,12 +2056,11 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data))
+                .app_data(web::Data::new(auth_app_data.clone()))
                 .service(
                     web::scope("/babamul")
                         .wrap(from_fn(babamul_auth_middleware))
-                        .service(routes::babamul::surveys::cone_search_objects)
-                        .service(routes::babamul::get_babamul_profile), // Add another service for consistency
+                        .service(routes::babamul::surveys::cone_search_objects),
                 ),
         )
         .await;
@@ -2137,8 +2136,12 @@ mod tests {
             }))
             .to_request();
 
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
 
         // Clean up
         for obj in test_objects {
@@ -2162,7 +2165,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
-                .app_data(web::Data::new(auth_app_data))
+                .app_data(web::Data::new(auth_app_data.clone()))
                 .service(
                     web::scope("/babamul")
                         .wrap(from_fn(babamul_auth_middleware))
@@ -2237,8 +2240,12 @@ mod tests {
             }))
             .to_request();
 
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
 
         // Test successful cone search with valid parameters
         let req = test::TestRequest::post()
@@ -2267,7 +2274,7 @@ mod tests {
         );
 
         let body = read_json_response(resp).await;
-        assert_eq!(body["status"].as_str().unwrap(), "ok");
+        assert!(body["message"].is_string(), "Should include a message");
         assert!(body["data"].is_object(), "Should return results as object");
     }
 }
