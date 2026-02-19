@@ -962,19 +962,24 @@ mod tests {
         // let's also verify that forcediffimflux(unc) converts to psfFlux(Err) correctly
         let zp_scaling_factor =
             10f64.powf((ZTF_ZP as f64 - fp_negative_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);
+        // The production code computes in f64 then casts to f32, so mirror that here
+        let expected_flux = (fp_negative_det.fp_hist.forcediffimflux.unwrap() as f64
+            * 1e9_f64
+            * zp_scaling_factor) as f32;
         assert!(
-            (fp_negative_det.fp_hist.forcediffimflux.unwrap() as f64 * 1e9_f64 * zp_scaling_factor
-                - fp_negative_det.psf_flux.unwrap() as f64)
-                .abs()
-                < 1e-3
+            (expected_flux - fp_negative_det.psf_flux.unwrap()).abs() < 1e-6,
+            "psf_flux mismatch: expected {}, got {}",
+            expected_flux,
+            fp_negative_det.psf_flux.unwrap()
         );
+        let expected_flux_err = (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64
+            * 1e9_f64
+            * zp_scaling_factor) as f32;
         assert!(
-            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64
-                * 1e9_f64
-                * zp_scaling_factor
-                - fp_negative_det.psf_flux_err.unwrap() as f64)
-                .abs()
-                < 1e-3
+            (expected_flux_err - fp_negative_det.psf_flux_err.unwrap()).abs() < 1e-6,
+            "psf_flux_err mismatch: expected {}, got {}",
+            expected_flux_err,
+            fp_negative_det.psf_flux_err.unwrap()
         );
 
         let fp_positive_det = fp_hists.get(9).unwrap();
@@ -996,19 +1001,23 @@ mod tests {
         assert!((sigmapsf - 0.3616859).abs() < 1e-6);
         let zp_scaling_factor =
             10f64.powf((ZTF_ZP as f64 - fp_positive_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);
+        let expected_flux = (fp_positive_det.fp_hist.forcediffimflux.unwrap() as f64
+            * 1e9_f64
+            * zp_scaling_factor) as f32;
         assert!(
-            (fp_positive_det.fp_hist.forcediffimflux.unwrap() as f64 * 1e9_f64 * zp_scaling_factor
-                - fp_positive_det.psf_flux.unwrap() as f64)
-                .abs()
-                < 1e-3
+            (expected_flux - fp_positive_det.psf_flux.unwrap()).abs() < 1e-6,
+            "psf_flux mismatch: expected {}, got {}",
+            expected_flux,
+            fp_positive_det.psf_flux.unwrap()
         );
+        let expected_flux_err = (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64
+            * 1e9_f64
+            * zp_scaling_factor) as f32;
         assert!(
-            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64
-                * 1e9_f64
-                * zp_scaling_factor
-                - fp_positive_det.psf_flux_err.unwrap() as f64)
-                .abs()
-                < 1e-3
+            (expected_flux_err - fp_positive_det.psf_flux_err.unwrap()).abs() < 1e-6,
+            "psf_flux_err mismatch: expected {}, got {}",
+            expected_flux_err,
+            fp_positive_det.psf_flux_err.unwrap()
         );
 
         // validate the cutouts
