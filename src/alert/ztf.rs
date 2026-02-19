@@ -930,7 +930,7 @@ impl ZtfAlertWorker {
         n_retries: usize,
     ) -> Result<(), AlertError> {
         // at every retry, we fetch the existing alert aux again
-        for attempt in 0..=n_retries {
+        for attempt in 0..n_retries {
             match self
                 .update_aux(
                     object_id,
