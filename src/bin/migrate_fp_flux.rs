@@ -11,23 +11,19 @@ const ZTF_ZP: f64 = 23.9;
 
 /// Migrate ZTF forced photometry flux values to a fixed zeropoint.
 ///
-/// Rescales `psfFlux` and `psfFluxErr` in `fp_hists` from per-datapoint
-/// `magzpsci` zeropoints to the fixed ZTF_ZP = 23.9 zeropoint.
+/// Recomputes `psfFlux` and `psfFluxErr` in `fp_hists` from the raw IPAC
+/// `forcediffimflux` and `forcediffimfluxunc` fields, converting to nJy at
+/// the fixed ZTF_ZP = 23.9 zeropoint.
 ///
-/// Formula: new_value = old_value * 10^((23.9 - magzpsci) / 2.5)
+/// Formula: value = raw_value * 1e9 * 10^((23.9 - magzpsci) / 2.5)
 ///
-/// Safe to re-run: old values are saved as `_old_psfFlux` / `_old_psfFluxErr`
-/// in each fp_hists entry. Documents already containing these fields are skipped.
-/// Use `--cleanup` to remove the `_old_*` fields once migration is verified.
+/// Idempotent: since it always recomputes from raw fields, running this
+/// multiple times produces the same result.
 #[derive(Parser)]
 struct Cli {
     /// Number of document IDs to collect per update_many batch
     #[arg(long, default_value = "5000")]
     batch_size: usize,
-
-    /// Remove _old_psfFlux and _old_psfFluxErr fields instead of migrating
-    #[arg(long)]
-    cleanup: bool,
 }
 
 /// Run batched updates by streaming IDs from a cursor and calling update_many
@@ -126,11 +122,7 @@ async fn main() {
 
     let collection = db.collection::<Document>("ZTF_alerts_aux");
 
-    if args.cleanup {
-        cleanup(&collection, args.batch_size).await;
-    } else {
-        migrate(&collection, args.batch_size).await;
-    }
+    migrate(&collection, args.batch_size).await;
 }
 
 async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) {
@@ -143,39 +135,62 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
     };
     info!("Estimated ~{} documents in collection", estimated_count);
 
-    // Skip documents already migrated (they have _old_psfFlux in their fp_hists)
+    // Only process documents that have fp_hists
     let filter = doc! {
         "fp_hists.0": { "$exists": true },
-        "fp_hists.0._old_psfFlux": { "$exists": false },
     };
 
-    // Scale factor: 10^((ZTF_ZP - magzpsci) / 2.5)
+    // Converts raw flux to nJy at the fixed zeropoint:
+    //   psf_flux * 1e9 * 10^((ZTF_ZP - magzpsci) / 2.5)
     let scale_factor = doc! {
-        "$pow": [
-            10.0,
-            { "$divide": [
-                { "$subtract": [ZTF_ZP, "$$fp.magzpsci"] },
-                2.5
+        "$multiply": [
+            1e9_f64,
+            { "$pow": [
+                10.0,
+                { "$divide": [
+                    { "$subtract": [ZTF_ZP, "$$fp.magzpsci"] },
+                    2.5
+                ]}
             ]}
         ]
     };
 
+    // Filter out invalid raw flux values (-99999.0)
+    let valid_raw_flux = doc! {
+        "$and": [
+            { "$ne": ["$$fp.forcediffimflux", Bson::Null] },
+            { "$ne": ["$$fp.forcediffimflux", -99999.0] },
+        ]
+    };
+
+    let valid_raw_flux_err = doc! {
+        "$and": [
+            { "$ne": ["$$fp.forcediffimfluxunc", Bson::Null] },
+            { "$ne": ["$$fp.forcediffimfluxunc", -99999.0] },
+        ]
+    };
+
+    // psfFlux: computed from raw forcediffimflux when both it and magzpsci are valid
     let new_flux = doc! {
         "$cond": {
             "if": { "$and": [
+                valid_raw_flux,
                 { "$ne": ["$$fp.magzpsci", Bson::Null] },
-                { "$ne": ["$$fp.psfFlux", Bson::Null] },
             ]},
-            "then": { "$multiply": ["$$fp.psfFlux", scale_factor.clone()] },
-            "else": "$$fp.psfFlux"
+            "then": { "$multiply": ["$$fp.forcediffimflux", scale_factor.clone()] },
+            "else": Bson::Null,
         }
     };
 
+    // psfFluxErr: computed from raw forcediffimfluxunc when both it and magzpsci are valid
     let new_flux_err = doc! {
         "$cond": {
-            "if": { "$ne": ["$$fp.magzpsci", Bson::Null] },
-            "then": { "$multiply": ["$$fp.psfFluxErr", scale_factor] },
-            "else": "$$fp.psfFluxErr"
+            "if": { "$and": [
+                valid_raw_flux_err.clone(),
+                { "$ne": ["$$fp.magzpsci", Bson::Null] },
+            ]},
+            "then": { "$multiply": ["$$fp.forcediffimfluxunc", scale_factor] },
+            "else": Bson::Null,
         }
     };
 
@@ -189,8 +204,6 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
                         "$mergeObjects": [
                             "$$fp",
                             {
-                                "_old_psfFlux": "$$fp.psfFlux",
-                                "_old_psfFluxErr": "$$fp.psfFluxErr",
                                 "psfFlux": new_flux.clone(),
                                 "psfFluxErr": new_flux_err.clone(),
                             }
@@ -211,54 +224,5 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
     )
     .await;
 
-    info!(
-        "Migration complete. Modified {} documents. Run with --cleanup to remove _old_ fields.",
-        total
-    );
-}
-
-async fn cleanup(collection: &mongodb::Collection<Document>, batch_size: usize) {
-    info!("Removing _old_psfFlux and _old_psfFluxErr fields...");
-    let filter = doc! { "fp_hists.0._old_psfFlux": { "$exists": true } };
-
-    let count = match collection.count_documents(filter.clone()).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error counting documents: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    if count == 0 {
-        info!("No _old_ fields to remove. Exiting.");
-        return;
-    }
-
-    info!("Found {} documents to clean up", count);
-
-    let pipeline = vec![doc! {
-        "$set": {
-            "fp_hists": {
-                "$map": {
-                    "input": "$fp_hists",
-                    "as": "fp",
-                    "in": {
-                        "$unsetField": {
-                            "field": "_old_psfFluxErr",
-                            "input": {
-                                "$unsetField": {
-                                    "field": "_old_psfFlux",
-                                    "input": "$$fp",
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }];
-
-    let total =
-        run_batched_update(collection, filter, pipeline, batch_size, count, "cleanup").await;
-    info!("Cleanup complete. Cleaned {} documents.", total);
+    info!("Migration complete. Modified {} documents.", total);
 }
