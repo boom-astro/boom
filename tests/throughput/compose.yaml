@@ -5,7 +5,6 @@ networks:
 
 volumes:
   mongodb:
-  kafka_data:
 
 services:
   mongo:
