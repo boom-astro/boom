@@ -84,11 +84,9 @@ impl Default for BabamulSurveyMatches {
     }
 }
 
-impl TryFrom<crate::enrichment::ztf::ZtfMatch> for BabamulSurveyMatch {
-    type Error = EnrichmentWorkerError;
-
-    fn try_from(ztf_match: crate::enrichment::ztf::ZtfMatch) -> Result<Self, Self::Error> {
-        Ok(BabamulSurveyMatch {
+impl From<crate::enrichment::ztf::ZtfMatch> for BabamulSurveyMatch {
+    fn from(ztf_match: crate::enrichment::ztf::ZtfMatch) -> Self {
+        BabamulSurveyMatch {
             object_id: ztf_match.object_id,
             ra: ztf_match.ra,
             dec: ztf_match.dec,
@@ -128,15 +126,13 @@ impl TryFrom<crate::enrichment::ztf::ZtfMatch> for BabamulSurveyMatch {
                     band: p.band,
                 })
                 .collect(),
-        })
+        }
     }
 }
 
-impl TryFrom<crate::enrichment::lsst::LsstMatch> for BabamulSurveyMatch {
-    type Error = EnrichmentWorkerError;
-
-    fn try_from(lsst_match: crate::enrichment::lsst::LsstMatch) -> Result<Self, Self::Error> {
-        Ok(BabamulSurveyMatch {
+impl From<crate::enrichment::lsst::LsstMatch> for BabamulSurveyMatch {
+    fn from(lsst_match: crate::enrichment::lsst::LsstMatch) -> Self {
+        BabamulSurveyMatch {
             object_id: lsst_match.object_id,
             ra: lsst_match.ra,
             dec: lsst_match.dec,
@@ -165,38 +161,30 @@ impl TryFrom<crate::enrichment::lsst::LsstMatch> for BabamulSurveyMatch {
                     band: p.band,
                 })
                 .collect(),
-        })
-    }
-}
-
-impl TryFrom<Option<crate::enrichment::lsst::LsstSurveyMatches>> for BabamulSurveyMatches {
-    type Error = EnrichmentWorkerError;
-
-    fn try_from(
-        opt: Option<crate::enrichment::lsst::LsstSurveyMatches>,
-    ) -> Result<Self, Self::Error> {
-        match opt {
-            Some(lsst_matches) => Ok(BabamulSurveyMatches {
-                ztf: lsst_matches.ztf.map(|m| m.try_into()).transpose()?,
-                lsst: None, // Naturally, no LSST match for an LSST alert
-            }),
-            None => Ok(BabamulSurveyMatches::default()),
         }
     }
 }
 
-impl TryFrom<Option<crate::enrichment::ztf::ZtfSurveyMatches>> for BabamulSurveyMatches {
-    type Error = EnrichmentWorkerError;
-
-    fn try_from(
-        opt: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
-    ) -> Result<Self, Self::Error> {
+impl From<Option<crate::enrichment::lsst::LsstSurveyMatches>> for BabamulSurveyMatches {
+    fn from(opt: Option<crate::enrichment::lsst::LsstSurveyMatches>) -> Self {
         match opt {
-            Some(ztf_matches) => Ok(BabamulSurveyMatches {
+            Some(lsst_matches) => BabamulSurveyMatches {
+                ztf: lsst_matches.ztf.map(|m| m.into()),
+                lsst: None, // Naturally, no LSST match for an LSST alert
+            },
+            None => BabamulSurveyMatches::default(),
+        }
+    }
+}
+
+impl From<Option<crate::enrichment::ztf::ZtfSurveyMatches>> for BabamulSurveyMatches {
+    fn from(opt: Option<crate::enrichment::ztf::ZtfSurveyMatches>) -> Self {
+        match opt {
+            Some(ztf_matches) => BabamulSurveyMatches {
                 ztf: None, // Naturally, no ZTF match for a ZTF alert
-                lsst: ztf_matches.lsst.map(|m| m.try_into()).transpose()?,
-            }),
-            None => Ok(BabamulSurveyMatches::default()),
+                lsst: ztf_matches.lsst.map(|m| m.into()),
+            },
+            None => BabamulSurveyMatches::default(),
         }
     }
 }
@@ -219,14 +207,11 @@ impl BabamulLsstAlert {
     pub fn from_alert_and_properties(
         alert: LsstAlertForEnrichment,
         properties: LsstAlertProperties,
-    ) -> Result<
+    ) -> (
+        Self,
+        std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) {
         (
-            Self,
-            std::collections::HashMap<String, Vec<serde_json::Value>>,
-        ),
-        EnrichmentWorkerError,
-    > {
-        Ok((
             BabamulLsstAlert {
                 candid: alert.candid,
                 object_id: alert.object_id,
@@ -256,10 +241,10 @@ impl BabamulLsstAlert {
                     })
                     .collect(),
                 properties,
-                survey_matches: alert.survey_matches.try_into()?,
+                survey_matches: alert.survey_matches.into(),
             },
             alert.cross_matches.unwrap_or_default(),
-        ))
+        )
     }
 
     pub fn compute_babamul_category(
@@ -331,8 +316,8 @@ impl BabamulZtfAlert {
     pub fn from_alert_and_properties(
         alert: ZtfAlertForEnrichment,
         properties: ZtfAlertProperties,
-    ) -> Result<Self, EnrichmentWorkerError> {
-        Ok(BabamulZtfAlert {
+    ) -> Self {
+        BabamulZtfAlert {
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,
@@ -375,8 +360,8 @@ impl BabamulZtfAlert {
                 })
                 .collect(),
             properties,
-            survey_matches: alert.survey_matches.try_into()?,
-        })
+            survey_matches: alert.survey_matches.into(),
+        }
     }
 
     pub fn compute_babamul_category(&self) -> String {

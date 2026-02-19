@@ -333,7 +333,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
                 let (enriched_alert, cross_matches) =
-                    BabamulLsstAlert::from_alert_and_properties(alert, properties).unwrap();
+                    BabamulLsstAlert::from_alert_and_properties(alert, properties);
                 enriched_alerts.push((enriched_alert, cross_matches));
             }
         }

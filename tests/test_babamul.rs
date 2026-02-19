@@ -3,7 +3,10 @@ use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{
-        babamul::{BabamulLsstAlert, BabamulZtfAlert, ForcedPhotometry},
+        babamul::{
+            BabamulLsstAlert, BabamulSurveyMatch, BabamulSurveyMatches, BabamulZtfAlert,
+            ForcedPhotometry,
+        },
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
         ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
     },
@@ -176,7 +179,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
         },
-        survey_matches: None,
+        survey_matches: BabamulSurveyMatches::default(),
     }
 }
 
@@ -572,11 +575,9 @@ async fn test_compute_babamul_category() {
 
 #[test]
 fn test_compute_babamul_category_ztf() {
-    use boom::enrichment::ZtfSurveyMatches;
-
     // Test case 1: No LSST match + not stellar + sgscore1 > 0.5 → "no-lsst-match.hostless"
     let mut alert_no_lsst = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
-    alert_no_lsst.survey_matches = None;
+    alert_no_lsst.survey_matches = BabamulSurveyMatches::default();
     alert_no_lsst.properties.star = false;
     alert_no_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
     let category = alert_no_lsst.compute_babamul_category();
@@ -588,7 +589,7 @@ fn test_compute_babamul_category_ztf() {
     // Test case 2: No LSST match + stellar → "no-lsst-match.stellar"
     let mut alert_no_lsst_stellar =
         create_mock_enriched_ztf_alert(1234567891, "ZTF21aaaaaab", false);
-    alert_no_lsst_stellar.survey_matches = None;
+    alert_no_lsst_stellar.survey_matches = BabamulSurveyMatches::default();
     alert_no_lsst_stellar.properties.star = true;
     let category = alert_no_lsst_stellar.compute_babamul_category();
     assert_eq!(
@@ -598,15 +599,17 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 3: LSST match + not stellar + sgscore1 > 0.5 → "lsst-match.hostless"
     let mut alert_lsst = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", false);
-    alert_lsst.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaaa".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst.properties.star = false;
     alert_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
     let category = alert_lsst.compute_babamul_category();
@@ -617,15 +620,17 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 4: LSST match + stellar → "lsst-match.stellar"
     let mut alert_lsst_stellar = create_mock_enriched_ztf_alert(1234567893, "ZTF21aaaaaad", false);
-    alert_lsst_stellar.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst_stellar.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaab".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst_stellar.properties.star = true;
     let category = alert_lsst_stellar.compute_babamul_category();
     assert_eq!(
@@ -635,7 +640,7 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 5: No LSST match + not stellar + sgscore1 <= 0.5 → "no-lsst-match.hosted"
     let mut alert_hosted = create_mock_enriched_ztf_alert(1234567894, "ZTF21aaaaaae", false);
-    alert_hosted.survey_matches = None;
+    alert_hosted.survey_matches = BabamulSurveyMatches::default();
     alert_hosted.properties.star = false;
     alert_hosted.candidate.candidate.sgscore1 = Some(0.3); // Galaxy-like
     let category = alert_hosted.compute_babamul_category();
@@ -646,15 +651,17 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 6: LSST match + not stellar + sgscore1 <= 0.5 → "lsst-match.hosted"
     let mut alert_lsst_hosted = create_mock_enriched_ztf_alert(1234567895, "ZTF21aaaaaaf", false);
-    alert_lsst_hosted.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst_hosted.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaac".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst_hosted.properties.star = false;
     alert_lsst_hosted.candidate.candidate.sgscore1 = Some(0.4); // Galaxy-like
     let category = alert_lsst_hosted.compute_babamul_category();
@@ -665,7 +672,7 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 7: Negative sgscore (placeholder) should be ignored → "no-lsst-match.hostless"
     let mut alert_neg_sgscore = create_mock_enriched_ztf_alert(1234567896, "ZTF21aaaaaag", false);
-    alert_neg_sgscore.survey_matches = None;
+    alert_neg_sgscore.survey_matches = BabamulSurveyMatches::default();
     alert_neg_sgscore.properties.star = false;
     alert_neg_sgscore.candidate.candidate.sgscore1 = Some(-99.0); // Placeholder value
     alert_neg_sgscore.candidate.candidate.sgscore2 = Some(-99.0);
@@ -678,7 +685,7 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 8: sgscore2 or sgscore3 < 0.5 should mark as hosted
     let mut alert_sgscore2 = create_mock_enriched_ztf_alert(1234567897, "ZTF21aaaaaah", false);
-    alert_sgscore2.survey_matches = None;
+    alert_sgscore2.survey_matches = BabamulSurveyMatches::default();
     alert_sgscore2.properties.star = false;
     alert_sgscore2.candidate.candidate.sgscore1 = Some(0.8); // High score (not hosted by sgscore1)
     alert_sgscore2.candidate.candidate.sgscore2 = Some(0.3); // Low score (hosted)
@@ -691,7 +698,7 @@ fn test_compute_babamul_category_ztf() {
     // Test case 9: No LSST match + near_brightstar=true + star=false → "no-lsst-match.stellar"
     let mut alert_near_brightstar =
         create_mock_enriched_ztf_alert(1234567898, "ZTF21aaaaaai", false);
-    alert_near_brightstar.survey_matches = None;
+    alert_near_brightstar.survey_matches = BabamulSurveyMatches::default();
     alert_near_brightstar.properties.star = false;
     alert_near_brightstar.properties.near_brightstar = true;
     let category = alert_near_brightstar.compute_babamul_category();
@@ -703,15 +710,17 @@ fn test_compute_babamul_category_ztf() {
     // Test case 10: LSST match + near_brightstar=true + star=false → "lsst-match.stellar"
     let mut alert_lsst_near_brightstar =
         create_mock_enriched_ztf_alert(1234567899, "ZTF21aaaaaaj", false);
-    alert_lsst_near_brightstar.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst_near_brightstar.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaad".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst_near_brightstar.properties.star = false;
     alert_lsst_near_brightstar.properties.near_brightstar = true;
     let category = alert_lsst_near_brightstar.compute_babamul_category();
