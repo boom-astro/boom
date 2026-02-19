@@ -721,19 +721,32 @@ impl ZtfAlertWorker {
             });
 
         // if all new data is newer than existing data, we can just append without sorting
-        // else, we need to do the full update with sorting
         if min_new_jd_prv_candidate > max_existing_jd_prv_candidate.unwrap() {
             let new_prv_candidates_docs: Vec<Document> =
                 prv_candidates.iter().map(|pc| mongify(pc)).collect();
-            Ok((new_prv_candidates_docs, false))
-        } else {
-            let new_prv_candidates_docs: Vec<Document> = prv_candidates
-                .iter()
-                .filter(|pc| !existing_prv_candidate_jds.contains(&pc.prv_candidate.jd.to_bits()))
-                .map(|pc| mongify(pc))
-                .collect();
-            Ok((new_prv_candidates_docs, true))
+            return Ok((new_prv_candidates_docs, false));
         }
+
+        // we filter out points from the "new" data that are already in the existing data (deduplication)
+        // and at the same time find the minimum jd of the new post-deduplication data, to check if we can skip sorting
+        let (new_prv_candidates_docs, min_new_jd_prv_candidate) =
+            prv_candidates
+                .iter()
+                .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
+                    let min_jd = min_jd.min(pc.prv_candidate.jd);
+                    if !existing_prv_candidate_jds.contains(&pc.prv_candidate.jd.to_bits()) {
+                        docs.push(mongify(pc));
+                    }
+                    (docs, min_jd)
+                });
+
+        // if all the deduplicated new data is newer than existing data, we can just append without sorting
+        if min_new_jd_prv_candidate > max_existing_jd_prv_candidate.unwrap() {
+            return Ok((new_prv_candidates_docs, false));
+        }
+
+        // else, we need to do the full update with sorting
+        Ok((new_prv_candidates_docs, true))
     }
 
     async fn prepare_fp_hists_update(
@@ -769,18 +782,31 @@ impl ZtfAlertWorker {
         );
 
         // if all new data is newer than existing data, we can just append without sorting
-        // else, we need to do the full update with sorting
         if min_new_jd_fp_hist > max_existing_jd_fp_hist.unwrap() {
             let new_fp_hists_docs: Vec<Document> = fp_hists.iter().map(|pc| mongify(pc)).collect();
-            Ok((new_fp_hists_docs, false))
-        } else {
-            let new_fp_hists_docs: Vec<Document> = fp_hists
-                .iter()
-                .filter(|pc| !existing_fp_hist_jds.contains(&pc.fp_hist.jd.to_bits()))
-                .map(|pc| mongify(pc))
-                .collect();
-            Ok((new_fp_hists_docs, true))
+            return Ok((new_fp_hists_docs, false));
         }
+
+        // we filter out points from the "new" data that are already in the existing data (deduplication)
+        // and at the same time find the minimum jd of the new post-deduplication data, to check if we can skip sorting
+        let (new_fp_hists_docs, min_new_jd_fp_hist) =
+            fp_hists
+                .iter()
+                .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
+                    let min_jd = min_jd.min(pc.fp_hist.jd);
+                    if !existing_fp_hist_jds.contains(&pc.fp_hist.jd.to_bits()) {
+                        docs.push(mongify(pc));
+                    }
+                    (docs, min_jd)
+                });
+
+        // if all the deduplicated new data is newer than existing data, we can just append without sorting
+        if min_new_jd_fp_hist > max_existing_jd_fp_hist.unwrap() {
+            return Ok((new_fp_hists_docs, false));
+        }
+
+        // else, we need to do the full update with sorting
+        Ok((new_fp_hists_docs, true))
     }
 
     #[instrument(
