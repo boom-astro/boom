@@ -2435,12 +2435,11 @@ mod tests {
 
         // Insert a ZTF alert so we have cutouts associated with an objectId
         let mut alert_worker = ztf_alert_worker().await;
-        let (candid, object_id, _, _, bytes_content) =
-            AlertRandomizer::new_randomized(Survey::Ztf)
-                .ra(150.0)
-                .dec(20.0)
-                .get()
-                .await;
+        let (candid, object_id, _, _, bytes_content) = AlertRandomizer::new_randomized(Survey::Ztf)
+            .ra(150.0)
+            .dec(20.0)
+            .get()
+            .await;
         let status = alert_worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
 
@@ -2474,12 +2473,12 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert!(
-            body["data"]["cutout_science"].is_string(),
+            body["data"]["cutoutScience"].is_string(),
             "Should have science cutout"
         );
 
         // Test all `which` variants
-        for which in &["first", "last", "brightest", "faintest"] {
+        for which in &["First", "Last", "Brightest", "Faintest"] {
             let req = test::TestRequest::get()
                 .uri(&format!(
                     "/babamul/surveys/ztf/cutouts?object_id={}&which={}",
@@ -2520,8 +2519,8 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(
             resp.status(),
-            StatusCode::BAD_REQUEST,
-            "Missing both candid and object_id should return 400"
+            StatusCode::NOT_FOUND,
+            "Missing both candid and object_id should return 404"
         );
 
         // Clean up
