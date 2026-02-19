@@ -51,6 +51,8 @@ struct AlertsQuery {
     is_star: Option<bool>,
     is_near_brightstar: Option<bool>,
     is_stationary: Option<bool>,
+    limit: Option<u32>,
+    skip: Option<u64>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -78,6 +80,8 @@ enum AlertsQueryResult {
         ("is_star" = Option<bool>, Query, description = "Whether to filter for likely star candidates"),
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
         ("is_stationary" = Option<bool>, Query, description = "Whether to filter for stationary candidates"),
+        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return"),
+        ("skip" = Option<u64>, Query, description = "Number of alerts to skip (for pagination)"),
     ),
     responses(
         (status = 200, description = "Alerts retrieved successfully", body = AlertsQueryResult),
@@ -100,6 +104,13 @@ pub async fn get_alerts(
         }
     };
     let survey = path.into_inner();
+
+    let limit = query.limit.unwrap_or(100000);
+    if limit == 0 || limit > 100000 {
+        return response::bad_request("Invalid limit, must be between 1 and 100000");
+    }
+    let skip = query.skip.unwrap_or(0);
+
     let mut filter_doc = if survey == Survey::Ztf {
         doc! {"candidate.programid": 1} // Babamul only returns public ZTF alerts
     } else {
@@ -140,10 +151,9 @@ pub async fn get_alerts(
     } else if let (Some(ra), Some(dec), Some(radius_arcsec)) =
         (query.ra, query.dec, query.radius_arcsec)
     {
-        // if the radius is > 600 arcsec (10 arcmin), reject the query to avoid expensive searches
-        if radius_arcsec > 600.0 {
+        if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
             return response::bad_request(
-                "Radius too large, maximum allowed is 600 arcseconds (10 arcminutes)",
+                "Invalid radius, must be greater than 0 and less than or equal to 600 arcseconds (10 arcminutes)",
             );
         }
         // Add cone search filter
@@ -226,6 +236,8 @@ pub async fn get_alerts(
             let mut alert_cursor = match alerts_collection
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
+                .skip(skip)
+                .limit(limit as i64)
                 .await
             {
                 Ok(cursor) => cursor,
@@ -251,7 +263,7 @@ pub async fn get_alerts(
                 results.push(alert_doc);
             }
             return response::ok(
-                &format!("found {} objects matching query", results.len()),
+                &format!("found {} alerts matching query", results.len()),
                 serde_json::json!(results),
             );
         }
@@ -261,6 +273,8 @@ pub async fn get_alerts(
             let mut alert_cursor = match alerts_collection
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
+                .skip(skip)
+                .limit(limit as i64)
                 .await
             {
                 Ok(cursor) => cursor,
@@ -286,7 +300,7 @@ pub async fn get_alerts(
                 results.push(alert_doc);
             }
             return response::ok(
-                &format!("found {} objects matching query", results.len()),
+                &format!("found {} alerts matching query", results.len()),
                 serde_json::json!(results),
             );
         }
@@ -432,6 +446,8 @@ pub async fn cone_search_alerts(
             let alerts_collection: Collection<EnrichedZtfAlert> =
                 db.collection(&format!("{}_alerts", survey));
             let mut results: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
+            let mut alert_count = 0;
+            let mut coordinates_with_matches_count = 0;
             for (object_id, radec) in coordinates {
                 let ra = radec[0] - 180.0;
                 let dec = radec[1];
@@ -475,11 +491,20 @@ pub async fn cone_search_alerts(
                     }
                 } {
                     alert_results.push(alert_doc);
+                    alert_count += 1;
+                }
+                if !alert_results.is_empty() {
+                    coordinates_with_matches_count += 1;
                 }
                 results.insert(object_id.clone(), alert_results);
             }
             return response::ok(
-                &format!("found alerts matching query"),
+                &format!(
+                    "found cross-matches for {}/{} coordinates, with a total {} alerts",
+                    coordinates_with_matches_count,
+                    coordinates.len(),
+                    alert_count
+                ),
                 serde_json::json!(results),
             );
         }
@@ -488,6 +513,8 @@ pub async fn cone_search_alerts(
             let alerts_collection: Collection<EnrichedLsstAlert> =
                 db.collection(&format!("{}_alerts", survey));
             let mut results: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
+            let mut alert_count = 0;
+            let mut coordinates_with_matches_count = 0;
             for (object_id, radec) in coordinates {
                 let ra = radec[0] - 180.0;
                 let dec = radec[1];
@@ -529,11 +556,20 @@ pub async fn cone_search_alerts(
                     }
                 } {
                     alert_results.push(alert_doc);
+                    alert_count += 1;
+                }
+                if !alert_results.is_empty() {
+                    coordinates_with_matches_count += 1;
                 }
                 results.insert(object_id.clone(), alert_results);
             }
             return response::ok(
-                &format!("found alerts matching query"),
+                &format!(
+                    "found cross-matches for {}/{} coordinates, with a total {} alerts",
+                    coordinates_with_matches_count,
+                    coordinates.len(),
+                    alert_count
+                ),
                 serde_json::json!(results),
             );
         }

@@ -85,10 +85,7 @@ pub async fn get_cutouts(
             "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
             "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
         });
-        return response::ok(
-            &format!("cutouts found for candid: {}", candid),
-            serde_json::json!(resp),
-        );
+        return response::ok(&format!("cutouts found for candid: {}", candid), resp);
     }
 
     if let Some(object_id) = &query.object_id {
@@ -109,10 +106,10 @@ pub async fn get_cutouts(
                 .sort(doc! { "candidate.jd": -1 })
                 .build(),
             WhichCutouts::Brightest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { "candidate.magpsf": -1 }) // Lowest mag is brightest, so sort in descending order
+                .sort(doc! { "candidate.magpsf": 1 }) // Lowest mag is brightest, so sort in ascending order
                 .build(),
             WhichCutouts::Faintest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { "candidate.magpsf": 1 }) // Highest mag is faintest, so sort in ascending order
+                .sort(doc! { "candidate.magpsf": -1 }) // Highest mag is faintest, so sort in descending order
                 .build(),
         };
 
@@ -158,16 +155,12 @@ pub async fn get_cutouts(
         };
 
         let resp = serde_json::json!({
-            "objectId": object_id,
             "candid": candid,
             "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
             "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
             "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
         });
-        return response::ok(
-            &format!("cutouts found for objectId: {}", object_id),
-            serde_json::json!(resp),
-        );
+        return response::ok(&format!("cutouts found for objectId: {}", object_id), resp);
     }
 
     response::not_found("candid or objectId query parameter must be provided")
