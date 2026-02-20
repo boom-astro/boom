@@ -55,6 +55,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .server_url
         .unwrap_or_else(|| "localhost:9092".to_string());
 
+    let span = tracing::info_span!(
+        "kafka::producer::produce",
+        survey = ?args.survey, date = %date, limit = limit, program_id = ?program_id,
+        server_url = %server_url,
+    );
+    let _g = span.enter();
     match args.survey {
         Survey::Ztf => {
             let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);

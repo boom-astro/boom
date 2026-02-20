@@ -1,11 +1,13 @@
 use actix_web::middleware::from_fn;
-use actix_web::{middleware::Logger, web, App, HttpServer};
+use actix_web::{web, App, HttpServer};
 use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
 use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::o11y::logging;
+use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -13,6 +15,10 @@ use utoipa_scalar::{Scalar, Servable};
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
+    // Initialize database and authentication
+    logging::init();
+    tracing::info!("BOOM API binary starting up");
+
     let config = AppConfig::from_default_path().unwrap();
     let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
@@ -20,16 +26,11 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize email service
     let email_service = EmailService::new();
-
-    // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-
     let babamul_is_enabled = config.babamul.enabled;
-    if babamul_is_enabled {
-        println!("Babamul API endpoints are ENABLED");
-    } else {
-        println!("Babamul API endpoints are DISABLED");
-    }
+    tracing::info!(
+        babamul_enabled = babamul_is_enabled,
+        "Babamul endpoints configured"
+    );
 
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
@@ -37,6 +38,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         let mut app = App::new()
+            .wrap(TracingLogger::default())
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
@@ -71,7 +73,7 @@ async fn main() -> std::io::Result<()> {
         }
 
         app.service(
-            actix_web::web::scope("")
+            actix_web::web::scope("/api")
                 .wrap(from_fn(auth_middleware))
                 // Public routes
                 .service(Scalar::with_url("/docs", api_doc.clone()))
@@ -99,8 +101,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
-                .service(routes::queries::post_pipeline_query)
-                .wrap(Logger::default()),
+                .service(routes::queries::post_pipeline_query),
         )
     })
     .bind(("0.0.0.0", port))?

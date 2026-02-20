@@ -1,6 +1,6 @@
 use crate::api::routes::babamul::BabamulUser;
 use crate::api::routes::users::User;
-use crate::conf::AppConfig;
+use crate::conf::{AppConfig, AuthConfig};
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
@@ -9,6 +9,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -27,14 +28,17 @@ pub struct AuthProvider {
 }
 
 impl AuthProvider {
-    pub async fn new(config: &AppConfig, db: &Database) -> Result<Self, std::io::Error> {
-        let auth_config = &config.api.auth;
+    pub async fn new(
+        auth_config: &AuthConfig,
+        db: &mongodb::Database,
+    ) -> Result<Self, std::io::Error> {
         let encoding_key = EncodingKey::from_secret(auth_config.secret_key.as_bytes());
         let decoding_key = DecodingKey::from_secret(auth_config.secret_key.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
         validation.validate_exp = auth_config.token_expiration > 0; // Set to true if tokens should expire
 
         let users_collection: mongodb::Collection<User> = db.collection("users");
+        debug!("AuthProvider initialized with users collection");
 
         Ok(AuthProvider {
             encoding_key,
@@ -45,6 +49,8 @@ impl AuthProvider {
         })
     }
 
+    #[tracing::instrument(name = "auth::create_token", skip(self, user), 
+    fields(user_id = %user.id, token_expiration = self.token_expiration), err)]
     pub async fn create_token(
         &self,
         user: &User,
@@ -57,6 +63,7 @@ impl AuthProvider {
             exp,
         };
 
+        debug!("encoding JWT for user");
         let token = encode(&Header::default(), &claims, &self.encoding_key)?;
         Ok((
             token,
@@ -68,15 +75,18 @@ impl AuthProvider {
         ))
     }
 
+    #[tracing::instrument(name = "auth::decode_token", skip(self, token), err)]
     pub async fn decode_token(&self, token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
         decode::<Claims>(token, &self.decoding_key, &self.validation).map(|data| data.claims)
     }
 
+    #[tracing::instrument(name = "auth::validate_token", skip(self, token), err)]
     pub async fn validate_token(&self, token: &str) -> Result<String, jsonwebtoken::errors::Error> {
         let claims = self.decode_token(token).await?;
         Ok(claims.sub)
     }
 
+    #[tracing::instrument(name = "auth::authenticate_user", skip(self, token), fields(token_len = token.len()), err)]
     pub async fn authenticate_user(&self, token: &str) -> Result<User, std::io::Error> {
         let user_id = self.validate_token(token).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("Incorrect JWT: {}", e))
@@ -96,10 +106,9 @@ impl AuthProvider {
             .find_one(doc! {"_id": &user_id})
             .await
             .map_err(|e| {
-                tracing::error!(
+                error!(
                     "Database query failed when looking for user id {}: {}",
-                    user_id,
-                    e
+                    user_id, e
                 );
                 std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -108,24 +117,27 @@ impl AuthProvider {
             })?;
 
         match user {
-            Some(user) => return Ok(user),
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("User with id {} not found", user_id),
-                ));
+            Some(user) => {
+                info!(%user_id, "user authenticated successfully");
+                Ok(user)
             }
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("User with id {} not found", user_id),
+            )),
         }
     }
 
+    #[tracing::instrument(name = "auth::create_token_for_user", skip(self, username, password), fields(username = %username), err)]
     pub async fn create_token_for_user(
         &self,
         username: &str,
         password: &str,
     ) -> Result<(String, Option<usize>), std::io::Error> {
         let filter = mongodb::bson::doc! { "username": username };
+        debug!(%username, "looking up user for token creation");
         let user = self.users_collection.find_one(filter).await.map_err(|e| {
-            eprint!(
+            error!(
                 "Database query failed when looking for user {} (when creating token): {}",
                 username, e
             );
@@ -139,10 +151,16 @@ impl AuthProvider {
         // otherwise return an error
         if let Some(user) = user {
             match bcrypt::verify(&password, &user.password) {
-                Ok(true) => self.create_token(&user).await.map_err(|e| {
-                    eprint!("Token creation failed: {}", e);
-                    std::io::Error::new(std::io::ErrorKind::Other, format!("Token creation failed"))
-                }),
+                Ok(true) => {
+                    info!(%username, "credentials valid, creating token");
+                    self.create_token(&user).await.map_err(|e| {
+                        error!("Token creation failed: {}", e);
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Token creation failed"),
+                        )
+                    })
+                }
                 _ => Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Invalid credentials",
@@ -161,16 +179,17 @@ pub async fn get_auth(
     app_config: &AppConfig,
     db: &Database,
 ) -> Result<AuthProvider, std::io::Error> {
-    AuthProvider::new(&app_config, &db).await
+    AuthProvider::new(&app_config.api.auth, &db).await
 }
 
 pub async fn get_test_auth(db: &Database) -> Result<AuthProvider, std::io::Error> {
     let app_config = AppConfig::from_test_config().unwrap();
-    AuthProvider::new(&app_config, &db).await
+    AuthProvider::new(&app_config.api.auth, &db).await
 }
 
 pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/"];
 
+#[tracing::instrument(name = "auth::middleware", skip(req, next), fields(path = %req.path()), err)]
 pub async fn auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,

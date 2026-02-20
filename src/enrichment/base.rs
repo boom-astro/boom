@@ -19,7 +19,7 @@ use opentelemetry::{
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, instrument};
+use tracing::{debug, error, info, instrument, trace};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -111,7 +111,7 @@ pub trait EnrichmentWorker {
 ///
 /// # Returns
 /// A Result containing a vector of bson Documents representing the fetched alerts, or an EnrichmentWorkerError.
-#[instrument(skip_all, err)]
+#[instrument(skip(candids, alert_pipeline, alert_collection), fields(batch_size = candids.len()), err)]
 pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
     candids: &[i64], // this is a slice of candids to process
     alert_pipeline: &Vec<Document>,
@@ -125,6 +125,10 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
             }
         };
     }
+    debug!(
+        stages = alert_pipeline.len(),
+        "Fetching alerts with aggregation pipeline"
+    );
     let mut alert_cursor = alert_collection.aggregate(alert_pipeline).await?;
 
     let mut alerts: Vec<T> = Vec::new();
@@ -134,16 +138,17 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
                 let alert: T = mongodb::bson::from_document(document)?;
                 alerts.push(alert);
             }
-            _ => {
-                continue;
+            Err(e) => {
+                error!(error = %e, "failed to fetch alert document from MongoDB");
             }
         }
     }
 
+    debug!(fetched = alerts.len(), "Fetched alerts from database");
     Ok(alerts)
 }
 
-#[instrument(skip_all, err)]
+#[instrument(skip(candids, alert_cutout_collection), fields(batch_size = candids.len()), err)]
 pub async fn fetch_alert_cutouts(
     candids: &[i64],
     alert_cutout_collection: &mongodb::Collection<Document>,
@@ -151,6 +156,7 @@ pub async fn fetch_alert_cutouts(
     let filter = doc! {
         "_id": {"$in": candids}
     };
+    debug!("Fetching alert cutouts from database");
     let mut cursor = alert_cutout_collection.find(filter).await?;
 
     let mut cutouts_map: std::collections::HashMap<i64, AlertCutout> =
@@ -179,17 +185,22 @@ pub async fn fetch_alert_cutouts(
                 };
                 cutouts_map.insert(candid, alert_cutout);
             }
-            _ => {
+            Err(e) => {
+                error!(error = %e, "failed to fetch alert cutout document from MongoDB");
                 continue;
             }
         }
     }
 
+    debug!(
+        fetched = cutouts_map.len(),
+        "Fetched alert cutouts from database"
+    );
     Ok(cutouts_map)
 }
 
 #[tokio::main]
-#[instrument(skip_all, err)]
+#[instrument(skip_all, fields(worker_id = %worker_id, config_path = %config_path) err)]
 pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
@@ -203,6 +214,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
+
+    info!(input_queue = %input_queue, output_queue = %output_queue, "Enrichment worker started");
 
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
@@ -228,6 +241,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     loop {
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
+                info!("termination signal received, shutting down enrichment worker");
                 break;
             }
             command_check_countdown = command_interval;
@@ -237,13 +251,15 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         let candids: Vec<i64> = con
             .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
             .await
-            .inspect_err(|_| {
+            .inspect_err(|e| {
+                error!(error = %e, queue = %input_queue, "failed to read from input queue");
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &input_error_attrs);
             })?;
 
         if candids.is_empty() {
             ACTIVE.add(-1, &active_attrs);
+            trace!(queue = %input_queue, "no candids found in input queue; sleeping");
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
@@ -252,7 +268,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         let processed_alerts: Vec<String> = enrichment_worker
             .process_alerts(&candids)
             .await
-            .inspect_err(|_| {
+            .inspect_err(|e| {
+                error!(error = %e, "failed to process alerts");
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
@@ -267,7 +284,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         }
         con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
             .await
-            .inspect_err(|_| {
+            .inspect_err(|e| {
+                error!(error = %e, queue = %output_queue, "failed to write to output queue");
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &output_error_attrs);
             })?;

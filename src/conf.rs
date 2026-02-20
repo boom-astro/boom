@@ -60,7 +60,7 @@ pub fn load_dotenv() {
     debug!("No .env file found, using system environment variables only");
 }
 
-#[instrument(err)]
+#[instrument(err, fields(path = %filepath))]
 pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
     let path = Path::new(filepath);
 
@@ -82,8 +82,12 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
     Ok(conf)
 }
 
-#[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+#[instrument(skip_all, fields(
+    host = %conf.database.host,
+    port = conf.database.port,
+    name = %conf.database.name,
+), err)]
+pub async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
     let db_conf = &conf.database;
 
     let prefix = match db_conf.srv {
@@ -127,8 +131,11 @@ async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError
     Ok(db)
 }
 
-#[instrument(skip_all, err)]
-async fn build_redis(
+#[instrument(skip_all, fields(
+    host = %conf.redis.host,
+    port = conf.redis.port,
+), err)]
+pub async fn build_redis(
     conf: &AppConfig,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
     let host = &conf.redis.host;

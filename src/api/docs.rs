@@ -1,4 +1,5 @@
 use crate::api::routes;
+use tracing::{debug, instrument};
 use utoipa::openapi::security::{Flow, OAuth2, Password, Scopes, SecurityScheme};
 use utoipa::openapi::Components;
 use utoipa::Modify;
@@ -7,11 +8,14 @@ use utoipa::OpenApi;
 struct SecurityAddon;
 
 impl Modify for SecurityAddon {
+    #[instrument(name = "docs::modify_security_addon", skip(self, openapi))]
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if openapi.components.is_none() {
+            debug!("OpenAPI components missing, initializing");
             openapi.components = Some(Components::new());
         }
 
+        debug!("Adding api_jwt_token security scheme to OpenAPI components");
         openapi.components.as_mut().unwrap().add_security_scheme(
             "api_jwt_token",
             SecurityScheme::OAuth2(OAuth2::new([Flow::Password(Password::new(
@@ -25,11 +29,14 @@ impl Modify for SecurityAddon {
 struct BabamulSecurityAddon;
 
 impl Modify for BabamulSecurityAddon {
+    #[instrument(name = "docs::modify_babamul_security_addon", skip(self, openapi))]
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if openapi.components.is_none() {
+            debug!("OpenAPI components missing, initializing");
             openapi.components = Some(Components::new());
         }
 
+        debug!("Adding babamul_jwt_token security scheme to OpenAPI components");
         openapi.components.as_mut().unwrap().add_security_scheme(
             "babamul_jwt_token",
             SecurityScheme::OAuth2(OAuth2::new([Flow::Password(Password::new(

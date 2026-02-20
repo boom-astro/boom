@@ -19,7 +19,7 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
-use tracing::{instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -372,7 +372,7 @@ pub struct ZtfEnrichmentWorker {
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for ZtfEnrichmentWorker {
-    #[instrument(err)]
+    #[instrument(err, skip(config_path))]
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
@@ -382,6 +382,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
+
+        debug!(input_queue = %input_queue, output_queue = %output_queue,
+            "ZTF Enrichment Worker configuration");
 
         // we load the ACAI models (same architecture, same input/output)
         let acai_h_model = AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?;
@@ -425,13 +428,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         self.output_queue.clone()
     }
 
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all, fields(batch_size = candids.len()), err)]
     async fn process_alerts(
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
         let alerts: Vec<ZtfAlertForEnrichment> =
             fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
+        debug!(
+            "fetched {} alerts for {} candids",
+            alerts.len(),
+            candids.len()
+        );
 
         if alerts.len() != candids.len() {
             warn!(
@@ -542,12 +550,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         if let Some(babamul) = self.babamul.as_ref() {
             babamul.process_ztf_alerts(enriched_alerts).await?;
         }
-
+        debug!("processed {} alerts", processed_alerts.len());
         Ok(processed_alerts)
     }
 }
 
 impl ZtfEnrichmentWorker {
+    #[instrument(skip(self, alert), fields(candid = alert.candid), err)]
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertForEnrichment,

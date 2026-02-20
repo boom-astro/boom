@@ -11,7 +11,7 @@ pub struct AcaiModel {
 }
 
 impl Model for AcaiModel {
-    #[instrument(err)]
+    #[instrument(skip(path), fields(model_path = %path), err)]
     fn new(path: &str) -> Result<Self, ModelError> {
         Ok(Self {
             model: load_model(&path)?,
@@ -39,7 +39,7 @@ impl Model for AcaiModel {
 }
 
 impl AcaiModel {
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all, fields(batch_size = alerts.len()), err)]
     pub fn get_metadata(
         &self,
         alerts: &[&ZtfAlertForEnrichment],

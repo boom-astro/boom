@@ -2,7 +2,7 @@ use crate::{
     kafka::base::{AlertConsumer, AlertProducer},
     utils::{data::count_files_in_dir, enums::Survey},
 };
-use tracing::info;
+use tracing::{info, instrument};
 
 const DECAM_DEFAULT_NB_PARTITIONS: usize = 15;
 
@@ -72,6 +72,11 @@ impl AlertProducer for DecamAlertProducer {
     fn default_nb_partitions(&self) -> usize {
         DECAM_DEFAULT_NB_PARTITIONS
     }
+    #[instrument(skip(self), err, fields(
+        date = %self.date.format("%Y%m%d"),
+        server_url = %self.server_url,
+        limit = self.limit,
+    ))]
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
         // there is no public decam archive, so we just check if the directory exists
         let data_folder = self.data_directory();

@@ -4,6 +4,7 @@ use crate::api::{catalogs::catalog_exists, db::PROTECTED_COLLECTION_NAMES, model
 use actix_web::{get, web, HttpResponse};
 use futures::StreamExt;
 use mongodb::{bson::doc, Database};
+use tracing::debug;
 
 #[derive(serde::Deserialize)]
 struct CatalogsQueryParams {
@@ -26,13 +27,20 @@ impl Default for CatalogsQueryParams {
         (status = 200, description = "List of catalogs", body = Vec<serde_json::Value>),
         (status = 500, description = "Internal server error")
     ),
-    tags=["Catalogs"]
+    tags = ["catalogs"]
 )]
+#[tracing::instrument(name = "catalogs::get_catalogs", skip(db, params), fields(http.method = "GET", http.route = "/api/catalogs"))]
 #[get("/catalogs")]
 pub async fn get_catalogs(
     db: web::Data<Database>,
     params: Option<web::Query<CatalogsQueryParams>>,
 ) -> HttpResponse {
+    let params = params.map(|p| p.into_inner()).unwrap_or_default();
+    debug!(
+        get_details = params.get_details,
+        "get_catalogs endpoint hit"
+    );
+
     // Get collection names in alphabetical order
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
@@ -49,7 +57,6 @@ pub async fn get_catalogs(
         .collect::<Vec<String>>();
     catalog_names.sort();
     let mut catalogs = Vec::new();
-    let params = params.map(|p| p.into_inner()).unwrap_or_default();
     if params.get_details {
         for catalog in catalog_names {
             match db
@@ -96,11 +103,17 @@ pub async fn get_catalogs(
     ),
     tags=["Catalogs"]
 )]
+#[tracing::instrument(name = "catalogs::get_catalog_indexes", skip(db, catalog_name), fields(
+    http.method = "GET",
+    http.route = "/api/catalogs/{catalog_name}/indexes",
+    catalog_name = %catalog_name,
+))]
 #[get("/catalogs/{catalog_name}/indexes")]
 pub async fn get_catalog_indexes(
     db: web::Data<Database>,
     catalog_name: web::Path<String>,
 ) -> HttpResponse {
+    debug!(catalog_name = %catalog_name, "get_catalog_indexes endpoint hit");
     if !catalog_exists(&db, &catalog_name).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
@@ -145,12 +158,19 @@ impl Default for SampleQuery {
     ),
     tags=["Catalogs"]
 )]
+#[tracing::instrument(name = "catalogs::get_catalog_sample", skip(db, catalog_name, params), fields(
+    http.method = "GET",
+    http.route = "/api/catalogs/{catalog_name}/sample", 
+    catalog_name = %catalog_name,
+))]
 #[get("/catalogs/{catalog_name}/sample")]
 pub async fn get_catalog_sample(
     db: web::Data<Database>,
     catalog_name: web::Path<String>,
     params: web::Query<SampleQuery>,
 ) -> HttpResponse {
+    let size = params.size.unwrap_or(1) as i32;
+    debug!(catalog_name = %catalog_name, size, "get_catalog_sample endpoint hit");
     if !catalog_exists(&db, &catalog_name).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
@@ -158,7 +178,6 @@ pub async fn get_catalog_sample(
     // Get the collection
     let collection = db.collection::<mongodb::bson::Document>(&collection_name);
 
-    let size = params.size.unwrap_or(1) as i32;
     if size <= 0 || size > 1000 {
         return response::bad_request("Size must be between 1 and 1000");
     }
