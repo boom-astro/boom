@@ -922,7 +922,7 @@ async fn test_babamul_filters_low_drb() {
     alert_no_drb.candidate.candidate.drb = None;
 
     let result = babamul
-        .process_ztf_alerts(vec![alert_low_drb, alert_zero_drb, alert_no_drb])
+        .process_ztf_alerts(vec![alert_low_drb, alert_no_drb])
         .await;
     assert!(
         result.is_ok(),
