@@ -1,7 +1,9 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, BabamulLsstAlert};
-use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch};
+use crate::enrichment::{
+    babamul::{Babamul, BabamulLsstAlert},
+    fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
+};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{

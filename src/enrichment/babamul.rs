@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
-const LSST_MIN_RELIABILITY: f32 = 0.2;
+const LSST_MIN_RELIABILITY: f32 = 0.0; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
 const ZTF_MIN_DRB: f32 = 0.2;
 
 #[serdavro]
@@ -380,7 +380,7 @@ impl BabamulZtfAlert {
 
         // Check star-galaxy scores (sgscore1, sgscore2, sgscore3) to determine if hosted
         // TODO: Confirm the catalog has full ZTF footprint coverage
-        // Scores < 0.5 (and >= 0) indicate galaxy-like objects (hosted transients)
+        // Scores <= 0.5 (and >= 0) indicate galaxy-like objects (hosted transients)
         // Negative values (-99, etc.) are ZTF pipeline placeholders for "no match"
         let sgscores = [
             self.candidate.candidate.sgscore1,

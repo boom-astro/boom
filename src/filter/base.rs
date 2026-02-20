@@ -102,8 +102,8 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "Photometry",
                 "fields": [
                     {"name": "jd", "type": "double"},
-                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy"},
-                    {"name": "flux_err",  "type":"double", "doc": "in nJy"},
+                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
+                    {"name": "flux_err",  "type":"double", "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
                     {"name":"band","type":"string"},
                     {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
                     {"name":"programid","type":"int"},

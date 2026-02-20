@@ -1183,6 +1183,7 @@ async fn test_babamul_lsst_with_ztf_match() {
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
     let schema = BabamulLsstAlert::get_schema();
     let mut successful_decodes = 0;
+    let mut found_match = false;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
             Ok(r) => r,
@@ -1218,22 +1219,20 @@ async fn test_babamul_lsst_with_ztf_match() {
                 if let Some((_, survey_matches_value)) =
                     fields.iter().find(|(name, _)| name == "survey_matches")
                 {
-                    if let apache_avro::types::Value::Union(_, boxed) = survey_matches_value {
-                        if let apache_avro::types::Value::Record(fields) = &**boxed {
-                            if let Some((_, ztf_value)) =
-                                fields.iter().find(|(name, _)| name == "ztf")
-                            {
-                                if let apache_avro::types::Value::Union(_, ztf_boxed) = ztf_value {
-                                    if let apache_avro::types::Value::Record(obj_fields) =
-                                        &**ztf_boxed
-                                    {
-                                        if obj_fields.iter().any(|(field_name, field_value)| {
-                                            field_name == "object_id"
-                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
-                                        }) {
-                                            eprintln!("Found matching ZTF object_id: {}", ztf_match_id);
-                                            // Match found, but we continue to count successful decodes
-                                        }
+                    if let apache_avro::types::Value::Record(match_fields) = survey_matches_value {
+                        if let Some((_, ztf_value)) =
+                            match_fields.iter().find(|(name, _)| name == "ztf")
+                        {
+                            if let apache_avro::types::Value::Union(_, boxed_value) = ztf_value {
+                                if let apache_avro::types::Value::Record(obj_fields) =
+                                    &**boxed_value
+                                {
+                                    if obj_fields.iter().any(|(field_name, field_value)| {
+                                        field_name == "objectId"
+                                            && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
+                                    }) {
+                                        found_match = true;
+                                        break;
                                     }
                                 }
                             }
@@ -1270,6 +1269,12 @@ async fn test_babamul_lsst_with_ztf_match() {
         .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
         .await
         .expect("Failed to cleanup LSST cutouts fixture after test");
+
+    assert!(
+        found_match,
+        "Did not find expected ZTF match in Babamul message for LSST alert with objectId: {}",
+        lsst_object_id
+    );
 }
 
 #[tokio::test]
@@ -1431,16 +1436,21 @@ async fn test_babamul_ztf_with_lsst_match() {
     }
 
     assert!(
+        found_topic.is_some(),
+        "Expected to find Babamul message published to one of the LSST match topics for ZTF alert with objectId: {}",
+        ztf_object_id
+    );
+
+    assert!(
         !messages.is_empty(),
         "Expected at least one Babamul message in one of the lsst-match topics"
     );
-
-    println!("Found message in topic: {:?}", found_topic);
 
     // Try to decode and verify the LSST match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
     let schema = BabamulZtfAlert::get_schema();
     let mut successful_decodes = 0;
+    let mut found_match = false;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
             Ok(r) => r,
@@ -1477,29 +1487,25 @@ async fn test_babamul_ztf_with_lsst_match() {
                 if let Some((_, survey_matches_value)) =
                     fields.iter().find(|(name, _)| name == "survey_matches")
                 {
-                    if let apache_avro::types::Value::Union(_, boxed) = survey_matches_value {
-                        if let apache_avro::types::Value::Record(match_fields) = &**boxed {
-                            if let Some((_, lsst_value)) =
-                                match_fields.iter().find(|(name, _)| name == "lsst")
-                            {
-                                if let apache_avro::types::Value::Union(_, lsst_boxed) = lsst_value
+                    if let apache_avro::types::Value::Record(match_fields) = survey_matches_value {
+                        if let Some((_, lsst_value)) =
+                            match_fields.iter().find(|(name, _)| name == "lsst")
+                        {
+                            if let apache_avro::types::Value::Union(_, boxed_value) = lsst_value {
+                                if let apache_avro::types::Value::Record(obj_fields) =
+                                    &**boxed_value
                                 {
-                                    if let apache_avro::types::Value::Record(obj_fields) =
-                                        &**lsst_boxed
-                                    {
-                                        if obj_fields.iter().any(|(field_name, field_value)| {
-                                            field_name == "object_id"
-                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
-                                        }) {
-                                            eprintln!("Found matching LSST object_id: {}", lsst_match_id);
-                                        }
+                                    if obj_fields.iter().any(|(field_name, field_value)| {
+                                        field_name == "objectId"
+                                            && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
+                                    }) {
+                                        found_match = true;
+                                        break;
                                     }
                                 }
                             }
                         }
                     }
-                } else {
-                    eprintln!("No survey_matches field found in ZTF alert");
                 }
             }
         }
@@ -1533,4 +1539,10 @@ async fn test_babamul_ztf_with_lsst_match() {
         .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
         .await
         .expect("Failed to cleanup ZTF cutouts fixture after test");
+
+    assert!(
+        found_match,
+        "Did not find expected LSST match in Babamul message for ZTF alert with objectId: {}",
+        ztf_object_id
+    );
 }
