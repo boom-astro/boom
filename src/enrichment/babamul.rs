@@ -380,7 +380,7 @@ impl BabamulZtfAlert {
 
         // Check star-galaxy scores (sgscore1, sgscore2, sgscore3) to determine if hosted
         // TODO: Confirm the catalog has full ZTF footprint coverage
-        // Scores < 0.5 (and >= 0) indicate galaxy-like objects (hosted transients)
+        // Scores <= 0.5 (and >= 0) indicate galaxy-like objects (hosted transients)
         // Negative values (-99, etc.) are ZTF pipeline placeholders for "no match"
         let sgscores = [
             self.candidate.candidate.sgscore1,
