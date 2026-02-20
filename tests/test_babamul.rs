@@ -918,7 +918,7 @@ async fn test_babamul_filters_low_drb() {
     alert_low_drb.candidate.candidate.drb = Some(0.1); // Below ZTF_MIN_DRB threshold
 
     // Create a ZTF alert with DRB exactly at zero (should also be filtered)
-    let mut alert_zero_drb = create_mock_enriched_ztf_alert(1234567901, "ZTF21aaaaaaL", false);
+    let mut alert_zero_drb = create_mock_enriched_ztf_alert(1234567901, "ZTF21aaaaaaal", false);
     alert_zero_drb.candidate.candidate.drb = Some(0.0);
 
     // Create a ZTF alert with no DRB value (None → defaults to 0.0, should be filtered)
