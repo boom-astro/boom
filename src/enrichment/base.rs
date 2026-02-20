@@ -82,6 +82,10 @@ pub enum EnrichmentWorkerError {
     ConfigurationError(String),
     #[error("Bad processing status code: {0}")]
     BadProcstatus(String),
+    #[error("Missing magzpsci for forced photometry point, cannot apply ZP correction")]
+    MissingMagZPSci,
+    #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
+    MissingFluxPSF,
 }
 
 #[async_trait::async_trait]

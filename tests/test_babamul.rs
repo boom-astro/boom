@@ -3,12 +3,12 @@ use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{
-        babamul::{EnrichedLsstAlert, EnrichedZtfAlert},
+        babamul::{BabamulEnrichedLsstAlert, BabamulEnrichedZtfAlert},
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
-        ZtfAlertProperties,
+        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
     },
     utils::{
-        lightcurves::{Band, PerBandProperties},
+        lightcurves::{flux2mag, Band, PerBandProperties, ZTF_ZP},
         testing::TEST_CONFIG_FILE,
     },
 };
@@ -77,7 +77,11 @@ fn create_lspsc_cross_matches(
 }
 
 /// Create a mock enriched ZTF alert for testing
-fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -> EnrichedZtfAlert {
+fn create_mock_enriched_ztf_alert(
+    candid: i64,
+    object_id: &str,
+    is_rock: bool,
+) -> BabamulEnrichedZtfAlert {
     // Create a minimal Candidate and ZtfCandidate using defaults
     let mut inner_candidate = Candidate::default();
     inner_candidate.candid = candid;
@@ -88,21 +92,81 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
     inner_candidate.fid = 1; // g-band
     inner_candidate.programid = 1; // public
 
-    let candidate = ZtfCandidate {
-        candidate: inner_candidate,
-        psf_flux: 1000.0,
-        psf_flux_err: 10.0,
-        snr: 100.0,
+    let candidate = ZtfCandidate::try_from(inner_candidate.clone()).unwrap();
+
+    // let's make sure that the flux and flux_err generated when converting from Candidate to ZtfCandidate
+    // can be converted back to the original magpsf and sigmapsf using the same ZP, to verify that the conversion is consistent
+    let (new_magpsf, new_sigmapsf) = flux2mag(
+        candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
+        candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
+        ZTF_ZP,
+    );
+    assert!(
+        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-6,
+        "Magnitude conversion mismatch: expected {}, got {}",
+        candidate.candidate.magpsf,
+        new_magpsf
+    );
+    assert!(
+        (new_sigmapsf - candidate.candidate.sigmapsf).abs() < 1e-6,
+        "Magnitude error conversion mismatch: expected {}, got {}",
+        candidate.candidate.sigmapsf,
+        new_sigmapsf
+    );
+
+    let magpsf = 15.949999;
+    let sigmapsf = 0.002316;
+    let flux = -11859.88;
+    let flux_err = 25.300741;
+    let magzpsci = 26.1352;
+    let ztf_forced_photometry = ZtfForcedPhotometry {
+        jd: 2460447.9202778,
+        magpsf: Some(magpsf),
+        sigmapsf: Some(sigmapsf),
+        diffmaglim: 20.5,
+        flux: Some(flux),
+        flux_err: flux_err,
+        snr: Some(100.0),
         band: Band::G,
+        ra: Some(150.0),
+        dec: Some(30.0),
+        magzpsci: Some(magzpsci),
+        programid: 1,
+        procstatus: Some("0".to_string()),
     };
 
-    EnrichedZtfAlert {
+    let fp_as_photometry = ZtfPhotometry::try_from(ztf_forced_photometry).unwrap();
+
+    let new_flux = fp_as_photometry.flux.unwrap();
+    let new_flux_err = fp_as_photometry.flux_err;
+
+    // the new flux is on a fixed zeropoint (ZTF_ZP), verify
+    // that converting it back to magnitude gives the same magpsf and sigmapsf as the original data
+    let (new_magpsf, new_sigmapsf) = flux2mag(
+        -new_flux as f32 * 1e-9,    // from nJy to Jy
+        new_flux_err as f32 * 1e-9, // from nJy to Jy
+        ZTF_ZP,
+    );
+    assert!(
+        (new_magpsf - magpsf as f32).abs() < 1e-6,
+        "Magnitude conversion mismatch: expected {}, got {}",
+        magpsf,
+        new_magpsf
+    );
+    assert!(
+        (new_sigmapsf - sigmapsf as f32).abs() < 1e-6,
+        "Magnitude error conversion mismatch: expected {}, got {}",
+        sigmapsf,
+        new_sigmapsf
+    );
+
+    BabamulEnrichedZtfAlert {
         candid,
         object_id: object_id.to_string(),
         candidate,
         prv_candidates: vec![],
         prv_nondetections: vec![],
-        fp_hists: vec![],
+        fp_hists: vec![fp_as_photometry],
         properties: ZtfAlertProperties {
             rock: is_rock,
             star: false,
@@ -127,7 +191,10 @@ async fn create_mock_enriched_lsst_alert(
     is_rock: bool,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
+) -> (
+    BabamulEnrichedLsstAlert,
+    HashMap<String, Vec<serde_json::Value>>,
+) {
     create_mock_enriched_lsst_alert_with_matches(
         candid,
         object_id,
@@ -152,7 +219,10 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
+) -> (
+    BabamulEnrichedLsstAlert,
+    HashMap<String, Vec<serde_json::Value>>,
+) {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
     dia_source.candid = candid;
@@ -197,7 +267,6 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         flux_err: 10.0,
         snr: Some(100.0),
         band: Band::R,
-        zp: Some(8.9),
         ra: Some(ra_override.unwrap_or(150.0)),
         dec: Some(dec_override.unwrap_or(30.0)),
     };
@@ -217,7 +286,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         .await
         .unwrap();
 
-    EnrichedLsstAlert::from_alert_properties_and_cutouts(
+    BabamulEnrichedLsstAlert::from_alert_properties_and_cutouts(
         lsst_alert_for_enrichment,
         None,
         None,
@@ -700,7 +769,7 @@ async fn test_babamul_process_ztf_alerts() {
     let expected: std::collections::HashSet<String> =
         [ztf_obj1.clone(), ztf_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedZtfAlert::get_schema();
+    let schema = boom::enrichment::babamul::BabamulEnrichedZtfAlert::get_schema();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -759,7 +828,7 @@ async fn test_babamul_process_lsst_alerts() {
     let expected: std::collections::HashSet<String> =
         [lsst_obj1.clone(), lsst_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedLsstAlert::get_schema();
+    let schema = boom::enrichment::babamul::BabamulEnrichedLsstAlert::get_schema();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -1111,7 +1180,7 @@ async fn test_babamul_lsst_with_ztf_match() {
 
     // Try to decode and verify the ZTF match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
-    let schema = EnrichedLsstAlert::get_schema();
+    let schema = BabamulEnrichedLsstAlert::get_schema();
     let mut successful_decodes = 0;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -1369,7 +1438,7 @@ async fn test_babamul_ztf_with_lsst_match() {
 
     // Try to decode and verify the LSST match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
-    let schema = EnrichedZtfAlert::get_schema();
+    let schema = BabamulEnrichedZtfAlert::get_schema();
     let mut successful_decodes = 0;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {

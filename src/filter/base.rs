@@ -102,10 +102,9 @@ const ALERT_SCHEMA: &str = r#"
                 "name": "Photometry",
                 "fields": [
                     {"name": "jd", "type": "double"},
-                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy"},
-                    {"name": "flux_err",  "type":"double", "doc": "in nJy"},
+                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
+                    {"name": "flux_err",  "type":"double", "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
                     {"name":"band","type":"string"},
-                    {"name":"zero_point","type":"double"},
                     {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
                     {"name":"programid","type":"int"},
                     {"name":"survey","type": "Survey"},
@@ -165,7 +164,7 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     None
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Origin {
     Alert,
     ForcedPhot,
@@ -177,7 +176,6 @@ pub struct Photometry {
     pub flux: Option<f64>, // in nJy
     pub flux_err: f64,     // in nJy
     pub band: String,
-    pub zero_point: f64,
     pub origin: Origin,
     pub programid: i32,
     pub survey: Survey,
@@ -830,6 +828,8 @@ pub enum FilterWorkerError {
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
     KafkaConfigMissing(Survey),
+    #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
+    MissingFluxPSF,
 }
 
 #[async_trait::async_trait]

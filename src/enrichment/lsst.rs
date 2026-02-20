@@ -1,6 +1,6 @@
 use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedLsstAlert};
+use crate::enrichment::babamul::{Babamul, BabamulEnrichedLsstAlert};
 use crate::enrichment::{
     fetch_alert_cutouts, fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
@@ -63,10 +63,6 @@ pub fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
     moc.contains_cell(MOC_DEPTH, cell)
 }
 
-fn default_lsst_zp() -> Option<f64> {
-    Some(8.9)
-}
-
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LsstPhotometry {
@@ -79,9 +75,6 @@ pub struct LsstPhotometry {
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
     pub band: Band,
-    // Set a default if missing
-    #[serde(default = "default_lsst_zp")]
-    pub zp: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
     pub snr: Option<f64>,
@@ -329,7 +322,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<(
-            EnrichedLsstAlert,
+            BabamulEnrichedLsstAlert,
             std::collections::HashMap<String, Vec<serde_json::Value>>,
         )> = Vec::new();
         for alert in alerts {
@@ -362,7 +355,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                     .remove(&candid)
                     .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
                 let (enriched_alert, cross_matches) =
-                    EnrichedLsstAlert::from_alert_properties_and_cutouts(
+                    BabamulEnrichedLsstAlert::from_alert_properties_and_cutouts(
                         alert,
                         Some(cutouts.cutout_science),
                         Some(cutouts.cutout_template),

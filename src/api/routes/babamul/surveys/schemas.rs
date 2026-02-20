@@ -10,8 +10,8 @@ pub struct BabamulAvroSchemas {
 impl BabamulAvroSchemas {
     pub fn new() -> Self {
         use apache_avro::AvroSchema;
-        let lsst_schema = crate::enrichment::babamul::EnrichedLsstAlert::get_schema();
-        let ztf_schema = crate::enrichment::babamul::EnrichedZtfAlert::get_schema();
+        let lsst_schema = crate::enrichment::babamul::BabamulEnrichedLsstAlert::get_schema();
+        let ztf_schema = crate::enrichment::babamul::BabamulEnrichedZtfAlert::get_schema();
         let lsst_schema = serde_json::to_value(&lsst_schema).unwrap();
         let ztf_schema = serde_json::to_value(&ztf_schema).unwrap();
         Self {

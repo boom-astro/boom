@@ -1,10 +1,10 @@
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
+use crate::enrichment::babamul::{Babamul, BabamulEnrichedZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag,
+    PhotometryMag, ZTF_ZP,
 };
 use crate::{
     alert::ZtfCandidate,
@@ -50,10 +50,12 @@ pub struct ZtfForcedPhotometry {
     pub magpsf: Option<f64>,
     pub sigmapsf: Option<f64>,
     pub diffmaglim: f64,
-    #[serde(rename = "psfFlux")]
-    pub flux: Option<f64>, // in nJy
-    #[serde(rename = "psfFluxErr")]
-    pub flux_err: f64, // in nJy
+    // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+    #[serde(rename = "forcediffimflux")]
+    pub flux: Option<f64>,
+    // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+    #[serde(rename = "forcediffimfluxunc")]
+    pub flux_err: f64,
     pub band: Band,
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
@@ -77,7 +79,6 @@ pub struct ZtfPhotometry {
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
     pub band: Band,
-    pub zp: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
     pub snr: Option<f64>,
@@ -99,7 +100,6 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             band: phot.band,
             snr: phot.snr,
             programid: phot.programid,
-            zp: Some(23.9), // alert photometry uses a fixed zeropoint of 23.9
         })
     }
 }
@@ -115,19 +115,36 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             return Err(EnrichmentWorkerError::BadProcstatus(procstatus));
         }
 
+        // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
+        let zp_scaling_factor = if let Some(magzpsci) = phot.magzpsci {
+            10f64.powf((ZTF_ZP as f64 - magzpsci) / 2.5)
+        } else {
+            return Err(EnrichmentWorkerError::MissingMagZPSci);
+        };
+
+        let flux = if phot.flux != Some(-99999.0) && phot.flux.map_or(false, |f| !f.is_nan()) {
+            phot.flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
+        } else {
+            None
+        };
+        let flux_err = if phot.flux_err != -99999.0 && !phot.flux_err.is_nan() {
+            phot.flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
+        } else {
+            return Err(EnrichmentWorkerError::MissingFluxPSF);
+        };
+
         Ok(ZtfPhotometry {
             jd: phot.jd,
             magpsf: phot.magpsf,
             sigmapsf: phot.sigmapsf,
             diffmaglim: phot.diffmaglim,
-            flux: phot.flux,
-            flux_err: phot.flux_err,
+            flux,
+            flux_err,
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
             snr: phot.snr,
             programid: phot.programid,
-            zp: phot.magzpsci, // forced photometry has a zeropoint per datapoint
         })
     }
 }
@@ -444,7 +461,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
+        let mut enriched_alerts: Vec<BabamulEnrichedZtfAlert> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
@@ -514,7 +531,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
+                let enriched_alert = BabamulEnrichedZtfAlert::from_alert_properties_and_cutouts(
                     alert,
                     Some(cutouts.cutout_science),
                     Some(cutouts.cutout_template),
