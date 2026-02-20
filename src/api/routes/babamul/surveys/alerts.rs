@@ -448,14 +448,32 @@ pub async fn cone_search_alerts(
             let mut results: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
             let mut alert_count = 0;
             let mut coordinates_with_matches_count = 0;
-            for (object_id, radec) in coordinates {
-                let ra = radec[0] - 180.0;
+            for (object_name, radec) in coordinates {
+                if radec.len() != 2 {
+                    return response::bad_request(&format!(
+                        "Invalid coordinates for object {}: expected [RA, Dec]",
+                        object_name
+                    ));
+                }
+                let ra = radec[0];
                 let dec = radec[1];
+                if ra < 0.0 || ra >= 360.0 {
+                    return response::bad_request(&format!(
+                        "Invalid RA for object {}: must be in [0, 360)",
+                        object_name
+                    ));
+                }
+                if dec < -90.0 || dec > 90.0 {
+                    return response::bad_request(&format!(
+                        "Invalid Dec for object {}: must be in [-90, 90]",
+                        object_name
+                    ));
+                }
                 let center_sphere = doc! {
                     "coordinates.radec_geojson": {
                         "$geoWithin": {
                             "$centerSphere": [
-                                [ra, dec],
+                                [ra - 180.0, dec],
                                 radius_radians
                             ]
                         }
@@ -496,7 +514,7 @@ pub async fn cone_search_alerts(
                 if !alert_results.is_empty() {
                     coordinates_with_matches_count += 1;
                 }
-                results.insert(object_id.clone(), alert_results);
+                results.insert(object_name.clone(), alert_results);
             }
             return response::ok(
                 &format!(
@@ -515,14 +533,32 @@ pub async fn cone_search_alerts(
             let mut results: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
             let mut alert_count = 0;
             let mut coordinates_with_matches_count = 0;
-            for (object_id, radec) in coordinates {
-                let ra = radec[0] - 180.0;
+            for (object_name, radec) in coordinates {
+                if radec.len() != 2 {
+                    return response::bad_request(&format!(
+                        "Invalid coordinates for object {}: expected [RA, Dec]",
+                        object_name
+                    ));
+                }
+                let ra = radec[0];
                 let dec = radec[1];
+                if ra < 0.0 || ra >= 360.0 {
+                    return response::bad_request(&format!(
+                        "Invalid RA for object {}: must be in [0, 360)",
+                        object_name
+                    ));
+                }
+                if dec < -90.0 || dec > 90.0 {
+                    return response::bad_request(&format!(
+                        "Invalid Dec for object {}: must be in [-90, 90]",
+                        object_name
+                    ));
+                }
                 let center_sphere = doc! {
                     "coordinates.radec_geojson": {
                         "$geoWithin": {
                             "$centerSphere": [
-                                [ra, dec],
+                                [ra - 180.0, dec],
                                 radius_radians
                             ]
                         }
@@ -561,7 +597,7 @@ pub async fn cone_search_alerts(
                 if !alert_results.is_empty() {
                     coordinates_with_matches_count += 1;
                 }
-                results.insert(object_id.clone(), alert_results);
+                results.insert(object_name.clone(), alert_results);
             }
             return response::ok(
                 &format!(

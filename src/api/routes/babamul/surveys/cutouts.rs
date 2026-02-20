@@ -24,6 +24,7 @@ struct AlertCandidOnly {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct CutoutQuery {
     candid: Option<i64>,
+    #[serde(rename = "objectId")]
     object_id: Option<String>,
     which: Option<WhichCutouts>,
     band: Option<Band>,
