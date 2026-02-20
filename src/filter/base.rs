@@ -105,7 +105,6 @@ const ALERT_SCHEMA: &str = r#"
                     {"name": "flux",  "type": ["null", "double"], "doc": "in nJy"},
                     {"name": "flux_err",  "type":"double", "doc": "in nJy"},
                     {"name":"band","type":"string"},
-                    {"name":"zero_point","type":"double"},
                     {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
                     {"name":"programid","type":"int"},
                     {"name":"survey","type": "Survey"},

@@ -11,9 +11,7 @@ use crate::filter::{
     FilterWorkerError, LoadedFilter, Origin, Photometry,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
-use crate::utils::{enums::Survey, o11y::logging::as_error};
-
-const ZTF_ZP: f64 = 23.9;
+use crate::utils::{enums::Survey, lightcurves::ZTF_ZP, o11y::logging::as_error};
 
 /// For a filter running on another survey (e.g., LSST), determine if we need to
 /// fetch ZTF auxiliary data (prv_candidates, fp_hists) based on the fields
@@ -282,14 +280,14 @@ pub async fn build_ztf_alerts(
             let programid = doc.get_i32("programid")?;
 
             // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
-            let factor = 10f64.powf((ZTF_ZP - magzpsci) / 2.5);
+            let zp_scaling_factor = 10f64.powf((ZTF_ZP as f64 - magzpsci) / 2.5);
             let flux = if flux != Some(-99999.0) && flux.map_or(false, |f| !f.is_nan()) {
-                flux.map(|f| f * 1e9_f64 * factor) // convert to a fixed ZP and nJy
+                flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
             } else {
                 None
             };
             let flux_err = if flux_err != -99999.0 && !flux_err.is_nan() {
-                flux_err * 1e9_f64 * factor // convert to a fixed ZP and nJy
+                flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
             } else {
                 return Err(FilterWorkerError::MissingFluxPSF);
             };

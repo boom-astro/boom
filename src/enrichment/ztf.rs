@@ -116,19 +116,19 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
         }
 
         // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
-        let factor = if let Some(magzpsci) = phot.magzpsci {
+        let zp_scaling_factor = if let Some(magzpsci) = phot.magzpsci {
             10f64.powf((ZTF_ZP as f64 - magzpsci) / 2.5)
         } else {
             return Err(EnrichmentWorkerError::MissingMagZPSci);
         };
 
         let flux = if phot.flux != Some(-99999.0) && phot.flux.map_or(false, |f| !f.is_nan()) {
-            phot.flux.map(|f| f * 1e9_f64 * factor) // convert to a fixed ZP and nJy
+            phot.flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
         } else {
             None
         };
         let flux_err = if phot.flux_err != -99999.0 && !phot.flux_err.is_nan() {
-            phot.flux_err * 1e9_f64 * factor // convert to a fixed ZP and nJy
+            phot.flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
         } else {
             return Err(EnrichmentWorkerError::MissingFluxPSF);
         };
