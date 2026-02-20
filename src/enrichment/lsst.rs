@@ -200,7 +200,6 @@ pub struct LsstAlertProperties {
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
     pub photstats: PerBandProperties,
-    #[serde(default)]
     pub multisurvey_photstats: PerBandProperties,
 }
 
