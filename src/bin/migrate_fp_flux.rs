@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::lightcurves::ZTF_ZP;
 use clap::Parser;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -6,8 +9,9 @@ use mongodb::bson::{doc, Bson, Document};
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / 2.30258509299_f64;
+
 /// Fixed zeropoint for ZTF forced photometry.
-const ZTF_ZP: f64 = 23.9;
 
 /// Migrate ZTF forced photometry flux values to a fixed zeropoint.
 ///
@@ -24,6 +28,9 @@ struct Cli {
     /// Number of document IDs to collect per update_many batch
     #[arg(long, default_value = "5000")]
     batch_size: usize,
+    /// Whether or not validation should run after migration. Defaults to False (caution, it's very slow!)
+    #[arg(long, default_value = "false")]
+    validate: bool,
 }
 
 /// Run batched updates by streaming IDs from a cursor and calling update_many
@@ -123,6 +130,12 @@ async fn main() {
     let collection = db.collection::<Document>("ZTF_alerts_aux");
 
     migrate(&collection, args.batch_size).await;
+
+    // then validate
+    if args.validate {
+        info!("Starting validation...");
+        validate(&collection).await;
+    }
 }
 
 async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) {
@@ -146,10 +159,10 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
         "$multiply": [
             1e9_f64,
             { "$pow": [
-                10.0,
+                10.0_f64,
                 { "$divide": [
-                    { "$subtract": [ZTF_ZP, "$$fp.magzpsci"] },
-                    2.5
+                    { "$subtract": [ZTF_ZP as f64, "$$fp.magzpsci"] },
+                    2.5_f64
                 ]}
             ]}
         ]
@@ -174,10 +187,10 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
     let new_flux = doc! {
         "$cond": {
             "if": { "$and": [
-                valid_raw_flux,
+                &valid_raw_flux,
                 { "$ne": ["$$fp.magzpsci", Bson::Null] },
             ]},
-            "then": { "$multiply": ["$$fp.forcediffimflux", scale_factor.clone()] },
+            "then": { "$multiply": ["$$fp.forcediffimflux", &scale_factor] },
             "else": Bson::Null,
         }
     };
@@ -186,10 +199,10 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
     let new_flux_err = doc! {
         "$cond": {
             "if": { "$and": [
-                valid_raw_flux_err.clone(),
+                &valid_raw_flux_err,
                 { "$ne": ["$$fp.magzpsci", Bson::Null] },
             ]},
-            "then": { "$multiply": ["$$fp.forcediffimfluxunc", scale_factor] },
+            "then": { "$multiply": ["$$fp.forcediffimfluxunc", &scale_factor] },
             "else": Bson::Null,
         }
     };
@@ -204,8 +217,8 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
                         "$mergeObjects": [
                             "$$fp",
                             {
-                                "psfFlux": new_flux.clone(),
-                                "psfFluxErr": new_flux_err.clone(),
+                                "psfFlux": &new_flux,
+                                "psfFluxErr": &new_flux_err,
                             }
                         ]
                     }
@@ -225,4 +238,178 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
     .await;
 
     info!("Migration complete. Modified {} documents.", total);
+}
+
+async fn validate(collection: &mongodb::Collection<Document>) {
+    // here we want to validate that where the raw values are valid,
+    // the psfFlux and psfFluxErr were correctly updated. We can do this by
+    // taking the newly added psfFlux and psfFluxErr and checking that we
+    // can compute the magpsf and sigmapsf that match the existing ones, within some tolerance.
+    // we can skip computing this where psfFlux.abs() / psfFluxErr < 3, and where procstatus != "0"
+
+    let pipeline = vec![doc! {
+        "$set": {
+            "validation": {
+                "$map": {
+                    "input": "$fp_hists",
+                    "as": "fp",
+                    "in": {
+                        "computed_magpsf": {
+                            "$cond": {
+                                "if": { "$and": [
+                                    { "$ne": ["$$fp.psfFlux", Bson::Null] },
+                                    { "$ne": ["$$fp.psfFluxErr", Bson::Null] },
+                                    { "$gt": [
+                                        { "$abs": { "$divide": ["$$fp.psfFlux", "$$fp.psfFluxErr"] } },
+                                        3
+                                    ]},
+                                    { "$eq": ["$$fp.procstatus", "0"] },
+                                ]},
+                                "then": {
+                                    // magpsf = -2.5 * log10(abs(psfFlux / 1e9)) + ZTF_ZP
+                                    "$add": [
+                                        { "$multiply": [
+                                            -2.5,
+                                            { "$log10": { "$abs": { "$divide": ["$$fp.psfFlux", 1e9_f64] } }}
+                                        ]},
+                                        ZTF_ZP as f64
+                                    ]
+                                },
+                                "else": Bson::Null,
+                            }
+                        },
+                        "computed_sigmapsf": {
+                            "$cond": {
+                                "if": { "$and": [
+                                    { "$ne": ["$$fp.psfFluxErr", Bson::Null] },
+                                    { "$gt": [
+                                        { "$abs": { "$divide": ["$$fp.psfFlux", "$$fp.psfFluxErr"] } },
+                                        3
+                                    ]},
+                                    { "$eq": ["$$fp.procstatus", "0"] },
+                                ]},
+                                "then": {
+                                    // (2.5 / ln(10)) * (psfFluxErr * 1e-9 / abs(psfFlux * 1e-9))
+                                    "$multiply": [
+                                        FLUXERR2MAGERR_FACTOR,
+                                        { "$divide": [
+                                            { "$multiply": ["$$fp.psfFluxErr", 1e-9_f64] },
+                                            { "$abs": { "$multiply": ["$$fp.psfFlux", 1e-9_f64] } }
+                                        ]}
+                                    ]
+                                },
+                                "else": Bson::Null,
+                            }
+                        },
+                        "procstatus": "$$fp.procstatus",
+                        "magpsf": "$$fp.magpsf",
+                        "sigmapsf": "$$fp.sigmapsf",
+                        "snr": "$$fp.snr",
+                    }
+                }
+            }
+        }
+    }];
+
+    let estimated_count = match collection.estimated_document_count().await {
+        Ok(c) => c,
+        Err(e) => {
+            error!("error estimating document count: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let pb = ProgressBar::new(estimated_count);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "validate {bar:40} {pos}/{len} [{elapsed_precise} < {eta_precise}]",
+        )
+        .unwrap(),
+    );
+    pb.set_message("validate".to_string());
+
+    let mut cursor = match collection.aggregate(pipeline).await {
+        Ok(c) => c,
+        Err(e) => {
+            error!("error running validation aggregation: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut num_validated = 0;
+    let mut num_failed = 0;
+    let mut num_skipped = 0;
+    let mut skipped_by_reason = HashMap::new();
+    let mut failed_by_reason = HashMap::new();
+
+    while let Some(d) = cursor.try_next().await.unwrap() {
+        let validation = d.get("validation").unwrap().as_array().unwrap();
+        for fp in validation {
+            let fp = fp.as_document().unwrap();
+            let procstatus = fp.get_str("procstatus").unwrap();
+            if procstatus != "0" {
+                num_skipped += 1;
+                *skipped_by_reason.entry("invalid_procstatus").or_insert(0) += 1;
+                continue;
+            }
+            // check if an SNR is there, if not then skip
+            if fp.get("snr").is_none() || fp.get_f64("snr").unwrap().abs() <= 3.0 {
+                num_skipped += 1;
+                *skipped_by_reason.entry("low_snr").or_insert(0) += 1;
+                continue;
+            }
+
+            if fp.get("computed_magpsf").is_none() || fp.get("computed_sigmapsf").is_none() {
+                num_skipped += 1;
+                *skipped_by_reason
+                    .entry("missing_computed_values")
+                    .or_insert(0) += 1;
+                continue;
+            }
+            // if computed_magpsf is defined but null/None
+            let computed_magpsf = fp.get("computed_magpsf").unwrap();
+            if computed_magpsf.as_null().is_some() {
+                num_skipped += 1;
+                *skipped_by_reason
+                    .entry("invalid_computed_magpsf")
+                    .or_insert(0) += 1;
+                continue;
+            }
+            // same for computed_sigmapsf
+            let computed_sigmapsf = fp.get("computed_sigmapsf").unwrap();
+            if computed_sigmapsf.as_null().is_some() {
+                num_skipped += 1;
+                *skipped_by_reason
+                    .entry("invalid_computed_sigmapsf")
+                    .or_insert(0) += 1;
+                continue;
+            }
+            let computed_magpsf = fp.get_f64("computed_magpsf").unwrap();
+            let computed_sigmapsf = fp.get_f64("computed_sigmapsf").unwrap();
+            let magpsf = fp.get_f64("magpsf").unwrap();
+            let sigmapsf = fp.get_f64("sigmapsf").unwrap();
+
+            if (computed_magpsf - magpsf).abs() >= 1e-5 {
+                num_failed += 1;
+                *failed_by_reason.entry("magpsf_mismatch").or_insert(0) += 1;
+                error!("Validation failed for document {}: computed magpsf {}±{} vs existing magpsf {}±{}",
+                    d.get("_id").unwrap(), computed_magpsf, computed_sigmapsf, magpsf, sigmapsf);
+            } else if (computed_sigmapsf - sigmapsf).abs() >= 1e-5 {
+                num_failed += 1;
+                *failed_by_reason.entry("sigmapsf_mismatch").or_insert(0) += 1;
+                error!("Validation failed for document {}: computed sigmapsf {} vs existing sigmapsf {}",
+                    d.get("_id").unwrap(), computed_sigmapsf, sigmapsf);
+            } else {
+                num_validated += 1;
+            }
+        }
+        pb.inc(1);
+    }
+
+    info!(
+        "Validation complete. {} validated, {} failed, {} skipped.",
+        num_validated, num_failed, num_skipped
+    );
+    info!("Skipped by reason: {:?}", skipped_by_reason);
+    info!("Failed by reason: {:?}", failed_by_reason);
 }
