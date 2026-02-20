@@ -51,15 +51,15 @@ pub enum Band {
     U,
 }
 
-impl ToString for Band {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for Band {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Band::G => "g".to_string(),
-            Band::R => "r".to_string(),
-            Band::I => "i".to_string(),
-            Band::Z => "z".to_string(),
-            Band::Y => "y".to_string(),
-            Band::U => "u".to_string(),
+            Band::G => write!(f, "g"),
+            Band::R => write!(f, "r"),
+            Band::I => write!(f, "i"),
+            Band::Z => write!(f, "z"),
+            Band::Y => write!(f, "y"),
+            Band::U => write!(f, "u"),
         }
     }
 }
