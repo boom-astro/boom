@@ -6,10 +6,10 @@ use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
-use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
-use crate::utils::derive_avro_schema::SerdavroWriter;
+use crate::enrichment::EnrichmentWorkerError;
 use crate::utils::enums::Survey;
-use apache_avro::{AvroSchema, Schema, Writer};
+use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
+use apache_avro::{AvroSchema, DeflateSettings, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
