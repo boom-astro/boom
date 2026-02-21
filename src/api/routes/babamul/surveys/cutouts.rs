@@ -168,5 +168,5 @@ pub async fn get_cutouts(
         return response::ok(&format!("cutouts found for objectId: {}", object_id), resp);
     }
 
-    response::not_found("candid or objectId query parameter must be provided")
+    response::bad_request("candid or objectId query parameter must be provided")
 }
