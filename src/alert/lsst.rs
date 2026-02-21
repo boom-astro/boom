@@ -291,10 +291,13 @@ impl LsstCandidate {
         // instead of converting all the nJy values to Jy, we just add 2.5 * log10(1e9) = 22.5
         // to the zeropoint
 
-        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, LSST_ZP_AB_NJY);
+        let psf_flux_abs = psf_flux.abs();
+        let ap_flux_abs = ap_flux.abs();
+
+        let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
         let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
-        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
+        let (magap, sigmagap) = flux2mag(ap_flux_abs, ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, we use the dia_object_id as object_id
         // if dia_object_id is undefined but ss_object_id is defined, use "sso{ss_object_id}" as object_id
@@ -328,10 +331,10 @@ impl LsstCandidate {
             sigmapsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr_psf: psf_flux.abs() / psf_flux_err,
+            snr_psf: psf_flux_abs / psf_flux_err,
             magap,
             sigmagap,
-            snr_ap: ap_flux.abs() / ap_flux_err,
+            snr_ap: ap_flux_abs / ap_flux_err,
             jdstarthist,
             ndethist,
         })
@@ -376,10 +379,13 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
         // instead of converting all the nJy values to Jy, we just add 2.5 * log10(1e9) = 22.5
         // to the zeropoint
 
-        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, LSST_ZP_AB_NJY);
+        let psf_flux_abs = psf_flux.abs();
+        let ap_flux_abs = ap_flux.abs();
+
+        let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
         let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
-        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
+        let (magap, sigmagap) = flux2mag(ap_flux_abs, ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, we use the dia_object_id as object_id
         // if dia_object_id is undefined but ss_object_id is defined, use "sso{ss_object_id}" as object_id
@@ -401,10 +407,10 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
             sigmapsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr_psf: psf_flux.abs() / psf_flux_err,
+            snr_psf: psf_flux_abs / psf_flux_err,
             magap,
             sigmagap,
-            snr_ap: ap_flux.abs() / ap_flux_err,
+            snr_ap: ap_flux_abs / ap_flux_err,
         })
     }
 }
