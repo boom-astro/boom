@@ -267,9 +267,10 @@ pub struct LsstCandidate {
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
+    pub snr_psf: f32,
+    pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
-    pub snr_psf: f32,
     pub magap: f32,
     pub sigmagap: f32,
     pub snr_ap: f32,
@@ -296,6 +297,12 @@ impl LsstCandidate {
 
         let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
         let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
+
+        // chipsf is the psf_chi2 / psf_ndata, if measured successfully, otherwise None
+        let chipsf = match (dia_source.psf_chi2, dia_source.psf_ndata) {
+            (Some(chi2), Some(ndata)) if ndata > 0 => Some(chi2 / ndata as f32),
+            _ => None,
+        };
 
         let (magap, sigmagap) = flux2mag(ap_flux_abs, ap_flux_err, LSST_ZP_AB_NJY);
 
@@ -329,9 +336,10 @@ impl LsstCandidate {
             jd,
             magpsf,
             sigmapsf,
+            snr_psf: psf_flux_abs / psf_flux_err,
+            chipsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr_psf: psf_flux_abs / psf_flux_err,
             magap,
             sigmagap,
             snr_ap: ap_flux_abs / ap_flux_err,
@@ -356,9 +364,10 @@ pub struct LsstPrvCandidate {
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
+    pub snr_psf: f32,
+    pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
-    pub snr_psf: f32,
     pub magap: f32,
     pub sigmagap: f32,
     pub snr_ap: f32,
@@ -385,6 +394,12 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
         let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
         let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
+        // chipsf is the psf_chi2 / psf_ndata, if measured successfully, otherwise None
+        let chipsf = match (dia_source.psf_chi2, dia_source.psf_ndata) {
+            (Some(chi2), Some(ndata)) if ndata > 0 => Some(chi2 / ndata as f32),
+            _ => None,
+        };
+
         let (magap, sigmagap) = flux2mag(ap_flux_abs, ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, we use the dia_object_id as object_id
@@ -405,9 +420,10 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
             jd,
             magpsf,
             sigmapsf,
+            snr_psf: psf_flux_abs / psf_flux_err,
+            chipsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr_psf: psf_flux_abs / psf_flux_err,
             magap,
             sigmagap,
             snr_ap: ap_flux_abs / ap_flux_err,
@@ -424,9 +440,10 @@ impl TryFrom<LsstCandidate> for LsstPrvCandidate {
             jd: candidate.jd,
             magpsf: candidate.magpsf,
             sigmapsf: candidate.sigmapsf,
+            snr_psf: candidate.snr_psf,
+            chipsf: candidate.chipsf,
             diffmaglim: candidate.diffmaglim,
             isdiffpos: candidate.isdiffpos,
-            snr_psf: candidate.snr_psf,
             magap: candidate.magap,
             sigmagap: candidate.sigmagap,
             snr_ap: candidate.snr_ap,

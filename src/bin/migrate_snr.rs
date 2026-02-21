@@ -127,6 +127,24 @@ const FACTOR: f64 = 1.0857362047581294; // 2.5 / ln(10)
 // Shared BSON helpers
 // ---------------------------------------------------------------------------
 
+/// `chi2 / ndata` guarded by null checks and ndata > 0.
+/// For array element references use `var` like `"$$pc"`, for top-level use `"$candidate"`.
+fn chipsf_expr(chi2_ref: &str, ndata_ref: &str, existing_ref: &str) -> Document {
+    doc! {
+        "$cond": {
+            "if": { "$and": [
+                { "$ne": [chi2_ref, Bson::Null] },
+                { "$ne": [ndata_ref, Bson::Null] },
+                { "$gt": [ndata_ref, 0] },
+            ]},
+            "then": {
+                "$divide": [chi2_ref, ndata_ref]
+            },
+            "else": existing_ref,
+        }
+    }
+}
+
 /// `abs($$var.field) / $$var.field_err` guarded by null/zero checks.
 /// Returns the new SNR value when valid, otherwise keeps the existing value.
 fn snr_expr(var: &str, flux_field: &str, flux_err_field: &str, snr_field: &str) -> Document {
@@ -393,6 +411,11 @@ async fn migrate_lsst_alerts(db: &mongodb::Database, batch_size: usize) {
         "$set": {
             "candidate.snr_psf": snr_expr_top("candidate", "psfFlux", "psfFluxErr", "snr_psf"),
             "candidate.snr_ap": snr_expr_top("candidate", "apFlux", "apFluxErr", "snr_ap"),
+            "candidate.chipsf": chipsf_expr(
+                "$candidate.psfChi2",
+                "$candidate.psfNdata",
+                "$candidate.chipsf",
+            ),
         }
     }];
 
@@ -402,7 +425,7 @@ async fn migrate_lsst_alerts(db: &mongodb::Database, batch_size: usize) {
         pipeline,
         batch_size,
         estimated,
-        "LSST_alerts snr",
+        "LSST_alerts snr+chipsf",
     )
     .await;
     info!("LSST_alerts: modified {} documents", total);
@@ -425,6 +448,11 @@ async fn migrate_lsst_alerts_aux(db: &mongodb::Database, batch_size: usize) {
                             {
                                 "snr_psf": snr_expr("$$pc", "psfFlux", "psfFluxErr", "snr_psf"),
                                 "snr_ap":  snr_expr("$$pc", "apFlux",  "apFluxErr",  "snr_ap"),
+                                "chipsf": chipsf_expr(
+                                    "$$pc.psfChi2",
+                                    "$$pc.psfNdata",
+                                    "$$pc.chipsf",
+                                ),
                             }
                         ]
                     }
@@ -509,6 +537,21 @@ fn computed_snr_expr(flux_ref: &str, flux_err_ref: &str) -> Document {
     }
 }
 
+/// Aggregation sub-expression: compute expected chipsf = psfChi2 / psfNdata.
+fn computed_chipsf_expr(chi2_ref: &str, ndata_ref: &str) -> Document {
+    doc! {
+        "$cond": {
+            "if": { "$and": [
+                { "$ne": [chi2_ref, Bson::Null] },
+                { "$ne": [ndata_ref, Bson::Null] },
+                { "$gt": [ndata_ref, 0] },
+            ]},
+            "then": { "$divide": [chi2_ref, ndata_ref] },
+            "else": Bson::Null,
+        }
+    }
+}
+
 struct ValidationCounters {
     validated: u64,
     failed: u64,
@@ -550,14 +593,13 @@ impl ValidationCounters {
     }
 }
 
-/// Validate a single document's aperture-flux and SNR fields.
-/// `entry` is a BSON document with: computed_magap, computed_sigmagap, magap, sigmagap,
-/// computed_snr_psf, snr_psf, computed_snr_ap, snr_ap, apFlux, apFluxErr, psfFlux, psfFluxErr.
+/// Validate a single document's aperture-flux, SNR, and chipsf fields.
 fn validate_entry(
     entry: &Document,
     doc_id: &Bson,
     counters: &mut ValidationCounters,
     has_ap: bool,
+    has_chipsf: bool,
     tolerance: f64,
 ) {
     // --- apFlux / apFluxErr validation (magap round-trip) ---
@@ -635,6 +677,31 @@ fn validate_entry(
             }
             (None, _) => counters.skip("null_snr_ap"),
             (_, None) => counters.skip("null_apFlux_for_snr"),
+        }
+    }
+
+    // --- chipsf validation ---
+    if has_chipsf {
+        let chipsf = entry.get("chipsf").and_then(|v| get_f64(v));
+        let computed_chipsf = entry.get("computed_chipsf").and_then(|v| get_f64(v));
+        match (chipsf, computed_chipsf) {
+            (Some(stored), Some(expected)) => {
+                if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
+                    counters.fail("chipsf_mismatch");
+                    error!(
+                        "doc {}: chipsf {:.6} vs expected {:.6}",
+                        doc_id, stored, expected
+                    );
+                } else {
+                    counters.validated += 1;
+                }
+            }
+            (None, None) => counters.skip("null_chipsf_both"),
+            (Some(_), None) => counters.skip("null_psfChi2_psfNdata"),
+            (None, Some(_)) => {
+                counters.fail("chipsf_missing_but_expected");
+                error!("doc {}: chipsf is null but expected a value", doc_id);
+            }
         }
     }
 }
@@ -736,7 +803,7 @@ async fn validate_ztf_alerts(db: &mongodb::Database) {
     while let Some(d) = cursor.try_next().await.unwrap() {
         let doc_id = d.get("_id").unwrap().clone();
         let entry = d.get_document("validation").unwrap();
-        validate_entry(entry, &doc_id, &mut counters, true, 1e-4);
+        validate_entry(entry, &doc_id, &mut counters, true, false, 1e-4);
         pb.inc(1);
     }
     pb.finish();
@@ -856,7 +923,7 @@ async fn validate_ztf_alerts_aux(db: &mongodb::Database) {
         if let Ok(arr) = d.get_array("prv_validation") {
             for item in arr {
                 if let Some(entry) = item.as_document() {
-                    validate_entry(entry, &doc_id, &mut counters, true, 1e-4);
+                    validate_entry(entry, &doc_id, &mut counters, true, false, 1e-4);
                 }
             }
         }
@@ -864,7 +931,7 @@ async fn validate_ztf_alerts_aux(db: &mongodb::Database) {
         if let Ok(arr) = d.get_array("fp_validation") {
             for item in arr {
                 if let Some(entry) = item.as_document() {
-                    validate_entry(entry, &doc_id, &mut counters, false, 1e-4);
+                    validate_entry(entry, &doc_id, &mut counters, false, false, 1e-4);
                 }
             }
         }
@@ -895,6 +962,7 @@ async fn validate_lsst_alerts(db: &mongodb::Database) {
                 "psfFluxErr": "$candidate.psfFluxErr",
                 "snr_psf": "$candidate.snr_psf",
                 "snr_ap": "$candidate.snr_ap",
+                "chipsf": "$candidate.chipsf",
                 "computed_magap": {
                     "$cond": {
                         "if": { "$and": [
@@ -938,6 +1006,7 @@ async fn validate_lsst_alerts(db: &mongodb::Database) {
                         "else": Bson::Null,
                     }
                 },
+                "computed_chipsf": computed_chipsf_expr("$candidate.psfChi2", "$candidate.psfNdata"),
             }
         }
     }];
@@ -962,7 +1031,7 @@ async fn validate_lsst_alerts(db: &mongodb::Database) {
     while let Some(d) = cursor.try_next().await.unwrap() {
         let doc_id = d.get("_id").unwrap().clone();
         let entry = d.get_document("validation").unwrap();
-        validate_entry(entry, &doc_id, &mut counters, true, 1e-4);
+        validate_entry(entry, &doc_id, &mut counters, true, true, 1e-4);
         pb.inc(1);
     }
     pb.finish();
@@ -988,6 +1057,7 @@ async fn validate_lsst_alerts_aux(db: &mongodb::Database) {
                         "psfFluxErr": "$$pc.psfFluxErr",
                         "snr_psf": "$$pc.snr_psf",
                         "snr_ap": "$$pc.snr_ap",
+                        "chipsf": "$$pc.chipsf",
                         "computed_magap": {
                             "$cond": {
                                 "if": { "$and": [
@@ -1031,6 +1101,7 @@ async fn validate_lsst_alerts_aux(db: &mongodb::Database) {
                                 "else": Bson::Null,
                             }
                         },
+                        "computed_chipsf": computed_chipsf_expr("$$pc.psfChi2", "$$pc.psfNdata"),
                     }
                 }
             },
@@ -1081,14 +1152,14 @@ async fn validate_lsst_alerts_aux(db: &mongodb::Database) {
         if let Ok(arr) = d.get_array("prv_validation") {
             for item in arr {
                 if let Some(entry) = item.as_document() {
-                    validate_entry(entry, &doc_id, &mut counters, true, 1e-4);
+                    validate_entry(entry, &doc_id, &mut counters, true, true, 1e-4);
                 }
             }
         }
         if let Ok(arr) = d.get_array("fp_validation") {
             for item in arr {
                 if let Some(entry) = item.as_document() {
-                    validate_entry(entry, &doc_id, &mut counters, false, 1e-4);
+                    validate_entry(entry, &doc_id, &mut counters, false, false, 1e-4);
                 }
             }
         }
