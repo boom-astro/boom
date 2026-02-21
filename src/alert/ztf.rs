@@ -160,7 +160,11 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
                 let (flux, flux_err) = mag2flux(magap, sigmagap, ZTF_ZP);
                 let snr = flux / flux_err;
                 (
-                    Some(flux * 1e9_f32),     // convert to nJy
+                    Some(if isdiffpos.unwrap_or(false) {
+                        flux * 1e9_f32
+                    } else {
+                        -flux * 1e9_f32
+                    }), // convert to nJy
                     Some(flux_err * 1e9_f32), // convert to nJy
                     Some(snr),
                 )
@@ -510,7 +514,13 @@ impl TryFrom<Candidate> for ZtfCandidate {
             }, // convert to nJy
             psf_flux_err: psf_flux_err_jy * 1e9_f32, // convert to nJy
             snr_psf: psf_flux_jy / psf_flux_err_jy,
-            ap_flux: ap_flux_jy.map(|flux| flux * 1e9_f32), // convert to nJy
+            ap_flux: ap_flux_jy.map(|flux| {
+                if isdiffpos {
+                    flux * 1e9_f32
+                } else {
+                    -flux * 1e9_f32
+                }
+            }), // convert to nJy
             ap_flux_err: ap_flux_err_jy.map(|flux_err| flux_err * 1e9_f32), // convert to nJy
             snr_ap,
             band,
