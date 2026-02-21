@@ -1,6 +1,6 @@
 use crate::alert::{
-    AlertCutout, LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate,
-    ZtfForcedPhot, ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
+    LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate, ZtfForcedPhot,
+    ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
 };
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
@@ -8,11 +8,11 @@ use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
 use crate::utils::spatial::Coordinates;
-use actix_web::{get, web, HttpResponse};
-use base64::prelude::*;
+use actix_web::{get, post, web, HttpResponse};
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use utoipa::ToSchema;
 
@@ -55,12 +55,6 @@ struct ZtfObj {
     object_id: String,
     candidate: ZtfCandidate,
     properties: Option<ZtfAlertProperties>,
-    #[serde(rename = "cutoutScience")]
-    cutout_science: serde_json::Value,
-    #[serde(rename = "cutoutTemplate")]
-    cutout_template: serde_json::Value,
-    #[serde(rename = "cutoutDifference")]
-    cutout_difference: serde_json::Value,
     prv_candidates: Vec<ZtfPrvCandidate>,
     prv_nondetections: Vec<ZtfPrvCandidate>,
     fp_hists: Vec<ZtfForcedPhot>,
@@ -94,12 +88,6 @@ struct LsstObj {
     object_id: String,
     candidate: LsstCandidate,
     properties: Option<LsstAlertProperties>,
-    #[serde(rename = "cutoutScience")]
-    cutout_science: serde_json::Value,
-    #[serde(rename = "cutoutTemplate")]
-    cutout_template: serde_json::Value,
-    #[serde(rename = "cutoutDifference")]
-    cutout_difference: serde_json::Value,
     prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
@@ -155,8 +143,6 @@ pub async fn get_object(
         Survey::Ztf => {
             let alerts_collection: Collection<EnrichedZtfAlert> =
                 db.collection(&format!("{}_alerts", survey));
-            let cutout_collection: Collection<AlertCutout> =
-                db.collection(&format!("{}_alerts_cutouts", survey));
             let aux_collection: Collection<ZtfObject> =
                 db.collection(&format!("{}_alerts_aux", survey));
             let lsst_aux_collection: Collection<LsstObject> =
@@ -166,6 +152,7 @@ pub async fn get_object(
             let mut alert_cursor = match alerts_collection
                 .find(doc! {
                     "objectId": &object_id,
+                    "candidate.programid": 1, // Babamul only returns public ZTF alerts
                 })
                 .with_options(find_options_recent)
                 .await
@@ -210,26 +197,6 @@ pub async fn get_object(
             };
             // reverse classification history, to have it in chronological order
             classifications_history.reverse();
-
-            // using the candid, query the cutout collection for the cutouts
-            let candid = newest_alert.candid;
-            let cutouts = match cutout_collection
-                .find_one(doc! {
-                    "_id": candid,
-                })
-                .await
-            {
-                Ok(Some(cutouts)) => cutouts,
-                Ok(None) => {
-                    return response::not_found(&format!("no cutouts found for candid {}", candid));
-                }
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
-            };
 
             // Get crossmatches and light curve data from aux collection
             let aux_entry = match aux_collection
@@ -302,14 +269,22 @@ pub async fn get_object(
                 object_id: object_id.clone(),
                 candidate: newest_alert.candidate,
                 properties: newest_alert.properties,
-                cutout_science: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_science)),
-                cutout_template: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_template)),
-                cutout_difference: serde_json::json!(
-                    BASE64_STANDARD.encode(&cutouts.cutout_difference)
-                ),
-                prv_candidates: aux_entry.prv_candidates,
-                prv_nondetections: aux_entry.prv_nondetections,
-                fp_hists: aux_entry.fp_hists,
+                // Limit photometry to programid 1 (public ZTF alerts)
+                prv_candidates: aux_entry
+                    .prv_candidates
+                    .into_iter()
+                    .filter(|c| c.prv_candidate.programid == 1)
+                    .collect(),
+                prv_nondetections: aux_entry
+                    .prv_nondetections
+                    .into_iter()
+                    .filter(|c| c.prv_candidate.programid == 1)
+                    .collect(),
+                fp_hists: aux_entry
+                    .fp_hists
+                    .into_iter()
+                    .filter(|c| c.fp_hist.programid == 1)
+                    .collect(),
                 classifications: newest_alert.classifications,
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
@@ -320,8 +295,6 @@ pub async fn get_object(
         Survey::Lsst => {
             let alerts_collection: Collection<EnrichedLsstAlert> =
                 db.collection(&format!("{}_alerts", survey));
-            let cutout_collection: Collection<AlertCutout> =
-                db.collection(&format!("{}_alerts_cutouts", survey));
             let aux_collection: Collection<LsstObject> =
                 db.collection(&format!("{}_alerts_aux", survey));
             let ztf_aux_collection: Collection<ZtfObject> =
@@ -355,25 +328,7 @@ pub async fn get_object(
                     ));
                 }
             };
-            // using the candid, query the cutout collection for the cutouts
-            let candid = newest_alert.candid;
-            let cutouts = match cutout_collection
-                .find_one(doc! {
-                    "_id": candid,
-                })
-                .await
-            {
-                Ok(Some(cutouts)) => cutouts,
-                Ok(None) => {
-                    return response::not_found(&format!("no cutouts found for candid {}", candid));
-                }
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
-            };
+
             // Get crossmatches and light curve data from aux collection
             let aux_entry = match aux_collection
                 .find_one(doc! {
@@ -426,9 +381,22 @@ pub async fn get_object(
                             object_id: ztf_obj.object_id,
                             ra: ztf_radec.0,
                             dec: ztf_radec.1,
-                            prv_candidates: ztf_obj.prv_candidates,
-                            prv_nondetections: ztf_obj.prv_nondetections,
-                            fp_hists: ztf_obj.fp_hists,
+                            // Limit photometry to programid 1 (public ZTF alerts)
+                            prv_candidates: ztf_obj
+                                .prv_candidates
+                                .into_iter()
+                                .filter(|c| c.prv_candidate.programid == 1)
+                                .collect(),
+                            prv_nondetections: ztf_obj
+                                .prv_nondetections
+                                .into_iter()
+                                .filter(|c| c.prv_candidate.programid == 1)
+                                .collect(),
+                            fp_hists: ztf_obj
+                                .fp_hists
+                                .into_iter()
+                                .filter(|c| c.fp_hist.programid == 1)
+                                .collect(),
                             distance_arcsec: flare::spatial::great_circle_distance(
                                 ra,
                                 dec,
@@ -446,11 +414,6 @@ pub async fn get_object(
                 object_id: object_id.clone(),
                 candidate: newest_alert.candidate,
                 properties: newest_alert.properties,
-                cutout_science: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_science)),
-                cutout_template: serde_json::json!(BASE64_STANDARD.encode(&cutouts.cutout_template)),
-                cutout_difference: serde_json::json!(
-                    BASE64_STANDARD.encode(&cutouts.cutout_difference)
-                ),
                 prv_candidates: aux_entry.prv_candidates,
                 fp_hists: aux_entry.fp_hists,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
@@ -641,4 +604,212 @@ pub async fn get_objects(
         }
         Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ObjectsConeSearchQuery {
+    coordinates: HashMap<String, [f64; 2]>,
+    radius_arcsec: f64,
+}
+
+/// Perform a cone search around given coordinates for a specified survey.
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/objects/cone-search",
+    params(
+        ("survey" = Survey, Path, description = "Survey to search in (e.g., ztf, lsst)"),
+    ),
+    request_body = ObjectsConeSearchQuery,
+    responses(
+        (status = 200, description = "Cone search results", body = HashMap<String, Vec<SearchObjectResult>>),
+        (status = 400, description = "Invalid query parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/objects/cone-search")]
+pub async fn cone_search_objects(
+    path: web::Path<Survey>,
+    query: web::Json<ObjectsConeSearchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let radius_arcsec = query.radius_arcsec;
+    if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
+        return response::bad_request("radius_arcsec must be between 0 and 600");
+    }
+
+    // we must have more than 0 and less than 1000 coordinate pairs
+    // to prevent expensive queries that could potentially timeout the server
+    let coordinates = &query.coordinates;
+    if coordinates.is_empty() || coordinates.len() > 1000 {
+        return response::bad_request(
+            "Must provide between 1 and 1000 coordinate pairs for cone search",
+        );
+    }
+
+    let radius_radians = (radius_arcsec / 3600.0).to_radians();
+    let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
+
+    let survey = path.into_inner();
+    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
+    for (object_name, radec) in coordinates {
+        if radec.len() != 2 {
+            return response::bad_request(&format!(
+                "Invalid coordinates for {}: must be an array of [ra, dec]",
+                object_name
+            ));
+        }
+
+        let ra = radec[0];
+        let dec = radec[1];
+        if ra < 0.0 || ra >= 360.0 {
+            return response::bad_request(&format!(
+                "Invalid RA for object {}: must be in [0, 360)",
+                object_name
+            ));
+        }
+        if dec < -90.0 || dec > 90.0 {
+            return response::bad_request(&format!(
+                "Invalid Dec for object {}: must be in [-90, 90]",
+                object_name
+            ));
+        }
+        let filter = doc! {
+            "coordinates.radec_geojson": {
+                "$geoWithin": {
+                    "$centerSphere": [
+                        [ra - 180.0, dec],
+                        radius_radians
+                    ]
+                }
+            }
+        };
+
+        match collection.find(filter).await {
+            Ok(mut cursor) => {
+                let mut matches = vec![];
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    matches.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra: obj.coordinates.get_radec().0,
+                        dec: obj.coordinates.get_radec().1,
+                        survey: survey.clone(),
+                    });
+                }
+                results.insert(object_name.clone(), matches);
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error performing cone search for {}: {}",
+                    object_name, error
+                ));
+            }
+        }
+    }
+    response::ok_ser("Cone search completed", results)
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct XmatchResponse {
+    status: String,
+    message: String,
+    data: serde_json::Value,
+}
+
+/// Fetch an object's cross-matches (from a given survey's alert stream) by its object ID
+#[utoipa::path(
+    get,
+    path = "/babamul/surveys/{survey}/objects/{object_id}/cross-matches",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+        ("object_id" = String, Path, description = "ID of the object to retrieve"),
+    ),
+    responses(
+        (status = 200, description = "Object found", body = XmatchResponse),
+        (status = 404, description = "Object not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[get("/surveys/{survey}/objects/{object_id}/cross-matches")]
+pub async fn get_object_xmatches(
+    path: web::Path<(Survey, String)>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    // TODO: implement permissions for Babamul users, so we
+    // can constrain access to certain surveys' datapoints
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let (survey, object_id) = path.into_inner();
+    if survey != Survey::Ztf && survey != Survey::Lsst {
+        return response::bad_request(&format!(
+            "Unsupported survey: {}. Supported surveys are: ztf, lsst",
+            survey
+        ));
+    }
+    let aux_collection: Collection<mongodb::bson::Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
+
+    let aux_entry = match aux_collection
+        .find_one(doc! {
+            "_id": &object_id,
+        })
+        .projection(doc! {
+            "_id": 1,
+            "cross_matches": 1,
+        })
+        .await
+    {
+        Ok(entry) => match entry {
+            Some(doc) => doc,
+            None => {
+                return response::not_found(&format!(
+                    "no aux entry found for object id {}",
+                    object_id
+                ));
+            }
+        },
+        Err(error) => {
+            return response::internal_error(&format!("error getting documents: {}", error));
+        }
+    };
+
+    let cross_matches: HashMap<String, Vec<mongodb::bson::Document>> =
+        match aux_entry.get_document("cross_matches") {
+            Ok(matches_doc) => matches_doc
+                .iter()
+                .map(|(catalog, matches)| {
+                    let matches_array = match matches.as_array() {
+                        Some(arr) => arr
+                            .iter()
+                            .filter_map(|m| m.as_document().cloned())
+                            .collect::<Vec<mongodb::bson::Document>>(),
+                        None => vec![],
+                    };
+                    (catalog.clone(), matches_array)
+                })
+                .collect::<HashMap<String, Vec<mongodb::bson::Document>>>(),
+            Err(_) => HashMap::new(),
+        };
+
+    let response = XmatchResponse {
+        status: "success".to_string(),
+        message: format!("Found cross-matches for object {}", object_id),
+        data: serde_json::json!(cross_matches),
+    };
+    HttpResponse::Ok().json(response)
 }
