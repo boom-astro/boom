@@ -94,6 +94,11 @@ pub struct DiaSource {
     /// Aperture did not fit within measurement image.
     #[serde(rename = "apFlux_flag_apertureTruncated")]
     pub ap_flux_flag_aperture_truncated: Option<bool>,
+    /// Source was detected as significantly negative.
+    #[serde(rename = "isNegative")]
+    pub is_negative: Option<bool>,
+    /// The signal-to-noise ratio at which this source was detected in the difference image.
+    pub snr: Option<f32>,
     /// Flux for Point Source model. Note this actually measures the flux difference between the template and the visit image.
     #[serde(rename = "psfFlux")]
     pub psf_flux: Option<f32>,
