@@ -9,9 +9,13 @@ use utoipa::ToSchema;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema, Clone)]
 enum WhichCutouts {
+    #[serde(alias = "first")]
     First,
+    #[serde(alias = "last")]
     Last,
+    #[serde(alias = "brightest")]
     Brightest,
+    #[serde(alias = "faintest")]
     Faintest,
 }
 
