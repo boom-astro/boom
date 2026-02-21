@@ -126,7 +126,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         diffmaglim: 20.5,
         flux: Some(flux),
         flux_err: flux_err,
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
         band: Band::G,
         ra: Some(150.0),
         dec: Some(30.0),
@@ -248,9 +248,10 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         sigmapsf: 0.1,
         diffmaglim: 20.5,
         isdiffpos: true,
-        snr: 100.0,
+        snr_psf: 100.0,
         magap: 18.6,
         sigmagap: 0.12,
+        snr_ap: 90.0,
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
     };
@@ -261,7 +262,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         diffmaglim: 20.5,
         flux: Some(1000.0),
         flux_err: 10.0,
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
         band: Band::R,
         ra: Some(ra_override.unwrap_or(150.0)),
         dec: Some(dec_override.unwrap_or(30.0)),
@@ -1028,12 +1029,17 @@ async fn test_babamul_lsst_with_ztf_match() {
             dec: Some(0.0),
             magpsf: Some(19.0),
             sigmapsf: Some(0.07),
+            magap: Some(19.1),
+            sigmagap: Some(0.1),
             diffmaglim: Some(21.0),
             ..Default::default()
         },
         psf_flux: Some(1300.0),
         psf_flux_err: Some(13.0),
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
+        ap_flux: Some(1350.0),
+        ap_flux_err: Some(15.0),
+        snr_ap: Some(90.0),
         band: Band::G,
     };
 
@@ -1054,7 +1060,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         psf_flux: Some(1250.0),
         psf_flux_err: Some(12.0),
         isdiffpos: Some(true),
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
         band: Band::G,
     };
 
@@ -1106,9 +1112,10 @@ async fn test_babamul_lsst_with_ztf_match() {
         sigmapsf: 0.1,
         diffmaglim: 20.5,
         isdiffpos: true,
-        snr: 100.0,
+        snr_psf: 100.0,
         magap: 18.6,
         sigmagap: 0.12,
+        snr_ap: 90.0,
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
     };
@@ -1162,7 +1169,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         sigmapsf: Some(0.08),
         diffmaglim: 20.2,
         isdiffpos: Some(true),
-        snr: Some(105.0),
+        snr_psf: Some(105.0),
     };
 
     let lsst_aux = LsstObject {

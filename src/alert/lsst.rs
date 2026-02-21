@@ -269,9 +269,10 @@ pub struct LsstCandidate {
     pub sigmapsf: f32,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
-    pub snr: f32,
+    pub snr_psf: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub snr_ap: f32,
     pub jdstarthist: Option<f64>,
     pub ndethist: Option<i32>,
 }
@@ -327,9 +328,10 @@ impl LsstCandidate {
             sigmapsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr: psf_flux.abs() / psf_flux_err,
+            snr_psf: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            snr_ap: ap_flux.abs() / ap_flux_err,
             jdstarthist,
             ndethist,
         })
@@ -353,9 +355,10 @@ pub struct LsstPrvCandidate {
     pub sigmapsf: f32,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
-    pub snr: f32,
+    pub snr_psf: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub snr_ap: f32,
 }
 
 impl TryFrom<DiaSource> for LsstPrvCandidate {
@@ -398,9 +401,10 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
             sigmapsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr: psf_flux.abs() / psf_flux_err,
+            snr_psf: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            snr_ap: ap_flux.abs() / ap_flux_err,
         })
     }
 }
@@ -416,9 +420,10 @@ impl TryFrom<LsstCandidate> for LsstPrvCandidate {
             sigmapsf: candidate.sigmapsf,
             diffmaglim: candidate.diffmaglim,
             isdiffpos: candidate.isdiffpos,
-            snr: candidate.snr,
+            snr_psf: candidate.snr_psf,
             magap: candidate.magap,
             sigmagap: candidate.sigmagap,
+            snr_ap: candidate.snr_ap,
         })
     }
 }
@@ -673,7 +678,7 @@ pub struct LsstForcedPhot {
     pub sigmapsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: Option<bool>,
-    pub snr: Option<f32>,
+    pub snr_psf: Option<f32>,
 }
 
 impl TryFrom<DiaForcedSource> for LsstForcedPhot {
@@ -686,7 +691,7 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
 
         // for now, we only consider positive detections (flux positive) as detections
         // may revisit this later
-        let (magpsf, sigmapsf, isdiffpos, snr) = match dia_forced_source.psf_flux {
+        let (magpsf, sigmapsf, isdiffpos, snr_psf) = match dia_forced_source.psf_flux {
             Some(psf_flux) => {
                 let psf_flux_abs = psf_flux.abs();
                 if (psf_flux_abs / psf_flux_err) > SNT {
@@ -713,7 +718,7 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
             sigmapsf,
             diffmaglim,
             isdiffpos,
-            snr,
+            snr_psf,
         })
     }
 }
@@ -1108,7 +1113,7 @@ mod tests {
         assert!((candidate.magpsf - 23.674994).abs() < 1e-6);
         assert!((candidate.sigmapsf - 0.217043).abs() < 1e-6);
         assert!((candidate.diffmaglim - 23.675514).abs() < 1e-5);
-        assert!(candidate.snr - 5.002406 < 1e-6);
+        assert!(candidate.snr_psf - 5.002406 < 1e-6);
         assert_eq!(candidate.isdiffpos, false);
         assert_eq!(candidate.dia_source.band.unwrap(), Band::R);
         // TODO: check prv_candidates and forced photometry once we have alerts
