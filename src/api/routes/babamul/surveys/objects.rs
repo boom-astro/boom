@@ -660,11 +660,36 @@ pub async fn cone_search_objects(
 
     let survey = path.into_inner();
     let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
-    for (name, coords) in coordinates {
+    for (object_name, radec) in coordinates {
+        if radec.len() != 2 {
+            return response::bad_request(&format!(
+                "Invalid coordinates for {}: must be an array of [ra, dec]",
+                object_name
+            ));
+        }
+
+        let ra = radec[0];
+        let dec = radec[1];
+        if ra < 0.0 || ra >= 360.0 {
+            return response::bad_request(&format!(
+                "Invalid RA for object {}: must be in [0, 360)",
+                object_name
+            ));
+        }
+        if dec < -90.0 || dec > 90.0 {
+            return response::bad_request(&format!(
+                "Invalid Dec for object {}: must be in [-90, 90]",
+                object_name
+            ));
+        }
         let filter = doc! {
             "coordinates.radec_geojson": {
-                "$nearSphere": [coords[0] - 180.0, coords[1]],
-                "$maxDistance": radius_radians,
+                "$geoWithin": {
+                    "$centerSphere": [
+                        [ra - 180.0, dec],
+                        radius_radians
+                    ]
+                }
             }
         };
 
@@ -679,12 +704,12 @@ pub async fn cone_search_objects(
                         survey: survey.clone(),
                     });
                 }
-                results.insert(name.clone(), matches);
+                results.insert(object_name.clone(), matches);
             }
             Err(error) => {
                 return response::internal_error(&format!(
                     "error performing cone search for {}: {}",
-                    name, error
+                    object_name, error
                 ));
             }
         }
