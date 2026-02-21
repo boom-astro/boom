@@ -113,10 +113,9 @@ crossmatch:
       distance_max: 30.0
       distance_max_near: 300.0
       projection:
-        _id: 0
+        _id: 1
         ra: 1
         dec: 1
-        objname: 1
         objtype: 1
         z: 1
         z_unc: 1
