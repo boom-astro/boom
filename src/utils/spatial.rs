@@ -84,7 +84,7 @@ pub async fn xmatch(
 ) -> Result<HashMap<String, Vec<mongodb::bson::Document>>, XmatchError> {
     // TODO, make the xmatch config a hashmap for faster access
     // while looping over the xmatch results of the batched queries
-    if xmatch_configs.len() == 0 {
+    if xmatch_configs.is_empty() {
         return Ok(HashMap::new());
     }
     let ra_geojson = ra - 180.0;

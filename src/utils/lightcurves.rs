@@ -51,6 +51,19 @@ pub enum Band {
     U,
 }
 
+impl std::fmt::Display for Band {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Band::G => write!(f, "g"),
+            Band::R => write!(f, "r"),
+            Band::I => write!(f, "i"),
+            Band::Z => write!(f, "z"),
+            Band::Y => write!(f, "y"),
+            Band::U => write!(f, "u"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct PhotometryMag {
     #[serde(alias = "jd")]
