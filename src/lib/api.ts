@@ -258,7 +258,7 @@ export type Cutouts = {
 
 export type Alert = {
   objectId?: string;
-  candid: number;
+  candid: string;
   jd: number;
   candidate: {
     jd: number;
@@ -268,10 +268,6 @@ export type Alert = {
     reliability?: number;
     [key: string]: unknown;
   };
-  magpsf?: number;
-  drb?: number;
-  reliability?: number;
-  cutouts?: Cutouts;
   [key: string]: unknown;
 };
 
@@ -296,8 +292,20 @@ export async function fetchAlerts(survey: string, params: AlertSearchParams): Pr
   return Array.isArray(result) ? (result as Alert[]) : [];
 }
 
-export async function fetchAlertCutouts(survey: string, candid: number): Promise<Cutouts> {
-  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/alerts/${candid}/cutouts`;
+export async function fetchAlertCutouts(survey: string, candid: string): Promise<Cutouts> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/cutouts?candid=${encodeURIComponent(`${candid}`)}`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch cutouts failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const result = unwrapData<unknown>(body, {});
+  return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
+}
+
+export async function fetchObjCutouts(survey: string, objectId: string): Promise<Cutouts> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/cutouts?objectId=${encodeURIComponent(objectId)}`;
   const res = await fetchWithAuth(url);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -370,5 +378,6 @@ export default {
   deleteToken,
   fetchAlerts,
   fetchAlertCutouts,
+  fetchObjCutouts,
   searchObjects,
 };

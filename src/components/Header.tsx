@@ -1,6 +1,7 @@
 "use client"
 
 import { bytes2image } from '@/lib/imageProcessing';
+import api, { Cutouts } from '@/lib/api';
 
 import {
     Card,
@@ -25,7 +26,8 @@ import dayjs from "dayjs";
 
 import utc from "dayjs/plugin/utc";
 import relativeTime from "dayjs/plugin/relativeTime";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from "@/components/ui/badge"
 import { Button } from './ui/button';
 import { IconGalaxy, IconMeteor, IconSparkles, IconStar, IconStars, IconRotate2 } from '@tabler/icons-react';
@@ -70,12 +72,10 @@ type Detection = {
 
 type CandidateData = {
   objectId?: string;
+  candid?: number;
   candidate?: { ra?: number; dec?: number; drb?: number; ndethist?: number };
   classifications?: Record<string, number>;
   properties?: { star?: boolean };
-  cutoutScience?: Uint8Array | string | ArrayBuffer | undefined;
-  cutoutTemplate?: Uint8Array | string | ArrayBuffer | undefined;
-  cutoutDifference?: Uint8Array | string | ArrayBuffer | undefined;
   prv_candidates?: Detection[];
   prv_nondetections?: Detection[];
   survey_matches?: Record<string, { objectId?: string; distance_arcsec?: number }>;
@@ -237,6 +237,8 @@ export default function Header({
     const [lightboxOpen, setLightboxOpen] = useState(false);
     const [band, setBand] = useState<string>("all");
     const [rotated, setRotated] = useState(true);
+    const [cutouts, setCutouts] = useState<Cutouts | null>(null);
+    const [loadingCutouts, setLoadingCutouts] = useState(true);
 
     const objectId = data.objectId ?? "";
     const ra = data.candidate?.ra?.toFixed(6) ?? "-";
@@ -276,9 +278,28 @@ export default function Header({
 
     const survey = objectId.startsWith("ZTF") ? "ztf" : "lsst";
 
-    const scienceImage = bytes2image(data.cutoutScience, survey, "science", colorMap, rotated);
-    const templateImage = bytes2image(data.cutoutTemplate, survey, "template", colorMap, rotated);
-    const differenceImage = bytes2image(data.cutoutDifference, survey, "difference", colorMap, rotated);
+    useEffect(() => {
+      if (!data.objectId) return;
+      let cancelled = false;
+      const fetchCutouts = async () => {
+        setLoadingCutouts(true);
+        try {
+          const result = await api.fetchObjCutouts(survey, data.objectId!);
+          if (!cancelled) setCutouts(result);
+        } catch (err) {
+          console.error("Failed to load cutouts:", err);
+          if (!cancelled) setCutouts({});
+        } finally {
+          if (!cancelled) setLoadingCutouts(false);
+        }
+      };
+      fetchCutouts();
+      return () => { cancelled = true; };
+    }, [survey, data.objectId]);
+
+    const scienceImage = cutouts ? bytes2image(cutouts.cutoutScience, survey, "science", colorMap, rotated) : null;
+    const templateImage = cutouts ? bytes2image(cutouts.cutoutTemplate, survey, "template", colorMap, rotated) : null;
+    const differenceImage = cutouts ? bytes2image(cutouts.cutoutDifference, survey, "difference", colorMap, rotated) : null;
 
     const firstTime = first_det?.jd ? mjd_to_utc(jd_to_mjd(first_det.jd)).replace("T", ' ').replace("Z", "") : "-";
     const peakTime = peak_det?.jd ? mjd_to_utc(jd_to_mjd(peak_det.jd)).replace("T", ' ').replace("Z", "") : "-";
@@ -332,27 +353,46 @@ export default function Header({
         </CardHeader>
         <CardContent className="pb-0 flex flex-col gap-3">
             <div className="grid grid-cols-3 gap-3">
-              <div key="science" className="w-full flex flex-col gap-1 items-center">
-                <button onClick={openLightbox} className="w-full h-full text-left relative group">
-                  <img src={scienceImage ?? undefined} alt="Science" className="w-full h-auto object-cover rounded" style={{ imageRendering: 'pixelated' }}/>
-                    <Maximize2 className="absolute top-2 right-2 w-4 h-4 text-white opacity-0 group-hover:opacity-90 transition-opacity duration-150 pointer-events-none drop-shadow" />
-                </button>
-                <div className="text-xs font-medium text-muted-foreground">Science</div>
-              </div>
-              <div key="template" className="w-full flex flex-col gap-1 items-center">
-                <button onClick={openLightbox} className="w-full h-full text-left relative group">
-                  <img src={templateImage ?? undefined} alt="Reference" className="w-full h-auto object-cover rounded" style={{ imageRendering: 'pixelated' }}/>
-                    <Maximize2 className="absolute top-2 right-2 w-4 h-4 text-white opacity-0 group-hover:opacity-90 transition-opacity duration-150 pointer-events-none drop-shadow" />
-                </button>
-                <div className="text-xs font-medium text-muted-foreground">Reference</div>
-              </div>
-              <div key="difference" className="w-full flex flex-col gap-1 items-center">
-                <button onClick={openLightbox} className="w-full h-full text-left relative group">
-                  <img src={differenceImage ?? undefined} alt="Difference" className="w-full h-auto object-cover rounded" style={{ imageRendering: 'pixelated' }}/>
-                    <Maximize2 className="absolute top-2 right-2 w-4 h-4 text-white opacity-0 group-hover:opacity-90 transition-opacity duration-150 pointer-events-none drop-shadow" />
-                </button>
-                <div className="text-xs font-medium text-muted-foreground">Difference</div>
-              </div>
+              {loadingCutouts ? (
+                <>
+                  <div className="w-full flex flex-col gap-1 items-center">
+                    <Skeleton className="w-full aspect-square rounded" />
+                    <div className="text-xs font-medium text-muted-foreground">Science</div>
+                  </div>
+                  <div className="w-full flex flex-col gap-1 items-center">
+                    <Skeleton className="w-full aspect-square rounded" />
+                    <div className="text-xs font-medium text-muted-foreground">Reference</div>
+                  </div>
+                  <div className="w-full flex flex-col gap-1 items-center">
+                    <Skeleton className="w-full aspect-square rounded" />
+                    <div className="text-xs font-medium text-muted-foreground">Difference</div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div key="science" className="w-full flex flex-col gap-1 items-center">
+                    <button onClick={openLightbox} className="w-full h-full text-left relative group">
+                      <img src={scienceImage ?? undefined} alt="Science" className="w-full h-auto object-cover rounded" style={{ imageRendering: 'pixelated' }}/>
+                        <Maximize2 className="absolute top-2 right-2 w-4 h-4 text-white opacity-0 group-hover:opacity-90 transition-opacity duration-150 pointer-events-none drop-shadow" />
+                    </button>
+                    <div className="text-xs font-medium text-muted-foreground">Science</div>
+                  </div>
+                  <div key="template" className="w-full flex flex-col gap-1 items-center">
+                    <button onClick={openLightbox} className="w-full h-full text-left relative group">
+                      <img src={templateImage ?? undefined} alt="Reference" className="w-full h-auto object-cover rounded" style={{ imageRendering: 'pixelated' }}/>
+                        <Maximize2 className="absolute top-2 right-2 w-4 h-4 text-white opacity-0 group-hover:opacity-90 transition-opacity duration-150 pointer-events-none drop-shadow" />
+                    </button>
+                    <div className="text-xs font-medium text-muted-foreground">Reference</div>
+                  </div>
+                  <div key="difference" className="w-full flex flex-col gap-1 items-center">
+                    <button onClick={openLightbox} className="w-full h-full text-left relative group">
+                      <img src={differenceImage ?? undefined} alt="Difference" className="w-full h-auto object-cover rounded" style={{ imageRendering: 'pixelated' }}/>
+                        <Maximize2 className="absolute top-2 right-2 w-4 h-4 text-white opacity-0 group-hover:opacity-90 transition-opacity duration-150 pointer-events-none drop-shadow" />
+                    </button>
+                    <div className="text-xs font-medium text-muted-foreground">Difference</div>
+                  </div>
+                </>
+              )}
             </div>
             <div className="rounded-lg shadow-sm w-full border overflow-hidden">
               <div className="hidden sm:block overflow-x-auto">

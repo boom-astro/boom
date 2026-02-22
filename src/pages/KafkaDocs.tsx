@@ -95,51 +95,34 @@ const TOPIC_TREE: TopicNode[] = [
 const KAFKA_BOOTSTRAP = import.meta.env.VITE_KAFKA_DOMAIN ?? "kafka.boom.example.com:9092";
 
 function generatePython(topics: string[], groupId: string, offset: string, autoCommit: boolean, usernameVar = "<KAFKA_USERNAME>", passwordVar = "<KAFKA_PASSWORD>") {
-  const autoCommitStr = autoCommit ? "True" : "False";
-  const topicsList = topics.map(t => `"${t}"`).join(',\n    ');
-  return `import fastavro
-from io import BytesIO
-from confluent_kafka import Consumer
+  const topicsList = topics.map(t => `    "${t}"`).join(',\n');
+  return `import os
+import babamul
 
-# Configuration
-conf = {
-  "bootstrap.servers": "${KAFKA_BOOTSTRAP}",
-    "security.protocol": "SASL_PLAINTEXT",
-    "sasl.mechanism": "SCRAM-SHA-512",
-    "sasl.username": "${usernameVar}",
-    "sasl.password": "${passwordVar}",
-    "group.id": "${usernameVar}-${groupId}",
-    "auto.offset.reset": "${offset}",
-    "enable.auto.commit": ${autoCommitStr},
-}
+# Set your Kafka credentials (or even better, export these as env vars)
+os.environ["KAFKA_USERNAME"] = "${usernameVar}"
+os.environ["KAFKA_PASSWORD"] = "${passwordVar}"
 
-consumer = Consumer(conf)
-consumer.subscribe([
-    ${topicsList}
-])
+# Define parameters
+limit = 1000
+topics = [
+${topicsList},
+]
 
-try:
-    while True:
-        msg = consumer.poll(timeout=5.0)
-        if msg is None:
-            continue
-        if msg.error():
-            print(f"Consumer error: {msg.error()}")
-            continue
+alerts: list[babamul.LsstAlert | babamul.ZtfAlert] = []
 
-        # Deserialize Avro message
-        bytes_io = BytesIO(msg.value())
-        reader = fastavro.reader(bytes_io)
-        alert = next(reader) # There is only one record/alert per message
+for alert in babamul.AlertConsumer(
+    topics=topics,
+    group_id="${groupId}",
+    offset="${offset}",
+    auto_commit=${autoCommit},
+    timeout=10,
+):
+    alerts.append(alert)
+    if len(alerts) >= limit:
+        break
 
-        candid, objectId = alert["candid"], alert["objectId"]
-        print(f"Received alert: CANDID={candid}, ObjectID={objectId}")
-
-        # Process the alert as needed...
-except KeyboardInterrupt:
-    pass
-finally:
-    consumer.close()
+print(f"Fetched {len(alerts)} alerts.")
 `;
 }
 
@@ -538,7 +521,7 @@ export default function KafkaDocs() {
                 <h4 className="font-semibold">Setup</h4>
                 {lang === 'python' ? (
                   <div className="mt-2 space-y-3">
-                    <p className="text-sm">Pick one method. <span className="font-medium">uv</span> is fastest, <span className="font-medium">conda</span> fits Anaconda users, and <span className="font-medium">pip + venv</span> works everywhere.</p>
+                    <p className="text-sm">Install the <a href="https://pypi.org/project/babamul/" target="_blank" rel="noreferrer" className="underline hover:text-foreground font-medium">babamul</a> Python client — it handles Kafka connection, authentication, and Avro deserialization for you. It also comes with all you need to interact with the API</p>
                     <Tabs defaultValue="uv">
                       <TabsList className="w-full sm:w-auto">
                         <TabsTrigger value="uv">uv</TabsTrigger>
@@ -547,15 +530,15 @@ export default function KafkaDocs() {
                       </TabsList>
 
                       <TabsContent value="uv" className="space-y-2">
-                        <p className="text-sm text-muted-foreground">Fast as lightning, we can't recommend it enough. See installation steps here: <a href="https://uvlang.org/getting-started/" target="_blank" rel="noreferrer" className="underline hover:text-foreground">uvlang.org/getting-started/</a></p>
+                        <p className="text-sm text-muted-foreground">Fast as lightning, we can't recommend it enough. See installation steps here: <a href="https://docs.astral.sh/uv/getting-started/" target="_blank" rel="noreferrer" className="underline hover:text-foreground">docs.astral.sh/uv/getting-started/</a></p>
                         <ol className="list-decimal pl-5 text-sm space-y-3 marker:font-medium marker:text-muted-foreground">
                           <li>
                             <div>Create and activate an isolated env:</div>
                             <CopyablePre code={`uv venv\nsource .venv/bin/activate`} label="Copy uv venv commands" />
                           </li>
                           <li>
-                            <div>Install the Kafka dependencies:</div>
-                            <CopyablePre code={`uv pip install confluent-kafka fastavro cramjam`} label="Copy uv install command" />
+                            <div>Install babamul:</div>
+                            <CopyablePre code={`uv pip install babamul`} label="Copy uv install command" />
                           </li>
                         </ol>
                       </TabsContent>
@@ -568,8 +551,8 @@ export default function KafkaDocs() {
                             <CopyablePre code={`conda create -n boom-kafka python=3.11 -y\nconda activate boom-kafka`} label="Copy conda env commands" />
                           </li>
                           <li>
-                            <div>Install the Kafka dependencies with pip inside the env:</div>
-                            <CopyablePre code={`pip install confluent-kafka fastavro cramjam`} label="Copy conda pip install command" />
+                            <div>Install babamul with pip inside the env:</div>
+                            <CopyablePre code={`pip install babamul`} label="Copy conda pip install command" />
                           </li>
                         </ol>
                       </TabsContent>
@@ -582,8 +565,8 @@ export default function KafkaDocs() {
                             <CopyablePre code={`python -m venv .venv\nsource .venv/bin/activate`} label="Copy venv commands" />
                           </li>
                           <li>
-                            <div>Upgrade pip and install the dependencies:</div>
-                            <CopyablePre code={`python -m pip install --upgrade pip\npip install confluent-kafka fastavro cramjam`} label="Copy pip install commands" />
+                            <div>Install babamul:</div>
+                            <CopyablePre code={`python -m pip install --upgrade pip\npip install babamul`} label="Copy pip install commands" />
                           </li>
                         </ol>
                       </TabsContent>
