@@ -521,7 +521,7 @@ export default function KafkaDocs() {
                 <h4 className="font-semibold">Setup</h4>
                 {lang === 'python' ? (
                   <div className="mt-2 space-y-3">
-                    <p className="text-sm">Install the <a href="https://pypi.org/project/babamul/" target="_blank" rel="noreferrer" className="underline hover:text-foreground font-medium">babamul</a> Python client — it handles Kafka connection, authentication, and Avro deserialization for you. It also comes with all you need to interact with the API</p>
+                    <p className="text-sm">Install the <a href="https://pypi.org/project/babamul/" target="_blank" rel="noreferrer" className="underline hover:text-foreground font-medium">babamul</a> Python client — it handles Kafka connection, authentication, and Avro deserialization for you. It also comes with all you need to interact with the API. Check out the <a href="https://github.com/boom-astro/babamul/tree/main/examples" target="_blank" rel="noreferrer" className="underline hover:text-foreground font-medium">examples</a> for clear usage patterns covering both Kafka streams and the API.</p>
                     <Tabs defaultValue="uv">
                       <TabsList className="w-full sm:w-auto">
                         <TabsTrigger value="uv">uv</TabsTrigger>
