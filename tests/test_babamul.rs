@@ -254,7 +254,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         snr_ap: 90.0,
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
-        chipsf: Some(2.0)
+        chipsf: Some(2.0),
     };
     let prv_candidate = LsstPhotometry {
         jd: 2460000.0,
@@ -264,7 +264,6 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         flux: Some(1000.0),
         flux_err: 10.0,
         snr_psf: Some(100.0),
-        chipsf: Some(2.0)
         band: Band::R,
         ra: Some(ra_override.unwrap_or(150.0)),
         dec: Some(dec_override.unwrap_or(30.0)),
