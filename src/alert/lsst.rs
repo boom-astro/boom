@@ -272,13 +272,13 @@ pub struct LsstCandidate {
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
-    pub snr_psf: f32,
+    pub snr_psf: Option<f32>,
     pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
     pub magap: f32,
     pub sigmagap: f32,
-    pub snr_ap: f32,
+    pub snr_ap: Option<f32>,
     pub jdstarthist: Option<f64>,
     pub ndethist: Option<i32>,
 }
@@ -341,13 +341,13 @@ impl LsstCandidate {
             jd,
             magpsf,
             sigmapsf,
-            snr_psf: psf_flux_abs / psf_flux_err,
+            snr_psf: Some(psf_flux_abs / psf_flux_err),
             chipsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
             magap,
             sigmagap,
-            snr_ap: ap_flux_abs / ap_flux_err,
+            snr_ap: Some(ap_flux_abs / ap_flux_err),
             jdstarthist,
             ndethist,
         })
@@ -369,13 +369,13 @@ pub struct LsstPrvCandidate {
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
-    pub snr_psf: f32,
+    pub snr_psf: Option<f32>,
     pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
     pub magap: f32,
     pub sigmagap: f32,
-    pub snr_ap: f32,
+    pub snr_ap: Option<f32>,
 }
 
 impl TryFrom<DiaSource> for LsstPrvCandidate {
@@ -425,13 +425,13 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
             jd,
             magpsf,
             sigmapsf,
-            snr_psf: psf_flux_abs / psf_flux_err,
+            snr_psf: Some(psf_flux_abs / psf_flux_err),
             chipsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
             magap,
             sigmagap,
-            snr_ap: ap_flux_abs / ap_flux_err,
+            snr_ap: Some(ap_flux_abs / ap_flux_err),
         })
     }
 }
@@ -1142,7 +1142,7 @@ mod tests {
         assert!((candidate.magpsf - 23.674994).abs() < 1e-6);
         assert!((candidate.sigmapsf - 0.217043).abs() < 1e-6);
         assert!((candidate.diffmaglim - 23.675514).abs() < 1e-5);
-        assert!(candidate.snr_psf - 5.002406 < 1e-6);
+        assert!((candidate.snr_psf.unwrap() - 5.002406).abs() < 1e-6);
         assert_eq!(candidate.isdiffpos, false);
         assert_eq!(candidate.dia_source.band.unwrap(), Band::R);
         // TODO: check prv_candidates and forced photometry once we have alerts

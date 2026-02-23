@@ -478,7 +478,7 @@ pub struct ZtfCandidate {
     pub psf_flux: f32,
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: f32,
-    pub snr_psf: f32,
+    pub snr_psf: Option<f32>,
     #[serde(rename = "apFlux")]
     pub ap_flux: Option<f32>,
     #[serde(rename = "apFluxErr")]
@@ -513,7 +513,7 @@ impl TryFrom<Candidate> for ZtfCandidate {
                 -psf_flux_jy * 1e9_f32
             }, // convert to nJy
             psf_flux_err: psf_flux_err_jy * 1e9_f32, // convert to nJy
-            snr_psf: psf_flux_jy / psf_flux_err_jy,
+            snr_psf: Some(psf_flux_jy / psf_flux_err_jy),
             ap_flux: ap_flux_jy.map(|flux| {
                 if isdiffpos {
                     flux * 1e9_f32
@@ -576,7 +576,7 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
             },
             psf_flux: Some(ztf_candidate.psf_flux),
             psf_flux_err: Some(ztf_candidate.psf_flux_err),
-            snr_psf: Some(ztf_candidate.snr_psf),
+            snr_psf: ztf_candidate.snr_psf,
             ap_flux: ztf_candidate.ap_flux,
             ap_flux_err: ztf_candidate.ap_flux_err,
             snr_ap: ztf_candidate.snr_ap,
