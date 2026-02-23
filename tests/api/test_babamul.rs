@@ -1903,7 +1903,7 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey}/cross_matches/{object_id}
+    /// Test GET /babamul/surveys/{survey}/objects/{object_id}/cross-matches
     #[actix_rt::test]
     async fn test_get_object_xmatches() {
         use boom::utils::spatial::Coordinates;
@@ -2004,6 +2004,162 @@ mod tests {
             .delete_one(doc! { "_id": &test_object_id })
             .await
             .ok();
+    }
+
+    // Test POST /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
+    #[actix_rt::test]
+    async fn test_get_cross_matches_batch() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+        // Create test aux data with cross_matches
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let test_objects = vec![
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj001_{}", unique_suffix),
+                coordinates: Coordinates::new(125.0, -12.0),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: Some(
+                    serde_json::json!({
+                        "gaia": [{"mag": 15.2, "distance": 0.5}],
+                        "panstarrs": []
+                    })
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|item| mongodb::bson::to_document(item).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                ),
+            },
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj002_{}", unique_suffix),
+                coordinates: Coordinates::new(126.0, -11.5),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: Some(
+                    serde_json::json!({
+                        "gaia": [{"mag": 16.5, "distance": 1.0}],
+                        "panstarrs": [{"mag": 17.0, "distance": 0.8}]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|item| mongodb::bson::to_document(item).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                ),
+            },
+        ];
+
+        for obj in &test_objects {
+            aux_collection
+                .insert_one(obj)
+                .await
+                .expect("Failed to insert test object");
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_objects_xmatches),
+                ),
+        )
+        .await;
+
+        // Test successful batch retrieval
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "objectIds": [
+                    format!("ZTF24obj001_{}", unique_suffix),
+                    format!("ZTF24obj002_{}", unique_suffix)
+                ]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve batch cross-matches"
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data"
+        );
+
+        // Test with some non-existent object IDs
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "objectIds": [
+                    format!("ZTF24obj001_{}", unique_suffix),
+                    "ZTF99nonexistent"
+                ]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve cross-matches even if some object IDs do not exist"
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data for existing object"
+        );
+        assert!(
+            body["data"].get("ZTF99nonexistent").is_none(),
+            "Should not have data for non-existent object"
+        );
+
+        // Clean up test objects
+        for obj in test_objects {
+            aux_collection
+                .delete_one(doc! { "_id": &obj.object_id })
+                .await
+                .ok();
+        }
     }
 
     /// Test POST /babamul/surveys/{survey}/objects/cone-search

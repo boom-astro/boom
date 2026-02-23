@@ -813,3 +813,116 @@ pub async fn get_object_xmatches(
     };
     HttpResponse::Ok().json(response)
 }
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct BatchXmatchQuery {
+    #[serde(rename = "objectIds", alias = "object_ids")]
+    object_ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct BatchXmatchResponse {
+    status: String,
+    message: String,
+    // Map of object ID to their cross-matches, where cross-matches are represented as a map of catalog name
+    // to list of matches (as JSON values since the structure can vary widely between catalogs)
+    data: HashMap<String, HashMap<String, Vec<serde_json::Value>>>,
+}
+
+/// Fetch cross-matches for a batch of object IDs.
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/objects/cross-matches",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    request_body = BatchXmatchQuery,
+    responses(
+        (status = 200, description = "Cross-matches found", body = BatchXmatchResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/objects/cross-matches")]
+pub async fn get_objects_xmatches(
+    path: web::Path<(Survey,)>,
+    query: web::Json<BatchXmatchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    let survey = path.into_inner().0;
+    if survey != Survey::Ztf && survey != Survey::Lsst {
+        return response::bad_request(&format!(
+            "Unsupported survey: {}. Supported surveys are: ztf, lsst",
+            survey
+        ));
+    }
+    let aux_collection: Collection<mongodb::bson::Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
+
+    let object_ids = &query.object_ids;
+    // We require at least 1 and at most 1000 object IDs to prevent expensive queries that could potentially timeout the server
+    if object_ids.is_empty() || object_ids.len() > 1000 {
+        return response::bad_request("Must provide between 1 and 1000 object IDs");
+    }
+    let mut cursor = match aux_collection
+        .find(doc! {
+            "_id": { "$in": object_ids },
+        })
+        .projection(doc! {
+            "_id": 1,
+            "cross_matches": 1,
+        })
+        .await
+    {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            return response::internal_error(&format!("error querying database: {}", error));
+        }
+    };
+
+    let mut cross_matches_map = HashMap::new();
+    while let Ok(Some(doc)) = cursor.try_next().await {
+        let object_id = match doc.get_str("_id") {
+            Ok(id) => id.to_string(),
+            Err(_) => continue,
+        };
+        let cross_matches: HashMap<String, Vec<serde_json::Value>> = match doc
+            .get_document("cross_matches")
+        {
+            Ok(matches_doc) => matches_doc
+                .iter()
+                .map(|(catalog, matches)| {
+                    let matches_array = match matches.as_array() {
+                        Some(arr) => arr
+                            .iter()
+                            .filter_map(|m| m.as_document().cloned())
+                            .map(|doc| serde_json::to_value(doc).unwrap_or(serde_json::Value::Null))
+                            .collect::<Vec<serde_json::Value>>(),
+                        None => vec![],
+                    };
+                    (catalog.clone(), matches_array)
+                })
+                .collect::<HashMap<String, Vec<serde_json::Value>>>(),
+            Err(_) => HashMap::new(),
+        };
+        cross_matches_map.insert(object_id, cross_matches);
+    }
+
+    let response = BatchXmatchResponse {
+        status: "success".to_string(),
+        message: format!(
+            "Found cross-matches for {} objects",
+            cross_matches_map.len()
+        ),
+        data: cross_matches_map,
+    };
+    HttpResponse::Ok().json(response)
+}
