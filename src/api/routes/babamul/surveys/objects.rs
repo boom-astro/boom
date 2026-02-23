@@ -859,6 +859,10 @@ pub async fn get_objects_xmatches(
         db.collection(&format!("{}_alerts_aux", survey));
 
     let object_ids = &query.object_ids;
+    // We require at least 1 and at most 1000 object IDs to prevent expensive queries that could potentially timeout the server
+    if object_ids.is_empty() || object_ids.len() > 1000 {
+        return response::bad_request("Must provide between 1 and 1000 object IDs");
+    }
     let mut cursor = match aux_collection
         .find(doc! {
             "_id": { "$in": object_ids },
