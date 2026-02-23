@@ -846,8 +846,15 @@ struct BatchXmatchResponse {
 pub async fn get_objects_xmatches(
     path: web::Path<(Survey,)>,
     query: web::Json<BatchXmatchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
 ) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     let survey = path.into_inner().0;
     if survey != Survey::Ztf && survey != Survey::Lsst {
         return response::bad_request(&format!(
