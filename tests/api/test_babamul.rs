@@ -2006,7 +2006,7 @@ mod tests {
             .ok();
     }
 
-    // Test GET /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
+    // Test POST /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
     #[actix_rt::test]
     async fn test_get_cross_matches_batch() {
         use boom::utils::spatial::Coordinates;

@@ -824,6 +824,8 @@ struct BatchXmatchQuery {
 struct BatchXmatchResponse {
     status: String,
     message: String,
+    // Map of object ID to their cross-matches, where cross-matches are represented as a map of catalog name
+    // to list of matches (as JSON values since the structure can vary widely between catalogs)
     data: HashMap<String, HashMap<String, Vec<serde_json::Value>>>,
 }
 
