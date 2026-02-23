@@ -155,22 +155,23 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             }
         };
 
-        let (ap_flux, ap_flux_err, snr_ap) = match (prv_candidate.magap, prv_candidate.sigmagap) {
-            (Some(magap), Some(sigmagap)) => {
-                let (flux, flux_err) = mag2flux(magap, sigmagap, ZTF_ZP);
-                let snr = flux / flux_err;
-                (
-                    Some(if isdiffpos.unwrap_or(false) {
-                        flux * 1e9_f32
-                    } else {
-                        -flux * 1e9_f32
-                    }), // convert to nJy
-                    Some(flux_err * 1e9_f32), // convert to nJy
-                    Some(snr),
-                )
-            }
-            _ => (None, None, None),
-        };
+        let (ap_flux, ap_flux_err, snr_ap) =
+            match (prv_candidate.magap, prv_candidate.sigmagap, isdiffpos) {
+                (Some(magap), Some(sigmagap), Some(isdiff)) => {
+                    let (flux, flux_err) = mag2flux(magap, sigmagap, ZTF_ZP);
+                    let snr = flux / flux_err;
+                    (
+                        Some(if isdiff {
+                            flux * 1e9_f32
+                        } else {
+                            -flux * 1e9_f32
+                        }), // convert to nJy
+                        Some(flux_err * 1e9_f32), // convert to nJy
+                        Some(snr),
+                    )
+                }
+                _ => (None, None, None),
+            };
 
         Ok(ZtfPrvCandidate {
             prv_candidate,
