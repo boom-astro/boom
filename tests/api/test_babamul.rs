@@ -2006,7 +2006,7 @@ mod tests {
             .ok();
     }
 
-    // Test GET /babamul/surveys/{survey}/cross_matches endpoint (batch cross-match retrieval)
+    // Test GET /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
     #[actix_rt::test]
     async fn test_get_cross_matches_batch() {
         use boom::utils::spatial::Coordinates;
@@ -2103,7 +2103,7 @@ mod tests {
 
         // Test successful batch retrieval
         let req = test::TestRequest::post()
-            .uri("/babamul/surveys/ztf/cross-matches")
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .set_json(serde_json::json!({
                 "objectIds": [
@@ -2127,7 +2127,7 @@ mod tests {
 
         // Test with some non-existent object IDs
         let req = test::TestRequest::post()
-            .uri("/babamul/surveys/ztf/cross-matches")
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .set_json(serde_json::json!({
                 "objectIds": [
