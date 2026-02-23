@@ -57,6 +57,15 @@ struct Cli {
     #[arg(long, env = "BOOM_CONSUMER_INSTANCE_ID")]
     instance_id: Option<Uuid>,
 
+    /// Exit on end of file (for testing purposes)
+    /// Not used in production
+    #[arg(long, default_value_t = false)]
+    exit_on_eof: bool,
+
+    /// Overridethe topic name (useful if data has been produced to a non-default topic)
+    #[arg(long, value_name = "TOPIC")]
+    topic_override: Option<String>,
+
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
     deployment_env: String,
@@ -79,6 +88,16 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     .and_utc()
     .timestamp();
 
+    let exit_on_eof = if args.deployment_env == "dev" {
+        args.exit_on_eof
+    } else {
+        false
+    };
+
+    // If topic override is provided, use it. Otherwise, the consumer
+    // will determine the topic based on the survey, program ID, and date.
+    let topic = args.topic_override;
+
     match args.survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
@@ -87,12 +106,12 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    None,
+                    topic,
                     timestamp,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    false,
+                    exit_on_eof,
                     &args.config,
                 )
                 .await
@@ -108,12 +127,12 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    None,
+                    topic,
                     timestamp,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    false,
+                    exit_on_eof,
                     &args.config,
                 )
                 .await
@@ -129,12 +148,12 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    None,
+                    topic,
                     timestamp,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
-                    false,
+                    exit_on_eof,
                     &args.config,
                 )
                 .await

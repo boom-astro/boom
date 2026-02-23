@@ -136,10 +136,28 @@ pub async fn post_cone_search_query(
         Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
     };
     for (object_name, radec) in object_coordinates {
-        let ra = radec[0] - 180.0;
+        if radec.len() != 2 {
+            return response::bad_request(&format!(
+                "Invalid coordinates for object {}: expected [RA, Dec]",
+                object_name
+            ));
+        }
+        let ra = radec[0];
         let dec = radec[1];
+        if ra < 0.0 || ra >= 360.0 {
+            return response::bad_request(&format!(
+                "Invalid RA for object {}: must be in [0, 360)",
+                object_name
+            ));
+        }
+        if dec < -90.0 || dec > 90.0 {
+            return response::bad_request(&format!(
+                "Invalid Dec for object {}: must be in [-90, 90]",
+                object_name
+            ));
+        }
         let center_sphere = doc! {
-            "$centerSphere": [[ra, dec], radius]
+            "$centerSphere": [[ra - 180.0, dec], radius]
         };
         let geo_within = doc! {
             "$geoWithin": center_sphere

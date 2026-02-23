@@ -5,9 +5,10 @@ use boom::{
     },
     conf::get_test_db,
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
-    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, Origin, ZtfFilterWorker},
     utils::{
         enums::Survey,
+        lightcurves::{flux2mag, ZTF_ZP},
         testing::{
             decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
             remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
@@ -345,34 +346,70 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(properties.get_bool("star").unwrap(), true);
     assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
     assert_eq!(properties.get_bool("stationary").unwrap(), true);
+
     // the properties also include "photstats, a document with bands as keys and
     // as values the rate of evolution (mag/day) before and after peak
     let photstats = properties.get_document("photstats").unwrap();
+
+    // check the values for the g band
     assert!(photstats.contains_key("g"));
     let g_stats = photstats.get_document("g").unwrap();
+
+    // g basic stats
     let peak_mag = g_stats.get_f64("peak_mag").unwrap();
     let peak_jd = g_stats.get_f64("peak_jd").unwrap();
-    let rising = g_stats.get_document("rising").unwrap();
-    let fading = g_stats.get_document("fading").unwrap();
-    let rising_rate = rising.get_f64("rate").unwrap();
-    let fading_rate = fading.get_f64("rate").unwrap();
+    let dt = g_stats.get_f64("dt").unwrap();
     assert!((peak_mag - 15.6940).abs() < 1e-6);
     assert!((peak_jd - 2460441.971956).abs() < 1e-6);
-    assert!((rising_rate + 0.20024).abs() < 1e-6);
-    assert!((fading_rate - 0.037152).abs() < 1e-6);
+    assert!((dt - 26.956516).abs() < 1e-6);
 
+    // g rising stats
+    let rising = g_stats.get_document("rising").unwrap();
+    let rising_rate = rising.get_f64("rate").unwrap();
+    let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
+    let rising_dt = rising.get_f64("dt").unwrap();
+    assert!((rising_rate + 0.086736).abs() < 1e-6);
+    assert!((rising_red_chi2 - 82.419716).abs() < 1e-6); // bad fit
+    assert!((rising_dt - 21.008194).abs() < 1e-6);
+
+    // g fading stats
+    let fading = g_stats.get_document("fading").unwrap();
+    let fading_rate = fading.get_f64("rate").unwrap();
+    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
+    let fading_dt = fading.get_f64("dt").unwrap();
+    assert!((fading_rate - 0.038436).abs() < 1e-6);
+    assert!((fading_red_chi2 - 1.654100).abs() < 1e-6); // decent fit
+    assert!((fading_dt - 5.948322).abs() < 1e-6);
+
+    // check the values for the r band
     assert!(photstats.contains_key("r"));
     let r_stats = photstats.get_document("r").unwrap();
+
+    // r basic stats
     let peak_mag = r_stats.get_f64("peak_mag").unwrap();
     let peak_jd = r_stats.get_f64("peak_jd").unwrap();
-    let rising = r_stats.get_document("rising").unwrap();
-    let fading = r_stats.get_document("fading").unwrap();
-    let rising_rate = rising.get_f64("rate").unwrap();
-    let fading_rate = fading.get_f64("rate").unwrap();
+    let dt = r_stats.get_f64("dt").unwrap();
     assert!((peak_mag - 14.3987).abs() < 1e-6);
     assert!((peak_jd - 2460441.922303).abs() < 1e-6);
-    assert!((rising_rate + 0.13846).abs() < 1e-6);
+    assert!((dt - 25.922222).abs() < 1e-6);
+
+    // r rising stats
+    let rising = r_stats.get_document("rising").unwrap();
+    let rising_rate = rising.get_f64("rate").unwrap();
+    let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
+    let rising_dt = rising.get_f64("dt").unwrap();
+    assert!((rising_rate + 0.023725).abs() < 1e-6);
+    assert!((rising_red_chi2 - 70.454285).abs() < 1e-6); // bad fit
+    assert!((rising_dt - 17.966065).abs() < 1e-6);
+
+    // r fading stats
+    let fading = r_stats.get_document("fading").unwrap();
+    let fading_rate = fading.get_f64("rate").unwrap();
+    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
+    let fading_dt = fading.get_f64("dt").unwrap();
     assert!((fading_rate - 0.063829).abs() < 1e-6);
+    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
+    assert!((fading_dt - 7.956157).abs() < 1e-6);
 }
 
 #[tokio::test]
@@ -413,6 +450,58 @@ async fn test_filter_ztf_alert() {
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.object_id, object_id);
     assert_eq!(alert.photometry.len(), 21); // prv_candidates + prv_nondetections + fp_hists
+
+    // let's validate that the photometry points were correctly parsed, and that the flux and flux_err values are consistent with the original values in the alert
+    let fp_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460447.9202778 && p.origin == Origin::ForcedPhot)
+        .unwrap();
+    assert!(fp_point.flux.is_some());
+    let flux = fp_point.flux.unwrap();
+    assert!(flux < 0.0); // the first point is a negative detection, so the flux should be negative
+    let flux_err = fp_point.flux_err;
+    let band = &fp_point.band;
+    assert_eq!(band, "ztfg");
+
+    // we compute magpsf and magpsf_err from the flux values from the alert packet
+    let magzpsci = 26.1352;
+    let forcediffimflux = -11859.88;
+    let forcediffimfluxunc = 25.300741;
+    let (magpsf_forcediffimflux, magpsf_err) =
+        flux2mag(-forcediffimflux, forcediffimfluxunc, magzpsci);
+
+    // then we compute magpsf and magpsf_err from the flux and flux_err values
+    // we compute in the alert worker (at a fixed ZP)
+    let (magpsf, magpsf_err_from_flux) =
+        flux2mag(-flux as f32 * 1e-9, flux_err as f32 * 1e-9, ZTF_ZP);
+
+    // they should be consistent within a small tolerance
+    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
+    assert!((magpsf_err - magpsf_err_from_flux).abs() < 1e-6);
+
+    // let's do a similar validation for the first prv_candidates point, where the ZP is fixed at ZTF_ZP
+    let alert_points = alert
+        .photometry
+        .iter()
+        .filter(|p| p.origin == Origin::Alert && p.flux.is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        !alert_points.is_empty(),
+        "No Alert photometry points with flux found"
+    );
+    let prv_candidate_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460423.9562384 && p.origin == Origin::Alert && p.flux.is_some())
+        .unwrap();
+    assert!(prv_candidate_point.flux.is_some());
+    let flux = prv_candidate_point.flux.unwrap();
+    let flux_err = prv_candidate_point.flux_err;
+    let (magpsf_prv_candidate, magpsf_err_prv_candidate) =
+        flux2mag((flux.abs() * 1e-9) as f32, (flux_err * 1e-9) as f32, ZTF_ZP);
+    assert!((magpsf_prv_candidate - 16.8002).abs() < 1e-4);
+    assert!((magpsf_err_prv_candidate - 0.1788).abs() < 1e-4);
 
     let filter_passed = alert
         .filters

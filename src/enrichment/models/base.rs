@@ -19,7 +19,7 @@ pub enum ModelError {
     PrepareCutoutError(#[from] CutoutError),
     #[error("error converting predictions to vec")]
     ModelOutputToVecError,
-    #[error("missing feature in alert")]
+    #[error("missing feature in alert: {0}")]
     MissingFeature(&'static str),
 }
 

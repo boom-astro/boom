@@ -27,8 +27,10 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
-    - name: Create default .env file
-      run: cp .env.example .env
+    - name: Create default .env file & enable Babamul
+      run: |
+        cp .env.example .env
+        sed -i 's/BOOM_BABAMUL__ENABLED=false/BOOM_BABAMUL__ENABLED=true/' .env
     - name: Install Kafka CLI tools
       run: |
         KAFKA_VERSION=4.1.1
@@ -41,6 +43,24 @@ jobs:
         sudo rm -f /tmp/kafka.tgz
     - name: Start services
       run: docker compose up --build -d
+    - name: Wait for MongoDB to be ready
+      run: |
+        echo "Waiting for MongoDB to be ready..."
+        for i in {1..60}; do
+          if docker compose exec -T mongo mongosh localhost:27017/test --quiet --eval "db.runCommand('ping').ok" >/dev/null 2>&1; then
+            echo "MongoDB is ready!"
+            break
+          fi
+          echo "Attempt $i/60 - MongoDB not ready yet, waiting..."
+          sleep 2
+        done
+        # Final check to confirm MongoDB is ready
+        if ! docker compose exec -T mongo mongosh localhost:27017/test --quiet --eval "db.runCommand('ping').ok" >/dev/null 2>&1; then
+          echo "MongoDB failed to start within timeout" >&2
+          docker compose logs mongo || true
+          exit 1
+        fi
+        docker compose exec -T mongo mongosh localhost:27017/boom_test --quiet --username mongoadmin --password mongoadminsecret --authenticationDatabase admin --eval "db.createCollection('LSPSC'); db.LSPSC.createIndex({'coordinates.radec_geojson': '2dsphere'});"
     - name: Wait for Kafka ACL initialization
       run: |
         echo "Waiting for kafka-acl-init container to start..."

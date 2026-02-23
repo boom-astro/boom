@@ -1,10 +1,10 @@
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
+use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag,
+    PhotometryMag, ZTF_ZP,
 };
 use crate::{
     alert::ZtfCandidate,
@@ -18,9 +18,8 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
-use tracing::{instrument, warn};
+use tracing::{instrument, trace, warn};
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -51,10 +50,12 @@ pub struct ZtfForcedPhotometry {
     pub magpsf: Option<f64>,
     pub sigmapsf: Option<f64>,
     pub diffmaglim: f64,
-    #[serde(rename = "psfFlux")]
-    pub flux: Option<f64>, // in nJy
-    #[serde(rename = "psfFluxErr")]
-    pub flux_err: f64, // in nJy
+    // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+    #[serde(rename = "forcediffimflux")]
+    pub flux: Option<f64>,
+    // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+    #[serde(rename = "forcediffimfluxunc")]
+    pub flux_err: f64,
     pub band: Band,
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
@@ -78,7 +79,6 @@ pub struct ZtfPhotometry {
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
     pub band: Band,
-    pub zp: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
     pub snr: Option<f64>,
@@ -100,7 +100,6 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             band: phot.band,
             snr: phot.snr,
             programid: phot.programid,
-            zp: Some(23.9), // alert photometry uses a fixed zeropoint of 23.9
         })
     }
 }
@@ -113,24 +112,39 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
         ))?;
         // TODO: accept all "acceptable" procstatus (if not just "0")
         if procstatus != "0" {
-            return Err(EnrichmentWorkerError::Serialization(
-                "Invalid procstatus".to_string(),
-            ));
+            return Err(EnrichmentWorkerError::BadProcstatus(procstatus));
         }
+
+        // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
+        let zp_scaling_factor = if let Some(magzpsci) = phot.magzpsci {
+            10f64.powf((ZTF_ZP as f64 - magzpsci) / 2.5)
+        } else {
+            return Err(EnrichmentWorkerError::MissingMagZPSci);
+        };
+
+        let flux = if phot.flux != Some(-99999.0) && phot.flux.map_or(false, |f| !f.is_nan()) {
+            phot.flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
+        } else {
+            None
+        };
+        let flux_err = if phot.flux_err != -99999.0 && !phot.flux_err.is_nan() {
+            phot.flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
+        } else {
+            return Err(EnrichmentWorkerError::MissingFluxPSF);
+        };
 
         Ok(ZtfPhotometry {
             jd: phot.jd,
             magpsf: phot.magpsf,
             sigmapsf: phot.sigmapsf,
             diffmaglim: phot.diffmaglim,
-            flux: phot.flux,
-            flux_err: phot.flux_err,
+            flux,
+            flux_err,
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
             snr: phot.snr,
             programid: phot.programid,
-            zp: phot.magzpsci, // forced photometry has a zeropoint per datapoint
         })
     }
 }
@@ -177,10 +191,18 @@ where
                 .filter_map(|p| {
                     ZtfPhotometry::try_from(p)
                         .map_err(|e| {
-                            warn!(
-                                "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
-                                e
-                            );
+                            // log badprocstatus at trace level to avoid flooding logs
+                            if let EnrichmentWorkerError::BadProcstatus(_) = e {
+                                trace!(
+                                    "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
+                                    e
+                                );
+                            } else {
+                                warn!(
+                                    "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
+                                    e
+                                );
+                            }
                         })
                         .ok()
                 })
@@ -193,15 +215,20 @@ where
 
 // it should return an optional PhotometryMag
 impl ZtfPhotometry {
-    pub fn to_photometry_mag(&self) -> Option<PhotometryMag> {
-        // if the abs value of the snr > 3 and magpsf is Some, we return Some(PhotometryMag)
+    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
+        // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
+        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
+        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
         match (self.snr, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) if snr.abs() > 3.0 => Some(PhotometryMag {
-                time: self.jd,
-                mag: mag as f32,
-                mag_err: sig as f32,
-                band: self.band.clone(),
-            }),
+            (Some(snr), Some(mag), Some(sig)) => match min_snr {
+                Some(thresh) if snr.abs() < thresh => None,
+                _ => Some(PhotometryMag {
+                    time: self.jd,
+                    mag: mag as f32,
+                    mag_err: sig as f32,
+                    band: self.band.clone(),
+                }),
+            },
             _ => None,
         }
     }
@@ -248,7 +275,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                         "$cond": {
                             "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
                             "then": {
-                                "object_id": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
                                 "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
                                 "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
                                 "ra": { "$add": [
@@ -271,9 +298,10 @@ pub struct ZtfSurveyMatches {
     pub lsst: Option<LsstMatch>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ZtfMatch {
-    // #[serde(rename = "_id")]
+    #[serde(rename = "objectId")]
     pub object_id: String,
     pub ra: f64,
     pub dec: f64,
@@ -305,18 +333,18 @@ pub struct ZtfAlertForEnrichment {
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
-    pub multisurvey_photstats: PerBandProperties,
+    pub multisurvey_photstats: Option<PerBandProperties>,
 }
 
 /// ZTF alert ML classifier scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
     pub acai_h: f32,
     pub acai_n: f32,
@@ -427,11 +455,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
+        let now = flare::Time::now().to_jd();
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
+        let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
@@ -443,36 +473,49 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
-            let metadata = self.acai_h_model.get_metadata(&[&alert])?;
+            // (we skip ML inference if features cannot be computed, e.g. missing required features)
             let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-
-            let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-            let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-            let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-            let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-            let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-
-            let metadata_btsbot = self
+            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
+            let btsbot_metadata_result = self
                 .btsbot_model
-                .get_metadata(&[&alert], &[all_bands_properties])?;
-            let btsbot_scores = self.btsbot_model.predict(&metadata_btsbot, &triplet)?;
+                .get_metadata(&[&alert], &[all_bands_properties.clone()]);
 
-            let classifications = ZtfAlertClassifications {
-                acai_h: acai_h_scores[0],
-                acai_n: acai_n_scores[0],
-                acai_v: acai_v_scores[0],
-                acai_o: acai_o_scores[0],
-                acai_b: acai_b_scores[0],
-                btsbot: btsbot_scores[0],
+            let classifications = if let (Ok(metadata), Ok(btsbot_metadata)) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
+                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
+                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
+                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
+                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
+                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    candid
+                );
+                None
             };
 
-            let update_alert_document = doc! {
-                "$set": {
-                    // ML scores
+            let update_alert_document = if let Some(classifications) = classifications {
+                doc! { "$set": {
                     "classifications": mongify(&classifications),
-                    // properties
                     "properties": mongify(&properties),
-                }
+                    "updated_at": now,
+                }}
+            } else {
+                doc! { "$set": {
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }}
             };
 
             let update = WriteModel::UpdateOne(
@@ -488,13 +531,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
-                    alert,
-                    Some(cutouts.cutout_science),
-                    Some(cutouts.cutout_template),
-                    Some(cutouts.cutout_difference),
-                    properties,
-                );
+                let enriched_alert = BabamulZtfAlert::from_alert_and_properties(alert, properties);
                 enriched_alerts.push(enriched_alert);
             }
         }
@@ -568,12 +605,14 @@ impl ZtfEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
-            .filter_map(|p| p.to_photometry_mag())
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -582,26 +621,32 @@ impl ZtfEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
-        // make a multisurvey lightcurve if we have LSST matches
-        let multisurvey_photstats = if let Some(survey_matches) = &alert.survey_matches {
+        // Compute multisurvey photstats (including LSST if available, other surveys can be added later)
+        let mut has_matches = false;
+        if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
                 let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
                 let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
                     .fp_hists
                     .iter()
-                    .filter_map(|p| p.to_photometry_mag())
+                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
                     .collect();
                 let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
                 prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
+                has_matches = true;
             }
+        }
+        let multisurvey_photstats = if has_matches {
             analyze_photometry(&lightcurve).0
         } else {
-            PerBandProperties::default()
+            photstats.clone()
         };
 
         Ok((
@@ -611,7 +656,7 @@ impl ZtfEnrichmentWorker {
                 near_brightstar: is_near_brightstar,
                 stationary,
                 photstats,
-                multisurvey_photstats,
+                multisurvey_photstats: Some(multisurvey_photstats),
             },
             all_bands_properties,
             programid,

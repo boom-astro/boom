@@ -4,10 +4,14 @@ use dotenvy;
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, instrument, warn};
 
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+
+static HASHED_SECRET_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
 #[derive(thiserror::Error, Debug)]
 pub enum BoomConfigError {
@@ -291,10 +295,11 @@ fn default_kafka_server() -> String {
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
     pub server: String, // URL of the Kafka broker
-    pub group_id: String,                // Consumer group ID
-    pub schema_registry: Option<String>, // URL of the schema registry (if any)
-    pub username: Option<String>,        // Username for authentication (if any)
-    pub password: Option<String>,        // Password for authentication (if any)
+    pub group_id: String,                           // Consumer group ID
+    pub schema_registry: Option<String>,            // URL of the schema registry (if any)
+    pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
+    pub username: Option<String>,                   // Username for authentication (if any)
+    pub password: Option<String>,                   // Password for authentication (if any)
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -319,12 +324,23 @@ pub struct AuthConfig {
     pub admin_email: String,
 }
 
+impl AuthConfig {
+    pub fn get_hashed_secret_key(&self) -> &[u8; 32] {
+        HASHED_SECRET_KEY.get_or_init(|| {
+            let mut hasher = Sha256::new();
+            hasher.update(self.secret_key.as_bytes());
+            hasher.finalize().into()
+        })
+    }
+}
+
 fn default_api_port() -> u16 {
     4000
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ApiConfig {
+    pub domain: String,
     pub auth: AuthConfig,
     #[serde(default = "default_api_port")]
     pub port: u16,
@@ -360,12 +376,24 @@ impl Default for RedisConfig {
 #[derive(Deserialize, Debug, Clone)]
 pub struct BabamulConfig {
     pub enabled: bool,
+    pub webapp_url: Option<String>,
+    /// Number of days to retain Kafka messages for Babamul topics
+    #[serde(default = "default_babamul_retention_days")]
+    pub retention_days: u32,
 }
 
 impl Default for BabamulConfig {
     fn default() -> Self {
-        BabamulConfig { enabled: false }
+        BabamulConfig {
+            enabled: false,
+            webapp_url: None,
+            retention_days: default_babamul_retention_days(),
+        }
     }
+}
+
+fn default_babamul_retention_days() -> u32 {
+    3
 }
 
 #[derive(Deserialize, Debug, Clone)]
