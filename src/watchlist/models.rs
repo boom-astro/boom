@@ -137,11 +137,9 @@ impl<'de> Deserialize<'de> for EventGeometry {
             } => {
                 // Re-sort pixels to uphold the binary-search invariant even
                 // when data comes from an external source (e.g. MongoDB).
-                let mut pairs: Vec<(u64, f64)> =
-                    pixels.into_iter().zip(probabilities).collect();
+                let mut pairs: Vec<(u64, f64)> = pixels.into_iter().zip(probabilities).collect();
                 pairs.sort_unstable_by_key(|(px, _)| *px);
-                let (sorted_pixels, sorted_probs): (Vec<u64>, Vec<f64>) =
-                    pairs.into_iter().unzip();
+                let (sorted_pixels, sorted_probs): (Vec<u64>, Vec<f64>) = pairs.into_iter().unzip();
                 EventGeometry::HealPixMap {
                     nside,
                     pixels: sorted_pixels,
@@ -366,12 +364,7 @@ pub struct EventMatch {
 
 impl EventMatch {
     /// Create a new event match
-    pub fn new(
-        event: &GcnEvent,
-        alert_ra: f64,
-        alert_dec: f64,
-        alert_jd: f64,
-    ) -> Self {
+    pub fn new(event: &GcnEvent, alert_ra: f64, alert_dec: f64, alert_jd: f64) -> Self {
         let now = flare::Time::now().to_jd();
 
         let (distance_deg, probability) = match &event.geometry {

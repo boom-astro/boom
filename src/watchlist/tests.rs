@@ -13,8 +13,8 @@
 
 #[cfg(test)]
 mod model_tests {
-    use crate::watchlist::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
     use crate::utils::spatial::Coordinates;
+    use crate::watchlist::{EventGeometry, EventMatch, GcnEvent, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     // ==================== Helpers ====================
@@ -107,10 +107,7 @@ mod model_tests {
             serde_json::to_string(&GcnSource::Fermi).unwrap(),
             "\"fermi\""
         );
-        assert_eq!(
-            serde_json::to_string(&GcnSource::Svom).unwrap(),
-            "\"svom\""
-        );
+        assert_eq!(serde_json::to_string(&GcnSource::Svom).unwrap(), "\"svom\"");
         assert_eq!(
             serde_json::to_string(&GcnSource::EinsteinProbe).unwrap(),
             "\"einstein_probe\""
@@ -184,7 +181,11 @@ mod model_tests {
         for event_type in types {
             let json = serde_json::to_string(&event_type).unwrap();
             let deserialized: GcnEventType = serde_json::from_str(&json).unwrap();
-            assert_eq!(event_type, deserialized, "Round-trip failed for {:?}", event_type);
+            assert_eq!(
+                event_type, deserialized,
+                "Round-trip failed for {:?}",
+                event_type
+            );
         }
     }
 
@@ -214,9 +215,18 @@ mod model_tests {
 
     #[test]
     fn test_gcn_event_type_display() {
-        assert_eq!(format!("{}", GcnEventType::GravitationalWave), "Gravitational Wave");
-        assert_eq!(format!("{}", GcnEventType::GammaRayBurst), "Gamma-Ray Burst");
-        assert_eq!(format!("{}", GcnEventType::XRayTransient), "X-Ray Transient");
+        assert_eq!(
+            format!("{}", GcnEventType::GravitationalWave),
+            "Gravitational Wave"
+        );
+        assert_eq!(
+            format!("{}", GcnEventType::GammaRayBurst),
+            "Gamma-Ray Burst"
+        );
+        assert_eq!(
+            format!("{}", GcnEventType::XRayTransient),
+            "X-Ray Transient"
+        );
         assert_eq!(format!("{}", GcnEventType::Neutrino), "Neutrino");
         assert_eq!(format!("{}", GcnEventType::Watchlist), "Watchlist");
     }
@@ -334,10 +344,7 @@ mod model_tests {
         // Distance from A to B should equal distance from B to A
         let geom_a = EventGeometry::circle(100.0, 30.0, 5.0);
         let geom_b = EventGeometry::circle(103.0, 32.0, 5.0);
-        assert_eq!(
-            geom_a.contains(103.0, 32.0),
-            geom_b.contains(100.0, 30.0)
-        );
+        assert_eq!(geom_a.contains(103.0, 32.0), geom_b.contains(100.0, 30.0));
     }
 
     // ==================== HEALPix Validation Tests ====================
@@ -346,7 +353,10 @@ mod model_tests {
     fn test_healpix_rejects_non_power_of_two_nside_3() {
         let result = EventGeometry::healpix(3, vec![1], vec![0.5], 0.9);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("nside must be a power of 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("nside must be a power of 2"));
     }
 
     #[test]
@@ -420,7 +430,8 @@ mod model_tests {
 
     #[test]
     fn test_healpix_geometry_center_is_none() {
-        let geom = EventGeometry::healpix(64, vec![100, 101, 102], vec![0.1, 0.2, 0.7], 0.9).unwrap();
+        let geom =
+            EventGeometry::healpix(64, vec![100, 101, 102], vec![0.1, 0.2, 0.7], 0.9).unwrap();
         assert_eq!(geom.center(), None);
     }
 
@@ -520,7 +531,8 @@ mod model_tests {
 
     #[test]
     fn test_healpix_geometry_serialization_roundtrip() {
-        let healpix = EventGeometry::healpix(64, vec![100, 200, 300], vec![0.3, 0.5, 0.2], 0.9).unwrap();
+        let healpix =
+            EventGeometry::healpix(64, vec![100, 200, 300], vec![0.3, 0.5, 0.2], 0.9).unwrap();
         let json = serde_json::to_string(&healpix).unwrap();
         // HealPixMap -> heal_pix_map with snake_case renaming
         assert!(json.contains("\"type\":\"heal_pix_map\""));
@@ -866,8 +878,8 @@ mod model_tests {
 
 #[cfg(test)]
 mod xmatch_tests {
-    use crate::watchlist::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use crate::utils::spatial::Coordinates;
+    use crate::watchlist::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     fn make_event(
@@ -935,7 +947,16 @@ mod xmatch_tests {
 
     #[test]
     fn test_xmatch_no_match_due_to_inactive() {
-        let events = vec![make_event("evt1", 180.0, 45.0, 1.0, 2460000.0, 30.0, false, GcnSource::Custom)];
+        let events = vec![make_event(
+            "evt1",
+            180.0,
+            45.0,
+            1.0,
+            2460000.0,
+            30.0,
+            false,
+            GcnSource::Custom,
+        )];
         let matches = event_xmatch_sync(180.0, 45.0, 2460001.0, &events);
         assert!(matches.is_empty());
     }
@@ -959,9 +980,36 @@ mod xmatch_tests {
     #[test]
     fn test_xmatch_mixed_active_inactive() {
         let events = vec![
-            make_event("active1", 180.0, 45.0, 2.0, 2460000.0, 30.0, true, GcnSource::Custom),
-            make_event("inactive1", 180.0, 45.0, 2.0, 2460000.0, 30.0, false, GcnSource::Custom),
-            make_event("active2", 180.0, 45.0, 2.0, 2460000.0, 30.0, true, GcnSource::Custom),
+            make_event(
+                "active1",
+                180.0,
+                45.0,
+                2.0,
+                2460000.0,
+                30.0,
+                true,
+                GcnSource::Custom,
+            ),
+            make_event(
+                "inactive1",
+                180.0,
+                45.0,
+                2.0,
+                2460000.0,
+                30.0,
+                false,
+                GcnSource::Custom,
+            ),
+            make_event(
+                "active2",
+                180.0,
+                45.0,
+                2.0,
+                2460000.0,
+                30.0,
+                true,
+                GcnSource::Custom,
+            ),
         ];
         let matches = event_xmatch_sync(180.0, 45.0, 2460001.0, &events);
         assert_eq!(matches.len(), 2);
@@ -984,8 +1032,26 @@ mod xmatch_tests {
     #[test]
     fn test_xmatch_preserves_source_in_matches() {
         let events = vec![
-            make_event("swift-1", 180.0, 45.0, 2.0, 2460000.0, 30.0, true, GcnSource::Swift),
-            make_event("fermi-1", 180.0, 45.0, 2.0, 2460000.0, 30.0, true, GcnSource::Fermi),
+            make_event(
+                "swift-1",
+                180.0,
+                45.0,
+                2.0,
+                2460000.0,
+                30.0,
+                true,
+                GcnSource::Swift,
+            ),
+            make_event(
+                "fermi-1",
+                180.0,
+                45.0,
+                2.0,
+                2460000.0,
+                30.0,
+                true,
+                GcnSource::Fermi,
+            ),
         ];
         let matches = event_xmatch_sync(180.0, 45.0, 2460001.0, &events);
         assert_eq!(matches.len(), 2);
@@ -1023,9 +1089,9 @@ mod xmatch_tests {
     fn test_xmatch_same_position_different_times() {
         // Three events with different expiry windows
         let events = vec![
-            make_active("short", 180.0, 45.0, 1.0, 2460000.0, 5.0),   // expires at 2460005
-            make_active("medium", 180.0, 45.0, 1.0, 2460000.0, 15.0),  // expires at 2460015
-            make_active("long", 180.0, 45.0, 1.0, 2460000.0, 30.0),    // expires at 2460030
+            make_active("short", 180.0, 45.0, 1.0, 2460000.0, 5.0), // expires at 2460005
+            make_active("medium", 180.0, 45.0, 1.0, 2460000.0, 15.0), // expires at 2460015
+            make_active("long", 180.0, 45.0, 1.0, 2460000.0, 30.0), // expires at 2460030
         ];
 
         // At day 3: all match
@@ -1095,8 +1161,26 @@ mod xmatch_tests {
     #[test]
     fn test_xmatch_all_events_inactive() {
         let events = vec![
-            make_event("e1", 180.0, 45.0, 1.0, 2460000.0, 30.0, false, GcnSource::Custom),
-            make_event("e2", 180.0, 45.0, 1.0, 2460000.0, 30.0, false, GcnSource::Custom),
+            make_event(
+                "e1",
+                180.0,
+                45.0,
+                1.0,
+                2460000.0,
+                30.0,
+                false,
+                GcnSource::Custom,
+            ),
+            make_event(
+                "e2",
+                180.0,
+                45.0,
+                1.0,
+                2460000.0,
+                30.0,
+                false,
+                GcnSource::Custom,
+            ),
         ];
         let matches = event_xmatch_sync(180.0, 45.0, 2460001.0, &events);
         assert!(matches.is_empty());
@@ -1268,20 +1352,20 @@ mod healpix_advanced_tests {
     #[test]
     fn test_healpix_probability_ordering_after_sort() {
         // Deliberately out-of-order, non-consecutive pixels
-        let geom = EventGeometry::healpix(
-            64,
-            vec![500, 100, 300],
-            vec![0.1, 0.7, 0.2],
-            0.9,
-        )
-        .unwrap();
+        let geom =
+            EventGeometry::healpix(64, vec![500, 100, 300], vec![0.1, 0.7, 0.2], 0.9).unwrap();
 
         // After sorting: pixels=[100,300,500], probs=[0.7,0.2,0.1]
         // Verify via the internal representation (round-trip through serde)
         let json = serde_json::to_string(&geom).unwrap();
         let deser: EventGeometry = serde_json::from_str(&json).unwrap();
 
-        if let EventGeometry::HealPixMap { pixels, probabilities, .. } = &deser {
+        if let EventGeometry::HealPixMap {
+            pixels,
+            probabilities,
+            ..
+        } = &deser
+        {
             assert_eq!(pixels, &[100, 300, 500]);
             assert_eq!(probabilities, &[0.7, 0.2, 0.1]);
         } else {
@@ -1299,13 +1383,8 @@ mod healpix_advanced_tests {
     #[test]
     fn test_healpix_duplicate_pixels() {
         // Duplicate pixels are accepted — binary_search finds one
-        let geom = EventGeometry::healpix(
-            64,
-            vec![100, 100, 200],
-            vec![0.3, 0.5, 0.2],
-            0.9,
-        )
-        .unwrap();
+        let geom =
+            EventGeometry::healpix(64, vec![100, 100, 200], vec![0.3, 0.5, 0.2], 0.9).unwrap();
         // The geometry should contain pixel 100 and 200
         if let EventGeometry::HealPixMap { pixels, .. } = &geom {
             assert!(pixels.binary_search(&100).is_ok());
@@ -1355,13 +1434,8 @@ mod healpix_advanced_tests {
         let pixel_359 = nested::hash(depth, 359.99_f64.to_radians(), 0.0_f64.to_radians());
         let pixel_0 = nested::hash(depth, 0.01_f64.to_radians(), 0.0_f64.to_radians());
 
-        let geom = EventGeometry::healpix(
-            nside,
-            vec![pixel_359, pixel_0],
-            vec![0.5, 0.5],
-            0.9,
-        )
-        .unwrap();
+        let geom =
+            EventGeometry::healpix(nside, vec![pixel_359, pixel_0], vec![0.5, 0.5], 0.9).unwrap();
         assert!(geom.contains(359.99, 0.0));
         assert!(geom.contains(0.01, 0.0));
     }
@@ -1395,7 +1469,13 @@ mod healpix_advanced_tests {
     fn test_healpix_deserialization_from_raw_json() {
         let json = r#"{"type":"heal_pix_map","nside":64,"pixels":[100,200],"probabilities":[0.5,0.5],"credible_level":0.9}"#;
         let geom: EventGeometry = serde_json::from_str(json).unwrap();
-        if let EventGeometry::HealPixMap { nside, pixels, probabilities, credible_level } = geom {
+        if let EventGeometry::HealPixMap {
+            nside,
+            pixels,
+            probabilities,
+            credible_level,
+        } = geom
+        {
             assert_eq!(nside, 64);
             assert_eq!(pixels, vec![100, 200]);
             assert_eq!(probabilities, vec![0.5, 0.5]);
@@ -1497,8 +1577,16 @@ mod healpix_advanced_tests {
         };
         let m = EventMatch::new(&event, 180.0, 45.0, 2460001.0);
         // Current JD should be in range ~2460000-2470000 (2023-2050 era)
-        assert!(m.matched_at > 2460000.0, "matched_at {} too small", m.matched_at);
-        assert!(m.matched_at < 2470000.0, "matched_at {} too large", m.matched_at);
+        assert!(
+            m.matched_at > 2460000.0,
+            "matched_at {} too small",
+            m.matched_at
+        );
+        assert!(
+            m.matched_at < 2470000.0,
+            "matched_at {} too large",
+            m.matched_at
+        );
     }
 }
 
@@ -1506,8 +1594,8 @@ mod healpix_advanced_tests {
 
 #[cfg(test)]
 mod xmatch_healpix_tests {
-    use crate::watchlist::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use crate::utils::spatial::Coordinates;
+    use crate::watchlist::{event_xmatch_sync, EventGeometry, GcnEvent, GcnEventType, GcnSource};
     use std::collections::HashMap;
 
     fn make_circle(id: &str, ra: f64, dec: f64, radius: f64, trigger: f64) -> GcnEvent {
@@ -1590,7 +1678,10 @@ mod xmatch_healpix_tests {
         let matches = event_xmatch_sync(ra, dec, 2460001.0, &events);
         assert_eq!(matches.len(), 2);
 
-        let circle_match = matches.iter().find(|m| m.event_id == "watchlist-1").unwrap();
+        let circle_match = matches
+            .iter()
+            .find(|m| m.event_id == "watchlist-1")
+            .unwrap();
         assert!(circle_match.distance_deg.is_some());
         assert!(circle_match.probability.is_none());
         assert_eq!(circle_match.event_source, GcnSource::Custom);
@@ -1765,7 +1856,8 @@ mod serde_edge_case_tests {
     #[test]
     fn test_geometry_extra_unknown_fields_ignored() {
         // serde ignores unknown fields by default
-        let json = r#"{"type":"circle","ra":180.0,"dec":45.0,"error_radius":1.0,"extra_field":"ignored"}"#;
+        let json =
+            r#"{"type":"circle","ra":180.0,"dec":45.0,"error_radius":1.0,"extra_field":"ignored"}"#;
         let geom: EventGeometry = serde_json::from_str(json).unwrap();
         assert_eq!(geom.center(), Some((180.0, 45.0)));
     }

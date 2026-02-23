@@ -15,12 +15,7 @@ use tracing::instrument;
 /// # Returns
 /// Vector of EventMatch structs for all matching events
 #[instrument(skip(events), fields(ra = %ra, dec = %dec))]
-pub fn event_xmatch_sync(
-    ra: f64,
-    dec: f64,
-    alert_jd: f64,
-    events: &[GcnEvent],
-) -> Vec<EventMatch> {
+pub fn event_xmatch_sync(ra: f64, dec: f64, alert_jd: f64, events: &[GcnEvent]) -> Vec<EventMatch> {
     let mut matches = Vec::new();
 
     for event in events {
