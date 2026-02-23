@@ -5,9 +5,10 @@ use boom::{
     },
     conf::get_test_db,
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
-    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, Origin, ZtfFilterWorker},
     utils::{
         enums::Survey,
+        lightcurves::{flux2mag, ZTF_ZP},
         testing::{
             decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
             remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
@@ -449,6 +450,58 @@ async fn test_filter_ztf_alert() {
     assert_eq!(alert.candid, candid);
     assert_eq!(alert.object_id, object_id);
     assert_eq!(alert.photometry.len(), 21); // prv_candidates + prv_nondetections + fp_hists
+
+    // let's validate that the photometry points were correctly parsed, and that the flux and flux_err values are consistent with the original values in the alert
+    let fp_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460447.9202778 && p.origin == Origin::ForcedPhot)
+        .unwrap();
+    assert!(fp_point.flux.is_some());
+    let flux = fp_point.flux.unwrap();
+    assert!(flux < 0.0); // the first point is a negative detection, so the flux should be negative
+    let flux_err = fp_point.flux_err;
+    let band = &fp_point.band;
+    assert_eq!(band, "ztfg");
+
+    // we compute magpsf and magpsf_err from the flux values from the alert packet
+    let magzpsci = 26.1352;
+    let forcediffimflux = -11859.88;
+    let forcediffimfluxunc = 25.300741;
+    let (magpsf_forcediffimflux, magpsf_err) =
+        flux2mag(-forcediffimflux, forcediffimfluxunc, magzpsci);
+
+    // then we compute magpsf and magpsf_err from the flux and flux_err values
+    // we compute in the alert worker (at a fixed ZP)
+    let (magpsf, magpsf_err_from_flux) =
+        flux2mag(-flux as f32 * 1e-9, flux_err as f32 * 1e-9, ZTF_ZP);
+
+    // they should be consistent within a small tolerance
+    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
+    assert!((magpsf_err - magpsf_err_from_flux).abs() < 1e-6);
+
+    // let's do a similar validation for the first prv_candidates point, where the ZP is fixed at ZTF_ZP
+    let alert_points = alert
+        .photometry
+        .iter()
+        .filter(|p| p.origin == Origin::Alert && p.flux.is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        !alert_points.is_empty(),
+        "No Alert photometry points with flux found"
+    );
+    let prv_candidate_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460423.9562384 && p.origin == Origin::Alert && p.flux.is_some())
+        .unwrap();
+    assert!(prv_candidate_point.flux.is_some());
+    let flux = prv_candidate_point.flux.unwrap();
+    let flux_err = prv_candidate_point.flux_err;
+    let (magpsf_prv_candidate, magpsf_err_prv_candidate) =
+        flux2mag((flux.abs() * 1e-9) as f32, (flux_err * 1e-9) as f32, ZTF_ZP);
+    assert!((magpsf_prv_candidate - 16.8002).abs() < 1e-4);
+    assert!((magpsf_err_prv_candidate - 0.1788).abs() < 1e-4);
 
     let filter_passed = alert
         .filters

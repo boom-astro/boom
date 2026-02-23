@@ -44,17 +44,17 @@ workers:
   ztf:
     command_interval: 500
     alert:
-      n_workers: 1
+      n_workers: 3
     enrichment:
-      n_workers: 1
+      n_workers: 3
     filter:
-      n_workers: 1
+      n_workers: 3
   lsst:
     command_interval: 500
     alert:
-      n_workers: 1
+      n_workers: 4
     enrichment:
-      n_workers: 1
+      n_workers: 3
     filter:
       n_workers: 1
   decam:
@@ -113,10 +113,9 @@ crossmatch:
       distance_max: 30.0
       distance_max_near: 300.0
       projection:
-        _id: 0
+        _id: 1
         ra: 1
         dec: 1
-        objname: 1
         objtype: 1
         z: 1
         z_unc: 1
@@ -141,4 +140,27 @@ crossmatch:
         score: 1
         magwhite: 1
       max_results: 3 # 3 nearest neighbors
+    - catalog: NED
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        z_tech: 1
+        z_qual: 1
+        DistMpc: 1
+        DistMpc_unc: 1
+        ebv: 1
+        m_Ks: 1
+        m_Ks_unc: 1
+        tMASSphot: 1
+        Mstar: 1
+        Mstar_unc: 1
   decam: []
