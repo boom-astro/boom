@@ -1,8 +1,8 @@
 use crate::api::models::response;
 use crate::api::routes::users::User;
 use crate::conf::AppConfig;
-use crate::watchlist::{EventGeometry, GcnEvent, GcnEventType, GcnSource, WatchlistError};
 use crate::utils::spatial::Coordinates;
+use crate::watchlist::{EventGeometry, GcnEvent, GcnEventType, GcnSource, WatchlistError};
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use futures::stream::StreamExt;
 use mongodb::bson::doc;
@@ -244,12 +244,10 @@ pub async fn post_watchlist(
     };
 
     match gcn_collection.insert_one(&event).await {
-        Ok(_) => {
-            match WatchlistPublic::from_event(&event) {
-                Some(public) => response::ok_ser("Watchlist created", public),
-                None => response::internal_error("Failed to serialize watchlist"),
-            }
-        }
+        Ok(_) => match WatchlistPublic::from_event(&event) {
+            Some(public) => response::ok_ser("Watchlist created", public),
+            None => response::internal_error("Failed to serialize watchlist"),
+        },
         Err(e) => {
             error!("Failed to create watchlist: {}", e);
             response::internal_error("Failed to create watchlist")
