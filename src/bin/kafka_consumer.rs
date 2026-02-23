@@ -62,6 +62,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     exit_on_eof: bool,
 
+    /// Overridethe topic name (useful if data has been produced to a non-default topic)
+    #[arg(long, value_name = "TOPIC")]
+    topic_override: Option<String>,
+
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
     deployment_env: String,
@@ -90,6 +94,10 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         false
     };
 
+    // If topic override is provided, use it. Otherwise, the consumer
+    // will determine the topic based on the survey, program ID, and date.
+    let topic = args.topic_override;
+
     match args.survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
@@ -98,7 +106,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    None,
+                    topic,
                     timestamp,
                     None,
                     Some(args.processes),
@@ -119,7 +127,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    None,
+                    topic,
                     timestamp,
                     None,
                     Some(args.processes),
@@ -140,7 +148,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    None,
+                    topic,
                     timestamp,
                     None,
                     Some(args.processes),
