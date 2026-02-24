@@ -5,7 +5,7 @@ use crate::{
     },
     conf::{self, AppConfig},
     utils::{
-        db::mongify,
+        db::{mongify, update_timeseries_op},
         enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
         o11y::logging::as_error,
@@ -35,8 +35,6 @@ pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
-
-const NB_AUX_RETRIES: usize = 5;
 
 fn fid2band(fid: i32) -> Result<Band, AlertError> {
     match fid {
@@ -815,6 +813,37 @@ impl ZtfAlertWorker {
     }
 
     #[instrument(
+        skip(self, prv_candidates, prv_nondetections, fp_hists, survey_matches),
+        err
+    )]
+    async fn update_aux_fallback(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates: &Vec<ZtfPrvCandidate>,
+        prv_nondetections: &Vec<ZtfPrvCandidate>,
+        fp_hists: &Vec<ZtfForcedPhot>,
+        survey_matches: &Option<ZtfAliases>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let update_pipeline = vec![doc! {
+            "$set": {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+                "aliases": mongify(survey_matches),
+                "updated_at": now,
+                // we still want to increment the version even in the fallback,
+                // to prevent concurrency issues between a fallback update and a normal update from another thread
+                "version": doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
+            }
+        }];
+        self.alert_aux_collection
+            .update_one(doc! { "_id": object_id }, update_pipeline)
+            .await?;
+        Ok(())
+    }
+
+    #[instrument(
         skip(
             self,
             prv_candidates,
@@ -904,78 +933,19 @@ impl ZtfAlertWorker {
             .await?;
         if update_result.matched_count == 0 {
             warn!(
-                "Concurrent modification detected for object_id {}. Update skipped.",
+                "Concurrent modification detected for object_id {}. Using DB-only update.",
                 object_id
             );
-            return Err(AlertError::ConcurrentModification);
-        }
-        Ok(())
-    }
-
-    #[instrument(
-        skip(
-            self,
-            prv_candidates,
-            prv_nondetections,
-            fp_hists,
-            survey_matches,
-            existing_alert_aux
-        ),
-        err
-    )]
-    async fn update_aux_with_retries(
-        self: &mut Self,
-        object_id: &str,
-        prv_candidates: &Vec<ZtfPrvCandidate>,
-        prv_nondetections: &Vec<ZtfPrvCandidate>,
-        fp_hists: &Vec<ZtfForcedPhot>,
-        survey_matches: &Option<ZtfAliases>,
-        now: f64,
-        mut existing_alert_aux: AlertAuxForUpdate,
-        n_retries: usize,
-    ) -> Result<(), AlertError> {
-        // at every retry, we fetch the existing alert aux again
-        for attempt in 0..n_retries {
-            match self
-                .update_aux(
+            return self
+                .update_aux_fallback(
                     object_id,
                     prv_candidates,
                     prv_nondetections,
                     fp_hists,
                     survey_matches,
                     now,
-                    &existing_alert_aux,
                 )
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(AlertError::ConcurrentModification) => {
-                    if attempt == n_retries {
-                        warn!(
-                            "Max retries reached for object_id {}. Update failed.",
-                            object_id
-                        );
-                        return Err(AlertError::ConcurrentModification);
-                    }
-                    warn!(
-                        "Retrying update for object_id {} (attempt {}/{})",
-                        object_id,
-                        attempt + 1,
-                        n_retries
-                    );
-                    // fetch the existing alert aux again
-                    let new_existing_alert_aux =
-                        self.get_existing_aux(object_id.to_string()).await?;
-                    if let Some(new_existing_alert_aux) = new_existing_alert_aux {
-                        // update existing_alert_aux for the next attempt
-                        existing_alert_aux = new_existing_alert_aux;
-                    } else {
-                        warn!("Alert aux document for object_id {} not found during retry. Update failed.", object_id);
-                        return Err(AlertError::ConcurrentModification);
-                    }
-                }
-                Err(e) => return Err(e),
-            }
+                .await;
         }
         Ok(())
     }
@@ -1147,15 +1117,14 @@ impl AlertWorker for ZtfAlertWorker {
                 warn!("Alert aux document for object_id {} already exists. This can happen when multiple alerts with the same object_id are processed concurrently. Attempting to update the existing document.", object_id);
                 let existing_alert_aux: Option<AlertAuxForUpdate> =
                     self.get_existing_aux(object_id.clone()).await?;
-                self.update_aux_with_retries(
+                self.update_aux(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.prv_nondetections,
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
-                    existing_alert_aux.unwrap(),
-                    NB_AUX_RETRIES,
+                    &existing_alert_aux.unwrap(),
                 )
                 .await
                 .inspect_err(as_error!())?;
@@ -1163,15 +1132,14 @@ impl AlertWorker for ZtfAlertWorker {
                 result.inspect_err(as_error!())?;
             }
         } else {
-            self.update_aux_with_retries(
+            self.update_aux(
                 &object_id,
                 &prv_candidates,
                 &prv_nondetections,
                 &fp_hists,
                 &survey_matches,
                 now,
-                existing_alert_aux.unwrap(),
-                NB_AUX_RETRIES,
+                &existing_alert_aux.unwrap(),
             )
             .await
             .inspect_err(as_error!())?;
