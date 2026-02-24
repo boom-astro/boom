@@ -11,6 +11,7 @@ import { fetchProfile, fetchKafkaCredentials, createKafkaCredential, deleteKafka
 import { Copy, Key, Plus, Trash } from "lucide-react";
 import { IconEye, IconEyeOff } from "@tabler/icons-react";
 import { Spinner } from "@/components/ui/spinner.tsx";
+import * as analytics from "@/lib/analytics";
 
 export default function Profile() {
   const [profile, setProfile] = useState<ProfileType>(null);
@@ -67,6 +68,10 @@ export default function Profile() {
       return;
     }
 
+    analytics.trackKafkaCredentialCreateInitiated({
+      credential_name: newCredentialName,
+    });
+
     // Loading state
     const tempId = "loadingCred_" + Date.now();
     setCreating((ids) => new Set([...ids, tempId]));
@@ -86,9 +91,14 @@ export default function Profile() {
       // Auto-reveal the newly created credential's secret
       setRevealedSecrets(new Set([...revealedSecrets, newCred.id]));
       toast.success("Kafka credential created successfully");
+      analytics.trackKafkaCredentialCreated({
+        credential_id: newCred.id,
+        credential_name: newCred.name,
+      });
     } catch (error) {
       setCredentials((creds) => creds.filter((c) => c.id !== tempId));
       toast.error(`Failed to create credential: ${error}`);
+      analytics.trackError('kafka_credential_creation', error, { credential_name: loadingCred.name });
       await loadData();
     } finally {
       setCreating((ids) => new Set([...ids].filter(id => id !== tempId)));
@@ -108,8 +118,12 @@ export default function Profile() {
       setCredentials(creds => creds.filter(c => c.id !== idToDelete));
       setRevealedSecrets((ids) => new Set([...ids].filter(id => id !== idToDelete)));
       toast.success("Kafka credential deleted successfully");
+      analytics.trackKafkaCredentialDeleted({
+        credential_id: idToDelete,
+      });
     } catch (error) {
       toast.error(`Failed to delete credential: ${error}`);
+      analytics.trackError('kafka_credential_deletion', error, { credential_id: idToDelete });
       await loadData();
     } finally {
       setDeleting((ids) => new Set([...ids].filter(id => id !== idToDelete)));
@@ -120,6 +134,9 @@ export default function Profile() {
   function copyToClipboard(text: string, label: string) {
     navigator.clipboard.writeText(text).then(() => {
       toast.success(`${label} copied to clipboard`);
+      analytics.trackCredentialCopied({
+        label,
+      });
     }).catch(() => {
       toast.error("Failed to copy to clipboard");
     });
@@ -127,12 +144,17 @@ export default function Profile() {
 
   function toggleSecretVisibility(credentialsId: string) {
     const newSet = new Set(revealedSecrets);
+    const isRevealing = !newSet.has(credentialsId);
     if (newSet.has(credentialsId)) {
       newSet.delete(credentialsId);
     } else {
       newSet.add(credentialsId);
     }
     setRevealedSecrets(newSet);
+    analytics.trackCredentialSecretToggled({
+      credential_id: credentialsId,
+      revealed: isRevealing,
+    });
   }
 
   async function handleCreateApiToken() {
@@ -148,6 +170,11 @@ export default function Profile() {
       return;
     }
 
+    analytics.trackApiTokenCreateInitiated({
+      token_name: newTokenName,
+      expiry_days: expiryDays,
+    });
+
     setCreatingToken(true);
     try {
       const created = await createToken(newTokenName.trim(), expiryDays === 365 ? undefined : expiryDays);
@@ -161,8 +188,14 @@ export default function Profile() {
       setShowCreateTokenDialog(false);
       setNewlyCreatedToken(created);
       toast.success("Token created successfully");
+      analytics.trackApiTokenCreated({
+        token_id: created.id,
+        token_name: created.name,
+        expiry_days: expiryDays,
+      });
     } catch (error) {
       toast.error(`Failed to create token: ${error}`);
+      analytics.trackError('api_token_creation', error, { token_name: newTokenName, expiry_days: expiryDays });
       await loadData();
     } finally {
       setCreatingToken(false);
@@ -182,8 +215,12 @@ export default function Profile() {
       await deleteToken(tokenToDelete);
       setTokens((toks) => toks.filter((t) => t.id !== tokenToDelete));
       toast.success("Token deleted successfully");
+      analytics.trackApiTokenDeleted({
+        token_id: tokenToDelete,
+      });
     } catch (error) {
       toast.error(`Failed to delete token: ${error}`);
+      analytics.trackError('api_token_deletion', error, { token_id: tokenToDelete });
       await loadData();
     } finally {
       setDeletingToken(false);

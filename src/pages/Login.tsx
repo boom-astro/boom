@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
 import { LoginForm } from "@/components/login-form";
+import * as analytics from "@/lib/analytics";
 
 type Props = {
   onLoginSuccess: () => void;
@@ -35,10 +36,12 @@ export default function Login({ onLoginSuccess }: Props) {
     setError(null);
     try {
       await api.login(email, password);
+      analytics.trackLoginSuccess({ email });
       onLoginSuccess();
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
+      analytics.trackError('login', err, { email });
     } finally {
       setLoading(false);
     }

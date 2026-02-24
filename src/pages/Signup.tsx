@@ -1,15 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { usePostHog } from 'posthog-js/react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import * as analytics from '@/lib/analytics';
+
 // Use same-origin proxy; prod nginx should route /api to backend
 const API_BASE = '/api/babamul';
 
 export default function SignupPage() {
-  const posthog = usePostHog();
   const navigate = useNavigate();
   const location = useLocation();
   const autoActivatedRef = useRef(false);
@@ -48,7 +48,7 @@ export default function SignupPage() {
     setError(null);
     setMessage(null);
     setLoading(true);
-    posthog.capture('button_clicked', { button_name: 'signup' });
+    analytics.trackSignupInitiated({ email });
     try {
       const res = await fetch(`${API_BASE}/signup`, {
         method: 'POST',
@@ -70,9 +70,11 @@ export default function SignupPage() {
         setMessage('An email has been sent with an activation code. Check your inbox.');
         setStep('code');
       }
+      analytics.trackSignupEmailSubmitted({ email });
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
+      analytics.trackError('signup_email_submission', err, { email });
     } finally {
       setLoading(false);
     }
@@ -82,6 +84,7 @@ export default function SignupPage() {
     e?.preventDefault();
     setError(null);
     setLoading(true);
+    analytics.trackActivationCodeSubmitted({ email });
     try {
       const res = await fetch(`${API_BASE}/activate`, {
         method: 'POST',
@@ -104,9 +107,11 @@ export default function SignupPage() {
         setMessage('An account with this email is already activated.');
         setStep('done');
       }
+      analytics.trackAccountActivated({ email });
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
+      analytics.trackError('account_activation', err, { email });
     } finally {
       setLoading(false);
     }
@@ -137,9 +142,11 @@ export default function SignupPage() {
         setMessage('An account with this email is already activated.');
         setStep('done');
       }
+      analytics.trackAccountActivated({ email: emailToUse, via_link: true });
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
+      analytics.trackError('auto_account_activation', err, { email: emailToUse });
     } finally {
       setLoading(false);
     }

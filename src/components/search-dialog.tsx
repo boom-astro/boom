@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input"
 import { searchObjects, SearchResult } from "@/lib/api"
 import { toast } from "sonner"
 import { Spinner } from "./ui/spinner"
+import * as analytics from "@/lib/analytics"
 
 interface SearchContentProps {
   onResultClick: (result: SearchResult) => void
@@ -22,11 +23,11 @@ interface SearchContentProps {
 
 const DEBOUNCE_MS = 400
 
-export function SearchContent({ 
-  onResultClick, 
+export function SearchContent({
+  onResultClick,
   maxResults = 10,
   autoFocus = true,
-  showFooter = true 
+  showFooter = true
 }: SearchContentProps) {
   const [searchValue, setSearchValue] = useState("")
   const [results, setResults] = useState<SearchResult[]>([])
@@ -45,6 +46,11 @@ export function SearchContent({
       return
     }
 
+    analytics.trackObjectSearchSubmitted({
+      query: trimmed,
+      max_results: maxResults,
+    });
+
     setIsSearching(true)
     try {
       const { results: searchResults, message } = await searchObjects(trimmed, maxResults)
@@ -56,11 +62,17 @@ export function SearchContent({
       } else {
         setPlaceholderMessage(undefined)
       }
+
+      analytics.trackObjectSearchCompleted({
+        query: trimmed,
+        result_count: searchResults.length,
+      });
     } catch (error) {
       console.error("Search error:", error)
       toast.error("Failed to search objects")
       setResults([])
       setLastSearchValue("")
+      analytics.trackError('object_search', error, { query: trimmed });
     } finally {
       setIsSearching(false)
     }
@@ -105,7 +117,7 @@ export function SearchContent({
         // Skip search, results are already filtered correctly
         return
       }
-      
+
       performSearch(trimmed)
     }, DEBOUNCE_MS)
 
@@ -131,7 +143,7 @@ export function SearchContent({
             <Spinner className="h-6 w-6" />
           </div>
         )}
-        
+
         {!isSearching && results.length === 0 && searchValue && (
           <div className="relative flex items-center justify-center h-full text-center text-sm text-muted-foreground">
             <div>No objects found matching "{searchValue}"</div>
@@ -154,7 +166,14 @@ export function SearchContent({
             {results.map((result, index) => (
               <button
                 key={`${result.survey}-${result.objectId}-${index}`}
-                onClick={() => onResultClick(result)}
+                onClick={() => {
+                  analytics.trackObjectSearchCompleted({
+                    query: searchValue,
+                    result_selected: result.objectId,
+                    result_survey: result.survey,
+                  });
+                  onResultClick(result);
+                }}
                 className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent transition-colors text-left"
               >
                 <div className="flex flex-col gap-1">
@@ -204,7 +223,7 @@ export function SearchDialog({ open, onOpenChange }: SearchDialogProps) {
             Search for any object ID from any survey
           </DialogDescription>
         </DialogHeader>
-        
+
         <SearchContent onResultClick={handleResultClick} />
       </DialogContent>
     </Dialog>

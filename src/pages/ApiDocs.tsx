@@ -30,8 +30,8 @@ export default function ApiDocs() {
           <p className="text-sm text-muted-foreground mb-4">
             The API documentation should open in a new tab.
           </p>
-          <Button 
-            variant="outline" 
+          <Button
+            variant="outline"
             onClick={() => window.open(docsUrl, '_blank', 'noopener,noreferrer')}
             className="gap-2"
           >
