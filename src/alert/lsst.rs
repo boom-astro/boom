@@ -943,9 +943,12 @@ impl LsstAlertWorker {
                 .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
                     let min_jd = min_jd.min(pc.jd);
                     if !existing_prv_candidate_jds.contains(&pc.jd.to_bits()) {
+                        let min_jd = min_jd.min(pc.jd);
                         docs.push(mongify(pc));
+                        (docs, min_jd)
+                    } else {
+                        (docs, min_jd)
                     }
-                    (docs, min_jd)
                 });
 
         // if all the deduplicated new data is newer than existing data, we can just append without sorting
@@ -1001,11 +1004,13 @@ impl LsstAlertWorker {
             fp_hists
                 .iter()
                 .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
-                    let min_jd = min_jd.min(pc.jd);
                     if !existing_fp_hist_jds.contains(&pc.jd.to_bits()) {
                         docs.push(mongify(pc));
+                        let min_jd = min_jd.min(pc.jd);
+                        (docs, min_jd)
+                    } else {
+                        (docs, min_jd)
                     }
-                    (docs, min_jd)
                 });
 
         // if all the deduplicated new data is newer than existing data, we can just append without sorting

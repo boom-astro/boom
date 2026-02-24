@@ -733,9 +733,12 @@ impl ZtfAlertWorker {
                 .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
                     let min_jd = min_jd.min(pc.prv_candidate.jd);
                     if !existing_prv_candidate_jds.contains(&pc.prv_candidate.jd.to_bits()) {
+                        let min_jd = min_jd.min(pc.prv_candidate.jd);
                         docs.push(mongify(pc));
+                        (docs, min_jd)
+                    } else {
+                        (docs, min_jd)
                     }
-                    (docs, min_jd)
                 });
 
         // if all the deduplicated new data is newer than existing data, we can just append without sorting
@@ -793,9 +796,12 @@ impl ZtfAlertWorker {
                 .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
                     let min_jd = min_jd.min(pc.fp_hist.jd);
                     if !existing_fp_hist_jds.contains(&pc.fp_hist.jd.to_bits()) {
+                        let min_jd = min_jd.min(pc.fp_hist.jd);
                         docs.push(mongify(pc));
+                        (docs, min_jd)
+                    } else {
+                        (docs, min_jd)
                     }
-                    (docs, min_jd)
                 });
 
         // if all the deduplicated new data is newer than existing data, we can just append without sorting
