@@ -15,14 +15,15 @@ pub struct EmailService {
 impl EmailService {
     /// Create a new email service from environment variables
     ///
-    /// Required environment variables (if email is enabled):
-    /// - `SMTP_USERNAME`: SMTP username
-    /// - `SMTP_PASSWORD`: SMTP password
-    /// - `SMTP_SERVER`: SMTP server address (e.g., smtp.gmail.com)
+    /// Required:
+    /// - `SMTP_SERVER`: SMTP server address (e.g., smtp-server.astro.caltech.edu)
     /// - `SMTP_FROM_ADDRESS`: From email address (e.g., noreply@boom.example.com)
     ///
     /// Optional:
-    /// - `EMAIL_ENABLED`: Set to "false" to disable email (defaults to true if SMTP vars are set)
+    /// - `SMTP_USERNAME` / `SMTP_PASSWORD`: If both are set, authenticated TLS relay is used
+    ///   (default port 465). If omitted, plain unauthenticated SMTP is used (default port 25).
+    /// - `SMTP_PORT`: Override the port (e.g., 25, 465, 587).
+    /// - `EMAIL_ENABLED`: Set to "false" to disable email entirely.
     pub fn new() -> Self {
         // Check if email should be enabled
         let enabled = env::var("EMAIL_ENABLED")
@@ -56,29 +57,44 @@ impl EmailService {
             };
         }
 
-        // If we have SMTP server but missing username/password, we will try to connect without auth (some servers allow this)
-        // But, let's log a warning if username/password are missing, as this is often a misconfiguration
-        if smtp_username.is_none() || smtp_password.is_none() {
-            println!("WARNING: SMTP_USERNAME or SMTP_PASSWORD is not set. Attempting to connect without authentication. This may fail if your SMTP server requires auth.");
-        }
+        // Optional port override (defaults to 25 for unauthenticated, 465 for authenticated)
+        let smtp_port = env::var("SMTP_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok());
 
         // Build SMTP transport
-        let mailer = match SmtpTransport::relay(&smtp_server.unwrap()) {
-            Ok(transport) => match (smtp_username, smtp_password) {
-                (Some(username), Some(password)) => {
-                    let creds = Credentials::new(username, password);
-                    Some(transport.credentials(creds).build())
+        let mailer = match (smtp_username, smtp_password) {
+            (Some(username), Some(password)) => {
+                // Authenticated: use TLS relay (port 465 by default)
+                let port = smtp_port.unwrap_or(465);
+                match SmtpTransport::relay(&smtp_server.unwrap()) {
+                    Ok(transport) => {
+                        let creds = Credentials::new(username, password);
+                        Some(transport.port(port).credentials(creds).build())
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create SMTP transport: {}", e);
+                        println!("Email service is DISABLED (SMTP transport creation failed)");
+                        return Self {
+                            mailer: None,
+                            from_address,
+                            enabled: false,
+                        };
+                    }
                 }
-                _ => Some(transport.build()),
-            },
-            Err(e) => {
-                eprintln!("Failed to create SMTP transport: {}", e);
-                println!("Email service is DISABLED (SMTP transport creation failed)");
-                return Self {
-                    mailer: None,
-                    from_address,
-                    enabled: false,
-                };
+            }
+            _ => {
+                // No credentials: use plain unauthenticated SMTP (port 25 by default)
+                let port = smtp_port.unwrap_or(25);
+                println!(
+                    "SMTP_USERNAME/SMTP_PASSWORD not set — using unauthenticated plain SMTP on port {}.",
+                    port
+                );
+                Some(
+                    SmtpTransport::builder_dangerous(&smtp_server.unwrap())
+                        .port(port)
+                        .build(),
+                )
             }
         };
 
