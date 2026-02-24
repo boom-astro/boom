@@ -22,12 +22,12 @@ function toColor(band?: string) {
 type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey_match' | 'main', snr_psf?: number | undefined, snr?: number | undefined, objectId?: string | null };
 
 type LightcurveData = {
-    objectId: string | null;
+    objectId?: string | null;
     prv_candidates?: Detection[];
     fp_hists?: Detection[];
     prv_nondetections?: Detection[];
     survey_matches?: Record<string, {
-        objectId: string | null;
+        objectId?: string | null;
         prv_candidates?: Detection[] | null;
         fp_hists?: Detection[] | null;
         prv_nondetections?: Detection[] | null;
