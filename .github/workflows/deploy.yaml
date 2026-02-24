@@ -36,6 +36,10 @@ jobs:
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
       KAFKA_ADMIN_PASSWORD: ${{ secrets.KAFKA_ADMIN_PASSWORD }}
       KAFKA_READONLY_PASSWORD: ${{ secrets.KAFKA_READONLY_PASSWORD }}
+      SMTP_SERVER: ${{ vars.SMTP_SERVER }}
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
