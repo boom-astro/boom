@@ -213,7 +213,7 @@ export default function CentroidPlot() {
                       onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
                       className="w-3 h-3"
                     />
-                    <span className="text-gray-600 dark:text-gray-300">Other surveys</span>
+                    <span className="text-gray-600 dark:text-gray-300">Matches</span>
                   </label>
                 )}
               </div>
@@ -727,7 +727,7 @@ export default function CentroidPlot() {
               <p className="text-gray-600 dark:text-gray-300">
                 This plot displays the positional offsets of individual detections relative to the computed centroid of all detections. 
                 The centroid (marked with a crosshair at the center) represents the average position of the object across all observations.
-                Just like on the photometry plot, a toggle for "Other surveys" allows you to include or exclude data from additional surveys, if available.
+                Just like on the photometry plot, a toggle for "Matches" allows you to include or exclude data from additional surveys, if available.
               </p>
             </div>
 
@@ -740,7 +740,7 @@ export default function CentroidPlot() {
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-medium">Squares:</span>
-                  <span>Detections from other surveys (when "Other surveys" is enabled).</span>
+                  <span>Detections from other surveys (when "Matches" is enabled).</span>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-medium">Crosshair (center):</span>

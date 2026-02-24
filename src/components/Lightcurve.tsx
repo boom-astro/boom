@@ -440,7 +440,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                     {bands.map(b =>
                         <div
                             key={`legend-${b}`}
-                            className="flex items-center gap-2 text-xs cursor-pointer select-none"
+                            className="flex items-center gap-1 text-xs cursor-pointer select-none"
                             onClick={() => handleLegendClick(b)}
                             onDoubleClick={() => handleLegendDoubleClick(b)}
                             style={{ opacity: hiddenBands.has(b) ? 0.12 : 1, transition: 'opacity 200ms ease' }}
@@ -457,7 +457,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                 onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
                                 className="w-4 h-4"
                             />
-                            <span className="text-gray-600 dark:text-gray-300">Other surveys</span>
+                            <span className="text-gray-600 dark:text-gray-300">Matches</span>
                         </label>
                     )}
                     <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
@@ -732,7 +732,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     </div>
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Squares:</span>
-                                        <span>Detections from other surveys (when "Other surveys" is enabled).</span>
+                                        <span>Detections from other surveys (when "Matches" is enabled).</span>
                                     </div>
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Triangles:</span>
@@ -783,7 +783,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                 <h3 className="font-semibold mb-2">Data Sources</h3>
                                 <p className="text-gray-600 dark:text-gray-300">
                                     The plot combines data from the "primary" survey_match with data from other surveys' nearest objects, if any. 
-                                    Use the "Other surveys" checkbox to include or exclude cross-matched data from additional sources.
+                                    Use the "Matches" checkbox to include or exclude cross-matched data from additional sources.
                                 </p>
                             </div>
                         </div>
