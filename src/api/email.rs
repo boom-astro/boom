@@ -47,10 +47,8 @@ impl EmailService {
             .unwrap_or_else(|_| "noreply@boom.example.com".to_string());
 
         // If any SMTP config is missing, disable email
-        if smtp_username.is_none() || smtp_password.is_none() || smtp_server.is_none() {
-            println!(
-                "Email service is DISABLED (missing SMTP configuration: SMTP_USERNAME, SMTP_PASSWORD, or SMTP_SERVER)"
-            );
+        if smtp_server.is_none() {
+            println!("Email service is DISABLED (missing SMTP configuration: SMTP_SERVER)");
             return Self {
                 mailer: None,
                 from_address,
@@ -58,11 +56,21 @@ impl EmailService {
             };
         }
 
-        // Build SMTP transport
-        let creds = Credentials::new(smtp_username.unwrap(), smtp_password.unwrap());
+        // If we have SMTP server but missing username/password, we will try to connect without auth (some servers allow this)
+        // But, let's log a warning if username/password are missing, as this is often a misconfiguration
+        if smtp_username.is_none() || smtp_password.is_none() {
+            println!("WARNING: SMTP_USERNAME or SMTP_PASSWORD is not set. Attempting to connect without authentication. This may fail if your SMTP server requires auth.");
+        }
 
+        // Build SMTP transport
         let mailer = match SmtpTransport::relay(&smtp_server.unwrap()) {
-            Ok(transport) => Some(transport.credentials(creds).build()),
+            Ok(transport) => match (smtp_username, smtp_password) {
+                (Some(username), Some(password)) => {
+                    let creds = Credentials::new(username, password);
+                    Some(transport.credentials(creds).build())
+                }
+                _ => Some(transport.build()),
+            },
             Err(e) => {
                 eprintln!("Failed to create SMTP transport: {}", e);
                 println!("Email service is DISABLED (SMTP transport creation failed)");
