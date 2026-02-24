@@ -234,6 +234,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     dia_source.ap_flux_err = Some(15.0);
     dia_source.pixel_flags = Some(pixel_flags);
     dia_source.reliability = Some(reliability as f32);
+    dia_source.extendedness = Some(0.2); // Set extendedness to a non-zero value to avoid filtering out the alert
 
     let ss_object_id = if is_rock { Some(555555_i64) } else { None };
     dia_source.ss_object_id = ss_object_id;
@@ -946,7 +947,12 @@ async fn test_babamul_filters_low_reliability() {
     );
 
     // Low reliability alerts should not be sent (filtered by Babamul)
-    // Just verify the processing succeeded
+    // Let's just verify the processing succeeded and no messages were sent to Kafka
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Expected 0 messages for LSST alerts with reliability below threshold"
+    );
 }
 
 #[tokio::test]
@@ -971,6 +977,16 @@ async fn test_babamul_filters_rocks() {
 
     // Rock alerts should not be sent to any topic
     // Since they're filtered out at the source, we just verify the processing succeeded
+    assert_eq!(
+        ztf_result.unwrap(),
+        0,
+        "Expected 0 messages for ZTF alerts marked as rocks"
+    );
+    assert_eq!(
+        lsst_result.unwrap(),
+        0,
+        "Expected 0 messages for LSST alerts marked as rocks"
+    );
 }
 
 #[tokio::test]
@@ -1166,6 +1182,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         dia_source.ap_flux_err = Some(15.0);
         dia_source.pixel_flags = Some(false);
         dia_source.reliability = Some(0.9);
+        dia_source.extendedness = Some(0.2);
         dia_source.band = Some(Band::G);
         dia_source
     };
@@ -1455,6 +1472,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         dia.ap_flux_err = Some(13.0);
         dia.pixel_flags = Some(false);
         dia.reliability = Some(0.95);
+        dia.extendedness = Some(0.2);
         dia.band = Some(Band::G);
         dia
     };
