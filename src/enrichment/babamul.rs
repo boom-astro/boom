@@ -648,6 +648,7 @@ impl Babamul {
                     .pixel_flags_saturated
                     .unwrap_or(false)
                 || alert.candidate.dia_source.shape_flag.unwrap_or(false)
+                || alert.candidate.dia_source.centroid_flag.unwrap_or(false)
                 || alert.candidate.dia_source.extendedness.is_none()
                 || alert.candidate.dia_source.extendedness.unwrap_or(0_f32) == 1_f32
                 || alert.candidate.snr_psf.unwrap_or(0.0) < 3.0
