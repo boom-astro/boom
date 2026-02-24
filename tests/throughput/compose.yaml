@@ -34,7 +34,6 @@ services:
     volumes:
       - ${PWD}/tests/throughput/mongo-init.sh:/mongo-init.sh
       - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
-      - ${PWD}/data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz:/boom_throughput.ZTF_alerts_aux.dump.gz
       - ${PWD}/tests/throughput/cats150.filter.json:/cats150.filter.json
     environment:
       - DB_NAME=boom-benchmarking

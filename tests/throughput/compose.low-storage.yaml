@@ -1,9 +1,0 @@
-# Docker Compose override for LOW_STORAGE mode
-# This removes the volume mount for alerts, preventing Docker-created files
-# from persisting to the host with permission issues.
-
-services:
-  producer:
-    volumes:
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-      # Remove the alerts volume mount - alerts will stay in container
