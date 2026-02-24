@@ -45,6 +45,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     const survey_matches = data?.survey_matches;
     const [includeSurveyMatches, setIncludeSurveyMatches] = useState(true);
     const [includeForcedPhot, setIncludeForcedPhot] = useState(true);
+    const [includeUpperLimits, setIncludeUpperLimits] = useState(true);
 
     const nondetsFromFpHists = useMemo(() => {
         if (!includeForcedPhot) return [];
@@ -177,11 +178,12 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     }, [detections, nondetectionsSeries]);
 
     // Domains
-    const allTimes = [...detections.map(d => d.t), ...nondetectionsSeries.map(d => d.t)];
+    const visibleNondets = includeUpperLimits ? nondetectionsSeries : [];
+    const allTimes = [...detections.map(d => d.t), ...visibleNondets.map(d => d.t)];
     const allMags = [
         ...detections.map(d => d.mag - d.sigma),
         ...detections.map(d => d.mag + d.sigma),
-        ...nondetectionsSeries.map(d => d.mag)
+        ...visibleNondets.map(d => d.mag)
     ];
     const tMin = Math.min(...(allTimes.length ? allTimes : [0]));
     const tMax = Math.max(...(allTimes.length ? allTimes : [1]));
@@ -427,28 +429,30 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
         <div ref={containerRef} style={{ width: '100%', height: height || '36vh', marginBottom: 20, position: 'relative'}}>
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                    <div className="text-lg font-semibold pb-2">Photometry</div>
+                    {size.width >= 600 && <div className="text-lg font-semibold">Photometry</div>}
                     <button 
                         onClick={() => setHelpDialogOpen(true)} 
                         title="Plot information"
-                        className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 mb-2"
+                        className="rounded hover:bg-slate-100 dark:hover:bg-slate-700"
                     >
                         <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
                     </button>
                 </div>
-                <div className="flex items-center gap-3">
-                    {bands.map(b =>
-                        <div
-                            key={`legend-${b}`}
-                            className="flex items-center gap-1 text-xs cursor-pointer select-none"
-                            onClick={() => handleLegendClick(b)}
-                            onDoubleClick={() => handleLegendDoubleClick(b)}
-                            style={{ opacity: hiddenBands.has(b) ? 0.12 : 1, transition: 'opacity 200ms ease' }}
-                        >
-                            <div className="w-3 h-3 rounded" style={{ backgroundColor: toColor(b) }} />
-                            <div className="text-xs text-gray-600 dark:text-gray-300">{b.toUpperCase()}</div>
-                        </div>
-                    )}
+                <div className="flex items-center gap-0.5">
+                    <div className="flex items-center gap-2.5 pr-2">
+                        {bands.map(b =>
+                            <div
+                                key={`legend-${b}`}
+                                className="flex items-center gap-1 text-xs cursor-pointer select-none"
+                                onClick={() => handleLegendClick(b)}
+                                onDoubleClick={() => handleLegendDoubleClick(b)}
+                                style={{ opacity: hiddenBands.has(b) ? 0.12 : 1, transition: 'opacity 200ms ease' }}
+                            >
+                                <div className="w-3 h-3 rounded" style={{ backgroundColor: toColor(b) }} />
+                                <div className="text-xs text-gray-600 dark:text-gray-300">{b.toUpperCase()}</div>
+                            </div>
+                        )}
+                    </div>
                     {survey_matches && Object.keys(survey_matches).length > 0 && (
                         <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
                             <input 
@@ -467,7 +471,16 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                             onChange={(e) => setIncludeForcedPhot(e.target.checked)}
                             className="w-4 h-4"
                         />
-                        <span className="text-gray-600 dark:text-gray-300">Forced Phot</span>
+                        <span className="text-gray-600 dark:text-gray-300">ForcedPhot</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                        <input 
+                            type="checkbox" 
+                            checked={includeUpperLimits}
+                            onChange={(e) => setIncludeUpperLimits(e.target.checked)}
+                            className="w-4 h-4"
+                        />
+                        <span className="text-gray-600 dark:text-gray-300">Upperlimits</span>
                     </label>
                     {setExpandedDialogOpen && (
                         <button onClick={() => setExpandedDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
@@ -612,7 +625,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 })}
 
                 {/* Interactive non-detection polygons */}
-                {nondetectionsSeries.map((pt, i) => {
+                {includeUpperLimits && nondetectionsSeries.map((pt, i) => {
                     const { bandKey, isHidden, color } = getBandState(pt.band);
                     if (isHidden) return null;
                     const px = xToPixel(pt.t);
