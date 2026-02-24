@@ -100,8 +100,12 @@ function generatePython(topics: string[], groupId: string, offset: string, autoC
 import babamul
 
 # Set your Kafka credentials (or even better, export these as env vars)
-os.environ["KAFKA_USERNAME"] = "${usernameVar}"
-os.environ["KAFKA_PASSWORD"] = "${passwordVar}"
+os.environ["BABAMUL_KAFKA_USERNAME"] = "${usernameVar}"
+os.environ["BABAMUL_KAFKA_PASSWORD"] = "${passwordVar}"
+
+# The API token is technically optional, but highly recommended for API access 
+# (e.g. fetch and display cutouts). You can create API tokens in your profile page.
+os.environ["BABAMUL_API_TOKEN"] = "<API_TOKEN>"
 
 # Define parameters
 limit = 1000
@@ -111,16 +115,17 @@ ${topicsList},
 
 alerts: list[babamul.LsstAlert | babamul.ZtfAlert] = []
 
-for alert in babamul.AlertConsumer(
+with babamul.AlertConsumer(
     topics=topics,
     group_id="${groupId}",
     offset="${offset}",
-    auto_commit=${autoCommit},
+    auto_commit=${autoCommit ? 'True' : 'False'},
     timeout=10,
-):
-    alerts.append(alert)
-    if len(alerts) >= limit:
-        break
+) as consumer:
+    for alert in consumer:
+        alerts.append(alert)
+        if len(alerts) >= limit:
+            break
 
 print(f"Fetched {len(alerts)} alerts.")
 `;
