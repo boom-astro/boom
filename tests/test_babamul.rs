@@ -333,7 +333,7 @@ async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>>
 }
 
 #[tokio::test]
-async fn test_compute_babamul_category() {
+async fn test_compute_babamul_category_lsst() {
     use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
 
     // Test case 1: No ZTF match + stellar LSPSC → "no-ztf-match.stellar"
@@ -418,6 +418,20 @@ async fn test_compute_babamul_category() {
         "Alert with no matches but in footprint should be hostless"
     );
 
+    let ztf_public_prv_candidate = ZtfPhotometry {
+        jd: 2459999.5,
+        magpsf: Some(19.0),
+        sigmapsf: Some(0.07),
+        diffmaglim: 21.0,
+        flux: Some(1000.0),
+        flux_err: 10.0,
+        band: Band::G,
+        ra: Some(180.0),
+        dec: Some(0.0),
+        snr_psf: Some(100.0),
+        programid: 1,
+    };
+
     // Test case 5: ZTF match + stellar LSPSC → "ztf-match.stellar"
     let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
     let survey_matches = Some(LsstSurveyMatches {
@@ -425,7 +439,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaaa".to_string(),
             ra: 180.0,
             dec: 0.0,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -455,7 +469,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaab".to_string(),
             ra: 180.1,
             dec: 0.1,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -485,7 +499,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaac".to_string(),
             ra: 180.2,
             dec: 0.2,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -514,7 +528,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaad".to_string(),
             ra: 180.5,
             dec: 0.5,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -573,6 +587,57 @@ async fn test_compute_babamul_category() {
     assert_eq!(
         category, "no-ztf-match.unknown",
         "Alert with empty LSPSC matches and no ZTF match should be unknown"
+    );
+
+    // Test case 11: ZTF match whose prv_candidates are all non-public (programid != 1) →
+    // should be treated as if there is no ZTF match at all → "no-ztf-match.*"
+    let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
+    let survey_matches_non_public = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaae".to_string(),
+            ra: 180.3,
+            dec: 0.3,
+            prv_candidates: vec![
+                // programid = 2 → not public, will be filtered out by BabamulSurveyMatch::from
+                ZtfPhotometry {
+                    jd: 2459999.5,
+                    magpsf: Some(19.0),
+                    sigmapsf: Some(0.07),
+                    diffmaglim: 21.0,
+                    flux: Some(1000.0),
+                    flux_err: 10.0,
+                    band: Band::G,
+                    ra: Some(180.3),
+                    dec: Some(0.3),
+                    snr_psf: Some(100.0),
+                    programid: 2,
+                },
+            ],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let (alert_no_public_data, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
+        9876543220,
+        "LSST24aaaaaak",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches_non_public,
+        None,
+        None,
+    )
+    .await;
+    // The ZTF match must have been dropped because its only prv_candidate is non-public
+    assert!(
+        alert_no_public_data.survey_matches.ztf.is_none(),
+        "ZTF match with only non-public prv_candidates should be removed from survey_matches"
+    );
+    let category = alert_no_public_data.compute_babamul_category(&cross_matches);
+    assert_eq!(
+        category, "no-ztf-match.hostless",
+        "Alert whose ZTF match was filtered out (no public prv_candidates) should be categorised as no-ztf-match"
     );
 }
 

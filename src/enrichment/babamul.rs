@@ -168,10 +168,17 @@ impl From<crate::enrichment::lsst::LsstMatch> for BabamulSurveyMatch {
 impl From<Option<crate::enrichment::lsst::LsstSurveyMatches>> for BabamulSurveyMatches {
     fn from(opt: Option<crate::enrichment::lsst::LsstSurveyMatches>) -> Self {
         match opt {
-            Some(lsst_matches) => BabamulSurveyMatches {
-                ztf: lsst_matches.ztf.map(|m| m.into()),
-                lsst: None, // Naturally, no LSST match for an LSST alert
-            },
+            Some(lsst_matches) => {
+                // for ztf matches, if we are left with an empty prv_candidates after filtering,
+                // then it means we have no public alert to share for that match and we should not include it in Babamul
+                BabamulSurveyMatches {
+                    ztf: lsst_matches
+                        .ztf
+                        .map(|m| m.into())
+                        .filter(|m: &BabamulSurveyMatch| !m.prv_candidates.is_empty()),
+                    lsst: None, // Naturally, no LSST match for an LSST alert
+                }
+            }
             None => BabamulSurveyMatches::default(),
         }
     }
