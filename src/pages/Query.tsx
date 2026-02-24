@@ -150,7 +150,18 @@ export default function Query() {
             </TabsContent>
 
             <TabsContent value="alerts">
-              <form onSubmit={submitAlertSearch} className="space-y-4">
+              <div className="flex flex-col items-center justify-center py-12 gap-4 text-center text-muted-foreground">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="size-10 opacity-40" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 6v6l4 2" />
+                  <circle cx="12" cy="12" r="10" strokeWidth="1.5" />
+                </svg>
+                <div>
+                  <p className="text-base font-semibold text-foreground">Coming Soon</p>
+                  <p className="text-sm mt-1 pb-2">Alert Search from the web application is under development and will be available shortly (~late February).</p>
+                  <p className="text-sm mt-1">In the meantime, please give a go at searching for alerts using the Python client (see Kafka docs for examples)!</p>
+                </div>
+              </div>
+              <form onSubmit={submitAlertSearch} className="space-y-4 hidden">
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   <div className="sm:col-span-4">
                     <Label className="text-xs font-medium mb-1 block text-muted-foreground">Survey</Label>
@@ -161,7 +172,6 @@ export default function Query() {
                       <SelectContent>
                         <SelectItem value="ZTF">ZTF</SelectItem>
                         <SelectItem value="LSST">LSST</SelectItem>
-                        {/* <SelectItem value="Decam">Decam</SelectItem> */}
                       </SelectContent>
                     </Select>
                   </div>
