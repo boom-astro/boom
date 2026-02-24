@@ -1,7 +1,7 @@
 use crate::{
     alert::{
         base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
-        decam, lsst, AlertCutout,
+        decam, lsst, AlertCutout, LightcurveJdOnly,
     },
     conf::{self, AppConfig},
     utils::{
@@ -635,15 +635,10 @@ pub struct ZtfAlertWorker {
 }
 
 #[derive(Deserialize, Serialize)]
-struct LightcurveJdOnly {
-    pub jd: f64,
-}
-#[derive(Deserialize, Serialize)]
 struct AlertAuxForUpdate {
     pub prv_candidates: Vec<LightcurveJdOnly>,
     pub prv_nondetections: Vec<LightcurveJdOnly>,
     pub fp_hists: Vec<LightcurveJdOnly>,
-    // version should have a default value of 0
     pub version: Option<i32>,
 }
 
