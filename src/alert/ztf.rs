@@ -953,8 +953,36 @@ mod tests {
         assert_eq!(avro_alert.publisher, "ZTF (www.ztf.caltech.edu)");
         assert_eq!(avro_alert.object_id, object_id);
         assert_eq!(avro_alert.candid, candid);
+
         assert_eq!(avro_alert.candidate.candidate.ra, ra);
         assert_eq!(avro_alert.candidate.candidate.dec, dec);
+        assert!((avro_alert.candidate.psf_flux + 3957191600000.0).abs() < 1e-3);
+        assert!((avro_alert.candidate.psf_flux_err - 55887786000.0).abs() < 1e-3);
+        assert!(
+            (avro_alert.candidate.snr_psf.unwrap()
+                - avro_alert.candidate.psf_flux.abs() / avro_alert.candidate.psf_flux_err)
+                .abs()
+                < 1e-6
+        );
+        assert!((avro_alert.candidate.ap_flux.unwrap() + 3650897600000.0).abs() < 1e-3);
+        assert!((avro_alert.candidate.ap_flux_err.unwrap() - 24546988000.0).abs() < 1e-3);
+        assert!(
+            (avro_alert.candidate.snr_ap.unwrap()
+                - avro_alert.candidate.ap_flux.unwrap().abs()
+                    / avro_alert.candidate.ap_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert_eq!(avro_alert.candidate.band, Band::R);
+
+        // let's also verify that we can recover the original magpsf and sigmapsf from the flux and flux_err for the detection
+        let (magpsf, sigmapsf) = flux2mag(
+            avro_alert.candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
+            avro_alert.candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - avro_alert.candidate.candidate.magpsf).abs() < 1e-6);
+        assert!((sigmapsf - avro_alert.candidate.candidate.sigmapsf).abs() < 1e-6);
 
         // validate the prv_candidates
         let prv_candidates = avro_alert.clone().prv_candidates;
@@ -972,6 +1000,18 @@ mod tests {
         assert_eq!(detection.prv_candidate.sigmapsf.is_some(), true);
         assert_eq!(detection.prv_candidate.diffmaglim.is_some(), true);
         assert_eq!(detection.prv_candidate.isdiffpos.is_some(), true);
+        assert!(
+            (detection.snr_psf.unwrap()
+                - detection.psf_flux.unwrap().abs() / detection.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!(
+            (detection.snr_ap.unwrap()
+                - detection.ap_flux.unwrap().abs() / detection.ap_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
 
         // let's also verify that we can recover the original magpsf and sigmapsf from the flux and flux_err for the detection
         let (magpsf, sigmapsf) = flux2mag(
@@ -996,7 +1036,12 @@ mod tests {
         assert!((fp_negative_det.sigmapsf.unwrap() - 0.002316).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.diffmaglim.unwrap() - 20.4005).abs() < 1e-6);
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
-        assert!((fp_negative_det.snr_psf.unwrap() - 468.75623).abs() < 1e-6);
+        assert!(
+            (fp_negative_det.snr_psf.unwrap()
+                - fp_negative_det.psf_flux.unwrap().abs() / fp_negative_det.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
         assert_eq!(fp_negative_det.band, Band::G);
         // let's verify that the psf_flux is negative AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
@@ -1035,7 +1080,12 @@ mod tests {
         assert!((fp_positive_det.sigmapsf.unwrap() - 0.3616859).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.diffmaglim.unwrap() - 19.7873).abs() < 1e-6);
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
-        assert!((fp_positive_det.snr_psf.unwrap() - 3.0018756).abs() < 1e-6);
+        assert!(
+            (fp_positive_det.snr_psf.unwrap()
+                - fp_positive_det.psf_flux.unwrap().abs() / fp_positive_det.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
         assert_eq!(fp_positive_det.band, Band::G);
         // let's verify that the psf_flux is positive AND that we can recover the original magpsf and sigmapsf from the flux and flux_err

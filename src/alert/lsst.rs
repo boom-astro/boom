@@ -1145,6 +1145,32 @@ mod tests {
         assert!((candidate.snr_psf.unwrap() - 5.002406).abs() < 1e-6);
         assert_eq!(candidate.isdiffpos, false);
         assert_eq!(candidate.dia_source.band.unwrap(), Band::R);
+        assert!((candidate.dia_source.snr.unwrap() - 5.0520844).abs() < 1e-6);
+        assert!(
+            (candidate.snr_psf.unwrap()
+                - candidate.dia_source.psf_flux.unwrap().abs()
+                    / candidate.dia_source.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!(
+            (candidate.snr_ap.unwrap()
+                - candidate.dia_source.ap_flux.unwrap().abs()
+                    / candidate.dia_source.ap_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!((candidate.dia_source.psf_chi2.unwrap() - 1710.2283).abs() < 1e-4);
+        assert!((candidate.dia_source.psf_ndata.unwrap() as f32 - 1681_f32).abs() < 1e-4);
+        assert!(
+            (candidate.chipsf.unwrap()
+                - candidate.dia_source.psf_chi2.unwrap()
+                    / candidate.dia_source.psf_ndata.unwrap() as f32)
+                .abs()
+                < 1e-6
+        );
+        assert!(candidate.dia_source.ap_flux.unwrap() < 0.0);
+
         // TODO: check prv_candidates and forced photometry once we have alerts
         //       where they aren't empty
         // TODO: check non detections once these are available in the schema
