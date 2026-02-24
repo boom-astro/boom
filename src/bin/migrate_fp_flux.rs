@@ -25,6 +25,10 @@ const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / 2.30258509299_f64;
 /// multiple times produces the same result.
 #[derive(Parser)]
 struct Cli {
+    /// Path to the configuration file
+    #[arg(long, value_name = "FILE")]
+    config: Option<String>,
+
     /// Number of document IDs to collect per update_many batch
     #[arg(long, default_value = "5000")]
     batch_size: usize,
@@ -118,7 +122,13 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let config = AppConfig::from_default_path().unwrap();
+    let default_config_path = "config.yaml".to_string();
+    let config_path = args.config.unwrap_or_else(|| {
+        tracing::warn!("no config file provided, using {}", default_config_path);
+        default_config_path
+    });
+    let config = AppConfig::from_path(&config_path).unwrap();
+
     let db = match config.build_db().await {
         Ok(db) => db,
         Err(e) => {

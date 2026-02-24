@@ -94,6 +94,11 @@ pub struct DiaSource {
     /// Aperture did not fit within measurement image.
     #[serde(rename = "apFlux_flag_apertureTruncated")]
     pub ap_flux_flag_aperture_truncated: Option<bool>,
+    /// Source was detected as significantly negative.
+    #[serde(rename = "isNegative")]
+    pub is_negative: Option<bool>,
+    /// The signal-to-noise ratio at which this source was detected in the difference image.
+    pub snr: Option<f32>,
     /// Flux for Point Source model. Note this actually measures the flux difference between the template and the visit image.
     #[serde(rename = "psfFlux")]
     pub psf_flux: Option<f32>,
@@ -267,11 +272,13 @@ pub struct LsstCandidate {
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
+    pub snr_psf: Option<f32>,
+    pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
-    pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub snr_ap: Option<f32>,
     pub jdstarthist: Option<f64>,
     pub ndethist: Option<i32>,
 }
@@ -290,10 +297,19 @@ impl LsstCandidate {
         // instead of converting all the nJy values to Jy, we just add 2.5 * log10(1e9) = 22.5
         // to the zeropoint
 
-        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, LSST_ZP_AB_NJY);
+        let psf_flux_abs = psf_flux.abs();
+        let ap_flux_abs = ap_flux.abs();
+
+        let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
         let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
-        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
+        // chipsf is the psf_chi2 / psf_ndata, if measured successfully, otherwise None
+        let chipsf = match (dia_source.psf_chi2, dia_source.psf_ndata) {
+            (Some(chi2), Some(ndata)) if ndata > 0 => Some(chi2 / ndata as f32),
+            _ => None,
+        };
+
+        let (magap, sigmagap) = flux2mag(ap_flux_abs, ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, we use the dia_object_id as object_id
         // if dia_object_id is undefined but ss_object_id is defined, use "sso{ss_object_id}" as object_id
@@ -325,11 +341,13 @@ impl LsstCandidate {
             jd,
             magpsf,
             sigmapsf,
+            snr_psf: Some(psf_flux_abs / psf_flux_err),
+            chipsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            snr_ap: Some(ap_flux_abs / ap_flux_err),
             jdstarthist,
             ndethist,
         })
@@ -351,11 +369,13 @@ pub struct LsstPrvCandidate {
     pub jd: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
+    pub snr_psf: Option<f32>,
+    pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
-    pub snr: f32,
     pub magap: f32,
     pub sigmagap: f32,
+    pub snr_ap: Option<f32>,
 }
 
 impl TryFrom<DiaSource> for LsstPrvCandidate {
@@ -373,10 +393,19 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
         // instead of converting all the nJy values to Jy, we just add 2.5 * log10(1e9) = 22.5
         // to the zeropoint
 
-        let (magpsf, sigmapsf) = flux2mag(psf_flux.abs(), psf_flux_err, LSST_ZP_AB_NJY);
+        let psf_flux_abs = psf_flux.abs();
+        let ap_flux_abs = ap_flux.abs();
+
+        let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
         let diffmaglim = fluxerr2diffmaglim(psf_flux_err, LSST_ZP_AB_NJY);
 
-        let (magap, sigmagap) = flux2mag(ap_flux.abs(), ap_flux_err, LSST_ZP_AB_NJY);
+        // chipsf is the psf_chi2 / psf_ndata, if measured successfully, otherwise None
+        let chipsf = match (dia_source.psf_chi2, dia_source.psf_ndata) {
+            (Some(chi2), Some(ndata)) if ndata > 0 => Some(chi2 / ndata as f32),
+            _ => None,
+        };
+
+        let (magap, sigmagap) = flux2mag(ap_flux_abs, ap_flux_err, LSST_ZP_AB_NJY);
 
         // if dia_object_id is defined, we use the dia_object_id as object_id
         // if dia_object_id is undefined but ss_object_id is defined, use "sso{ss_object_id}" as object_id
@@ -396,11 +425,13 @@ impl TryFrom<DiaSource> for LsstPrvCandidate {
             jd,
             magpsf,
             sigmapsf,
+            snr_psf: Some(psf_flux_abs / psf_flux_err),
+            chipsf,
             diffmaglim,
             isdiffpos: psf_flux > 0.0,
-            snr: psf_flux.abs() / psf_flux_err,
             magap,
             sigmagap,
+            snr_ap: Some(ap_flux_abs / ap_flux_err),
         })
     }
 }
@@ -414,11 +445,13 @@ impl TryFrom<LsstCandidate> for LsstPrvCandidate {
             jd: candidate.jd,
             magpsf: candidate.magpsf,
             sigmapsf: candidate.sigmapsf,
+            snr_psf: candidate.snr_psf,
+            chipsf: candidate.chipsf,
             diffmaglim: candidate.diffmaglim,
             isdiffpos: candidate.isdiffpos,
-            snr: candidate.snr,
             magap: candidate.magap,
             sigmagap: candidate.sigmagap,
+            snr_ap: candidate.snr_ap,
         })
     }
 }
@@ -673,7 +706,7 @@ pub struct LsstForcedPhot {
     pub sigmapsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: Option<bool>,
-    pub snr: Option<f32>,
+    pub snr_psf: Option<f32>,
 }
 
 impl TryFrom<DiaForcedSource> for LsstForcedPhot {
@@ -686,16 +719,17 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
 
         // for now, we only consider positive detections (flux positive) as detections
         // may revisit this later
-        let (magpsf, sigmapsf, isdiffpos, snr) = match dia_forced_source.psf_flux {
+        let (magpsf, sigmapsf, isdiffpos, snr_psf) = match dia_forced_source.psf_flux {
             Some(psf_flux) => {
                 let psf_flux_abs = psf_flux.abs();
-                if (psf_flux_abs / psf_flux_err) > SNT {
+                let snr_psf = psf_flux_abs / psf_flux_err;
+                if snr_psf > SNT {
                     let (magpsf, sigmapsf) = flux2mag(psf_flux_abs, psf_flux_err, LSST_ZP_AB_NJY);
                     (
                         Some(magpsf),
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
-                        Some(psf_flux_abs / psf_flux_err),
+                        Some(snr_psf),
                     )
                 } else {
                     (None, None, None, None)
@@ -713,7 +747,7 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
             sigmapsf,
             diffmaglim,
             isdiffpos,
-            snr,
+            snr_psf,
         })
     }
 }
@@ -1108,9 +1142,35 @@ mod tests {
         assert!((candidate.magpsf - 23.674994).abs() < 1e-6);
         assert!((candidate.sigmapsf - 0.217043).abs() < 1e-6);
         assert!((candidate.diffmaglim - 23.675514).abs() < 1e-5);
-        assert!(candidate.snr - 5.002406 < 1e-6);
+        assert!((candidate.snr_psf.unwrap() - 5.002406).abs() < 1e-6);
         assert_eq!(candidate.isdiffpos, false);
         assert_eq!(candidate.dia_source.band.unwrap(), Band::R);
+        assert!((candidate.dia_source.snr.unwrap() - 5.0520844).abs() < 1e-6);
+        assert!(
+            (candidate.snr_psf.unwrap()
+                - candidate.dia_source.psf_flux.unwrap().abs()
+                    / candidate.dia_source.psf_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!(
+            (candidate.snr_ap.unwrap()
+                - candidate.dia_source.ap_flux.unwrap().abs()
+                    / candidate.dia_source.ap_flux_err.unwrap())
+            .abs()
+                < 1e-6
+        );
+        assert!((candidate.dia_source.psf_chi2.unwrap() - 1710.2283).abs() < 1e-4);
+        assert!((candidate.dia_source.psf_ndata.unwrap() as f32 - 1681_f32).abs() < 1e-4);
+        assert!(
+            (candidate.chipsf.unwrap()
+                - candidate.dia_source.psf_chi2.unwrap()
+                    / candidate.dia_source.psf_ndata.unwrap() as f32)
+                .abs()
+                < 1e-6
+        );
+        assert!(candidate.dia_source.ap_flux.unwrap() < 0.0);
+
         // TODO: check prv_candidates and forced photometry once we have alerts
         //       where they aren't empty
         // TODO: check non detections once these are available in the schema
