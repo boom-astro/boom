@@ -93,6 +93,7 @@ function LayoutRoutes() {
                   <Route path="/landing" element={<Landing />} />
                   <Route path="/login" element={<LoginPageWrapper />} />
                   {!PRERELEASE_MODE && <Route path="/signup" element={<SignupPage />} />}
+                  {!PRERELEASE_MODE && <Route path="/activate" element={<SignupPage />} />}
                   <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
                   <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
                   <Route path="/docs/kafka" element={<ProtectedRoute><KafkaDocs /></ProtectedRoute>} />
