@@ -19,7 +19,7 @@ function toColor(band?: string) {
     return BAND_COLORS[k] ?? BAND_COLORS.default;
 }
 
-type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey' | 'main', snr?: number | undefined };
+type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey_match' | 'main', snr_psf?: number | undefined, snr?: number | undefined };
 
 type LightcurveData = {
     prv_candidates?: Detection[];
@@ -36,7 +36,7 @@ function jd2mjd(jd: number) {
     return jd - 2400000.5;
 }
 
-export default function Lightcurve({ data }: { data: LightcurveData }) {
+function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, height }: { data: LightcurveData, setExpandedDialogOpen?: (open: boolean) => void | null, setHelpDialogOpen: (open: boolean) => void, height?: string }) {
     const candidates: Detection[] = data?.prv_candidates ?? [];
     const fpHists: Detection[] = data?.fp_hists ?? [];
     const nondets: Detection[] = data?.prv_nondetections ?? [];
@@ -49,7 +49,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
         return fpHists.filter(d => d.diffmaglim !== undefined && d.magpsf === undefined);
     }, [fpHists, includeForcedPhot]);
 
-    // extract survey match detections (candidates only)
+    // extract survey_match match detections (candidates only)
     const surveyMatchDetections = useMemo(() => {
         if (!survey_matches || !includeSurveyMatches) return [];
         const result: Detection[] = [];
@@ -72,7 +72,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
         return result;
     }, [survey_matches, includeSurveyMatches]);
 
-    // extract survey match forced photometry
+    // extract survey_match match forced photometry
     // fp hists contains both detections and non-detections, so we need to split them
     const surveyMatchFpHists = useMemo(() => {
         if (!survey_matches || !includeSurveyMatches || !includeForcedPhot) return [];
@@ -119,11 +119,11 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
         }));
         const survey_candidates_arr = surveyMatchDetections.map(d => ({
             ...d,
-            source: 'survey' as const,
+            source: 'survey_match' as const,
         }));
         const survey_fphists_arr = surveyMatchFpHists.map(d => ({
             ...d,
-            source: 'survey' as const,
+            source: 'survey_match' as const,
         }));
         arr = [...candidates_arr, ...fphists_arr, ...survey_candidates_arr, ...survey_fphists_arr] as Detection[];
         return arr
@@ -132,19 +132,19 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                 mag: d.magpsf !== undefined ? Number(d.magpsf) : NaN,
                 band: d.band ?? 'unknown',
                 sigma: d.sigmapsf !== undefined ? Number(d.sigmapsf) : NaN,
-                snr: d.snr !== undefined ? Number(d.snr) : NaN,
+                snr: d.snr_psf !== undefined ? Number(d.snr_psf) : (d.snr !== undefined ? Number(d.snr) : NaN),
                 source: d.source,
             }))
             .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag));
     }, [candidates, fpHists, surveyMatchDetections, surveyMatchFpHists, includeForcedPhot]);
 
     const nondetectionsSeries = useMemo(() => {
-        // Get non-detections from survey matches if included
+        // Get non-detections from survey_match matches if included
         const allNondets: Detection[] = [
             ...nondets.map(d => ({ ...d, source: 'main' as const })),
             ...nondetsFromFpHists.map(d => ({ ...d, source: 'fphist' as const })),
-            ...surveyMatchNondetections.map(d => ({ ...d, source: 'survey' as const })),
-            ...surveyMatchNondetectionsFromFpHists.map(d => ({ ...d, source: 'survey' as const })),
+            ...surveyMatchNondetections.map(d => ({ ...d, source: 'survey_match' as const })),
+            ...surveyMatchNondetectionsFromFpHists.map(d => ({ ...d, source: 'survey_match' as const })),
         ];
         
         return allNondets
@@ -189,8 +189,6 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     useEffect(() => setDomain(initialDomain), [initialDomain.x0, initialDomain.x1, initialDomain.y0, initialDomain.y1]);
 
     const [hiddenBands, setHiddenBands] = useState<Set<string>>(new Set());
-    const [dialogOpen, setDialogOpen] = useState(false);
-    const [helpDialogOpen, setHelpDialogOpen] = useState(false);
 
     const handleLegendClick = (band: string) => {
         setHiddenBands(prev => {
@@ -283,7 +281,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     }, [domain]);
 
     // interaction: tooltip, drag-zoom
-    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean }>(() => ({ visible: false, x: 0, y: 0 }));
+    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean, snr?: number }>(() => ({ visible: false, x: 0, y: 0 }));
 
     const dragging = useRef(false);
     const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -414,417 +412,281 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
     // (no additional helpers needed right now)
 
     return (
-        <Card className="@container/card col-span-1 @xl/main:col-span-2">
-            <CardContent>
-                <div ref={containerRef} style={{ width: '100%', height: '36vh', marginBottom: 20, position: 'relative'}}>
-                    <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                            <div className="text-lg font-semibold pb-2">Photometry</div>
-                            <button 
-                                onClick={() => setHelpDialogOpen(true)} 
-                                title="Plot information"
-                                className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 mb-2"
-                            >
-                                <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
-                            </button>
-                        </div>
-                        <div className="flex items-center gap-3">
-                            {bands.map(b =>
-                                <div
-                                    key={`legend-${b}`}
-                                    className="flex items-center gap-2 text-xs cursor-pointer select-none"
-                                    onClick={() => handleLegendClick(b)}
-                                    onDoubleClick={() => handleLegendDoubleClick(b)}
-                                    style={{ opacity: hiddenBands.has(b) ? 0.12 : 1, transition: 'opacity 200ms ease' }}
-                                >
-                                    <div className="w-3 h-3 rounded" style={{ backgroundColor: toColor(b) }} />
-                                    <div className="text-xs text-gray-600 dark:text-gray-300">{b.toUpperCase()}</div>
-                                </div>
-                            )}
-                            {survey_matches && Object.keys(survey_matches).length > 0 && (
-                                <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
-                                    <input 
-                                        type="checkbox" 
-                                        checked={includeSurveyMatches}
-                                        onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
-                                        className="w-4 h-4"
-                                    />
-                                    <span className="text-gray-600 dark:text-gray-300">Other surveys</span>
-                                </label>
-                            )}
-                            <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
-                                <input 
-                                    type="checkbox" 
-                                    checked={includeForcedPhot}
-                                    onChange={(e) => setIncludeForcedPhot(e.target.checked)}
-                                    className="w-4 h-4"
-                                />
-                                <span className="text-gray-600 dark:text-gray-300">Forced Phot</span>
-                            </label>
-                            <button onClick={() => setDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
-                                <Maximize2 className="w-4 h-4 text-gray-600" />
-                            </button>
-                        </div>
-                    </div>
-
-                    <svg width={size.width} height={size.height} onDoubleClick={onDoubleClick}>
-                        {/* background */}
-                        {/* <rect x={0} y={0} width={size.width} height={size.height} className="fill-transparent" rx={4} /> */}
-
-                        {/* grid and axes */}
-                        {/* horizontal grid (y ticks) */}
-                        {yTicks.map((yt, i) => {
-                            const py = yToPixel(yt);
-                            return <line key={`gy-${i}`} x1={pad.left} x2={size.width - pad.right} y1={py} y2={py} className="stroke-[#eef2f6] dark:stroke-slate-700" />;
-                        })}
-                        {/* vertical grid (x ticks) */}
-                        {xTicks.map((xt, i) => {
-                            const px = xToPixel(xt);
-                            return <line key={`gx-${i}`} x1={px} x2={px} y1={pad.top} y2={pad.top + plotH} className="stroke-[#f3f4f6] dark:stroke-slate-700" />;
-                        })}
-
-                        {/* axes labels and ticks */}
-                        {/* Y ticks labels (outside left) */}
-                        {yTicks.map((yt, i) => {
-                            const py = yToPixel(yt);
-                            return (
-                                <text key={`yt-${i}`} x={pad.left - 8} y={py + 4} textAnchor="end" className="text-xs fill-gray-400 dark:fill-gray-300">{yt.toFixed(2)}</text>
-                            );
-                        })}
-                        {/* X ticks labels */}
-                        {xTicks.map((xt, i) => {
-                            const px = xToPixel(xt);
-                            return (
-                                <text key={`xt-${i}`} x={px} y={pad.top + plotH + 20} textAnchor="middle" className="text-xs fill-gray-400 dark:fill-gray-300">{xt.toFixed(1)}</text>
-                            );
-                        })}
-
-                        {/* axis titles */}
-                        <text x={size.width / 2} y={size.height - 8} textAnchor="middle" className="text-sm fill-gray-600 dark:fill-gray-300">MJD</text>
-                        <text x={12} y={size.height / 2} transform={`rotate(-90 12 ${size.height / 2})`} textAnchor="middle" className="text-sm fill-gray-600 dark:fill-gray-300">AB mag</text>
-
-                        {/* plotting area clip */}
-                        <defs>
-                            <clipPath id="plot-area">
-                                <rect x={pad.left} y={pad.top} width={plotW} height={plotH} />
-                            </clipPath>
-                        </defs>
-
-                        {/* points: detections - error bars with clipping */}
-                        <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
-                            {detections.map((pt, i) => {
-                                const { bandKey, isHidden, color } = getBandState(pt.band);
-                                if (isHidden) return null;
-                                const px = xToPixel(pt.t);
-                                const sigma = Number(pt.sigma);
-                                const hasSigma = Number.isFinite(sigma) && sigma > 0;
-                                const capW = 6;
-                                return hasSigma ? (
-                                    <g key={`errbar-${i}-${bandKey}`}>
-                                        <line x1={px} x2={px} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
-                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag - sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
-                                        <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag + sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
-                                    </g>
-                                ) : null;
-                            })}
-
-                            {/* non-detections as downward triangles (main) or diamonds (survey) */}
-                            {nondetectionsSeries.map((pt, i) => {
-                                const { bandKey, isHidden, color } = getBandState(pt.band);
-                                if (isHidden) return null;
-                                const px = xToPixel(pt.t);
-                                const py = yToPixel(pt.mag);
-                                const isFromSurvey = pt.source === 'survey';
-                                const size = 5;
-                                
-                                // Triangle for main, diamond for survey
-                                const path = isFromSurvey 
-                                    ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
-                                    : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
-                                
-                                return (
-                                    <polygon
-                                        key={`nd-vis-${i}-${bandKey}`}
-                                        points={path}
-                                        fill={color}
-                                        style={{ opacity: 0.95, transition: 'opacity 200ms ease' }}
-                                    />
-                                );
-                            })}
-                        </g>
-
-                        {/* transparent overlay to capture drag events - rendered early so interactive elements are on top */}
-                        <rect
-                            x={pad.left}
-                            y={pad.top}
-                            width={plotW}
-                            height={plotH}
-                            fill="transparent"
-                            onMouseDown={onMouseDown}
-                            onMouseMove={onMouseMove}
-                            onMouseUp={onMouseUp}
-                        />
-
-                        {/* Interactive circles and polygons - rendered after overlay so they're on top */}
-                        {detections.map((pt, i) => {
-                            const { bandKey, isHidden, color } = getBandState(pt.band);
-                            if (isHidden) return null;
-                            const px = xToPixel(pt.t);
-                            const py = yToPixel(pt.mag);
-                            const isFromSurvey = pt.source === 'survey';
-                            const size = 4;
-                            
-                            return (
-                                <g key={`d-hit-${i}-${bandKey}`}>
-                                    {/* invisible hit area */}
-                                    <circle
-                                        cx={px}
-                                        cy={py}
-                                        r={8}
-                                        fill="transparent"
-                                        style={{ pointerEvents: 'auto', cursor: 'pointer' }}
-                                        onMouseEnter={(e: React.MouseEvent<SVGCircleElement>) => {
-                                            const rect = containerRef.current?.getBoundingClientRect();
-                                            const clientX = e.clientX;
-                                            const clientY = e.clientY;
-                                            const x = rect ? clientX - rect.left : clientX;
-                                            const y = rect ? clientY - rect.top : clientY;
-                                            setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, sigma: Number(pt.sigma), nondet: false });
-                                        }}
-                                        onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
-                                            const rect = containerRef.current?.getBoundingClientRect();
-                                            const clientX = e.clientX;
-                                            const clientY = e.clientY;
-                                            const x = rect ? clientX - rect.left : clientX;
-                                            const y = rect ? clientY - rect.top : clientY;
-                                            setTooltip(prev => ({ ...prev, x, y }));
-                                        }}
-                                        onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
-                                    />
-                                    {/* visible marker: circle for main, square for survey */}
-                                    {isFromSurvey ? (
-                                        <rect
-                                            x={px - size}
-                                            y={py - size}
-                                            width={size * 2}
-                                            height={size * 2}
-                                            fill={color}
-                                            style={{ opacity: 0.9, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
-                                        />
-                                    ) : (
-                                        <circle
-                                            cx={px}
-                                            cy={py}
-                                            r={size}
-                                            fill={color}
-                                            style={{ opacity: 0.9, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
-                                        />
-                                    )}
-                                </g>
-                            );
-                        })}
-
-                        {/* Interactive non-detection polygons */}
-                        {nondetectionsSeries.map((pt, i) => {
-                            const { bandKey, isHidden, color } = getBandState(pt.band);
-                            if (isHidden) return null;
-                            const px = xToPixel(pt.t);
-                            const py = yToPixel(pt.mag);
-                            const isFromSurvey = pt.source === 'survey';
-                            const size = 5;
-                            
-                            // Triangle for main, diamond for survey
-                            const path = isFromSurvey 
-                                ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
-                                : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
-                            
-                            return (
-                                <g key={`nd-hit-${i}-${bandKey}`}>
-                                    {/* invisible hit area */}
-                                    <circle
-                                        cx={px}
-                                        cy={py}
-                                        r={8}
-                                        fill="transparent"
-                                        style={{ pointerEvents: 'auto', cursor: 'pointer' }}
-                                        onMouseEnter={(e: React.MouseEvent<SVGCircleElement>) => {
-                                            const rect = containerRef.current?.getBoundingClientRect();
-                                            const clientX = e.clientX;
-                                            const clientY = e.clientY;
-                                            const x = rect ? clientX - rect.left : clientX;
-                                            const y = rect ? clientY - rect.top : clientY;
-                                            setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, nondet: true });
-                                        }}
-                                        onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
-                                            const rect = containerRef.current?.getBoundingClientRect();
-                                            const clientX = e.clientX;
-                                            const clientY = e.clientY;
-                                            const x = rect ? clientX - rect.left : clientX;
-                                            const y = rect ? clientY - rect.top : clientY;
-                                            setTooltip(prev => ({ ...prev, x, y }));
-                                        }}
-                                        onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
-                                    />
-                                    {/* visible polygon */}
-                                    <polygon
-                                        points={path}
-                                        fill={color}
-                                        style={{ opacity: 0.95, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
-                                    />
-                                </g>
-                            );
-                        })}
-
-                        {/* selection rect */}
-                        {selection && (
-                            <rect x={pad.left + selection.x} y={pad.top + selection.y} width={selection.w} height={selection.h} fill="#3b82f6" opacity={0.12} stroke="#3b82f6" strokeDasharray="4 2" />
-                        )}
-                    </svg>
-
-                    {/* tooltip outside SVG */}
-                    {tooltip.visible && (
-                        <div style={{ position: 'absolute', left: tooltip.x + 12, top: tooltip.y + 12, zIndex: 50, pointerEvents: 'none' }}>
-                            <div className="bg-white dark:bg-slate-800 text-xs border border-gray-300 dark:border-slate-600 rounded shadow-lg p-2 dark:text-gray-100" style={{ minWidth: 140 }}>
-                                <div className="font-medium">Band: {String(tooltip.band).toUpperCase()}{tooltip.nondet ? ' (non-det)' : ''}</div>
-                                <div>MJD: {tooltip.t?.toFixed(3)}</div>
-                                {!tooltip.nondet && (
-                                    <>
-                                        <div>Mag: {tooltip.mag?.toFixed(3)} {tooltip.sigma !== undefined && Number.isFinite(tooltip.sigma) && tooltip.sigma > 0 ? `± ${tooltip.sigma?.toFixed(3)}` : ''}</div>
-                                        <div>SNR: {tooltip.sigma && tooltip.sigma > 0 ? (tooltip.mag! / tooltip.sigma).toFixed(2) : 'N/A'}</div>
-                                    </>
-                                )}
-                                <div>Lim mag: {tooltip.mag?.toFixed(3)}</div>
-                            </div>
+        <div ref={containerRef} style={{ width: '100%', height: height || '36vh', marginBottom: 20, position: 'relative'}}>
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <div className="text-lg font-semibold pb-2">Photometry</div>
+                    <button 
+                        onClick={() => setHelpDialogOpen(true)} 
+                        title="Plot information"
+                        className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 mb-2"
+                    >
+                        <Info className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+                    </button>
+                </div>
+                <div className="flex items-center gap-3">
+                    {bands.map(b =>
+                        <div
+                            key={`legend-${b}`}
+                            className="flex items-center gap-2 text-xs cursor-pointer select-none"
+                            onClick={() => handleLegendClick(b)}
+                            onDoubleClick={() => handleLegendDoubleClick(b)}
+                            style={{ opacity: hiddenBands.has(b) ? 0.12 : 1, transition: 'opacity 200ms ease' }}
+                        >
+                            <div className="w-3 h-3 rounded" style={{ backgroundColor: toColor(b) }} />
+                            <div className="text-xs text-gray-600 dark:text-gray-300">{b.toUpperCase()}</div>
                         </div>
                     )}
+                    {survey_matches && Object.keys(survey_matches).length > 0 && (
+                        <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                            <input 
+                                type="checkbox" 
+                                checked={includeSurveyMatches}
+                                onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
+                                className="w-4 h-4"
+                            />
+                            <span className="text-gray-600 dark:text-gray-300">Other surveys</span>
+                        </label>
+                    )}
+                    <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                        <input 
+                            type="checkbox" 
+                            checked={includeForcedPhot}
+                            onChange={(e) => setIncludeForcedPhot(e.target.checked)}
+                            className="w-4 h-4"
+                        />
+                        <span className="text-gray-600 dark:text-gray-300">Forced Phot</span>
+                    </label>
+                    {setExpandedDialogOpen && (
+                        <button onClick={() => setExpandedDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
+                            <Maximize2 className="w-4 h-4 text-gray-600" />
+                        </button>
+                    )}
                 </div>
-                        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-            <DialogContent className="w-[min(1400px,95vw)] max-w-none sm:!max-w-none h-[90vh] flex flex-col">
-                <DialogHeader>
-                    <DialogTitle className="text-xl">Photometry - Expanded View</DialogTitle>
-                </DialogHeader>
-                <div className="flex-1 flex items-center justify-center overflow-hidden">
-                    <svg width={1200} height={600} onDoubleClick={onDoubleClick}>
-                        {/* Same structure as main plot but with larger dimensions */}
-                        {(() => {
-                            const dialogPad = { left: 80, right: 30, top: 30, bottom: 60 };
-                            const dialogW = 1200;
-                            const dialogH = 600;
-                            const dialogPlotW = dialogW - dialogPad.left - dialogPad.right;
-                            const dialogPlotH = dialogH - dialogPad.top - dialogPad.bottom;
-                            const xToPixelDialog = (t: number) => dialogPad.left + ((t - domain.x0) / (domain.x1 - domain.x0)) * dialogPlotW;
-                            const yToPixelDialog = (mag: number) => dialogPad.top + ((mag - domain.y0) / (domain.y1 - domain.y0)) * dialogPlotH;
+            </div>
 
-                            return (
-                                <>
-                                    {/* grid */}
-                                    {yTicks.map((yt, i) => {
-                                        const py = yToPixelDialog(yt);
-                                        return <line key={`gy-${i}`} x1={dialogPad.left} x2={dialogW - dialogPad.right} y1={py} y2={py} className="stroke-[#eef2f6] dark:stroke-slate-700" />;
-                                    })}
-                                    {xTicks.map((xt, i) => {
-                                        const px = xToPixelDialog(xt);
-                                        return <line key={`gx-${i}`} x1={px} x2={px} y1={dialogPad.top} y2={dialogPad.top + dialogPlotH} className="stroke-[#f3f4f6] dark:stroke-slate-700" />;
-                                    })}
+            <svg width={size.width} height={size.height} onDoubleClick={onDoubleClick}>
+                {/* background */}
+                {/* <rect x={0} y={0} width={size.width} height={size.height} className="fill-transparent" rx={4} /> */}
 
-                                    {/* axis labels */}
-                                    {yTicks.map((yt, i) => {
-                                        const py = yToPixelDialog(yt);
-                                        return <text key={`yt-${i}`} x={dialogPad.left - 10} y={py + 4} textAnchor="end" className="text-sm fill-gray-400 dark:fill-gray-300">{yt.toFixed(2)}</text>;
-                                    })}
-                                    {xTicks.map((xt, i) => {
-                                        const px = xToPixelDialog(xt);
-                                        return <text key={`xt-${i}`} x={px} y={dialogPad.top + dialogPlotH + 25} textAnchor="middle" className="text-sm fill-gray-400 dark:fill-gray-300">{xt.toFixed(1)}</text>;
-                                    })}
+                {/* grid and axes */}
+                {/* horizontal grid (y ticks) */}
+                {yTicks.map((yt, i) => {
+                    const py = yToPixel(yt);
+                    return <line key={`gy-${i}`} x1={pad.left} x2={size.width - pad.right} y1={py} y2={py} className="stroke-[#eef2f6] dark:stroke-slate-700" />;
+                })}
+                {/* vertical grid (x ticks) */}
+                {xTicks.map((xt, i) => {
+                    const px = xToPixel(xt);
+                    return <line key={`gx-${i}`} x1={px} x2={px} y1={pad.top} y2={pad.top + plotH} className="stroke-[#f3f4f6] dark:stroke-slate-700" />;
+                })}
 
-                                    <text x={dialogW / 2} y={dialogH - 15} textAnchor="middle" className="text-base fill-gray-600 dark:fill-gray-300">MJD</text>
-                                    <text x={20} y={dialogH / 2} transform={`rotate(-90 20 ${dialogH / 2})`} textAnchor="middle" className="text-base fill-gray-600 dark:fill-gray-300">AB mag</text>
+                {/* axes labels and ticks */}
+                {/* Y ticks labels (outside left) */}
+                {yTicks.map((yt, i) => {
+                    const py = yToPixel(yt);
+                    return (
+                        <text key={`yt-${i}`} x={pad.left - 8} y={py + 4} textAnchor="end" className="text-xs fill-gray-400 dark:fill-gray-300">{yt.toFixed(2)}</text>
+                    );
+                })}
+                {/* X ticks labels */}
+                {xTicks.map((xt, i) => {
+                    const px = xToPixel(xt);
+                    return (
+                        <text key={`xt-${i}`} x={px} y={pad.top + plotH + 20} textAnchor="middle" className="text-xs fill-gray-400 dark:fill-gray-300">{xt.toFixed(1)}</text>
+                    );
+                })}
 
-                                    {/* clip path for dialog */}
-                                    <defs>
-                                        <clipPath id="plot-area-dialog">
-                                            <rect x={dialogPad.left} y={dialogPad.top} width={dialogPlotW} height={dialogPlotH} />
-                                        </clipPath>
-                                    </defs>
+                {/* axis titles */}
+                <text x={size.width / 2} y={size.height - 8} textAnchor="middle" className="text-sm fill-gray-600 dark:fill-gray-300">MJD</text>
+                <text x={12} y={size.height / 2} transform={`rotate(-90 12 ${size.height / 2})`} textAnchor="middle" className="text-sm fill-gray-600 dark:fill-gray-300">AB mag</text>
 
-                                    {/* error bars */}
-                                    <g clipPath="url(#plot-area-dialog)" style={{ pointerEvents: 'none' }}>
-                                        {detections.map((pt, i) => {
-                                            const { bandKey, isHidden, color } = getBandState(pt.band);
-                                            if (isHidden) return null;
-                                            const px = xToPixelDialog(pt.t);
-                                            const sigma = Number(pt.sigma);
-                                            const hasSigma = Number.isFinite(sigma) && sigma > 0;
-                                            const capW = 8;
-                                            return hasSigma ? (
-                                                <g key={`errbar-${i}-${bandKey}`}>
-                                                    <line x1={px} x2={px} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
-                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag - sigma)} y2={yToPixelDialog(pt.mag - sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
-                                                    <line x1={px - capW} x2={px + capW} y1={yToPixelDialog(pt.mag + sigma)} y2={yToPixelDialog(pt.mag + sigma)} stroke={color} strokeWidth={1.5} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
-                                                </g>
-                                            ) : null;
-                                        })}
+                {/* plotting area clip */}
+                <defs>
+                    <clipPath id="plot-area">
+                        <rect x={pad.left} y={pad.top} width={plotW} height={plotH} />
+                    </clipPath>
+                </defs>
 
-                                        {nondetectionsSeries.map((pt, i) => {
-                                            const { bandKey, isHidden, color } = getBandState(pt.band);
-                                            if (isHidden) return null;
-                                            const px = xToPixelDialog(pt.t);
-                                            const py = yToPixelDialog(pt.mag);
-                                            const isFromSurvey = pt.source === 'survey';
-                                            const size = 6;
-                                            
-                                            // Triangle for main, diamond for survey
-                                            const path = isFromSurvey 
-                                                ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
-                                                : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
-                                            
-                                            return (
-                                                <polygon key={`nd-vis-${i}-${bandKey}`} points={path} fill={color} style={{ opacity: 0.95, transition: 'opacity 200ms ease' }} />
-                                            );
-                                        })}
-                                    </g>
+                {/* points: detections error bars - rendered early so they're under the points */}
+                <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
+                    {detections.map((pt, i) => {
+                        const { bandKey, isHidden, color } = getBandState(pt.band);
+                        if (isHidden) return null;
+                        const px = xToPixel(pt.t);
+                        const sigma = Number(pt.sigma);
+                        const hasSigma = Number.isFinite(sigma) && sigma > 0;
+                        const capW = 6;
+                        return hasSigma ? (
+                            <g key={`errbar-${i}-${bandKey}`}>
+                                <line x1={px} x2={px} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                                <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag - sigma)} y2={yToPixel(pt.mag - sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                                <line x1={px - capW} x2={px + capW} y1={yToPixel(pt.mag + sigma)} y2={yToPixel(pt.mag + sigma)} stroke={color} strokeWidth={1.2} style={{ opacity: 0.9, transition: 'opacity 200ms ease' }} />
+                            </g>
+                        ) : null;
+                    })}
+                </g>
 
-                                    {/* detection points */}
-                                    {detections.map((pt, i) => {
-                                        const { bandKey, isHidden, color } = getBandState(pt.band);
-                                        if (isHidden) return null;
-                                        const px = xToPixelDialog(pt.t);
-                                        const py = yToPixelDialog(pt.mag);
-                                        const isFromSurvey = pt.source === 'survey';
-                                        const size = 5 ;
-                                        
-                                        return isFromSurvey ? (
-                                            <rect key={`d-${i}-${bandKey}`} x={px - size} y={py - size} width={size * 2} height={size * 2} fill={color} style={{ opacity: 0.9, transition: 'opacity 200ms ease', pointerEvents: 'none' }} />
-                                        ) : (
-                                            <circle key={`d-${i}-${bandKey}`} cx={px} cy={py} r={size} fill={color} style={{ opacity: 0.9, transition: 'opacity 200ms ease, r 120ms ease' }} />
-                                        );
-                                    })}
+                {/* transparent overlay to capture drag events - rendered early so interactive elements are on top */}
+                <rect
+                    x={pad.left}
+                    y={pad.top}
+                    width={plotW}
+                    height={plotH}
+                    fill="transparent"
+                    onMouseDown={onMouseDown}
+                    onMouseMove={onMouseMove}
+                    onMouseUp={onMouseUp}
+                />
 
-                                    {/* non-detection points */}
-                                    {nondetectionsSeries.map((pt, i) => {
-                                        const { bandKey, isHidden, color } = getBandState(pt.band);
-                                        if (isHidden) return null;
-                                        const px = xToPixelDialog(pt.t);
-                                        const py = yToPixelDialog(pt.mag);
-                                        const isFromSurvey = pt.source === 'survey';
-                                        const size = 6;
-                                        
-                                        // Triangle for main, diamond for survey
-                                        const path = isFromSurvey 
-                                            ? `${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`
-                                            : `${px - size},${py - 1} ${px + size},${py - 1} ${px},${py + size}`;
-                                        
-                                        return (
-                                            <polygon key={`nd-${i}-${bandKey}`} points={path} fill={color} style={{ opacity: 0.95, transition: 'opacity 200ms ease' }} />
-                                        );
-                                    })}
-                                </>
-                            );
-                        })()}
-                    </svg>
+                {/* Interactive circles and polygons - rendered after overlay so they're on top */}
+                {detections.map((pt, i) => {
+                    const { bandKey, isHidden, color } = getBandState(pt.band);
+                    if (isHidden) return null;
+                    const px = xToPixel(pt.t);
+                    const py = yToPixel(pt.mag);
+                    const isFromSurvey = pt.source === 'survey_match';
+                    const size = 5;
+                    
+                    return (
+                        <g key={`d-hit-${i}-${bandKey}`}>
+                            {/* invisible hit area */}
+                            <circle
+                                cx={px}
+                                cy={py}
+                                r={8}
+                                fill="transparent"
+                                style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+                                onMouseEnter={(e: React.MouseEvent<SVGCircleElement>) => {
+                                    const rect = containerRef.current?.getBoundingClientRect();
+                                    const clientX = e.clientX;
+                                    const clientY = e.clientY;
+                                    const x = rect ? clientX - rect.left : clientX;
+                                    const y = rect ? clientY - rect.top : clientY;
+                                    setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, sigma: Number(pt.sigma), nondet: false, snr: pt.snr });
+                                }}
+                                onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
+                                    const rect = containerRef.current?.getBoundingClientRect();
+                                    const clientX = e.clientX;
+                                    const clientY = e.clientY;
+                                    const x = rect ? clientX - rect.left : clientX;
+                                    const y = rect ? clientY - rect.top : clientY;
+                                    setTooltip(prev => ({ ...prev, x, y }));
+                                }}
+                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, snr: undefined })}
+                            />
+                            {/* visible marker: circle for main, square for survey_match */}
+                            {isFromSurvey ? (
+                                <rect
+                                    x={px - size}
+                                    y={py - size}
+                                    width={size * 2}
+                                    height={size * 2}
+                                    fill={color}
+                                    style={{ opacity: 0.9, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
+                                />
+                            ) : (
+                                <circle
+                                    cx={px}
+                                    cy={py}
+                                    r={size}
+                                    fill={color}
+                                    style={{ opacity: 0.9, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
+                                />
+                            )}
+                        </g>
+                    );
+                })}
+
+                {/* Interactive non-detection polygons */}
+                {nondetectionsSeries.map((pt, i) => {
+                    const { bandKey, isHidden, color } = getBandState(pt.band);
+                    if (isHidden) return null;
+                    const px = xToPixel(pt.t);
+                    const py = yToPixel(pt.mag);
+                    const isFromSurvey = pt.source === 'survey_match';
+                    
+                    // Downward-facing triangle; slightly larger for main
+                    const size = isFromSurvey ? 4 : 5;
+                    const path = `${px - size},${py - size} ${px + size},${py - size} ${px},${py + size * 0.5}`;
+                    const opacity = isFromSurvey ? 0.95 : 0.8;
+                    
+                    return (
+                        <g key={`nd-hit-${i}-${bandKey}`}>
+                            {/* invisible hit area */}
+                            <circle
+                                cx={px}
+                                cy={py}
+                                r={8}
+                                fill="transparent"
+                                style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+                                onMouseEnter={(e: React.MouseEvent<SVGCircleElement>) => {
+                                    const rect = containerRef.current?.getBoundingClientRect();
+                                    const clientX = e.clientX;
+                                    const clientY = e.clientY;
+                                    const x = rect ? clientX - rect.left : clientX;
+                                    const y = rect ? clientY - rect.top : clientY;
+                                    setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, nondet: true, sigma: undefined, snr: undefined });
+                                }}
+                                onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
+                                    const rect = containerRef.current?.getBoundingClientRect();
+                                    const clientX = e.clientX;
+                                    const clientY = e.clientY;
+                                    const x = rect ? clientX - rect.left : clientX;
+                                    const y = rect ? clientY - rect.top : clientY;
+                                    setTooltip(prev => ({ ...prev, x, y }));
+                                }}
+                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, snr: undefined })}
+                            />
+                            {/* visible polygon */}
+                            <polygon
+                                points={path}
+                                fill={color}
+                                style={{ opacity, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
+                            />
+                        </g>
+                    );
+                })}
+
+                {/* selection rect */}
+                {selection && (
+                    <rect x={pad.left + selection.x} y={pad.top + selection.y} width={selection.w} height={selection.h} fill="#3b82f6" opacity={0.12} stroke="#3b82f6" strokeDasharray="4 2" />
+                )}
+            </svg>
+
+            {/* tooltip outside SVG */}
+            {tooltip.visible && (
+                <div style={{ position: 'absolute', left: tooltip.x + 12, top: tooltip.y + 12, zIndex: 50, pointerEvents: 'none' }}>
+                    <div className="bg-white dark:bg-slate-800 text-xs border border-gray-300 dark:border-slate-600 rounded shadow-lg p-2 dark:text-gray-100" style={{ minWidth: 140 }}>
+                        <div className="font-medium">Band: {String(tooltip.band).toUpperCase()}{tooltip.nondet ? ' (non-det)' : ''}</div>
+                        <div>MJD: {tooltip.t?.toFixed(3)}</div>
+                        {!tooltip.nondet && (
+                            <>
+                                <div>Mag: {tooltip.mag?.toFixed(3)} {tooltip.sigma !== undefined && Number.isFinite(tooltip.sigma) && tooltip.sigma > 0 ? `± ${tooltip.sigma?.toFixed(3)}` : ''}</div>
+                                <div>SNR: {tooltip.snr !== undefined && !isNaN(tooltip.snr) ? tooltip.snr.toFixed(2) : 'N/A'}</div>
+                            </>
+                        )}
+                        <div>Lim mag: {tooltip.mag?.toFixed(3)}</div>
+                    </div>
                 </div>
-            </DialogContent>
-        </Dialog>
+            )}
+        </div>
+    );
+}
+
+export default function Lightcurve({ data }: { data: LightcurveData }) {
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const [helpDialogOpen, setHelpDialogOpen] = useState(false);
+
+    return (
+        <Card className="@container/card col-span-1 @xl/main:col-span-2">
+            <CardContent>
+                <LightcurveInternal data={data} setExpandedDialogOpen={setDialogOpen} setHelpDialogOpen={setHelpDialogOpen} />
+                <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                    <DialogContent className="w-[min(1400px,95vw)] max-w-none sm:!max-w-none h-[90vh] flex flex-col">
+                        <LightcurveInternal data={data} setHelpDialogOpen={setHelpDialogOpen} height='100%'/>
+                    </DialogContent>
+                </Dialog>
 
                 {/* Help Dialog */}
                 <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
@@ -839,7 +701,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     This plot displays the brightness history of the astronomical object over time, including previous alerts, forced photometry, and non-detections. The X-axis shows Modified Julian Date (MJD), 
                                     and the Y-axis shows the AB magnitude (note: fainter objects have higher magnitude values, so the Y-axis is inverted).
                                     It takes advantage of data from multiple surveys to provide a comprehensive view of the object's photometric behavior,
-                                    if available. We will refer to the survey from which the object originates as the "primary" survey, and any additional data from other surveys as "other surveys".
+                                    if available. We will refer to the survey_match from which the object originates as the "primary" survey_match, and any additional data from other surveys as "other surveys".
                                 </p>
                             </div>
 
@@ -848,7 +710,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                 <div className="space-y-2 text-gray-600 dark:text-gray-300">
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Circles:</span>
-                                        <span>Detections from the "primary" survey. Error bars show the measurement uncertainty (±σ).</span>
+                                        <span>Detections from the "primary" survey_match. Error bars show the measurement uncertainty (±σ).</span>
                                     </div>
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Squares:</span>
@@ -856,10 +718,10 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     </div>
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Triangles:</span>
-                                        <span>Non-detections from the "primary" survey, showing limiting magnitude (the object was fainter than this value).</span>
+                                        <span>Non-detections from the "primary" survey_match, showing limiting magnitude (the object was fainter than this value).</span>
                                     </div>
                                     <div className="flex items-start gap-2">
-                                        <span className="font-medium">Diamonds:</span>
+                                        <span className="font-medium">Triangles (larger):</span>
                                         <span>Non-detections from other surveys.</span>
                                     </div>
                                 </div>
@@ -902,7 +764,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             <div>
                                 <h3 className="font-semibold mb-2">Data Sources</h3>
                                 <p className="text-gray-600 dark:text-gray-300">
-                                    The plot combines data from the "primary" survey with data from other surveys' nearest objects, if any. 
+                                    The plot combines data from the "primary" survey_match with data from other surveys' nearest objects, if any. 
                                     Use the "Other surveys" checkbox to include or exclude cross-matched data from additional sources.
                                 </p>
                             </div>
