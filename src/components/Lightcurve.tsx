@@ -19,13 +19,15 @@ function toColor(band?: string) {
     return BAND_COLORS[k] ?? BAND_COLORS.default;
 }
 
-type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey_match' | 'main', snr_psf?: number | undefined, snr?: number | undefined };
+type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey_match' | 'main', snr_psf?: number | undefined, snr?: number | undefined, objectId?: string | null };
 
 type LightcurveData = {
+    objectId: string | null;
     prv_candidates?: Detection[];
     fp_hists?: Detection[];
     prv_nondetections?: Detection[];
     survey_matches?: Record<string, {
+        objectId: string | null;
         prv_candidates?: Detection[] | null;
         fp_hists?: Detection[] | null;
         prv_nondetections?: Detection[] | null;
@@ -55,7 +57,10 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
         const result: Detection[] = [];
         for (const data of Object.values(survey_matches)) {
             if (data?.prv_candidates) {
-                result.push(...(Array.isArray(data.prv_candidates) ? data.prv_candidates : []));
+                const arr = Array.isArray(data.prv_candidates) ? data.prv_candidates : [];
+                for (const d of arr) {
+                    result.push({ ...d, objectId: data.objectId });
+                }
             }
         }
         return result;
@@ -66,7 +71,10 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
         const result: Detection[] = [];
         for (const data of Object.values(survey_matches)) {
             if (data?.prv_nondetections) {
-                result.push(...(Array.isArray(data.prv_nondetections) ? data.prv_nondetections : []));
+                const arr = Array.isArray(data.prv_nondetections) ? data.prv_nondetections : [];
+                for (const d of arr) {
+                    result.push({ ...d, objectId: data.objectId });
+                }
             }
         }
         return result;
@@ -82,7 +90,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 const arr = Array.isArray(data.fp_hists) ? data.fp_hists : [];
                 for (const d of arr) {
                     if (d.magpsf !== undefined) {
-                        result.push(d);
+                        result.push({ ...d, objectId: data.objectId });
                     }
                 }
             }
@@ -98,7 +106,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 const arr = Array.isArray(data.fp_hists) ? data.fp_hists : [];
                 for (const d of arr) {
                     if (d.diffmaglim !== undefined && d.magpsf === undefined) {
-                        result.push(d);
+                        result.push({ ...d, objectId: data.objectId });
                     }
                 }
             }
@@ -112,10 +120,12 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
         const candidates_arr = candidates.map(d => ({
             ...d,
             source: 'candidate' as const,
+            objectId: data.objectId,
         }));
         const fphists_arr = (includeForcedPhot ? fpHists : []).map(d => ({
             ...d,
             source: 'fphist' as const,
+            objectId: data.objectId,
         }));
         const survey_candidates_arr = surveyMatchDetections.map(d => ({
             ...d,
@@ -134,6 +144,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 sigma: d.sigmapsf !== undefined ? Number(d.sigmapsf) : NaN,
                 snr: d.snr_psf !== undefined ? Number(d.snr_psf) : (d.snr !== undefined ? Number(d.snr) : NaN),
                 source: d.source,
+                objectId: d.objectId,
             }))
             .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag));
     }, [candidates, fpHists, surveyMatchDetections, surveyMatchFpHists, includeForcedPhot]);
@@ -141,8 +152,8 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     const nondetectionsSeries = useMemo(() => {
         // Get non-detections from survey_match matches if included
         const allNondets: Detection[] = [
-            ...nondets.map(d => ({ ...d, source: 'main' as const })),
-            ...nondetsFromFpHists.map(d => ({ ...d, source: 'fphist' as const })),
+            ...nondets.map(d => ({ ...d, source: 'main' as const, objectId: data.objectId })),
+            ...nondetsFromFpHists.map(d => ({ ...d, source: 'fphist' as const, objectId: data.objectId })),
             ...surveyMatchNondetections.map(d => ({ ...d, source: 'survey_match' as const })),
             ...surveyMatchNondetectionsFromFpHists.map(d => ({ ...d, source: 'survey_match' as const })),
         ];
@@ -153,6 +164,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 mag: d.diffmaglim !== undefined ? Number(d.diffmaglim) : NaN,
                 band: d.band ?? 'unknown',
                 source: d.source,
+                objectId: d.objectId,
             }))
             .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag));
     }, [nondets, nondetsFromFpHists, surveyMatchNondetections, surveyMatchNondetectionsFromFpHists]);
@@ -281,7 +293,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     }, [domain]);
 
     // interaction: tooltip, drag-zoom
-    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean, snr?: number }>(() => ({ visible: false, x: 0, y: 0 }));
+    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean, snr?: number, objectId?: string | null }>(() => ({ visible: false, x: 0, y: 0}));
 
     const dragging = useRef(false);
     const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -547,6 +559,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                     const py = yToPixel(pt.mag);
                     const isFromSurvey = pt.source === 'survey_match';
                     const size = 5;
+                    const opacity = isFromSurvey ? 0.8 : 0.9;
                     
                     return (
                         <g key={`d-hit-${i}-${bandKey}`}>
@@ -563,7 +576,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                     const clientY = e.clientY;
                                     const x = rect ? clientX - rect.left : clientX;
                                     const y = rect ? clientY - rect.top : clientY;
-                                    setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, sigma: Number(pt.sigma), nondet: false, snr: pt.snr });
+                                    setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, sigma: Number(pt.sigma), nondet: false, snr: pt.snr, objectId: pt.objectId });
                                 }}
                                 onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
                                     const rect = containerRef.current?.getBoundingClientRect();
@@ -573,7 +586,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                     const y = rect ? clientY - rect.top : clientY;
                                     setTooltip(prev => ({ ...prev, x, y }));
                                 }}
-                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, snr: undefined })}
+                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, snr: undefined, objectId: undefined })}
                             />
                             {/* visible marker: circle for main, square for survey_match */}
                             {isFromSurvey ? (
@@ -583,7 +596,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                     width={size * 2}
                                     height={size * 2}
                                     fill={color}
-                                    style={{ opacity: 0.9, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
+                                    style={{ opacity, transition: 'opacity 200ms ease', pointerEvents: 'none' }}
                                 />
                             ) : (
                                 <circle
@@ -591,7 +604,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                     cy={py}
                                     r={size}
                                     fill={color}
-                                    style={{ opacity: 0.9, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
+                                    style={{ opacity, transition: 'opacity 200ms ease, r 120ms ease', pointerEvents: 'none' }}
                                 />
                             )}
                         </g>
@@ -609,7 +622,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                     // Downward-facing triangle; slightly larger for main
                     const size = isFromSurvey ? 4 : 5;
                     const path = `${px - size},${py - size} ${px + size},${py - size} ${px},${py + size * 0.5}`;
-                    const opacity = isFromSurvey ? 0.95 : 0.8;
+                    const opacity = isFromSurvey ? 0.8 : 0.9;
                     
                     return (
                         <g key={`nd-hit-${i}-${bandKey}`}>
@@ -626,7 +639,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                     const clientY = e.clientY;
                                     const x = rect ? clientX - rect.left : clientX;
                                     const y = rect ? clientY - rect.top : clientY;
-                                    setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, nondet: true, sigma: undefined, snr: undefined });
+                                    setTooltip({ visible: true, x, y, mag: pt.mag, t: pt.t, band: pt.band, nondet: true, sigma: undefined, snr: undefined, objectId: pt.objectId });
                                 }}
                                 onMouseMove={(e: React.MouseEvent<SVGCircleElement>) => {
                                     const rect = containerRef.current?.getBoundingClientRect();
@@ -636,7 +649,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                                     const y = rect ? clientY - rect.top : clientY;
                                     setTooltip(prev => ({ ...prev, x, y }));
                                 }}
-                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, snr: undefined })}
+                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, snr: undefined, objectId: undefined })}
                             />
                             {/* visible polygon */}
                             <polygon
@@ -667,6 +680,11 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                             </>
                         )}
                         <div>Lim mag: {tooltip.mag?.toFixed(3)}</div>
+                        {tooltip.objectId && (
+                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                Object ID: {tooltip.objectId}
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
