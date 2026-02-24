@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
-const LSST_MIN_RELIABILITY: f32 = 0.0; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
+const LSST_MIN_RELIABILITY: f32 = 0.5; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
 const ZTF_MIN_DRB: f32 = 0.2;
 
 #[serdavro]
@@ -638,7 +638,19 @@ impl Babamul {
         // Iterate over the alerts
         for (alert, cross_matches) in alerts {
             if alert.candidate.dia_source.reliability.unwrap_or(0.0) < LSST_MIN_RELIABILITY
+                || alert.candidate.dia_source.psf_flux_flag.unwrap_or(false)
+                || alert.candidate.dia_source.ap_flux_flag.unwrap_or(false)
                 || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
+                || alert.candidate.dia_source.pixel_flags_bad.unwrap_or(false)
+                || alert
+                    .candidate
+                    .dia_source
+                    .pixel_flags_saturated
+                    .unwrap_or(false)
+                || alert.candidate.dia_source.shape_flag.unwrap_or(false)
+                || alert.candidate.dia_source.extendedness.is_none()
+                || alert.candidate.dia_source.extendedness.unwrap_or(0_f32) == 1_f32
+                || alert.candidate.snr_psf.unwrap_or(0.0) < 3.0
                 || alert.properties.rock
             {
                 // Skip this alert, it doesn't meet the criteria
