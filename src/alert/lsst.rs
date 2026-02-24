@@ -1083,16 +1083,22 @@ impl LsstAlertWorker {
             }
         }
 
-        if push_updates.is_empty() {
-            // if there is no new data to push, we can skip the update
-            return Ok(());
-        }
-        let update_doc = doc! {
-            "$push": push_updates,
-            "$set": {
-                "aliases": mongify(survey_matches),
-                "updated_at": now,
-                "version": current_version.unwrap_or(0) + 1,
+        let update_doc = if push_updates.is_empty() {
+            doc! {
+                "$set": {
+                    "aliases": mongify(survey_matches),
+                    "updated_at": now,
+                    "version": current_version.unwrap_or(0) + 1,
+                }
+            }
+        } else {
+            doc! {
+                "$push": push_updates,
+                "$set": {
+                    "aliases": mongify(survey_matches),
+                    "updated_at": now,
+                    "version": current_version.unwrap_or(0) + 1,
+                }
             }
         };
         let find_doc = if let Some(version) = current_version {
