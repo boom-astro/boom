@@ -7,7 +7,7 @@ use crate::{
     utils::{
         db::mongify,
         enums::Survey,
-        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT},
+        lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -35,8 +35,6 @@ pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 pub const ZTF_DECAM_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
-
-const ZTF_ZP: f32 = 23.9;
 
 const NB_AUX_RETRIES: usize = 5;
 
@@ -263,6 +261,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
 
         let band = fid2band(fp_hist.fid)?;
         let magzpsci = fp_hist.magzpsci.ok_or(AlertError::MissingMagZPSci)?;
+        let zp_scaling_factor = 10f64.powf((ZTF_ZP as f64 - magzpsci as f64) / 2.5);
 
         let (magpsf, sigmapsf, isdiffpos, snr, psf_flux) = match fp_hist.forcediffimflux {
             Some(psf_flux) => {
@@ -274,10 +273,16 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
                         Some(psf_flux_abs / psf_flux_err),
-                        Some(psf_flux * 1e9_f32), // convert to nJy
+                        Some((psf_flux as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
                     )
                 } else {
-                    (None, None, None, None, Some(psf_flux * 1e9_f32)) // convert to nJy
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some((psf_flux as f64 * 1e9 * zp_scaling_factor) as f32),
+                    ) // convert to nJy and a fixed ZTF_ZP
                 }
             }
             _ => (None, None, None, None, None),
@@ -288,7 +293,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some(psf_flux_err * 1e9_f32), // convert to nJy
+            psf_flux_err: Some((psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
             isdiffpos,
             snr,
             band,
@@ -1235,6 +1240,15 @@ mod tests {
         assert_eq!(detection.prv_candidate.diffmaglim.is_some(), true);
         assert_eq!(detection.prv_candidate.isdiffpos.is_some(), true);
 
+        // let's also verify that we can recover the original magpsf and sigmapsf from the flux and flux_err for the detection
+        let (magpsf, sigmapsf) = flux2mag(
+            detection.psf_flux.unwrap() / 1e9_f32,     // convert back to Jy
+            detection.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - detection.prv_candidate.magpsf.unwrap()).abs() < 1e-6);
+        assert!((sigmapsf - detection.prv_candidate.sigmapsf.unwrap()).abs() < 1e-6);
+
         // validate the fp_hists
         let fp_hists = avro_alert.clone().fp_hists;
         assert!(fp_hists.is_some());
@@ -1252,6 +1266,36 @@ mod tests {
         assert!((fp_negative_det.snr.unwrap() - 468.75623).abs() < 1e-6);
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
         assert_eq!(fp_negative_det.band, Band::G);
+        // let's verify that the psf_flux is negative AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
+        assert!(fp_negative_det.psf_flux.unwrap() < 0.0);
+        let (magpsf, sigmapsf) = flux2mag(
+            -fp_negative_det.psf_flux.unwrap() / 1e9_f32, // convert back to Jy
+            fp_negative_det.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - 15.949999).abs() < 1e-6);
+        assert!((sigmapsf - 0.002316).abs() < 1e-6);
+        // let's also verify that forcediffimflux(unc) converts to psfFlux(Err) correctly
+        let zp_scaling_factor =
+            10f64.powf((ZTF_ZP as f64 - fp_negative_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);
+        let expected_flux = (fp_negative_det.fp_hist.forcediffimflux.unwrap() as f64
+            * 1e9
+            * zp_scaling_factor) as f32;
+        let expected_flux_err = (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64
+            * 1e9
+            * zp_scaling_factor) as f32;
+        assert!(
+            (expected_flux - fp_negative_det.psf_flux.unwrap()).abs() < 1e-6,
+            "Expected flux: {}, PSF flux: {}",
+            expected_flux,
+            fp_negative_det.psf_flux.unwrap()
+        );
+        assert!(
+            (expected_flux_err - fp_negative_det.psf_flux_err.unwrap()).abs() < 1e-6,
+            "Expected flux err: {}, PSF flux err: {}",
+            expected_flux_err,
+            fp_negative_det.psf_flux_err.unwrap()
+        );
 
         let fp_positive_det = fp_hists.get(9).unwrap();
         assert!((fp_positive_det.magpsf.unwrap() - 20.801506).abs() < 1e-6);
@@ -1261,6 +1305,35 @@ mod tests {
         assert!((fp_positive_det.snr.unwrap() - 3.0018756).abs() < 1e-6);
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
         assert_eq!(fp_positive_det.band, Band::G);
+        // let's verify that the psf_flux is positive AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
+        assert!(fp_positive_det.psf_flux.unwrap() > 0.0);
+        let (magpsf, sigmapsf) = flux2mag(
+            fp_positive_det.psf_flux.unwrap() / 1e9_f32, // convert back to Jy
+            fp_positive_det.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            ZTF_ZP,
+        );
+        assert!((magpsf - 20.801506).abs() < 1e-6);
+        assert!((sigmapsf - 0.3616859).abs() < 1e-6);
+        let zp_scaling_factor =
+            10f64.powf((ZTF_ZP as f64 - fp_positive_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);
+        let expected_flux = (fp_positive_det.fp_hist.forcediffimflux.unwrap() as f64
+            * 1e9
+            * zp_scaling_factor) as f32;
+        let expected_flux_err = (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64
+            * 1e9
+            * zp_scaling_factor) as f32;
+        assert!(
+            (expected_flux - fp_positive_det.psf_flux.unwrap()).abs() < 1e-6,
+            "Expected flux: {}, PSF flux: {}",
+            expected_flux,
+            fp_positive_det.psf_flux.unwrap()
+        );
+        assert!(
+            (expected_flux_err - fp_positive_det.psf_flux_err.unwrap()).abs() < 1e-6,
+            "Expected flux err: {}, PSF flux err: {}",
+            expected_flux_err,
+            fp_positive_det.psf_flux_err.unwrap()
+        );
 
         // validate the cutouts
         assert_eq!(avro_alert.cutout_science.len(), 13107);
