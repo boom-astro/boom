@@ -64,16 +64,13 @@ impl EmailService {
 
         // Build SMTP transport
         let mailer = match SmtpTransport::relay(&smtp_server.unwrap()) {
-            Ok(transport) => {
-                // If both username and password are provided, use credentials. Otherwise, try to connect without auth.
-                match (smtp_username, smtp_password) {
-                    (Some(username), Some(password)) => {
-                        let creds = Credentials::new(username, password);
-                        Some(transport.credentials(creds).build())
-                    }
-                    _ => Some(transport.build()),
+            Ok(transport) => match (smtp_username, smtp_password) {
+                (Some(username), Some(password)) => {
+                    let creds = Credentials::new(username, password);
+                    Some(transport.credentials(creds).build())
                 }
-            }
+                _ => Some(transport.build()),
+            },
             Err(e) => {
                 eprintln!("Failed to create SMTP transport: {}", e);
                 println!("Email service is DISABLED (SMTP transport creation failed)");
