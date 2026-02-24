@@ -652,6 +652,7 @@ impl Babamul {
                 || alert.candidate.dia_source.extendedness.is_none()
                 || alert.candidate.dia_source.extendedness.unwrap_or(0_f32) == 1_f32
                 || alert.candidate.snr_psf.unwrap_or(0.0) < 3.0
+                || alert.candidate.dia_source.is_dipole.unwrap_or(false)
                 || alert.properties.rock
             {
                 // Skip this alert, it doesn't meet the criteria
