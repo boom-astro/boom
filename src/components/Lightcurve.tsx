@@ -147,7 +147,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 source: d.source,
                 objectId: d.objectId,
             }))
-            .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag));
+            .filter(d => Number.isFinite(d.t) && Number.isFinite(d.mag) && d.snr > 3); // filter out invalid and low SNR points
     }, [candidates, fpHists, surveyMatchDetections, surveyMatchFpHists, includeForcedPhot]);
 
     const nondetectionsSeries = useMemo(() => {
@@ -158,7 +158,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
             ...surveyMatchNondetections.map(d => ({ ...d, source: 'survey_match' as const })),
             ...surveyMatchNondetectionsFromFpHists.map(d => ({ ...d, source: 'survey_match' as const })),
         ];
-        
+
         return allNondets
             .map(d => ({
                 t: d.jd !== undefined ? jd2mjd(Number(d.jd)) : NaN,
@@ -430,8 +430,8 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     {size.width >= 600 && <div className="text-lg font-semibold">Photometry</div>}
-                    <button 
-                        onClick={() => setHelpDialogOpen(true)} 
+                    <button
+                        onClick={() => setHelpDialogOpen(true)}
                         title="Plot information"
                         className="rounded hover:bg-slate-100 dark:hover:bg-slate-700"
                     >
@@ -455,8 +455,8 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                     </div>
                     {survey_matches && Object.keys(survey_matches).length > 0 && (
                         <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
-                            <input 
-                                type="checkbox" 
+                            <input
+                                type="checkbox"
                                 checked={includeSurveyMatches}
                                 onChange={(e) => setIncludeSurveyMatches(e.target.checked)}
                                 className="w-4 h-4"
@@ -465,8 +465,8 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         </label>
                     )}
                     <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
-                        <input 
-                            type="checkbox" 
+                        <input
+                            type="checkbox"
                             checked={includeForcedPhot}
                             onChange={(e) => setIncludeForcedPhot(e.target.checked)}
                             className="w-4 h-4"
@@ -474,8 +474,8 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         <span className="text-gray-600 dark:text-gray-300">ForcedPhot</span>
                     </label>
                     <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
-                        <input 
-                            type="checkbox" 
+                        <input
+                            type="checkbox"
                             checked={includeUpperLimits}
                             onChange={(e) => setIncludeUpperLimits(e.target.checked)}
                             className="w-4 h-4"
@@ -573,7 +573,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                     const isFromSurvey = pt.source === 'survey_match';
                     const size = 5;
                     const opacity = isFromSurvey ? 0.8 : 0.9;
-                    
+
                     return (
                         <g key={`d-hit-${i}-${bandKey}`}>
                             {/* invisible hit area */}
@@ -631,12 +631,12 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                     const px = xToPixel(pt.t);
                     const py = yToPixel(pt.mag);
                     const isFromSurvey = pt.source === 'survey_match';
-                    
+
                     // Downward-facing triangle; slightly larger for main
                     const size = isFromSurvey ? 4 : 5;
                     const path = `${px - size},${py - size} ${px + size},${py - size} ${px},${py + size * 0.5}`;
                     const opacity = isFromSurvey ? 0.8 : 0.9;
-                    
+
                     return (
                         <g key={`nd-hit-${i}-${bandKey}`}>
                             {/* invisible hit area */}
@@ -681,8 +681,10 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
             </svg>
 
             {/* tooltip outside SVG */}
-            {tooltip.visible && (
-                <div style={{ position: 'absolute', left: tooltip.x + 12, top: tooltip.y + 12, zIndex: 50, pointerEvents: 'none' }}>
+            {tooltip.visible && (() => {
+                const showOnLeft = tooltip.x > size.width / 2;
+                return (
+                <div style={{ position: 'absolute', left: showOnLeft ? tooltip.x - 12 : tooltip.x + 12, top: tooltip.y + 12, zIndex: 50, pointerEvents: 'none', transform: showOnLeft ? 'translateX(-100%)' : 'none' }}>
                     <div className="bg-white dark:bg-slate-800 text-xs border border-gray-300 dark:border-slate-600 rounded shadow-lg p-2 dark:text-gray-100" style={{ minWidth: 140 }}>
                         <div className="font-medium">Band: {String(tooltip.band).toUpperCase()}{tooltip.nondet ? ' (non-det)' : ''}</div>
                         <div>MJD: {tooltip.t?.toFixed(3)}</div>
@@ -700,7 +702,8 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         )}
                     </div>
                 </div>
-            )}
+                );
+            })()}
         </div>
     );
 }
@@ -729,7 +732,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             <div>
                                 <h3 className="font-semibold mb-2">What This Plot Shows</h3>
                                 <p className="text-gray-600 dark:text-gray-300">
-                                    This plot displays the brightness history of the astronomical object over time, including previous alerts, forced photometry, and non-detections. The X-axis shows Modified Julian Date (MJD), 
+                                    This plot displays the brightness history of the astronomical object over time, including previous alerts, forced photometry, and non-detections. The X-axis shows Modified Julian Date (MJD),
                                     and the Y-axis shows the AB magnitude (note: fainter objects have higher magnitude values, so the Y-axis is inverted).
                                     It takes advantage of data from multiple surveys to provide a comprehensive view of the object's photometric behavior,
                                     if available. We will refer to the survey_match from which the object originates as the "primary" survey_match, and any additional data from other surveys as "other surveys".
@@ -761,7 +764,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             <div>
                                 <h3 className="font-semibold mb-2">Filter Bands</h3>
                                 <p className="text-gray-600 dark:text-gray-300">
-                                    Different colored markers represent different photometric filters (bands), such as <span className="font-mono">g</span>, <span className="font-mono">r</span>, <span className="font-mono">i</span>, etc. 
+                                    Different colored markers represent different photometric filters (bands), such as <span className="font-mono">g</span>, <span className="font-mono">r</span>, <span className="font-mono">i</span>, etc.
                                     Each filter captures light in a specific wavelength range.
                                 </p>
                             </div>
@@ -795,7 +798,7 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                             <div>
                                 <h3 className="font-semibold mb-2">Data Sources</h3>
                                 <p className="text-gray-600 dark:text-gray-300">
-                                    The plot combines data from the "primary" survey_match with data from other surveys' nearest objects, if any. 
+                                    The plot combines data from the "primary" survey_match with data from other surveys' nearest objects, if any.
                                     Use the "Matches" checkbox to include or exclude cross-matched data from additional sources.
                                 </p>
                             </div>
