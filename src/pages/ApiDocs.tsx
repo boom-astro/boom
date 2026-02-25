@@ -9,7 +9,11 @@ export default function ApiDocs() {
   const location = useLocation();
 
   // Open the docs on the actual API host directly
-  const apiHost = import.meta.env.VITE_API_PROXY_TARGET || window.location.origin;
+  // we need to make sure to prepend https:// if we got it from VITE_API_PROXY_TARGET,
+  // because otherwise window.open will treat it as a relative path
+  const apiHost = import.meta.env.VITE_API_PROXY_TARGET
+    ? (import.meta.env.VITE_API_PROXY_TARGET.startsWith('http') ? import.meta.env.VITE_API_PROXY_TARGET : `https://${import.meta.env.VITE_API_PROXY_TARGET}`)
+    : window.location.origin;
   const docsUrl = `${apiHost}/babamul/docs`;
 
   useEffect(() => {
