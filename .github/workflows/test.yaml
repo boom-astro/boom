@@ -68,7 +68,7 @@ jobs:
         # so it may take 70-90s before the container is even created.
         # Poll for up to 180s for the container to appear and exit.
         for i in $(seq 1 60); do
-          CID=$(docker compose ps -q kafka-acl-init 2>/dev/null || true)
+          CID=$(docker compose ps -a -q kafka-acl-init 2>/dev/null || true)
           if [ -n "$CID" ]; then
             STATUS=$(docker inspect -f '{{.State.Status}}' "$CID" 2>/dev/null || echo "unknown")
             if [ "$STATUS" = "exited" ]; then
