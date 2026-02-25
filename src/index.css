@@ -140,6 +140,17 @@
   background: linear-gradient(
     90deg,
     transparent 0%,
+    oklch(0 0 0 / 8%) 40%,
+    oklch(0 0 0 / 15%) 50%,
+    oklch(0 0 0 / 8%) 60%,
+    transparent 100%
+  );
+}
+
+.dark .shimmer::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
     oklch(1 0 0 / 8%) 40%,
     oklch(1 0 0 / 15%) 50%,
     oklch(1 0 0 / 8%) 60%,
