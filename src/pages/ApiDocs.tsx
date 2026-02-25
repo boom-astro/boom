@@ -8,8 +8,9 @@ export default function ApiDocs() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Always hit the same-origin proxy; prod should route /api to the backend via nginx
-  const docsUrl = "/api/babamul/docs";
+  // Open the docs on the actual API host directly
+  const apiHost = import.meta.env.VITE_API_PROXY_TARGET || window.location.origin;
+  const docsUrl = `${apiHost}/babamul/docs`;
 
   useEffect(() => {
     // Open in new tab
