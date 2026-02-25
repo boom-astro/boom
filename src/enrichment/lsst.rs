@@ -13,7 +13,7 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use cdshealpix::nested::get;
 use lightcurve_fitting::{
-    build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+    build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
 };
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
 use moc::moc::range::RangeMOC;
@@ -328,11 +328,10 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
                     let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
                     let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
                     let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-                    let parametric = fit_parametric(&mag_bands);
                     let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
                     LightcurveFittingResult {
                         nonparametric,
-                        parametric,
+                        parametric: vec![],
                         thermal,
                     }
                 }),
@@ -525,7 +524,7 @@ impl LsstEnrichmentWorker {
 mod tests {
     use crate::utils::lightcurves::{Band, PhotometryMag};
     use lightcurve_fitting::{
-        build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+        build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
     };
 
     /// Helper: build a synthetic LSST-like lightcurve with g, r, i bands.
@@ -583,7 +582,6 @@ mod tests {
         assert_eq!(mag_bands.len(), 3);
 
         let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-        let parametric = fit_parametric(&mag_bands);
         let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
 
         // Should produce results for all 3 bands
@@ -601,7 +599,7 @@ mod tests {
         // Full result should serialize
         let result = LightcurveFittingResult {
             nonparametric,
-            parametric,
+            parametric: vec![],
             thermal: Some(thermal),
         };
         let json = serde_json::to_string(&result)
@@ -613,11 +611,9 @@ mod tests {
     fn test_lsst_fitting_empty() {
         let mag_bands = build_mag_bands(&[], &[], &[], &[]);
         let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-        let parametric = fit_parametric(&mag_bands);
         let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
 
         assert!(nonparametric.is_empty());
-        assert!(parametric.is_empty());
         assert!(thermal.is_none());
     }
 

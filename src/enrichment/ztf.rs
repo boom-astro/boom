@@ -17,7 +17,7 @@ use crate::{
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use lightcurve_fitting::{
-    build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+    build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -489,11 +489,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
                     let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
                     let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-                    let parametric = fit_parametric(&mag_bands);
                     let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
                     LightcurveFittingResult {
                         nonparametric,
-                        parametric,
+                        parametric: vec![],
                         thermal,
                     }
                 }),
@@ -718,7 +717,7 @@ impl ZtfEnrichmentWorker {
 mod tests {
     use super::*;
     use lightcurve_fitting::{
-        build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+        build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
     };
 
     /// Helper: build a synthetic lightcurve with a transient-like shape in g and r bands.
@@ -868,12 +867,11 @@ mod tests {
 
         let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
         let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-        let parametric = fit_parametric(&mag_bands);
         let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
 
         let result = LightcurveFittingResult {
             nonparametric,
-            parametric,
+            parametric: vec![],
             thermal,
         };
 
@@ -884,7 +882,6 @@ mod tests {
         let json = serde_json::to_string(&result)
             .expect("LightcurveFittingResult should serialize to JSON");
         assert!(json.contains("nonparametric"));
-        assert!(json.contains("parametric"));
         assert!(json.contains("thermal"));
 
         // Round-trip: deserialize back
@@ -897,11 +894,9 @@ mod tests {
     fn test_fitting_empty_lightcurve() {
         let mag_bands = build_mag_bands(&[], &[], &[], &[]);
         let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-        let parametric = fit_parametric(&mag_bands);
         let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
 
         assert!(nonparametric.is_empty());
-        assert!(parametric.is_empty());
         assert!(thermal.is_none());
     }
 

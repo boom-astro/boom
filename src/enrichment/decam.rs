@@ -6,7 +6,7 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
 use lightcurve_fitting::{
-    build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+    build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -174,11 +174,10 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
                     let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
                     let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
                     let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-                    let parametric = fit_parametric(&mag_bands);
                     let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
                     LightcurveFittingResult {
                         nonparametric,
-                        parametric,
+                        parametric: vec![],
                         thermal,
                     }
                 }),
@@ -258,7 +257,7 @@ impl DecamEnrichmentWorker {
 mod tests {
     use crate::utils::lightcurves::{Band, PhotometryMag};
     use lightcurve_fitting::{
-        build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+        build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
     };
 
     /// Helper: build a synthetic DECam-like lightcurve with g, r, i, z bands.
@@ -299,7 +298,6 @@ mod tests {
         assert_eq!(mag_bands.len(), 4);
 
         let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-        let parametric = fit_parametric(&mag_bands);
         let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
 
         // g, r, i have enough points (>= 5); z has 8 so should also fit
@@ -308,13 +306,12 @@ mod tests {
         // Full result should serialize
         let result = LightcurveFittingResult {
             nonparametric,
-            parametric,
+            parametric: vec![],
             thermal,
         };
         let json = serde_json::to_string(&result)
             .expect("LightcurveFittingResult should serialize to JSON");
         assert!(json.contains("nonparametric"));
-        assert!(json.contains("parametric"));
         assert!(json.contains("thermal"));
     }
 
@@ -322,11 +319,9 @@ mod tests {
     fn test_decam_fitting_empty() {
         let mag_bands = build_mag_bands(&[], &[], &[], &[]);
         let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
-        let parametric = fit_parametric(&mag_bands);
         let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
 
         assert!(nonparametric.is_empty());
-        assert!(parametric.is_empty());
         assert!(thermal.is_none());
     }
 
