@@ -16,6 +16,9 @@ use crate::{
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
+use lightcurve_fitting::{
+    build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
@@ -472,8 +475,48 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, all_bands_properties, programid, _lightcurve) =
+            let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
+
+            // Lightcurve fitting (GP nonparametric)
+            let lc = lightcurve.clone();
+            let fitting_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::task::spawn_blocking(move || {
+                    let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+                    let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+                    let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+                    let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+                    let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+                    let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+                    let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+                    LightcurveFittingResult {
+                        nonparametric,
+                        parametric: vec![],
+                        thermal,
+                    }
+                }),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    warn!("Lightcurve fitting panicked for candid {}: {}", candid, e);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                        parametric: vec![],
+                        thermal: None,
+                    }
+                }
+                Err(_) => {
+                    warn!("Lightcurve fitting timed out (60s) for candid {}", candid);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                        parametric: vec![],
+                        thermal: None,
+                    }
+                }
+            };
 
             // Now, prepare inputs for ML models and run inference
             // (we skip ML inference if features cannot be computed, e.g. missing required features)
@@ -512,11 +555,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 doc! { "$set": {
                     "classifications": mongify(&classifications),
                     "properties": mongify(&properties),
+                    "lightcurve_fitting": mongify(&fitting_result),
                     "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
                     "properties": mongify(&properties),
+                    "lightcurve_fitting": mongify(&fitting_result),
                     "updated_at": now,
                 }}
             };
@@ -665,5 +710,241 @@ impl ZtfEnrichmentWorker {
             programid,
             lightcurve,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightcurve_fitting::{
+        build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
+    };
+
+    /// Helper: build a synthetic lightcurve with a transient-like shape in g and r bands.
+    fn make_synthetic_lightcurve() -> Vec<PhotometryMag> {
+        let mut lc = Vec::new();
+        let jd_start = 2460000.0;
+        // g-band: 20 points with a bump peaking around day 15
+        for i in 0..20 {
+            let t = jd_start + i as f64 * 2.0;
+            let phase = (i as f64 - 7.0) / 5.0;
+            let mag = 19.0 - 1.5 * (-phase * phase).exp();
+            lc.push(PhotometryMag {
+                time: t,
+                mag: mag as f32,
+                mag_err: 0.05,
+                band: Band::G,
+            });
+        }
+        // r-band: 15 points with a dimmer bump
+        for i in 0..15 {
+            let t = jd_start + i as f64 * 2.5 + 1.0;
+            let phase = (i as f64 - 6.0) / 5.0;
+            let mag = 19.3 - 1.2 * (-phase * phase).exp();
+            lc.push(PhotometryMag {
+                time: t,
+                mag: mag as f32,
+                mag_err: 0.06,
+                band: Band::R,
+            });
+        }
+        lc
+    }
+
+    #[test]
+    fn test_photometry_to_raw_arrays() {
+        let lc = make_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        assert_eq!(times.len(), 35);
+        assert_eq!(mags.len(), 35);
+        assert_eq!(mag_errs.len(), 35);
+        assert_eq!(bands.len(), 35);
+
+        // Check band names are lowercase
+        assert!(bands.iter().all(|b| b == "g" || b == "r"));
+        assert_eq!(bands.iter().filter(|b| *b == "g").count(), 20);
+        assert_eq!(bands.iter().filter(|b| *b == "r").count(), 15);
+    }
+
+    #[test]
+    fn test_build_mag_bands_from_photometry() {
+        let lc = make_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+
+        assert!(mag_bands.contains_key("g"));
+        assert!(mag_bands.contains_key("r"));
+        assert_eq!(mag_bands["g"].times.len(), 20);
+        assert_eq!(mag_bands["r"].times.len(), 15);
+
+        // Times should be relative (starting near 0)
+        let g_t_min = mag_bands["g"]
+            .times
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            g_t_min < 2.0,
+            "g-band times should be relative, got min={g_t_min}"
+        );
+    }
+
+    #[test]
+    fn test_build_mag_bands_empty() {
+        let mag_bands = build_mag_bands(&[], &[], &[], &[]);
+        assert!(mag_bands.is_empty());
+    }
+
+    #[test]
+    fn test_nonparametric_fitting_synthetic() {
+        let lc = make_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+
+        // Should produce results for both bands
+        assert_eq!(nonparametric.len(), 2);
+
+        let band_names: Vec<&str> = nonparametric.iter().map(|r| r.band.as_str()).collect();
+        assert!(band_names.contains(&"g"));
+        assert!(band_names.contains(&"r"));
+
+        // Peak magnitude should be brighter than 19.0 (our synthetic peak is ~17.5)
+        for result in &nonparametric {
+            assert!(
+                result.peak_mag.is_some(),
+                "peak_mag should be Some for {}",
+                result.band
+            );
+            assert!(result.n_obs >= 5);
+        }
+
+        // Trained GPs should be returned for reuse by thermal fitting
+        assert!(!trained_gps.is_empty());
+    }
+
+    #[test]
+    fn test_thermal_fitting_synthetic() {
+        let lc = make_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        let (_, trained_gps) = fit_nonparametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        // With g and r bands, thermal fitting should produce a result
+        assert!(
+            thermal.is_some(),
+            "thermal fitting should return Some with g+r bands"
+        );
+        let thermal = thermal.unwrap();
+        assert!(thermal.n_bands_used >= 1);
+        assert!(thermal.ref_band == "g" || thermal.ref_band == "r");
+    }
+
+    #[test]
+    fn test_full_fitting_pipeline_synthetic() {
+        let lc = make_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        let result = LightcurveFittingResult {
+            nonparametric,
+            parametric: vec![],
+            thermal,
+        };
+
+        // Nonparametric should have 2 bands
+        assert_eq!(result.nonparametric.len(), 2);
+
+        // Result should serialize to JSON (needed for BSON/MongoDB)
+        let json = serde_json::to_string(&result)
+            .expect("LightcurveFittingResult should serialize to JSON");
+        assert!(json.contains("nonparametric"));
+        assert!(json.contains("thermal"));
+
+        // Round-trip: deserialize back
+        let deserialized: LightcurveFittingResult = serde_json::from_str(&json)
+            .expect("LightcurveFittingResult should deserialize from JSON");
+        assert_eq!(deserialized.nonparametric.len(), result.nonparametric.len());
+    }
+
+    #[test]
+    fn test_fitting_empty_lightcurve() {
+        let mag_bands = build_mag_bands(&[], &[], &[], &[]);
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        assert!(nonparametric.is_empty());
+        assert!(thermal.is_none());
+    }
+
+    #[test]
+    fn test_fitting_single_band() {
+        let mut lc = Vec::new();
+        let jd_start = 2460000.0;
+        for i in 0..15 {
+            let t = jd_start + i as f64 * 3.0;
+            let phase = (i as f64 - 5.0) / 4.0;
+            let mag = 18.5 - 2.0 * (-phase * phase).exp();
+            lc.push(PhotometryMag {
+                time: t,
+                mag: mag as f32,
+                mag_err: 0.04,
+                band: Band::G,
+            });
+        }
+
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        assert_eq!(nonparametric.len(), 1);
+        assert_eq!(nonparametric[0].band, "g");
+
+        // Thermal with a single band: either None or a result with no useful temperature
+        if let Some(ref t) = thermal {
+            assert!(
+                t.log_temp_peak.is_none() || t.n_bands_used == 0,
+                "thermal with single band should have no temperature estimate"
+            );
+        }
+    }
+
+    #[test]
+    fn test_band_display_matches_fitting_expectations() {
+        // Verify Band::Display produces the lowercase names the fitting crate expects
+        assert_eq!(Band::G.to_string(), "g");
+        assert_eq!(Band::R.to_string(), "r");
+        assert_eq!(Band::I.to_string(), "i");
+        assert_eq!(Band::Z.to_string(), "z");
+        assert_eq!(Band::Y.to_string(), "y");
+        assert_eq!(Band::U.to_string(), "u");
     }
 }

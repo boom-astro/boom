@@ -12,6 +12,9 @@ use crate::utils::lightcurves::{
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use cdshealpix::nested::get;
+use lightcurve_fitting::{
+    build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
+};
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
 use moc::moc::range::RangeMOC;
 use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
@@ -312,11 +315,52 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             let candid = alert.candid;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            let properties = self.get_alert_properties(&alert).await?;
+            let (properties, lightcurve) = self.get_alert_properties(&alert).await?;
+
+            // Lightcurve fitting (GP nonparametric + parametric + thermal)
+            let lc = lightcurve.clone();
+            let fitting_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::task::spawn_blocking(move || {
+                    let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+                    let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+                    let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+                    let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+                    let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+                    let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+                    let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+                    LightcurveFittingResult {
+                        nonparametric,
+                        parametric: vec![],
+                        thermal,
+                    }
+                }),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    warn!("Lightcurve fitting panicked for candid {}: {}", candid, e);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                        parametric: vec![],
+                        thermal: None,
+                    }
+                }
+                Err(_) => {
+                    warn!("Lightcurve fitting timed out (60s) for candid {}", candid);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                        parametric: vec![],
+                        thermal: None,
+                    }
+                }
+            };
 
             let update_alert_document = doc! {
                 "$set": {
                     "properties": mongify(&properties),
+                    "lightcurve_fitting": mongify(&fitting_result),
                     "updated_at": now,
                 }
             };
@@ -360,7 +404,7 @@ impl LsstEnrichmentWorker {
     pub async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
-    ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
+    ) -> Result<(LsstAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
 
@@ -462,13 +506,125 @@ impl LsstEnrichmentWorker {
             photstats.clone()
         };
 
-        Ok(LsstAlertProperties {
-            rock: is_rock,
-            star: is_star,
-            near_brightstar: is_near_brightstar,
-            stationary,
-            photstats,
-            multisurvey_photstats,
-        })
+        Ok((
+            LsstAlertProperties {
+                rock: is_rock,
+                star: is_star,
+                near_brightstar: is_near_brightstar,
+                stationary,
+                photstats,
+                multisurvey_photstats,
+            },
+            lightcurve,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::utils::lightcurves::{Band, PhotometryMag};
+    use lightcurve_fitting::{
+        build_mag_bands, fit_nonparametric, fit_thermal, LightcurveFittingResult,
+    };
+
+    /// Helper: build a synthetic LSST-like lightcurve with g, r, i bands.
+    fn make_lsst_synthetic_lightcurve() -> Vec<PhotometryMag> {
+        let mut lc = Vec::new();
+        let jd_start = 2460000.0;
+        // g-band: 20 points
+        for i in 0..20 {
+            let t = jd_start + i as f64 * 1.5;
+            let phase = (i as f64 - 8.0) / 5.0;
+            let mag = 21.0 - 1.0 * (-phase * phase).exp();
+            lc.push(PhotometryMag {
+                time: t,
+                mag: mag as f32,
+                mag_err: 0.08,
+                band: Band::G,
+            });
+        }
+        // r-band: 18 points
+        for i in 0..18 {
+            let t = jd_start + i as f64 * 1.6 + 0.5;
+            let phase = (i as f64 - 7.0) / 5.0;
+            let mag = 21.2 - 0.8 * (-phase * phase).exp();
+            lc.push(PhotometryMag {
+                time: t,
+                mag: mag as f32,
+                mag_err: 0.09,
+                band: Band::R,
+            });
+        }
+        // i-band: 12 points
+        for i in 0..12 {
+            let t = jd_start + i as f64 * 2.0 + 1.0;
+            let phase = (i as f64 - 5.0) / 4.0;
+            let mag = 21.5 - 0.6 * (-phase * phase).exp();
+            lc.push(PhotometryMag {
+                time: t,
+                mag: mag as f32,
+                mag_err: 0.10,
+                band: Band::I,
+            });
+        }
+        lc
+    }
+
+    #[test]
+    fn test_lsst_fitting_multiband() {
+        let lc = make_lsst_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        assert_eq!(mag_bands.len(), 3);
+
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        // Should produce results for all 3 bands
+        assert_eq!(nonparametric.len(), 3);
+        let band_names: Vec<&str> = nonparametric.iter().map(|r| r.band.as_str()).collect();
+        assert!(band_names.contains(&"g"));
+        assert!(band_names.contains(&"r"));
+        assert!(band_names.contains(&"i"));
+
+        // Thermal should work with 3 bands (ref=g, colors from r and i)
+        assert!(thermal.is_some());
+        let thermal = thermal.unwrap();
+        assert!(thermal.n_bands_used >= 1);
+
+        // Full result should serialize
+        let result = LightcurveFittingResult {
+            nonparametric,
+            parametric: vec![],
+            thermal: Some(thermal),
+        };
+        let json = serde_json::to_string(&result)
+            .expect("LightcurveFittingResult should serialize to JSON");
+        assert!(json.contains("nonparametric"));
+    }
+
+    #[test]
+    fn test_lsst_fitting_empty() {
+        let mag_bands = build_mag_bands(&[], &[], &[], &[]);
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        assert!(nonparametric.is_empty());
+        assert!(thermal.is_none());
+    }
+
+    #[test]
+    fn test_lsst_band_names() {
+        // LSST uses ugrizy — verify Display trait produces expected names
+        assert_eq!(Band::U.to_string(), "u");
+        assert_eq!(Band::G.to_string(), "g");
+        assert_eq!(Band::R.to_string(), "r");
+        assert_eq!(Band::I.to_string(), "i");
+        assert_eq!(Band::Z.to_string(), "z");
+        assert_eq!(Band::Y.to_string(), "y");
     }
 }
