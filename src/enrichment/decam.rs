@@ -5,6 +5,9 @@ use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
+use lightcurve_fitting::{
+    build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -158,11 +161,53 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         for alert in alerts {
             let candid = alert.candid;
 
-            let properties = self.get_alert_properties(&alert).await?;
+            let (properties, lightcurve) = self.get_alert_properties(&alert).await?;
+
+            // Lightcurve fitting (GP nonparametric + parametric + thermal)
+            let lc = lightcurve.clone();
+            let fitting_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::task::spawn_blocking(move || {
+                    let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+                    let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+                    let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+                    let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+                    let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+                    let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+                    let parametric = fit_parametric(&mag_bands);
+                    let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+                    LightcurveFittingResult {
+                        nonparametric,
+                        parametric,
+                        thermal,
+                    }
+                }),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    warn!("Lightcurve fitting panicked for candid {}: {}", candid, e);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                        parametric: vec![],
+                        thermal: None,
+                    }
+                }
+                Err(_) => {
+                    warn!("Lightcurve fitting timed out (60s) for candid {}", candid);
+                    LightcurveFittingResult {
+                        nonparametric: vec![],
+                        parametric: vec![],
+                        thermal: None,
+                    }
+                }
+            };
 
             let update_alert_document = doc! {
                 "$set": {
                     "properties": mongify(&properties),
+                    "lightcurve_fitting": mongify(&fitting_result),
                     "updated_at": now,
                 }
             };
@@ -189,7 +234,7 @@ impl DecamEnrichmentWorker {
     async fn get_alert_properties(
         &self,
         alert: &DecamAlertForEnrichment,
-    ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
+    ) -> Result<(DecamAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
         let prv_candidates = alert.prv_candidates.clone();
         let fp_hists = alert.fp_hists.clone();
 
@@ -199,9 +244,124 @@ impl DecamEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
-        Ok(DecamAlertProperties {
-            stationary,
-            photstats,
-        })
+        Ok((
+            DecamAlertProperties {
+                stationary,
+                photstats,
+            },
+            lightcurve,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::utils::lightcurves::{Band, PhotometryMag};
+    use lightcurve_fitting::{
+        build_mag_bands, fit_nonparametric, fit_parametric, fit_thermal, LightcurveFittingResult,
+    };
+
+    /// Helper: build a synthetic DECam-like lightcurve with g, r, i, z bands.
+    fn make_decam_synthetic_lightcurve() -> Vec<PhotometryMag> {
+        let mut lc = Vec::new();
+        let jd_start = 2460000.0;
+        let band_configs: Vec<(Band, usize, f64, f64, f32)> = vec![
+            (Band::G, 15, 21.0, 1.0, 0.07),
+            (Band::R, 15, 21.3, 0.8, 0.08),
+            (Band::I, 10, 21.5, 0.6, 0.10),
+            (Band::Z, 8, 21.8, 0.5, 0.12),
+        ];
+        for (band, n_pts, base_mag, amplitude, err) in band_configs {
+            for i in 0..n_pts {
+                let t = jd_start + i as f64 * 2.0;
+                let phase = (i as f64 - (n_pts as f64 / 3.0)) / 4.0;
+                let mag = base_mag - amplitude * (-phase * phase).exp();
+                lc.push(PhotometryMag {
+                    time: t,
+                    mag: mag as f32,
+                    mag_err: err,
+                    band: band.clone(),
+                });
+            }
+        }
+        lc
+    }
+
+    #[test]
+    fn test_decam_fitting_multiband() {
+        let lc = make_decam_synthetic_lightcurve();
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        assert_eq!(mag_bands.len(), 4);
+
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let parametric = fit_parametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        // g, r, i have enough points (>= 5); z has 8 so should also fit
+        assert!(nonparametric.len() >= 3);
+
+        // Full result should serialize
+        let result = LightcurveFittingResult {
+            nonparametric,
+            parametric,
+            thermal,
+        };
+        let json = serde_json::to_string(&result)
+            .expect("LightcurveFittingResult should serialize to JSON");
+        assert!(json.contains("nonparametric"));
+        assert!(json.contains("parametric"));
+        assert!(json.contains("thermal"));
+    }
+
+    #[test]
+    fn test_decam_fitting_empty() {
+        let mag_bands = build_mag_bands(&[], &[], &[], &[]);
+        let (nonparametric, trained_gps) = fit_nonparametric(&mag_bands);
+        let parametric = fit_parametric(&mag_bands);
+        let thermal = fit_thermal(&mag_bands, Some(&trained_gps));
+
+        assert!(nonparametric.is_empty());
+        assert!(parametric.is_empty());
+        assert!(thermal.is_none());
+    }
+
+    #[test]
+    fn test_decam_fitting_few_points() {
+        // Only 3 points in one band — below threshold, should produce no results
+        let lc = vec![
+            PhotometryMag {
+                time: 2460000.0,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2460002.0,
+                mag: 20.5,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2460004.0,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+        ];
+        let times: Vec<f64> = lc.iter().map(|p| p.time).collect();
+        let mags: Vec<f64> = lc.iter().map(|p| p.mag as f64).collect();
+        let mag_errs: Vec<f64> = lc.iter().map(|p| p.mag_err as f64).collect();
+        let bands: Vec<String> = lc.iter().map(|p| p.band.to_string()).collect();
+
+        let mag_bands = build_mag_bands(&times, &mags, &mag_errs, &bands);
+        let (nonparametric, _) = fit_nonparametric(&mag_bands);
+
+        // 3 points is below the 5-point minimum for GP fitting
+        assert!(nonparametric.is_empty());
     }
 }
