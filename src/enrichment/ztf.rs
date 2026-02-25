@@ -1,7 +1,6 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
-use lightcurve_fitting::{build_mag_bands, fit_nonparametric, LightcurveFittingResult};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
@@ -17,6 +16,7 @@ use crate::{
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
+use lightcurve_fitting::{build_mag_bands, fit_nonparametric, LightcurveFittingResult};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
