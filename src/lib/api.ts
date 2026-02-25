@@ -10,8 +10,15 @@ export type TokenRecord = {
 // Generic API object shape for responses we don't have a stricter schema for
 export type ApiObject = Record<string, unknown>;
 
-// Profile shape returned by `/profile` endpoint (partial)
-export type Profile = { username?: string; name?: string; email?: string; avatar?: string } | null;
+// Profile shape returned by `/profile`
+export type Profile = {
+  id: string;
+  username: string;
+  email: string;
+  created_at: number;
+  name?: string;
+  avatar?: string;
+} | null;
 
 // Kafka credential returned by `/babamul/kafka-credentials`
 export type KafkaCredential = { id: string; name: string; kafka_username: string; kafka_password: string };

@@ -36,6 +36,10 @@ export default function Login({ onLoginSuccess }: Props) {
     setError(null);
     try {
       await api.login(email, password);
+      const profile = await api.fetchProfile().catch(() => null);
+      const identifiedEmail = profile?.email ?? email;
+      const identifiedUserId = profile?.id ?? profile?.username ?? identifiedEmail;
+      analytics.identifyUser(identifiedUserId, identifiedEmail);
       analytics.trackLoginSuccess({ email });
       onLoginSuccess();
     } catch (err: unknown) {
