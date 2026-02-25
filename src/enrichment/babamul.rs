@@ -637,23 +637,25 @@ impl Babamul {
 
         // Iterate over the alerts
         for (alert, cross_matches) in alerts {
-            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < LSST_MIN_RELIABILITY
-                || alert.candidate.dia_source.psf_flux_flag.unwrap_or(false)
-                || alert.candidate.dia_source.ap_flux_flag.unwrap_or(false)
-                || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
-                || alert.candidate.dia_source.pixel_flags_bad.unwrap_or(false)
-                || alert
-                    .candidate
-                    .dia_source
-                    .pixel_flags_saturated
-                    .unwrap_or(false)
-                || alert.candidate.dia_source.shape_flag.unwrap_or(false)
-                || alert.candidate.dia_source.centroid_flag.unwrap_or(false)
-                || alert.candidate.dia_source.extendedness.is_none()
-                || alert.candidate.dia_source.extendedness.unwrap_or(0_f32) == 1_f32
+            let dia_source = &alert.candidate.dia_source;
+            if alert.properties.rock
                 || alert.candidate.snr_psf.unwrap_or(0.0) < 3.0
-                || alert.candidate.dia_source.is_dipole.unwrap_or(false)
-                || alert.properties.rock
+                || dia_source.reliability.unwrap_or(0.0) < LSST_MIN_RELIABILITY
+                || dia_source.psf_flux_flag.unwrap_or(false)
+                || dia_source.psf_flux_flag_edge.unwrap_or(false)
+                || dia_source.ap_flux_flag.unwrap_or(false)
+                || dia_source.pixel_flags_streak.unwrap_or(false)
+                || dia_source.pixel_flags_nodata.unwrap_or(false)
+                || dia_source.pixel_flags_cr.unwrap_or(false)
+                || dia_source.pixel_flags_bad.unwrap_or(false)
+                || dia_source.pixel_flags_saturated.unwrap_or(false)
+                || dia_source.shape_flag.unwrap_or(false)
+                || dia_source.centroid_flag.unwrap_or(false)
+                || dia_source.extendedness.is_none()
+                || dia_source.extendedness.unwrap_or(0_f32).is_nan()
+                || dia_source.extendedness.unwrap_or(0_f32) == 1_f32
+                || dia_source.glint_trail.unwrap_or(false)
+                || dia_source.is_dipole.unwrap_or(false)
             {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
