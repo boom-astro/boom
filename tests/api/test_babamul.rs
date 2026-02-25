@@ -468,7 +468,7 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey_name}/objects/{candid}/cutouts success case
+    /// Test GET /babamul/surveys/{survey_name}/cutouts success case
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
         load_dotenv();
@@ -501,14 +501,14 @@ mod tests {
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
                     .wrap(from_fn(babamul_auth_middleware))
-                    .service(routes::babamul::surveys::get_alert_cutouts),
+                    .service(routes::babamul::surveys::get_cutouts),
             ),
         )
         .await;
 
         let req = test::TestRequest::get()
             .uri(&format!(
-                "/babamul/surveys/ztf/alerts/{}/cutouts",
+                "/babamul/surveys/ztf/cutouts?candid={}",
                 test_candid
             ))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -518,7 +518,8 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "Should successfully retrieve cutouts"
+            "Should successfully retrieve cutouts: {}",
+            read_str_response(resp).await
         );
 
         let body = read_json_response(resp).await;
@@ -540,7 +541,7 @@ mod tests {
 
         // Test retrieval of non-existent candid
         let req = test::TestRequest::get()
-            .uri("/babamul/surveys/ztf/alerts/8888888888/cutouts")
+            .uri("/babamul/surveys/ztf/cutouts?candid=8888888888")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
 
@@ -732,10 +733,6 @@ mod tests {
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
-        assert!(
-            body["data"]["cutoutScience"].is_string(),
-            "Cutout should be base64 encoded string"
-        );
 
         // Clean up
         drop_alert_from_collections(candid, "LSST").await.unwrap();
@@ -806,10 +803,6 @@ mod tests {
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
-        );
-        assert!(
-            body["data"]["cutoutScience"].is_string(),
-            "Cutout should be base64 encoded string"
         );
 
         // Clean up
@@ -1908,5 +1901,536 @@ mod tests {
             StatusCode::NOT_FOUND,
             "Should not be able to delete another user's token"
         );
+    }
+
+    /// Test GET /babamul/surveys/{survey}/objects/{object_id}/cross-matches
+    #[actix_rt::test]
+    async fn test_get_object_xmatches() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        // Create test aux data with cross_matches
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let test_object_id = "ZTF24aaaaaaa".to_string();
+
+        let test_object = boom::alert::ZtfObject {
+            object_id: test_object_id.clone(),
+            coordinates: Coordinates::new(124.5, -12.3),
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+            aliases: None,
+            created_at: 0.0,
+            updated_at: 0.0,
+            cross_matches: Some(
+                serde_json::json!({
+                    "gaia": [{"mag": 15.2, "distance": 0.5}],
+                    "panstarrs": []
+                })
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|item| mongodb::bson::to_document(item).ok())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>(),
+            ),
+        };
+
+        aux_collection
+            .insert_one(&test_object)
+            .await
+            .expect("Failed to insert test object");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_object_xmatches),
+                ),
+        )
+        .await;
+
+        // Test successful retrieval
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/objects/{}/cross-matches",
+                test_object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve cross-matches"
+        );
+
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data"
+        );
+
+        // Test not found
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/objects/ZTF99nonexistent/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Clean up
+        aux_collection
+            .delete_one(doc! { "_id": &test_object_id })
+            .await
+            .ok();
+    }
+
+    // Test POST /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
+    #[actix_rt::test]
+    async fn test_get_cross_matches_batch() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+        // Create test aux data with cross_matches
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let test_objects = vec![
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj001_{}", unique_suffix),
+                coordinates: Coordinates::new(125.0, -12.0),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: Some(
+                    serde_json::json!({
+                        "gaia": [{"mag": 15.2, "distance": 0.5}],
+                        "panstarrs": []
+                    })
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|item| mongodb::bson::to_document(item).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                ),
+            },
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj002_{}", unique_suffix),
+                coordinates: Coordinates::new(126.0, -11.5),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: Some(
+                    serde_json::json!({
+                        "gaia": [{"mag": 16.5, "distance": 1.0}],
+                        "panstarrs": [{"mag": 17.0, "distance": 0.8}]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|item| mongodb::bson::to_document(item).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                ),
+            },
+        ];
+
+        for obj in &test_objects {
+            aux_collection
+                .insert_one(obj)
+                .await
+                .expect("Failed to insert test object");
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_objects_xmatches),
+                ),
+        )
+        .await;
+
+        // Test successful batch retrieval
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "objectIds": [
+                    format!("ZTF24obj001_{}", unique_suffix),
+                    format!("ZTF24obj002_{}", unique_suffix)
+                ]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve batch cross-matches"
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data"
+        );
+
+        // Test with some non-existent object IDs
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "objectIds": [
+                    format!("ZTF24obj001_{}", unique_suffix),
+                    "ZTF99nonexistent"
+                ]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve cross-matches even if some object IDs do not exist"
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data for existing object"
+        );
+        assert!(
+            body["data"].get("ZTF99nonexistent").is_none(),
+            "Should not have data for non-existent object"
+        );
+
+        // Clean up test objects
+        for obj in test_objects {
+            aux_collection
+                .delete_one(doc! { "_id": &obj.object_id })
+                .await
+                .ok();
+        }
+    }
+
+    /// Test POST /babamul/surveys/{survey}/objects/cone-search
+    #[actix_rt::test]
+    async fn test_cone_search_objects() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        // Insert test objects with specific coordinates
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let test_objects = vec![
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj001_{}", unique_suffix),
+                coordinates: Coordinates::new(125.0, -12.0),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            },
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj002_{}", unique_suffix),
+                coordinates: Coordinates::new(126.0, -11.5),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            },
+        ];
+
+        for obj in &test_objects {
+            aux_collection
+                .insert_one(obj)
+                .await
+                .expect("Failed to insert test object");
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::cone_search_objects),
+                ),
+        )
+        .await;
+
+        // Test successful cone search with multiple coordinates
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0],
+                    "search2": [126.0, -11.5]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cone search should succeed (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(body["data"].is_object(), "Should return results as object");
+
+        // Test with invalid radius (too large)
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 700.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius > 600 arcsec"
+        );
+
+        // Test with no coordinates
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {},
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject empty coordinates"
+        );
+
+        // Test with unauthorized access
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Clean up
+        for obj in test_objects {
+            aux_collection
+                .delete_one(doc! { "_id": &obj.object_id })
+                .await
+                .ok();
+        }
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/cone-search
+    #[actix_rt::test]
+    async fn test_cone_search_alerts() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::cone_search_alerts),
+                ),
+        )
+        .await;
+
+        // Test with invalid radius (too small)
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 0.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius <= 0"
+        );
+
+        // Test with invalid radius (too large)
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 700.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius > 600"
+        );
+
+        // Test with no coordinates
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {},
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject empty coordinates"
+        );
+
+        // Test with unauthorized access
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Test successful cone search with valid parameters
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0,
+                "start_jd": 2450000.0,
+                "end_jd": 2460000.0,
+                "min_magpsf": 10.0,
+                "max_magpsf": 20.0,
+                "is_rock": false,
+                "is_star": false
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cone search with valid parameters should succeed (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(body["message"].is_string(), "Should include a message");
+        assert!(body["data"].is_object(), "Should return results as object");
     }
 }

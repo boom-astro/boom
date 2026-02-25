@@ -1,11 +1,11 @@
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, EnrichedZtfAlert};
+use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::fitting::{fit_nonparametric, photometry_to_mag_bands, LightcurveFittingResult};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag,
+    PhotometryMag, ZTF_ZP,
 };
 use crate::{
     alert::ZtfCandidate,
@@ -38,7 +38,8 @@ pub struct ZtfAlertPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    #[serde(alias = "snr")]
+    pub snr_psf: Option<f64>,
     pub programid: i32,
 }
 
@@ -51,15 +52,18 @@ pub struct ZtfForcedPhotometry {
     pub magpsf: Option<f64>,
     pub sigmapsf: Option<f64>,
     pub diffmaglim: f64,
-    #[serde(rename = "psfFlux")]
-    pub flux: Option<f64>, // in nJy
-    #[serde(rename = "psfFluxErr")]
-    pub flux_err: f64, // in nJy
+    // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+    #[serde(rename = "forcediffimflux")]
+    pub flux: Option<f64>,
+    // TODO: read from psfFlux once that is moved to a fixed ZP in the database
+    #[serde(rename = "forcediffimfluxunc")]
+    pub flux_err: f64,
     pub band: Band,
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    #[serde(alias = "snr")]
+    pub snr_psf: Option<f64>,
     pub programid: i32,
     pub procstatus: Option<String>,
 }
@@ -78,10 +82,10 @@ pub struct ZtfPhotometry {
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
     pub band: Band,
-    pub zp: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    #[serde(alias = "snr")]
+    pub snr_psf: Option<f64>,
     pub programid: i32,
 }
 
@@ -98,9 +102,8 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr: phot.snr,
+            snr_psf: phot.snr_psf,
             programid: phot.programid,
-            zp: Some(23.9), // alert photometry uses a fixed zeropoint of 23.9
         })
     }
 }
@@ -116,19 +119,36 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             return Err(EnrichmentWorkerError::BadProcstatus(procstatus));
         }
 
+        // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
+        let zp_scaling_factor = if let Some(magzpsci) = phot.magzpsci {
+            10f64.powf((ZTF_ZP as f64 - magzpsci) / 2.5)
+        } else {
+            return Err(EnrichmentWorkerError::MissingMagZPSci);
+        };
+
+        let flux = if phot.flux != Some(-99999.0) && phot.flux.map_or(false, |f| !f.is_nan()) {
+            phot.flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
+        } else {
+            None
+        };
+        let flux_err = if phot.flux_err != -99999.0 && !phot.flux_err.is_nan() {
+            phot.flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
+        } else {
+            return Err(EnrichmentWorkerError::MissingFluxPSF);
+        };
+
         Ok(ZtfPhotometry {
             jd: phot.jd,
             magpsf: phot.magpsf,
             sigmapsf: phot.sigmapsf,
             diffmaglim: phot.diffmaglim,
-            flux: phot.flux,
-            flux_err: phot.flux_err,
+            flux,
+            flux_err,
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr: phot.snr,
+            snr_psf: phot.snr_psf,
             programid: phot.programid,
-            zp: phot.magzpsci, // forced photometry has a zeropoint per datapoint
         })
     }
 }
@@ -203,7 +223,7 @@ impl ZtfPhotometry {
         // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
         // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
         // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
-        match (self.snr, self.magpsf, self.sigmapsf) {
+        match (self.snr_psf, self.magpsf, self.sigmapsf) {
             (Some(snr), Some(mag), Some(sig)) => match min_snr {
                 Some(thresh) if snr.abs() < thresh => None,
                 _ => Some(PhotometryMag {
@@ -445,7 +465,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
-        let mut enriched_alerts: Vec<EnrichedZtfAlert> = Vec::new();
+        let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
@@ -544,13 +564,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = EnrichedZtfAlert::from_alert_properties_and_cutouts(
-                    alert,
-                    Some(cutouts.cutout_science),
-                    Some(cutouts.cutout_template),
-                    Some(cutouts.cutout_difference),
-                    properties,
-                );
+                let enriched_alert = BabamulZtfAlert::from_alert_and_properties(alert, properties);
                 enriched_alerts.push(enriched_alert);
             }
         }

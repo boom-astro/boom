@@ -5,9 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use utoipa::ToSchema;
 
-pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitudes
+pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitude
 pub const SNT: f32 = 3.0; // Signal-to-noise threshold for detection
 const FACTOR: f32 = 1.0857362047581294; // where 1.0857362047581294 = 2.5 / np.log(10)
+
+// now survey-specific values:
+pub const ZTF_ZP: f32 = 23.9;
+pub const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
 
 pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {
     let mag = -2.5 * (flux).log10() + zp;
@@ -45,6 +49,19 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
+}
+
+impl std::fmt::Display for Band {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Band::G => write!(f, "g"),
+            Band::R => write!(f, "r"),
+            Band::I => write!(f, "i"),
+            Band::Z => write!(f, "z"),
+            Band::Y => write!(f, "y"),
+            Band::U => write!(f, "u"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema)]

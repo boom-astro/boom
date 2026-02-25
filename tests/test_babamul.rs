@@ -3,12 +3,15 @@ use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
     conf::AppConfig,
     enrichment::{
-        babamul::{EnrichedLsstAlert, EnrichedZtfAlert},
+        babamul::{
+            BabamulLsstAlert, BabamulSurveyMatch, BabamulSurveyMatches, BabamulZtfAlert,
+            ForcedPhotometry,
+        },
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
-        ZtfAlertProperties,
+        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
     },
     utils::{
-        lightcurves::{Band, PerBandProperties},
+        lightcurves::{flux2mag, Band, PerBandProperties, ZTF_ZP},
         testing::TEST_CONFIG_FILE,
     },
 };
@@ -77,7 +80,7 @@ fn create_lspsc_cross_matches(
 }
 
 /// Create a mock enriched ZTF alert for testing
-fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -> EnrichedZtfAlert {
+fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -> BabamulZtfAlert {
     // Create a minimal Candidate and ZtfCandidate using defaults
     let mut inner_candidate = Candidate::default();
     inner_candidate.candid = candid;
@@ -87,22 +90,88 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
     inner_candidate.sigmapsf = 0.1;
     inner_candidate.fid = 1; // g-band
     inner_candidate.programid = 1; // public
+    inner_candidate.drb = Some(1.0); // DRB value
 
-    let candidate = ZtfCandidate {
-        candidate: inner_candidate,
-        psf_flux: 1000.0,
-        psf_flux_err: 10.0,
-        snr: 100.0,
+    let candidate = ZtfCandidate::try_from(inner_candidate.clone()).unwrap();
+
+    // let's make sure that the flux and flux_err generated when converting from Candidate to ZtfCandidate
+    // can be converted back to the original magpsf and sigmapsf using the same ZP, to verify that the conversion is consistent
+    let (new_magpsf, new_sigmapsf) = flux2mag(
+        candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
+        candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
+        ZTF_ZP,
+    );
+    assert!(
+        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-6,
+        "Magnitude conversion mismatch: expected {}, got {}",
+        candidate.candidate.magpsf,
+        new_magpsf
+    );
+    assert!(
+        (new_sigmapsf - candidate.candidate.sigmapsf).abs() < 1e-6,
+        "Magnitude error conversion mismatch: expected {}, got {}",
+        candidate.candidate.sigmapsf,
+        new_sigmapsf
+    );
+
+    let magpsf = 15.949999;
+    let sigmapsf = 0.002316;
+    let flux = -11859.88;
+    let flux_err = 25.300741;
+    let magzpsci = 26.1352;
+    let ztf_forced_photometry = ZtfForcedPhotometry {
+        jd: 2460447.9202778,
+        magpsf: Some(magpsf),
+        sigmapsf: Some(sigmapsf),
+        diffmaglim: 20.5,
+        flux: Some(flux),
+        flux_err: flux_err,
+        snr_psf: Some(100.0),
         band: Band::G,
+        ra: Some(150.0),
+        dec: Some(30.0),
+        magzpsci: Some(magzpsci),
+        programid: 1,
+        procstatus: Some("0".to_string()),
     };
 
-    EnrichedZtfAlert {
+    let fp_as_photometry = ZtfPhotometry::try_from(ztf_forced_photometry).unwrap();
+
+    let new_flux = fp_as_photometry.flux.unwrap();
+    let new_flux_err = fp_as_photometry.flux_err;
+
+    // the new flux is on a fixed zeropoint (ZTF_ZP), verify
+    // that converting it back to magnitude gives the same magpsf and sigmapsf as the original data
+    let (new_magpsf, new_sigmapsf) = flux2mag(
+        -new_flux as f32 * 1e-9,    // from nJy to Jy
+        new_flux_err as f32 * 1e-9, // from nJy to Jy
+        ZTF_ZP,
+    );
+    assert!(
+        (new_magpsf - magpsf as f32).abs() < 1e-6,
+        "Magnitude conversion mismatch: expected {}, got {}",
+        magpsf,
+        new_magpsf
+    );
+    assert!(
+        (new_sigmapsf - sigmapsf as f32).abs() < 1e-6,
+        "Magnitude error conversion mismatch: expected {}, got {}",
+        sigmapsf,
+        new_sigmapsf
+    );
+
+    BabamulZtfAlert {
         candid,
         object_id: object_id.to_string(),
         candidate,
         prv_candidates: vec![],
         prv_nondetections: vec![],
-        fp_hists: vec![],
+        fp_hists: vec![ForcedPhotometry {
+            jd: fp_as_photometry.jd,
+            flux: fp_as_photometry.flux,
+            flux_err: fp_as_photometry.flux_err,
+            band: fp_as_photometry.band,
+        }],
         properties: ZtfAlertProperties {
             rock: is_rock,
             star: false,
@@ -111,10 +180,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
         },
-        cutout_science: None,
-        cutout_template: None,
-        cutout_difference: None,
-        survey_matches: None,
+        survey_matches: BabamulSurveyMatches::default(),
     }
 }
 
@@ -127,7 +193,7 @@ async fn create_mock_enriched_lsst_alert(
     is_rock: bool,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
+) -> (BabamulLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
     create_mock_enriched_lsst_alert_with_matches(
         candid,
         object_id,
@@ -152,7 +218,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
-) -> (EnrichedLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
+) -> (BabamulLsstAlert, HashMap<String, Vec<serde_json::Value>>) {
     // Create a minimal DiaSource with default values
     let mut dia_source = DiaSource::default();
     dia_source.candid = candid;
@@ -182,11 +248,13 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         sigmapsf: 0.1,
         diffmaglim: 20.5,
         isdiffpos: true,
-        snr: 100.0,
+        snr_psf: Some(100.0),
         magap: 18.6,
         sigmagap: 0.12,
+        snr_ap: Some(90.0),
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
+        chipsf: Some(2.0),
     };
     let prv_candidate = LsstPhotometry {
         jd: 2460000.0,
@@ -195,9 +263,8 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         diffmaglim: 20.5,
         flux: Some(1000.0),
         flux_err: 10.0,
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
         band: Band::R,
-        zp: Some(8.9),
         ra: Some(ra_override.unwrap_or(150.0)),
         dec: Some(dec_override.unwrap_or(30.0)),
     };
@@ -217,13 +284,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         .await
         .unwrap();
 
-    EnrichedLsstAlert::from_alert_properties_and_cutouts(
-        lsst_alert_for_enrichment,
-        None,
-        None,
-        None,
-        properties,
-    )
+    BabamulLsstAlert::from_alert_and_properties(lsst_alert_for_enrichment, properties)
 }
 
 /// Consume messages from a Kafka topic and return them as a vector of byte arrays.
@@ -272,7 +333,7 @@ async fn consume_kafka_messages(topic: &str, config: &AppConfig) -> Vec<Vec<u8>>
 }
 
 #[tokio::test]
-async fn test_compute_babamul_category() {
+async fn test_compute_babamul_category_lsst() {
     use boom::enrichment::{LsstSurveyMatches, ZtfMatch};
 
     // Test case 1: No ZTF match + stellar LSPSC → "no-ztf-match.stellar"
@@ -357,6 +418,20 @@ async fn test_compute_babamul_category() {
         "Alert with no matches but in footprint should be hostless"
     );
 
+    let ztf_public_prv_candidate = ZtfPhotometry {
+        jd: 2459999.5,
+        magpsf: Some(19.0),
+        sigmapsf: Some(0.07),
+        diffmaglim: 21.0,
+        flux: Some(1000.0),
+        flux_err: 10.0,
+        band: Band::G,
+        ra: Some(180.0),
+        dec: Some(0.0),
+        snr_psf: Some(100.0),
+        programid: 1,
+    };
+
     // Test case 5: ZTF match + stellar LSPSC → "ztf-match.stellar"
     let cross_matches = create_lspsc_cross_matches(Some(0.5), Some(0.95), false);
     let survey_matches = Some(LsstSurveyMatches {
@@ -364,7 +439,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaaa".to_string(),
             ra: 180.0,
             dec: 0.0,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -394,7 +469,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaab".to_string(),
             ra: 180.1,
             dec: 0.1,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -424,7 +499,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaac".to_string(),
             ra: 180.2,
             dec: 0.2,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -453,7 +528,7 @@ async fn test_compute_babamul_category() {
             object_id: "ZTF24aaaaaad".to_string(),
             ra: 180.5,
             dec: 0.5,
-            prv_candidates: vec![],
+            prv_candidates: vec![ztf_public_prv_candidate.clone()],
             prv_nondetections: vec![],
             fp_hists: vec![],
         }),
@@ -513,15 +588,64 @@ async fn test_compute_babamul_category() {
         category, "no-ztf-match.unknown",
         "Alert with empty LSPSC matches and no ZTF match should be unknown"
     );
+
+    // Test case 11: ZTF match whose prv_candidates are all non-public (programid != 1) →
+    // should be treated as if there is no ZTF match at all → "no-ztf-match.*"
+    let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
+    let survey_matches_non_public = Some(LsstSurveyMatches {
+        ztf: Some(ZtfMatch {
+            object_id: "ZTF24aaaaaae".to_string(),
+            ra: 180.3,
+            dec: 0.3,
+            prv_candidates: vec![
+                // programid = 2 → not public, will be filtered out by BabamulSurveyMatch::from
+                ZtfPhotometry {
+                    jd: 2459999.5,
+                    magpsf: Some(19.0),
+                    sigmapsf: Some(0.07),
+                    diffmaglim: 21.0,
+                    flux: Some(1000.0),
+                    flux_err: 10.0,
+                    band: Band::G,
+                    ra: Some(180.3),
+                    dec: Some(0.3),
+                    snr_psf: Some(100.0),
+                    programid: 2,
+                },
+            ],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+        }),
+    });
+    let (alert_no_public_data, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
+        9876543220,
+        "LSST24aaaaaak",
+        0.8,
+        false,
+        false,
+        Some(cross_matches),
+        survey_matches_non_public,
+        None,
+        None,
+    )
+    .await;
+    // The ZTF match must have been dropped because its only prv_candidate is non-public
+    assert!(
+        alert_no_public_data.survey_matches.ztf.is_none(),
+        "ZTF match with only non-public prv_candidates should be removed from survey_matches"
+    );
+    let category = alert_no_public_data.compute_babamul_category(&cross_matches);
+    assert_eq!(
+        category, "no-ztf-match.hostless",
+        "Alert whose ZTF match was filtered out (no public prv_candidates) should be categorised as no-ztf-match"
+    );
 }
 
 #[test]
 fn test_compute_babamul_category_ztf() {
-    use boom::enrichment::ZtfSurveyMatches;
-
     // Test case 1: No LSST match + not stellar + sgscore1 > 0.5 → "no-lsst-match.hostless"
     let mut alert_no_lsst = create_mock_enriched_ztf_alert(1234567890, "ZTF21aaaaaaa", false);
-    alert_no_lsst.survey_matches = None;
+    alert_no_lsst.survey_matches = BabamulSurveyMatches::default();
     alert_no_lsst.properties.star = false;
     alert_no_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
     let category = alert_no_lsst.compute_babamul_category();
@@ -533,7 +657,7 @@ fn test_compute_babamul_category_ztf() {
     // Test case 2: No LSST match + stellar → "no-lsst-match.stellar"
     let mut alert_no_lsst_stellar =
         create_mock_enriched_ztf_alert(1234567891, "ZTF21aaaaaab", false);
-    alert_no_lsst_stellar.survey_matches = None;
+    alert_no_lsst_stellar.survey_matches = BabamulSurveyMatches::default();
     alert_no_lsst_stellar.properties.star = true;
     let category = alert_no_lsst_stellar.compute_babamul_category();
     assert_eq!(
@@ -543,15 +667,17 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 3: LSST match + not stellar + sgscore1 > 0.5 → "lsst-match.hostless"
     let mut alert_lsst = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", false);
-    alert_lsst.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaaa".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst.properties.star = false;
     alert_lsst.candidate.candidate.sgscore1 = Some(0.8); // Star-like
     let category = alert_lsst.compute_babamul_category();
@@ -562,15 +688,17 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 4: LSST match + stellar → "lsst-match.stellar"
     let mut alert_lsst_stellar = create_mock_enriched_ztf_alert(1234567893, "ZTF21aaaaaad", false);
-    alert_lsst_stellar.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst_stellar.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaab".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst_stellar.properties.star = true;
     let category = alert_lsst_stellar.compute_babamul_category();
     assert_eq!(
@@ -580,7 +708,7 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 5: No LSST match + not stellar + sgscore1 <= 0.5 → "no-lsst-match.hosted"
     let mut alert_hosted = create_mock_enriched_ztf_alert(1234567894, "ZTF21aaaaaae", false);
-    alert_hosted.survey_matches = None;
+    alert_hosted.survey_matches = BabamulSurveyMatches::default();
     alert_hosted.properties.star = false;
     alert_hosted.candidate.candidate.sgscore1 = Some(0.3); // Galaxy-like
     let category = alert_hosted.compute_babamul_category();
@@ -591,15 +719,17 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 6: LSST match + not stellar + sgscore1 <= 0.5 → "lsst-match.hosted"
     let mut alert_lsst_hosted = create_mock_enriched_ztf_alert(1234567895, "ZTF21aaaaaaf", false);
-    alert_lsst_hosted.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst_hosted.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaac".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst_hosted.properties.star = false;
     alert_lsst_hosted.candidate.candidate.sgscore1 = Some(0.4); // Galaxy-like
     let category = alert_lsst_hosted.compute_babamul_category();
@@ -610,7 +740,7 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 7: Negative sgscore (placeholder) should be ignored → "no-lsst-match.hostless"
     let mut alert_neg_sgscore = create_mock_enriched_ztf_alert(1234567896, "ZTF21aaaaaag", false);
-    alert_neg_sgscore.survey_matches = None;
+    alert_neg_sgscore.survey_matches = BabamulSurveyMatches::default();
     alert_neg_sgscore.properties.star = false;
     alert_neg_sgscore.candidate.candidate.sgscore1 = Some(-99.0); // Placeholder value
     alert_neg_sgscore.candidate.candidate.sgscore2 = Some(-99.0);
@@ -623,7 +753,7 @@ fn test_compute_babamul_category_ztf() {
 
     // Test case 8: sgscore2 or sgscore3 < 0.5 should mark as hosted
     let mut alert_sgscore2 = create_mock_enriched_ztf_alert(1234567897, "ZTF21aaaaaah", false);
-    alert_sgscore2.survey_matches = None;
+    alert_sgscore2.survey_matches = BabamulSurveyMatches::default();
     alert_sgscore2.properties.star = false;
     alert_sgscore2.candidate.candidate.sgscore1 = Some(0.8); // High score (not hosted by sgscore1)
     alert_sgscore2.candidate.candidate.sgscore2 = Some(0.3); // Low score (hosted)
@@ -636,7 +766,7 @@ fn test_compute_babamul_category_ztf() {
     // Test case 9: No LSST match + near_brightstar=true + star=false → "no-lsst-match.stellar"
     let mut alert_near_brightstar =
         create_mock_enriched_ztf_alert(1234567898, "ZTF21aaaaaai", false);
-    alert_near_brightstar.survey_matches = None;
+    alert_near_brightstar.survey_matches = BabamulSurveyMatches::default();
     alert_near_brightstar.properties.star = false;
     alert_near_brightstar.properties.near_brightstar = true;
     let category = alert_near_brightstar.compute_babamul_category();
@@ -648,15 +778,17 @@ fn test_compute_babamul_category_ztf() {
     // Test case 10: LSST match + near_brightstar=true + star=false → "lsst-match.stellar"
     let mut alert_lsst_near_brightstar =
         create_mock_enriched_ztf_alert(1234567899, "ZTF21aaaaaaj", false);
-    alert_lsst_near_brightstar.survey_matches = Some(ZtfSurveyMatches {
-        lsst: Some(boom::enrichment::LsstMatch {
+    alert_lsst_near_brightstar.survey_matches = BabamulSurveyMatches {
+        lsst: Some(BabamulSurveyMatch {
             object_id: "LSST24aaaaaad".to_string(),
             ra: 150.0,
             dec: 30.0,
             prv_candidates: vec![],
+            prv_nondetections: vec![],
             fp_hists: vec![],
         }),
-    });
+        ztf: None,
+    };
     alert_lsst_near_brightstar.properties.star = false;
     alert_lsst_near_brightstar.properties.near_brightstar = true;
     let category = alert_lsst_near_brightstar.compute_babamul_category();
@@ -690,17 +822,22 @@ async fn test_babamul_process_ztf_alerts() {
     let alert2 = create_mock_enriched_ztf_alert(1234567891, &ztf_obj2, false);
 
     // Process the alerts
-    let _result = babamul
+    let count = babamul
         .process_ztf_alerts(vec![alert1, alert2])
         .await
         .unwrap();
+    assert_eq!(
+        count, 2,
+        "Expected to process 2 ZTF alerts, but processed {}",
+        count
+    );
 
     // Consume messages from Kafka topic and verify our specific alerts are present
     let messages = consume_kafka_messages(topic, &config).await;
     let expected: std::collections::HashSet<String> =
         [ztf_obj1.clone(), ztf_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedZtfAlert::get_schema();
+    let schema = boom::enrichment::babamul::BabamulZtfAlert::get_schema();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -759,7 +896,7 @@ async fn test_babamul_process_lsst_alerts() {
     let expected: std::collections::HashSet<String> =
         [lsst_obj1.clone(), lsst_obj2.clone()].into_iter().collect();
 
-    let schema = boom::enrichment::babamul::EnrichedLsstAlert::get_schema();
+    let schema = boom::enrichment::babamul::BabamulLsstAlert::get_schema();
     let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in &messages {
         if let Ok(reader) = apache_avro::Reader::with_schema(&schema, &msg[..]) {
@@ -834,6 +971,38 @@ async fn test_babamul_filters_rocks() {
 
     // Rock alerts should not be sent to any topic
     // Since they're filtered out at the source, we just verify the processing succeeded
+}
+
+#[tokio::test]
+async fn test_babamul_filters_low_drb() {
+    use boom::enrichment::babamul::Babamul;
+
+    let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let babamul = Babamul::new(&config);
+
+    // Create a ZTF alert with DRB below the ZTF_MIN_DRB threshold (0.2)
+    let mut alert_low_drb = create_mock_enriched_ztf_alert(1234567900, "ZTF21aaaaaak", false);
+    alert_low_drb.candidate.candidate.drb = Some(0.1); // Below ZTF_MIN_DRB threshold
+
+    // Create a ZTF alert with no DRB value (None → defaults to 0.0, should be filtered)
+    let mut alert_no_drb = create_mock_enriched_ztf_alert(1234567902, "ZTF21aaaaaam", false);
+    alert_no_drb.candidate.candidate.drb = None;
+
+    let result = babamul
+        .process_ztf_alerts(vec![alert_low_drb, alert_no_drb])
+        .await;
+    assert!(
+        result.is_ok(),
+        "Failed to process ZTF alerts: {:?}",
+        result.err()
+    );
+
+    // All low-DRB alerts should be filtered out
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Expected 0 messages for ZTF alerts with DRB below threshold"
+    );
 }
 
 #[tokio::test]
@@ -926,12 +1095,17 @@ async fn test_babamul_lsst_with_ztf_match() {
             dec: Some(0.0),
             magpsf: Some(19.0),
             sigmapsf: Some(0.07),
+            magap: Some(19.1),
+            sigmagap: Some(0.1),
             diffmaglim: Some(21.0),
             ..Default::default()
         },
         psf_flux: Some(1300.0),
         psf_flux_err: Some(13.0),
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
+        ap_flux: Some(1350.0),
+        ap_flux_err: Some(15.0),
+        snr_ap: Some(90.0),
         band: Band::G,
     };
 
@@ -952,7 +1126,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         psf_flux: Some(1250.0),
         psf_flux_err: Some(12.0),
         isdiffpos: Some(true),
-        snr: Some(100.0),
+        snr_psf: Some(100.0),
         band: Band::G,
     };
 
@@ -1004,9 +1178,11 @@ async fn test_babamul_lsst_with_ztf_match() {
         sigmapsf: 0.1,
         diffmaglim: 20.5,
         isdiffpos: true,
-        snr: 100.0,
+        snr_psf: Some(100.0),
+        chipsf: Some(2.0),
         magap: 18.6,
         sigmagap: 0.12,
+        snr_ap: Some(90.0),
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
     };
@@ -1060,7 +1236,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         sigmapsf: Some(0.08),
         diffmaglim: 20.2,
         isdiffpos: Some(true),
-        snr: Some(105.0),
+        snr_psf: Some(105.0),
     };
 
     let lsst_aux = LsstObject {
@@ -1111,8 +1287,9 @@ async fn test_babamul_lsst_with_ztf_match() {
 
     // Try to decode and verify the ZTF match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
-    let schema = EnrichedLsstAlert::get_schema();
+    let schema = BabamulLsstAlert::get_schema();
     let mut successful_decodes = 0;
+    let mut found_match = false;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
             Ok(r) => r,
@@ -1148,22 +1325,20 @@ async fn test_babamul_lsst_with_ztf_match() {
                 if let Some((_, survey_matches_value)) =
                     fields.iter().find(|(name, _)| name == "survey_matches")
                 {
-                    if let apache_avro::types::Value::Union(_, boxed) = survey_matches_value {
-                        if let apache_avro::types::Value::Record(fields) = &**boxed {
-                            if let Some((_, ztf_value)) =
-                                fields.iter().find(|(name, _)| name == "ztf")
-                            {
-                                if let apache_avro::types::Value::Union(_, ztf_boxed) = ztf_value {
-                                    if let apache_avro::types::Value::Record(obj_fields) =
-                                        &**ztf_boxed
-                                    {
-                                        if obj_fields.iter().any(|(field_name, field_value)| {
-                                            field_name == "object_id"
-                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
-                                        }) {
-                                            eprintln!("Found matching ZTF object_id: {}", ztf_match_id);
-                                            // Match found, but we continue to count successful decodes
-                                        }
+                    if let apache_avro::types::Value::Record(match_fields) = survey_matches_value {
+                        if let Some((_, ztf_value)) =
+                            match_fields.iter().find(|(name, _)| name == "ztf")
+                        {
+                            if let apache_avro::types::Value::Union(_, boxed_value) = ztf_value {
+                                if let apache_avro::types::Value::Record(obj_fields) =
+                                    &**boxed_value
+                                {
+                                    if obj_fields.iter().any(|(field_name, field_value)| {
+                                        field_name == "objectId"
+                                            && matches!(field_value, apache_avro::types::Value::String(s) if s == &ztf_match_id)
+                                    }) {
+                                        found_match = true;
+                                        break;
                                     }
                                 }
                             }
@@ -1200,6 +1375,12 @@ async fn test_babamul_lsst_with_ztf_match() {
         .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
         .await
         .expect("Failed to cleanup LSST cutouts fixture after test");
+
+    assert!(
+        found_match,
+        "Did not find expected ZTF match in Babamul message for LSST alert with objectId: {}",
+        lsst_object_id
+    );
 }
 
 #[tokio::test]
@@ -1361,16 +1542,21 @@ async fn test_babamul_ztf_with_lsst_match() {
     }
 
     assert!(
+        found_topic.is_some(),
+        "Expected to find Babamul message published to one of the LSST match topics for ZTF alert with objectId: {}",
+        ztf_object_id
+    );
+
+    assert!(
         !messages.is_empty(),
         "Expected at least one Babamul message in one of the lsst-match topics"
     );
 
-    println!("Found message in topic: {:?}", found_topic);
-
     // Try to decode and verify the LSST match in the published messages
     // Skip messages that don't decode (e.g., due to schema mismatch with stale messages)
-    let schema = EnrichedZtfAlert::get_schema();
+    let schema = BabamulZtfAlert::get_schema();
     let mut successful_decodes = 0;
+    let mut found_match = false;
     for msg in &messages {
         let reader = match apache_avro::Reader::with_schema(&schema, &msg[..]) {
             Ok(r) => r,
@@ -1407,29 +1593,25 @@ async fn test_babamul_ztf_with_lsst_match() {
                 if let Some((_, survey_matches_value)) =
                     fields.iter().find(|(name, _)| name == "survey_matches")
                 {
-                    if let apache_avro::types::Value::Union(_, boxed) = survey_matches_value {
-                        if let apache_avro::types::Value::Record(match_fields) = &**boxed {
-                            if let Some((_, lsst_value)) =
-                                match_fields.iter().find(|(name, _)| name == "lsst")
-                            {
-                                if let apache_avro::types::Value::Union(_, lsst_boxed) = lsst_value
+                    if let apache_avro::types::Value::Record(match_fields) = survey_matches_value {
+                        if let Some((_, lsst_value)) =
+                            match_fields.iter().find(|(name, _)| name == "lsst")
+                        {
+                            if let apache_avro::types::Value::Union(_, boxed_value) = lsst_value {
+                                if let apache_avro::types::Value::Record(obj_fields) =
+                                    &**boxed_value
                                 {
-                                    if let apache_avro::types::Value::Record(obj_fields) =
-                                        &**lsst_boxed
-                                    {
-                                        if obj_fields.iter().any(|(field_name, field_value)| {
-                                            field_name == "object_id"
-                                                && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
-                                        }) {
-                                            eprintln!("Found matching LSST object_id: {}", lsst_match_id);
-                                        }
+                                    if obj_fields.iter().any(|(field_name, field_value)| {
+                                        field_name == "objectId"
+                                            && matches!(field_value, apache_avro::types::Value::String(s) if s == &lsst_match_id)
+                                    }) {
+                                        found_match = true;
+                                        break;
                                     }
                                 }
                             }
                         }
                     }
-                } else {
-                    eprintln!("No survey_matches field found in ZTF alert");
                 }
             }
         }
@@ -1463,4 +1645,10 @@ async fn test_babamul_ztf_with_lsst_match() {
         .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
         .await
         .expect("Failed to cleanup ZTF cutouts fixture after test");
+
+    assert!(
+        found_match,
+        "Did not find expected LSST match in Babamul message for ZTF alert with objectId: {}",
+        ztf_object_id
+    );
 }
