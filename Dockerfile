@@ -68,6 +68,7 @@ ENV PATH="/opt/kafka/bin:${PATH}"
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
+COPY --from=builder /app/target/release/bulk_xmatch_update /app/bulk_xmatch_update
 COPY --from=builder /app/target/release/api /app/boom-api
 COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
