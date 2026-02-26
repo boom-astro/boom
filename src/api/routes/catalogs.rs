@@ -37,7 +37,7 @@ pub async fn get_catalogs(
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
         Err(e) => {
-            return response::internal_error(&format!("Error getting catalog info: {:?}", e));
+            return response::internal_error(&format!("Error getting catalog info: {}", e));
         }
     };
     // Catalogs can't be part of the protected names and can't start with "system."
@@ -60,10 +60,7 @@ pub async fn get_catalogs(
             {
                 Ok(d) => catalogs.push(doc! {"name": catalog, "details": d}),
                 Err(e) => {
-                    return response::internal_error(&format!(
-                        "Error getting catalog info: {:?}",
-                        e
-                    ));
+                    return response::internal_error(&format!("Error getting catalog info: {}", e));
                 }
             };
         }
@@ -77,7 +74,7 @@ pub async fn get_catalogs(
     match serde_json::to_value(&catalogs) {
         Ok(v) => return response::ok("success", v),
         Err(e) => {
-            return response::internal_error(&format!("Error serializing catalog info: {:?}", e));
+            return response::internal_error(&format!("Error serializing catalog info: {}", e));
         }
     };
 }
@@ -109,14 +106,22 @@ pub async fn get_catalog_indexes(
     let collection = db.collection::<mongodb::bson::Document>(&collection_name);
     // Get index information
     match collection.list_indexes().await {
-        Ok(indexes) => {
-            let indexes: Vec<_> = indexes
-                .map(|index| index.unwrap())
-                .collect::<Vec<_>>()
-                .await;
-            response::ok("success", serde_json::to_value(indexes).unwrap())
+        Ok(mut indexes) => {
+            let mut index_list = Vec::new();
+            while let Some(result) = indexes.next().await {
+                match result {
+                    Ok(i) => index_list.push(i),
+                    Err(e) => {
+                        return response::internal_error(&format!(
+                            "Error retrieving index information: {}",
+                            e
+                        ));
+                    }
+                }
+            }
+            response::ok_ser("success", index_list)
         }
-        Err(e) => response::internal_error(&format!("Error getting indexes: {:?}", e)),
+        Err(e) => response::internal_error(&format!("Error getting indexes: {}", e)),
     }
 }
 
@@ -164,17 +169,29 @@ pub async fn get_catalog_sample(
     }
 
     // Get a sample of documents
-    match collection
+    let mut cursor = match collection
         .aggregate(vec![doc! { "$sample": { "size": size } }])
         .await
     {
-        Ok(cursor) => {
-            let docs: Vec<_> = cursor.map(|doc| doc.unwrap()).collect::<Vec<_>>().await;
-            response::ok("success", serde_json::to_value(docs).unwrap())
+        Ok(cursor) => cursor,
+        Err(e) => {
+            return response::internal_error(&format!(
+                "Error getting sample for catalog {}: {}",
+                catalog_name, e
+            ))
         }
-        Err(e) => response::internal_error(&format!(
-            "Error getting sample for catalog {}: {:?}",
-            catalog_name, e
-        )),
+    };
+    let mut docs = Vec::new();
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(doc) => docs.push(doc),
+            Err(e) => {
+                return response::internal_error(&format!(
+                    "Error retrieving document for catalog {}: {}",
+                    catalog_name, e
+                ))
+            }
+        }
     }
+    response::ok_ser("success", &docs)
 }
