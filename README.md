@@ -72,22 +72,29 @@ code.
 
 ### Start services for local development
 
-1. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode
-   using Docker, with the provided `docker-compose.yaml` file:
+1. Install and configure Git LFS, then pull the large files:
     ```bash
-    docker compose --profile api up -d
+    sudo apt-get install git-lfs # or brew install git-lfs
+    git lfs install
+    git lfs pull
     ```
-    This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
-    *To check if the containers are running and healthy, run `docker ps`.*
+2. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode:
 
-    **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+   - With docker, using the provided `docker-compose.yaml` file:
+     ```bash
+     docker compose --profile api up -d
+     ```
+     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
+     *To check if the containers are running and healthy, run `docker ps`.*
 
-2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+     **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+
+3. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
     ```bash
     cargo build --release
     ```
 
-## Running BOOM:
+## Running BOOM for development
 
 ### Alert Production (not required for production use)
 
@@ -195,6 +202,29 @@ As a more complete example, the following sets the logging level to DEBUG, with 
 
 ```bash
 RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+```
+
+## Running Benchmark
+
+This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
+This benchmark uses Docker to build the image and run the benchmark, but it can also be run with Apptainer.
+The steps to run the benchmark are as follows:
+
+### Build Image
+```bash
+  docker buildx create --use
+  docker buildx inspect --bootstrap
+  docker buildx bake -f tests/throughput/compose.yaml --load
+```
+
+### Download Data
+```bash
+  uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./tests/data/alerts/kowalski.NED.json.gz
+```
+
+### Start Benchmark
+```bash
+  uv run tests/throughput/run.py
 ```
 
 ## Contributing

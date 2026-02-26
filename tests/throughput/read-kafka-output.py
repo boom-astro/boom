@@ -8,7 +8,7 @@
 
 from confluent_kafka import Consumer, KafkaException
 
-# Now let's check that we can read all of the alerts from the babamul.ztf.none
+# Now let's check that we can read all the alerts from
 # Kafka topic
 consumer_conf = {
     "bootstrap.servers": "localhost:9092",
@@ -16,8 +16,8 @@ consumer_conf = {
     "auto.offset.reset": "earliest",
 }
 consumer = Consumer(consumer_conf)
-topic = "babamul.ztf.none"
-consumer.subscribe([topic])
+topic_pattern = "^babamul\\.ztf\\..*"
+consumer.subscribe([topic_pattern])
 n_alerts = 0
 try:
     while True:
@@ -31,6 +31,6 @@ finally:
     consumer.close()
 
 if n_alerts != 28548:
-    raise RuntimeError(f"Expected 28548 alerts, but got {n_alerts}")
+    raise AssertionError(f"Expected 28548 alerts, but got {n_alerts}")
 
-print(f"Read {n_alerts} alerts from topic {topic}")
+print(f"Read {n_alerts} alerts from all Kafka topics matching {topic_pattern}")
