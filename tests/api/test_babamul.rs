@@ -958,12 +958,12 @@ mod tests {
             "Response should contain message"
         );
         assert!(
-            body["credential"].is_object(),
+            body["data"].is_object(),
             "Response should contain credential object"
         );
 
         // Verify credential structure
-        let credential = &body["credential"];
+        let credential = &body["data"];
         assert!(credential["id"].is_string(), "Credential should have id");
         assert_eq!(
             credential["name"].as_str().unwrap(),
@@ -1129,7 +1129,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body1 = read_json_response(resp).await;
-        let credential_id_1 = body1["credential"]["id"].as_str().unwrap();
+        let credential_id_1 = body1["data"]["id"].as_str().unwrap();
 
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
@@ -1142,7 +1142,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body2 = read_json_response(resp).await;
-        let credential_id_2 = body2["credential"]["id"].as_str().unwrap();
+        let credential_id_2 = body2["data"]["id"].as_str().unwrap();
 
         // Now list should show 2 credentials
         let req = test::TestRequest::get()
@@ -1231,7 +1231,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = read_json_response(resp).await;
-        let credential_id = body["credential"]["id"].as_str().unwrap();
+        let credential_id = body["data"]["id"].as_str().unwrap();
 
         // Verify credential exists before deletion
         let req = test::TestRequest::get()

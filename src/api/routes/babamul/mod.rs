@@ -779,7 +779,7 @@ pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>
         }
     };
     let user_public = BabamulUserPublic::from(current_user.into_inner().clone());
-    response::ok("success", serde_json::to_value(user_public).unwrap())
+    response::ok_ser("success", user_public)
 }
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -790,7 +790,7 @@ pub struct CreateKafkaCredentialPost {
 #[derive(Serialize, Clone, ToSchema)]
 pub struct CreateKafkaCredentialResponse {
     pub message: String,
-    pub credential: KafkaCredential, // Return the full credential including the decrypted password
+    pub data: KafkaCredential, // Return the full credential including the decrypted password
 }
 
 /// Create a new Kafka credential for the authenticated user
@@ -848,6 +848,14 @@ pub async fn post_kafka_credentials(
         created_at: flare::Time::now().to_utc().timestamp(),
     };
 
+    let kafka_credentials_bson = match mongodb::bson::to_bson(&kafka_credential) {
+        Ok(bson) => bson,
+        Err(e) => {
+            eprintln!("Failed to convert Kafka credential to BSON: {}", e);
+            return response::internal_error("Failed to process Kafka credential");
+        }
+    };
+
     // Create Kafka SCRAM user and ACLs
     if let Err(e) = create_kafka_user_and_acls(
         &kafka_username,
@@ -872,22 +880,22 @@ pub async fn post_kafka_credentials(
             doc! { "_id": &current_user.id },
             doc! {
                 "$push": {
-                    "kafka_credentials": mongodb::bson::to_bson(&kafka_credential).unwrap()
+                    "kafka_credentials": kafka_credentials_bson
                 }
             },
         )
         .await
     {
-        Ok(_) => HttpResponse::Ok().json(CreateKafkaCredentialResponse {
-            message: "Kafka credential created successfully. Save the kafka_password - it can be retrieved later but should be stored securely.".to_string(),
-            credential: KafkaCredential {
+        Ok(_) => response::ok_ser(
+            "Kafka credential created successfully. Save the kafka_password - it can be retrieved later but should be stored securely.",
+            KafkaCredential {
                 id: kafka_credential.id,
                 name: kafka_credential.name,
                 kafka_username: kafka_credential.kafka_username,
                 kafka_password,
                 created_at: kafka_credential.created_at,
             },
-        }),
+        ),
         Err(e) => {
             eprintln!("Database error adding Kafka credential: {}", e);
             response::internal_error("Failed to save Kafka credential")
