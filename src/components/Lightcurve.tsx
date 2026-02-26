@@ -565,6 +565,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 />
 
                 {/* Interactive circles and polygons - rendered after overlay so they're on top */}
+                <g clipPath="url(#plot-area)">
                 {detections.map((pt, i) => {
                     const { bandKey, isHidden, color } = getBandState(pt.band);
                     if (isHidden) return null;
@@ -623,8 +624,10 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         </g>
                     );
                 })}
+                </g>
 
                 {/* Interactive non-detection polygons */}
+                <g clipPath="url(#plot-area)">
                 {includeUpperLimits && nondetectionsSeries.map((pt, i) => {
                     const { bandKey, isHidden, color } = getBandState(pt.band);
                     if (isHidden) return null;
@@ -673,6 +676,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         </g>
                     );
                 })}
+                </g>
 
                 {/* selection rect */}
                 {selection && (
