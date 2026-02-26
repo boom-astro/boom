@@ -68,7 +68,8 @@ pub async fn post_pipeline_query(
         match result {
             Ok(doc) => docs.push(doc),
             Err(e) => {
-                return response::internal_error(&format!("Error retrieving document: {}", e))
+                eprintln!("Error retrieving document from the database: {}", e);
+                return response::internal_error("Error retrieving document from the database");
             }
         }
     }
