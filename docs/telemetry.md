@@ -12,7 +12,7 @@ Run the producer and the consumer as desired, e.g.,
 
 ```sh
 kafka_producer ztf 20250205
-kafka_consumer ztf --date 20250205
+kafka_consumer ztf 20250205
 ```
 
 And in a different terminal, run the scheduler:
