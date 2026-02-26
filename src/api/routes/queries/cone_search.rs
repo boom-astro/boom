@@ -73,14 +73,16 @@ struct ConeSearchQuery {
 }
 impl ConeSearchQuery {
     /// Convert to MongoDB Find options
-    fn to_find_options(&self) -> mongodb::options::FindOptions {
+    fn to_find_options(&self) -> Result<mongodb::options::FindOptions, String> {
         let mut options = mongodb::options::FindOptions::default();
         if let Some(projection) = &self.projection {
             options.projection = match mongodb::bson::to_document(projection) {
                 Ok(doc) => Some(doc),
                 Err(e) => {
-                    eprintln!("Error converting projection to BSON document: {:?}", e);
-                    None
+                    return Err(format!(
+                        "Error converting projection to BSON document: {:?}",
+                        e
+                    ));
                 }
             }
         }
@@ -94,15 +96,14 @@ impl ConeSearchQuery {
             options.sort = match mongodb::bson::to_document(sort) {
                 Ok(doc) => Some(doc),
                 Err(e) => {
-                    eprintln!("Error converting sort to BSON document: {:?}", e);
-                    None
+                    return Err(format!("Error converting sort to BSON document: {:?}", e));
                 }
             }
         }
         if let Some(max_time_ms) = self.max_time_ms {
             options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
         }
-        options
+        Ok(options)
     }
 }
 
@@ -131,7 +132,10 @@ pub async fn post_cone_search_query(
     // Get the collection
     let collection = db.collection::<mongodb::bson::Document>(&collection_name);
     // Perform cone search over each set of object coordinates
-    let find_options = body.to_find_options();
+    let find_options = match body.to_find_options() {
+        Ok(options) => options,
+        Err(e) => return response::bad_request(&format!("Invalid find options: {:?}", e)),
+    };
     let mut radius = body.radius;
     let unit = body.unit.clone();
     // Convert radius to radians based on unit

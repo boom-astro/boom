@@ -115,7 +115,10 @@ pub async fn get_catalog_indexes(
                 match result {
                     Ok(i) => index_list.push(i),
                     Err(e) => {
-                        eprintln!("Error retrieving index: {:?}", e);
+                        return response::internal_error(&format!(
+                            "Error retrieving index information: {:?}",
+                            e
+                        ));
                     }
                 }
             }
@@ -168,7 +171,7 @@ pub async fn get_catalog_sample(
         return response::bad_request("Size must be between 1 and 1000");
     }
 
-    // // Get a sample of documents
+    // Get a sample of documents
     let mut cursor = match collection
         .aggregate(vec![doc! { "$sample": { "size": size } }])
         .await

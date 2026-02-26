@@ -790,7 +790,7 @@ pub struct CreateKafkaCredentialPost {
 #[derive(Serialize, Clone, ToSchema)]
 pub struct CreateKafkaCredentialResponse {
     pub message: String,
-    pub credential: KafkaCredential, // Return the full credential including the decrypted password
+    pub data: KafkaCredential, // Return the full credential including the decrypted password
 }
 
 /// Create a new Kafka credential for the authenticated user
