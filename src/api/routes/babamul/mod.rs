@@ -9,6 +9,7 @@ use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
+use sha2::{Digest, Sha256};
 use std::process::Command;
 use utoipa::ToSchema;
 
@@ -819,7 +820,6 @@ pub async fn post_babamul_forgot_password(
     };
 
     // Generate a secure random raw token and store its SHA-256 hash.
-    use sha2::{Digest, Sha256};
     let raw_token = generate_random_string(48);
     let mut hasher = Sha256::new();
     hasher.update(raw_token.as_bytes());
@@ -915,7 +915,6 @@ pub async fn post_babamul_reset_password(
     }
 
     // Hash the incoming token to look it up in the database.
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(raw_token.as_bytes());
     let token_hash = format!("{:x}", hasher.finalize());
