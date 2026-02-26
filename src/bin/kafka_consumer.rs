@@ -27,9 +27,9 @@ struct Cli {
     #[arg(value_parser = parse_date)]
     date: Option<NaiveDate>, // Easier to deal with the default value after clap
 
-    /// ID of the program to consume the alerts (ZTF-only)
-    #[arg(default_value_t, value_enum)]
-    program_id: ProgramId,
+    /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --program-ids public,partnership,caltech).
+    #[arg(value_enum, value_delimiter = ',', default_value = "public")]
+    program_ids: Vec<ProgramId>,
 
     /// Path to the configuration file
     #[arg(long, value_name = "FILE", default_value = "config.yaml")]
@@ -62,9 +62,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     exit_on_eof: bool,
 
-    /// Overridethe topic name (useful if data has been produced to a non-default topic)
-    #[arg(long, value_name = "TOPIC")]
-    topic_override: Option<String>,
+    /// Override the topic name(s) (useful if data has been produced to a non-default topic)
+    #[arg(long, value_name = "TOPICS")]
+    topics_override: Option<Vec<String>>,
 
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
@@ -96,17 +96,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 
     // If topic override is provided, use it. Otherwise, the consumer
     // will determine the topic based on the survey, program ID, and date.
-    let topic = args.topic_override;
+    let topics = args.topics_override;
 
     match args.survey {
         Survey::Ztf => {
-            let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
+            let consumer = ZtfAlertConsumer::new(None, Some(args.program_ids));
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config).await;
             }
             match consumer
                 .consume(
-                    topic,
+                    topics,
                     timestamp,
                     None,
                     Some(args.processes),
@@ -127,7 +127,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    topic,
+                    topics,
                     timestamp,
                     None,
                     Some(args.processes),
@@ -148,7 +148,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    topic,
+                    topics,
                     timestamp,
                     None,
                     Some(args.processes),

@@ -12,29 +12,32 @@ const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 
 pub struct ZtfAlertConsumer {
     output_queue: String,
-    program_id: ProgramId,
+    program_ids: Vec<ProgramId>,
 }
 
 impl ZtfAlertConsumer {
     #[instrument]
-    pub fn new(output_queue: Option<&str>, program_id: Option<ProgramId>) -> Self {
-        let program_id = program_id.unwrap_or(ProgramId::Public);
+    pub fn new(output_queue: Option<&str>, program_ids: Option<Vec<ProgramId>>) -> Self {
+        let program_ids = program_ids.unwrap_or_else(|| vec![ProgramId::Public]);
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();
 
         ZtfAlertConsumer {
             output_queue,
-            program_id,
+            program_ids,
         }
     }
 }
 
 #[async_trait::async_trait]
 impl AlertConsumer for ZtfAlertConsumer {
-    fn topic_name(&self, timestamp: i64) -> String {
+    fn topic_names(&self, timestamp: i64) -> Vec<String> {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        format!("ztf_{}_programid{}", date.format("%Y%m%d"), self.program_id)
+        self.program_ids
+            .iter()
+            .map(|program_id| format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id))
+            .collect()
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
