@@ -24,11 +24,11 @@ struct Cli {
 
     /// UTC date for which we want to consume alerts, with format YYYYMMDD
     /// [default: yesterday's date]
-    #[arg(value_parser = parse_date)]
-    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+    #[arg(long, value_parser = parse_date)]
+    date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
 
     /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --program-ids public,partnership,caltech).
-    #[arg(value_enum, value_delimiter = ',', default_value = "public")]
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "public")]
     program_ids: Vec<ProgramId>,
 
     /// Path to the configuration file
@@ -71,22 +71,16 @@ struct Cli {
     deployment_env: String,
 }
 
-fn parse_date(s: &str) -> Result<NaiveDate, String> {
+fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
     let date =
         NaiveDate::parse_from_str(s, "%Y%m%d").map_err(|_| "expected a date in YYYYMMDD format")?;
-    Ok(date)
+    Ok(date.and_hms_opt(0, 0, 0).unwrap())
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
 async fn run(args: Cli, meter_provider: SdkMeterProvider) {
-    let timestamp = NaiveDateTime::from(args.date.unwrap_or_else(|| {
-        chrono::Utc::now()
-            .date_naive()
-            .pred_opt()
-            .expect("previous date is not representable")
-    }))
-    .and_utc()
-    .timestamp();
+    let date = args.date.unwrap_or_else(|| chrono::Utc::now().naive_utc());
+    let timestamp = date.and_utc().timestamp();
 
     let exit_on_eof = if args.deployment_env == "dev" {
         args.exit_on_eof
