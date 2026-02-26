@@ -63,28 +63,36 @@ jobs:
         docker compose exec -T mongo mongosh localhost:27017/boom_test --quiet --username mongoadmin --password mongoadminsecret --authenticationDatabase admin --eval "db.createCollection('LSPSC'); db.LSPSC.createIndex({'coordinates.radec_geojson': '2dsphere'});"
     - name: Wait for Kafka ACL initialization
       run: |
-        echo "Waiting for kafka-acl-init container to start..."
-        for i in {1..60}; do
-          if docker compose ps --status running kafka-acl-init >/dev/null 2>&1 || docker compose ps kafka-acl-init 2>&1 | grep -q kafka-acl-init; then
-            break
+        echo "Waiting for kafka-acl-init to complete..."
+        # The container depends_on broker:service_healthy (start_period=60s),
+        # so it may take 70-90s before the container is even created.
+        # Poll for up to 180s for the container to appear and exit.
+        for i in $(seq 1 60); do
+          CID=$(docker compose ps -a -q kafka-acl-init 2>/dev/null || true)
+          if [ -n "$CID" ]; then
+            STATUS=$(docker inspect -f '{{.State.Status}}' "$CID" 2>/dev/null || echo "unknown")
+            if [ "$STATUS" = "exited" ]; then
+              EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$CID")
+              echo "kafka-acl-init exited with code $EXIT_CODE"
+              if [ "$EXIT_CODE" != "0" ]; then
+                echo "--- kafka-acl-init logs: ---"
+                docker compose logs kafka-acl-init || true
+                echo "--- broker logs: ---"
+                docker compose logs broker || true
+                exit 1
+              fi
+              echo "kafka-acl-init completed successfully."
+              exit 0
+            fi
+            echo "Attempt $i/60 - kafka-acl-init status: $STATUS"
+          else
+            echo "Attempt $i/60 - kafka-acl-init container not yet created"
           fi
-          sleep 2
+          sleep 3
         done
-        CID=$(docker compose ps -q kafka-acl-init)
-        if [ -z "$CID" ]; then
-          echo "kafka-acl-init container not found" >&2
-          exit 1
-        fi
-        echo "Container ID: $CID. Waiting for it to exit..."
-        EXIT_CODE=$(docker wait "$CID")
-        echo "kafka-acl-init exited with code $EXIT_CODE"
-        if [ "$EXIT_CODE" != "0" ]; then
-          echo "--- kafka-acl-init logs: ---"
-          docker compose logs kafka-acl-init || true
-          echo "--- broker logs: ---"
-          docker compose logs broker || true
-          exit 1
-        fi
-        echo "kafka-acl-init completed successfully."
+        echo "Timed out waiting for kafka-acl-init (180s)" >&2
+        docker compose logs kafka-acl-init || true
+        docker compose logs broker || true
+        exit 1
     - name: Test BOOM
       run: PATH=/opt/kafka/bin:$PATH cargo test --release
