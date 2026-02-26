@@ -7,6 +7,7 @@ use crate::enrichment::lsst::{
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
+use crate::utils::enums::Survey;
 use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, DeflateSettings, Schema, Writer};
 use apache_avro_macros::serdavro;
@@ -417,7 +418,8 @@ pub struct Babamul {
     lsst_avro_schema: Schema,
     ztf_avro_schema: Schema,
     kafka_admin_client: AdminClient<DefaultClientContext>,
-    topic_retention_ms: i64,
+    default_retention_ms: i64,
+    by_survey_retention_ms: HashMap<Survey, i64>,
     // A cache for Kafka topics we've checked exist and match retention policy
     checked_topics: Mutex<HashSet<String>>,
 }
@@ -456,15 +458,23 @@ impl Babamul {
             .expect("Failed to create Babamul Kafka admin client");
 
         // Compute retention in milliseconds from config (days)
-        let babamul_retention_ms: i64 =
+        let default_retention_ms: i64 =
             (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
+
+        // Build per-survey retention map
+        let mut by_survey_retention_ms = HashMap::new();
+        for (survey, days) in &config.babamul.retention_days_by_survey {
+            let retention_ms = (*days as i64) * 24 * 60 * 60 * 1000;
+            by_survey_retention_ms.insert(survey.clone(), retention_ms);
+        }
 
         Babamul {
             kafka_producer,
             lsst_avro_schema,
             ztf_avro_schema,
             kafka_admin_client: admin_client,
-            topic_retention_ms: babamul_retention_ms,
+            default_retention_ms,
+            by_survey_retention_ms,
             checked_topics: Mutex::new(HashSet::new()),
         }
     }
@@ -553,6 +563,31 @@ impl Babamul {
         }
     }
 
+    /// Extract the survey from a topic name
+    /// - "babamul.lsst.no-ztf-match.stellar" -> Some(Survey::Lsst)
+    /// - "other_topic" -> None
+    fn extract_survey_from_topic(topic_name: &str) -> Option<Survey> {
+        if topic_name.starts_with("babamul.lsst.") {
+            Some(Survey::Lsst)
+        } else if topic_name.starts_with("babamul.ztf.") {
+            Some(Survey::Ztf)
+        } else {
+            None
+        }
+    }
+
+    /// Get the retention period for a given topic based on its survey
+    fn get_retention_for_topic(&self, topic_name: &str) -> i64 {
+        if let Some(survey) = Self::extract_survey_from_topic(topic_name) {
+            self.by_survey_retention_ms
+                .get(&survey)
+                .copied()
+                .unwrap_or(self.default_retention_ms)
+        } else {
+            self.default_retention_ms
+        }
+    }
+
     /// Ensure the given topic exists with the desired retention policy
     #[instrument(skip_all, err)]
     async fn check_topic(&self, topic_name: &str) -> Result<(), EnrichmentWorkerError> {
@@ -565,7 +600,7 @@ impl Babamul {
         }
 
         // Create topic with retention if it does not exist; ignore "already exists" errors
-        let retention_ms_string = self.topic_retention_ms.to_string();
+        let retention_ms_string = self.get_retention_for_topic(topic_name).to_string();
         let new_topic = NewTopic::new(topic_name, 1, TopicReplication::Fixed(1))
             .set("retention.ms", &retention_ms_string)
             .set("cleanup.policy", "delete");

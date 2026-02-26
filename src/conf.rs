@@ -380,6 +380,9 @@ pub struct BabamulConfig {
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
+    /// Optional per-survey retention settings (overrides retention_days)
+    #[serde(default)]
+    pub retention_days_by_survey: HashMap<Survey, u32>,
 }
 
 impl Default for BabamulConfig {
@@ -388,6 +391,7 @@ impl Default for BabamulConfig {
             enabled: false,
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
+            retention_days_by_survey: HashMap::new(),
         }
     }
 }

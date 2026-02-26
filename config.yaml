@@ -20,6 +20,9 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+  retention_days_by_survey: # Change these to override `retention_days`
+    ZTF: 3
+    LSST: 3
 redis:
   host: localhost
   port: 6379
