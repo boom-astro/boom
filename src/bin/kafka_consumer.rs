@@ -24,7 +24,7 @@ struct Cli {
 
     /// UTC date for which we want to consume alerts, with format YYYYMMDD
     /// [default: yesterday's date]
-    #[arg(long, value_parser = parse_date)]
+    #[arg(value_parser = parse_date)]
     date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
 
     /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --programids public,partnership,caltech).

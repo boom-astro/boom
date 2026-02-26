@@ -11,7 +11,7 @@ docker compose up -d
 Run the producer and the consumer as desired, e.g.,
 
 ```sh
-kafka_producer ztf --date 20250205
+kafka_producer ztf 20250205
 kafka_consumer ztf --date 20250205
 ```
 
