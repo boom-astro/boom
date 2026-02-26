@@ -55,15 +55,22 @@ pub async fn post_pipeline_query(
         Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
     };
     let pipeline_options = body.to_pipeline_options();
-    match collection
+    let mut cursor = match collection
         .aggregate(pipeline)
         .with_options(pipeline_options)
         .await
     {
-        Ok(cursor) => {
-            let docs: Vec<_> = cursor.map(|doc| doc.unwrap()).collect::<Vec<_>>().await;
-            response::ok("success", serde_json::to_value(docs).unwrap())
+        Ok(cursor) => cursor,
+        Err(e) => return response::internal_error(&format!("Error executing pipeline: {:?}", e)),
+    };
+    let mut docs = Vec::new();
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(doc) => docs.push(doc),
+            Err(e) => {
+                return response::internal_error(&format!("Error retrieving document: {:?}", e))
+            }
         }
-        Err(e) => response::internal_error(&format!("Error finding documents: {:?}", e)),
     }
+    response::ok_ser("success", &docs)
 }

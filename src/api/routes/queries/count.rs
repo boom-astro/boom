@@ -49,7 +49,7 @@ pub async fn post_count_query(
         }
     };
     // Return the count
-    response::ok("success", serde_json::to_value(count).unwrap())
+    response::ok_ser("success", count)
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
@@ -88,5 +88,5 @@ pub async fn post_estimated_count_query(
         }
     };
     // Return the count
-    response::ok("success", serde_json::to_value(count).unwrap())
+    response::ok_ser("success", count)
 }

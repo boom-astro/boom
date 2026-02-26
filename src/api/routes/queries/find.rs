@@ -23,7 +23,13 @@ impl FindQuery {
     fn to_find_options(&self) -> mongodb::options::FindOptions {
         let mut options = mongodb::options::FindOptions::default();
         if let Some(projection) = &self.projection {
-            options.projection = Some(mongodb::bson::to_document(projection).unwrap());
+            options.projection = match mongodb::bson::to_document(projection) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    eprintln!("Error converting projection to BSON document: {:?}", e);
+                    None
+                }
+            }
         }
         if let Some(limit) = self.limit {
             options.limit = Some(limit);
@@ -32,7 +38,13 @@ impl FindQuery {
             options.skip = Some(skip);
         }
         if let Some(sort) = &self.sort {
-            options.sort = Some(mongodb::bson::to_document(sort).unwrap());
+            options.sort = match mongodb::bson::to_document(sort) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    eprintln!("Error converting sort to BSON document: {:?}", e);
+                    None
+                }
+            }
         }
         if let Some(max_time_ms) = self.max_time_ms {
             options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
@@ -68,11 +80,18 @@ pub async fn post_find_query(db: web::Data<Database>, body: web::Json<FindQuery>
         Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
     };
     let find_options = body.to_find_options();
-    match collection.find(filter).with_options(find_options).await {
-        Ok(cursor) => {
-            let docs: Vec<_> = cursor.map(|doc| doc.unwrap()).collect::<Vec<_>>().await;
-            response::ok("success", serde_json::to_value(docs).unwrap())
+    let mut cursor = match collection.find(filter).with_options(find_options).await {
+        Ok(cursor) => cursor,
+        Err(e) => return response::internal_error(&format!("Error finding documents: {:?}", e)),
+    };
+    let mut docs = Vec::new();
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(doc) => docs.push(doc),
+            Err(e) => {
+                return response::internal_error(&format!("Error retrieving document: {:?}", e))
+            }
         }
-        Err(e) => response::internal_error(&format!("Error finding documents: {:?}", e)),
     }
+    response::ok_ser("success", &docs)
 }

@@ -76,7 +76,13 @@ impl ConeSearchQuery {
     fn to_find_options(&self) -> mongodb::options::FindOptions {
         let mut options = mongodb::options::FindOptions::default();
         if let Some(projection) = &self.projection {
-            options.projection = Some(mongodb::bson::to_document(&projection).unwrap());
+            options.projection = match mongodb::bson::to_document(projection) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    eprintln!("Error converting projection to BSON document: {:?}", e);
+                    None
+                }
+            }
         }
         if let Some(limit) = self.limit {
             options.limit = Some(limit);
@@ -85,7 +91,13 @@ impl ConeSearchQuery {
             options.skip = Some(skip);
         }
         if let Some(sort) = &self.sort {
-            options.sort = Some(mongodb::bson::to_document(&sort).unwrap());
+            options.sort = match mongodb::bson::to_document(sort) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    eprintln!("Error converting sort to BSON document: {:?}", e);
+                    None
+                }
+            }
         }
         if let Some(max_time_ms) = self.max_time_ms {
             options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
