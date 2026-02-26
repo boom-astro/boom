@@ -78,22 +78,22 @@ pub async fn post_find_query(db: web::Data<Database>, body: web::Json<FindQuery>
     // Find documents with the provided filter
     let filter = match parse_filter(&body.filter) {
         Ok(filter) => filter,
-        Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
+        Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
     let find_options = match body.to_find_options() {
         Ok(options) => options,
-        Err(e) => return response::bad_request(&format!("Invalid find options: {:?}", e)),
+        Err(e) => return response::bad_request(&format!("Invalid find options: {}", e)),
     };
     let mut cursor = match collection.find(filter).with_options(find_options).await {
         Ok(cursor) => cursor,
-        Err(e) => return response::internal_error(&format!("Error finding documents: {:?}", e)),
+        Err(e) => return response::internal_error(&format!("Error finding documents: {}", e)),
     };
     let mut docs = Vec::new();
     while let Some(result) = cursor.next().await {
         match result {
             Ok(doc) => docs.push(doc),
             Err(e) => {
-                return response::internal_error(&format!("Error retrieving document: {:?}", e))
+                return response::internal_error(&format!("Error retrieving document: {}", e))
             }
         }
     }

@@ -37,7 +37,7 @@ pub async fn get_catalogs(
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
         Err(e) => {
-            return response::internal_error(&format!("Error getting catalog info: {:?}", e));
+            return response::internal_error(&format!("Error getting catalog info: {}", e));
         }
     };
     // Catalogs can't be part of the protected names and can't start with "system."
@@ -60,10 +60,7 @@ pub async fn get_catalogs(
             {
                 Ok(d) => catalogs.push(doc! {"name": catalog, "details": d}),
                 Err(e) => {
-                    return response::internal_error(&format!(
-                        "Error getting catalog info: {:?}",
-                        e
-                    ));
+                    return response::internal_error(&format!("Error getting catalog info: {}", e));
                 }
             };
         }
@@ -77,7 +74,7 @@ pub async fn get_catalogs(
     match serde_json::to_value(&catalogs) {
         Ok(v) => return response::ok("success", v),
         Err(e) => {
-            return response::internal_error(&format!("Error serializing catalog info: {:?}", e));
+            return response::internal_error(&format!("Error serializing catalog info: {}", e));
         }
     };
 }
@@ -116,7 +113,7 @@ pub async fn get_catalog_indexes(
                     Ok(i) => index_list.push(i),
                     Err(e) => {
                         return response::internal_error(&format!(
-                            "Error retrieving index information: {:?}",
+                            "Error retrieving index information: {}",
                             e
                         ));
                     }
@@ -124,7 +121,7 @@ pub async fn get_catalog_indexes(
             }
             response::ok_ser("success", index_list)
         }
-        Err(e) => response::internal_error(&format!("Error getting indexes: {:?}", e)),
+        Err(e) => response::internal_error(&format!("Error getting indexes: {}", e)),
     }
 }
 
@@ -179,7 +176,7 @@ pub async fn get_catalog_sample(
         Ok(cursor) => cursor,
         Err(e) => {
             return response::internal_error(&format!(
-                "Error getting sample for catalog {}: {:?}",
+                "Error getting sample for catalog {}: {}",
                 catalog_name, e
             ))
         }
@@ -190,7 +187,7 @@ pub async fn get_catalog_sample(
             Ok(doc) => docs.push(doc),
             Err(e) => {
                 return response::internal_error(&format!(
-                    "Error retrieving document for catalog {}: {:?}",
+                    "Error retrieving document for catalog {}: {}",
                     catalog_name, e
                 ))
             }

@@ -40,6 +40,6 @@ pub async fn get_db_info(
     }
     match db.run_command(mongodb::bson::doc! { "dbstats": 1 }).await {
         Ok(stats) => response::ok_ser("success", stats),
-        Err(e) => response::internal_error(&format!("Error getting database info: {:?}", e)),
+        Err(e) => response::internal_error(&format!("Error getting database info: {}", e)),
     }
 }

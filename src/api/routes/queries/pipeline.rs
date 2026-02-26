@@ -52,7 +52,7 @@ pub async fn post_pipeline_query(
     // Find documents with the provided filter
     let pipeline = match parse_pipeline(&body.pipeline) {
         Ok(pipeline) => pipeline,
-        Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
+        Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
     let pipeline_options = body.to_pipeline_options();
     let mut cursor = match collection
@@ -61,14 +61,14 @@ pub async fn post_pipeline_query(
         .await
     {
         Ok(cursor) => cursor,
-        Err(e) => return response::internal_error(&format!("Error executing pipeline: {:?}", e)),
+        Err(e) => return response::internal_error(&format!("Error executing pipeline: {}", e)),
     };
     let mut docs = Vec::new();
     while let Some(result) = cursor.next().await {
         match result {
             Ok(doc) => docs.push(doc),
             Err(e) => {
-                return response::internal_error(&format!("Error retrieving document: {:?}", e))
+                return response::internal_error(&format!("Error retrieving document: {}", e))
             }
         }
     }
