@@ -311,7 +311,8 @@ impl EmailService {
                             border-radius:8px;font-size:13px;line-height:1.6;
                             overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0 0 8px;">curl -X POST https://{domain}/babamul/reset-password \
      -H 'Content-Type: application/json' \
-     -d '{{"token":"{token}","new_password":"YOUR_NEW_PASSWORD"}}'</pre>"#,
+     -d '{{"email":"{email}","token":"{token}","new_password":"YOUR_NEW_PASSWORD"}}'</pre>"#,
+                email = to_email,
                 domain = domain,
                 token = raw_token,
             )
