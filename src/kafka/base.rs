@@ -391,6 +391,8 @@ pub enum ConsumerError {
     Redis(#[from] redis::RedisError),
     #[error("error from config")]
     ConfigError(#[from] config::ConfigError),
+    #[error("IO error: {0}")]
+    IOError(#[from] std::io::Error),
 }
 
 #[async_trait::async_trait]
