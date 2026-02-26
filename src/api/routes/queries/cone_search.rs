@@ -73,10 +73,18 @@ struct ConeSearchQuery {
 }
 impl ConeSearchQuery {
     /// Convert to MongoDB Find options
-    fn to_find_options(&self) -> mongodb::options::FindOptions {
+    fn to_find_options(&self) -> Result<mongodb::options::FindOptions, String> {
         let mut options = mongodb::options::FindOptions::default();
         if let Some(projection) = &self.projection {
-            options.projection = Some(mongodb::bson::to_document(&projection).unwrap());
+            options.projection = match mongodb::bson::to_document(projection) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    return Err(format!(
+                        "Error converting projection to BSON document: {:?}",
+                        e
+                    ));
+                }
+            }
         }
         if let Some(limit) = self.limit {
             options.limit = Some(limit);
@@ -85,12 +93,17 @@ impl ConeSearchQuery {
             options.skip = Some(skip);
         }
         if let Some(sort) = &self.sort {
-            options.sort = Some(mongodb::bson::to_document(&sort).unwrap());
+            options.sort = match mongodb::bson::to_document(sort) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    return Err(format!("Error converting sort to BSON document: {:?}", e));
+                }
+            }
         }
         if let Some(max_time_ms) = self.max_time_ms {
             options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
         }
-        options
+        Ok(options)
     }
 }
 
@@ -119,7 +132,10 @@ pub async fn post_cone_search_query(
     // Get the collection
     let collection = db.collection::<mongodb::bson::Document>(&collection_name);
     // Perform cone search over each set of object coordinates
-    let find_options = body.to_find_options();
+    let find_options = match body.to_find_options() {
+        Ok(options) => options,
+        Err(e) => return response::bad_request(&format!("Invalid find options: {}", e)),
+    };
     let mut radius = body.radius;
     let unit = body.unit.clone();
     // Convert radius to radians based on unit
@@ -133,7 +149,7 @@ pub async fn post_cone_search_query(
     let mut docs: HashMap<String, Vec<mongodb::bson::Document>> = HashMap::new();
     let filter = match parse_optional_filter(&body.filter) {
         Ok(f) => f,
-        Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
+        Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
     for (object_name, radec) in object_coordinates {
         if radec.len() != 2 {
@@ -171,14 +187,14 @@ pub async fn post_cone_search_query(
         {
             Ok(c) => c,
             Err(e) => {
-                return response::internal_error(&format!("Error finding documents: {:?}", e));
+                return response::internal_error(&format!("Error finding documents: {}", e));
             }
         };
         // Create map entry for this object's cone search
         let data = match cursor.try_collect::<Vec<mongodb::bson::Document>>().await {
             Ok(d) => d,
             Err(e) => {
-                return response::internal_error(&format!("Error collecting documents: {:?}", e));
+                return response::internal_error(&format!("Error collecting documents: {}", e));
             }
         };
         docs.insert(object_name.clone(), data);
