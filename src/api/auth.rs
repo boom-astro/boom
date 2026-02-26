@@ -220,6 +220,8 @@ const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
     "/babamul/signup",
     "/babamul/activate",
     "/babamul/auth",
+    "/babamul/forgot-password",
+    "/babamul/reset-password",
     "/babamul/surveys/lsst/schemas",
     "/babamul/surveys/ztf/schemas",
     "/babamul/docs",

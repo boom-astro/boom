@@ -44,6 +44,8 @@ mod tests {
                 created_at: 0,
                 kafka_credentials: vec![],
                 tokens: vec![],
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
             };
 
             let babamul_users_collection: mongodb::Collection<
@@ -2432,5 +2434,470 @@ mod tests {
         let body = read_json_response(resp).await;
         assert!(body["message"].is_string(), "Should include a message");
         assert!(body["data"].is_object(), "Should return results as object");
+    }
+
+    // ─── Password reset tests ─────────────────────────────────────────────────
+
+    /// Helper: compute the SHA-256 hex digest of a string (mirrors the production code).
+    fn sha256_hex(input: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(input.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
+    /// Helper: insert a password-reset token directly into the DB for a user.
+    async fn set_reset_token(database: &Database, user_id: &str, raw_token: &str, expires_at: i64) {
+        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let token_hash = sha256_hex(raw_token);
+        col.update_one(
+            doc! { "_id": user_id },
+            doc! {
+                "$set": {
+                    "password_reset_token_hash": &token_hash,
+                    "password_reset_token_expires_at": expires_at
+                }
+            },
+        )
+        .await
+        .expect("Failed to set reset token in DB");
+    }
+
+    /// POST /babamul/forgot-password
+    ///
+    /// Covers:
+    /// - Known activated user: token hash and expiry are written to DB
+    /// - Unknown email: returns 200 with generic message (no enumeration)
+    /// - Non-activated account: returns 200 but no token is stored
+    #[actix_rt::test]
+    async fn test_babamul_forgot_password() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::post_babamul_auth),
+            ),
+        )
+        .await;
+
+        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+
+        // ── Case 1: activated user – token is written to DB ──────────────────
+        let id_activated = uuid::Uuid::new_v4().to_string();
+        let email_activated = format!("test+{}@babamul.example.com", id_activated);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            id: id_activated.clone(),
+            username: "resettest".to_string(),
+            email: email_activated.clone(),
+            password_hash: bcrypt::hash("hunter22hunter22", 4).unwrap(),
+            activation_code: None,
+            is_activated: true,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+        })
+        .await
+        .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": email_activated }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "should always return 200");
+
+        let updated = col
+            .find_one(doc! { "_id": &id_activated })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            updated.password_reset_token_hash.is_some(),
+            "reset token hash should be written to DB"
+        );
+        let expiry = updated.password_reset_token_expires_at.unwrap();
+        let now = flare::Time::now().to_utc().timestamp();
+        assert!(expiry > now, "token expiry should be in the future");
+        assert!(
+            expiry <= now + 3600 + 5,
+            "token expiry should be ~1 hour from now"
+        );
+
+        // ── Case 2: unknown email – generic 200 response, no enumeration ─────
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": "nobody@nowhere.example.com" }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unknown email must not cause a non-200 status"
+        );
+        let body = read_json_response(resp).await;
+        assert!(
+            body["message"].as_str().unwrap().contains("If an account"),
+            "response must use the generic non-revealing message"
+        );
+
+        // ── Case 3: non-activated account – no token stored ──────────────────
+        let id_inactive = uuid::Uuid::new_v4().to_string();
+        let email_inactive = format!("test+{}@babamul.example.com", id_inactive);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            id: id_inactive.clone(),
+            username: "notactivated".to_string(),
+            email: email_inactive.clone(),
+            password_hash: "x".to_string(),
+            activation_code: Some("code".to_string()),
+            is_activated: false,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+        })
+        .await
+        .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": email_inactive }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let inactive = col
+            .find_one(doc! { "_id": &id_inactive })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            inactive.password_reset_token_hash.is_none(),
+            "no reset token should be stored for a non-activated account"
+        );
+
+        // Clean up
+        col.delete_one(doc! { "_id": &id_activated }).await.unwrap();
+        col.delete_one(doc! { "_id": &id_inactive }).await.unwrap();
+    }
+
+    /// POST /babamul/reset-password
+    ///
+    /// Covers:
+    /// - Happy path: successful reset clears token, old password fails, new password logs in
+    /// - Invalid (wrong) token → 400
+    /// - Correct token but wrong email → 400
+    /// - Expired token → 400
+    /// - New password shorter than 8 characters → 400
+    /// - Token is single-use: second attempt with the same token → 400
+    #[actix_rt::test]
+    async fn test_babamul_reset_password() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::post_babamul_auth),
+            ),
+        )
+        .await;
+
+        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let now = flare::Time::now().to_utc().timestamp();
+
+        // Helper closure for inserting a plain activated user
+        let insert_user =
+            |id: &str, email: &str, username: &str| boom::api::routes::babamul::BabamulUser {
+                id: id.to_string(),
+                username: username.to_string(),
+                email: email.to_string(),
+                password_hash: bcrypt::hash("pw12345678", 4).unwrap(),
+                activation_code: None,
+                is_activated: true,
+                created_at: 0,
+                kafka_credentials: vec![],
+                tokens: vec![],
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
+            };
+
+        let mut ids_to_cleanup: Vec<String> = Vec::new();
+
+        // ── Happy path ────────────────────────────────────────────────────────
+        let id = uuid::Uuid::new_v4().to_string();
+        let email = format!("test+{}@babamul.example.com", id);
+        let old_password = "oldpassword1234!";
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            password_hash: bcrypt::hash(old_password, 4).unwrap(),
+            ..insert_user(&id, &email, "happypath")
+        })
+        .await
+        .unwrap();
+        ids_to_cleanup.push(id.clone());
+
+        let raw_token = "happypathtokenXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id, raw_token, now + 3600).await;
+
+        let new_password = "newpassword5678!";
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email,
+                    "token": raw_token,
+                    "new_password": new_password
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "happy-path reset should succeed: {}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("reset successfully"));
+
+        let updated = col.find_one(doc! { "_id": &id }).await.unwrap().unwrap();
+        assert!(
+            updated.password_reset_token_hash.is_none(),
+            "token hash should be cleared"
+        );
+        assert!(
+            updated.password_reset_token_expires_at.is_none(),
+            "token expiry should be cleared"
+        );
+        assert!(
+            !bcrypt::verify(old_password, &updated.password_hash).unwrap(),
+            "old password should no longer work"
+        );
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/auth")
+                .set_form(serde_json::json!({ "email": email, "password": new_password }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "login with new password should succeed"
+        );
+        assert!(read_json_response(resp).await["access_token"].is_string());
+
+        // ── Invalid (wrong) token → 400 ───────────────────────────────────────
+        let id2 = uuid::Uuid::new_v4().to_string();
+        let email2 = format!("test+{}@babamul.example.com", id2);
+        col.insert_one(&insert_user(&id2, &email2, "invalidtok"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id2.clone());
+        set_reset_token(
+            &database,
+            &id2,
+            "correct_token_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            now + 3600,
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email2,
+                    "token": "this_is_the_wrong_token_XXXXXXXXXXXXXXXXXXXXXXXXX",
+                    "new_password": "newpassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "wrong token must be rejected"
+        );
+        assert_eq!(
+            read_json_response(resp).await["message"].as_str().unwrap(),
+            "Invalid or expired password reset token",
+            "wrong-token error must use the same generic message as wrong-email to prevent oracle attacks"
+        );
+
+        // ── Correct token but wrong email → 400 ──────────────────────────────
+        let id3 = uuid::Uuid::new_v4().to_string();
+        let email3 = format!("test+{}@babamul.example.com", id3);
+        col.insert_one(&insert_user(&id3, &email3, "wrongemail"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id3.clone());
+        let token3 = "wrongemailtoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id3, token3, now + 3600).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": "someone_else@other.example.com",
+                    "token": token3,
+                    "new_password": "newpassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "correct token with wrong email must be rejected"
+        );
+        assert_eq!(
+            read_json_response(resp).await["message"].as_str().unwrap(),
+            "Invalid or expired password reset token",
+            "wrong-email error must use the same generic message as wrong-token to prevent oracle attacks"
+        );
+
+        // ── Expired token → 400 ───────────────────────────────────────────────
+        let id4 = uuid::Uuid::new_v4().to_string();
+        let email4 = format!("test+{}@babamul.example.com", id4);
+        col.insert_one(&insert_user(&id4, &email4, "expiredtok"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id4.clone());
+        let token4 = "expiredtoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id4, token4, now - 1).await; // already expired
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email4,
+                    "token": token4,
+                    "new_password": "newpassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expired token must be rejected"
+        );
+
+        // ── Password too short → 400 ──────────────────────────────────────────
+        let id5 = uuid::Uuid::new_v4().to_string();
+        let email5 = format!("test+{}@babamul.example.com", id5);
+        col.insert_one(&insert_user(&id5, &email5, "tooshort"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id5.clone());
+        let token5 = "tooshorttoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id5, token5, now + 3600).await;
+
+        for short_pw in &["short", "seven77", ""] {
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/babamul/reset-password")
+                    .set_json(serde_json::json!({
+                        "email": email5,
+                        "token": token5,
+                        "new_password": short_pw
+                    }))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "password '{}' should be rejected as too short",
+                short_pw
+            );
+        }
+
+        // ── Token is single-use ───────────────────────────────────────────────
+        let id6 = uuid::Uuid::new_v4().to_string();
+        let email6 = format!("test+{}@babamul.example.com", id6);
+        col.insert_one(&insert_user(&id6, &email6, "singleuse"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id6.clone());
+        let token6 = "singleusetoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id6, token6, now + 3600).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email6,
+                    "token": token6,
+                    "new_password": "newpw12345678"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "first use should succeed");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email6,
+                    "token": token6,
+                    "new_password": "anothernewpw5678"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "second use of consumed token must be rejected"
+        );
+
+        // Clean up all users created in this test
+        for id in &ids_to_cleanup {
+            col.delete_one(doc! { "_id": id }).await.unwrap();
+        }
     }
 }

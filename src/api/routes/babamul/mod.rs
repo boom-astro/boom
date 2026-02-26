@@ -117,6 +117,8 @@ pub struct BabamulUser {
     #[serde(default)]
     pub kafka_credentials: Vec<KafkaCredentialEncrypted>, // List of Kafka credentials (w/ encrypted passwords)
     pub tokens: Vec<BabamulUserToken>, // List of API tokens
+    pub password_reset_token_hash: Option<String>, // SHA-256 hash of the password reset token
+    pub password_reset_token_expires_at: Option<i64>, // Unix timestamp expiry for the reset token
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -260,6 +262,8 @@ pub async fn post_babamul_signup(
                 created_at: flare::Time::now().to_utc().timestamp(),
                 kafka_credentials: Vec::new(), // Empty list, credentials created on demand
                 tokens: Vec::new(),            // Empty list of tokens
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -754,6 +758,229 @@ pub async fn post_babamul_auth(
         Err(e) => {
             eprintln!("Database error fetching user: {}", e);
             response::internal_error("Database error")
+        }
+    }
+}
+
+// ─── Password reset ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct BabamulForgotPasswordPost {
+    pub email: String,
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct BabamulForgotPasswordResponse {
+    pub message: String,
+}
+
+/// Request a password reset link
+///
+/// Accepts an email address and sends a password-reset link to that address if
+/// an activated account with that email exists.  The response is always the same
+/// regardless of whether the email is found – this prevents account enumeration.
+#[utoipa::path(
+    post,
+    path = "/babamul/forgot-password",
+    request_body = BabamulForgotPasswordPost,
+    responses(
+        (status = 200, description = "Reset email sent (or silently skipped)", body = BabamulForgotPasswordResponse),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[post("/forgot-password")]
+pub async fn post_babamul_forgot_password(
+    db: web::Data<Database>,
+    email_service: web::Data<EmailService>,
+    body: web::Json<BabamulForgotPasswordPost>,
+    config: web::Data<crate::conf::AppConfig>,
+) -> HttpResponse {
+    let email = body.email.trim().to_lowercase();
+
+    // Always return the same generic message to prevent account enumeration.
+    let generic_response = BabamulForgotPasswordResponse {
+        message: "If an account with that email exists, a password reset link has been sent."
+            .to_string(),
+    };
+
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    let user = match babamul_users_collection
+        .find_one(doc! { "email": &email })
+        .await
+    {
+        Ok(Some(u)) if u.is_activated => u,
+        Ok(_) => return HttpResponse::Ok().json(generic_response), // unknown email or not activated – silent no-op
+        Err(e) => {
+            eprintln!("Database error during forgot-password lookup: {}", e);
+            return response::internal_error("Database error");
+        }
+    };
+
+    // Generate a secure random raw token and store its SHA-256 hash.
+    use sha2::{Digest, Sha256};
+    let raw_token = generate_random_string(48);
+    let mut hasher = Sha256::new();
+    hasher.update(raw_token.as_bytes());
+    let token_hash = format!("{:x}", hasher.finalize());
+
+    // Expiry: 1 hour from now.
+    let expires_at = flare::Time::now().to_utc().timestamp() + 3600;
+
+    match babamul_users_collection
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! {
+                "$set": {
+                    "password_reset_token_hash": &token_hash,
+                    "password_reset_token_expires_at": expires_at
+                }
+            },
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Database error storing reset token: {}", e);
+            return response::internal_error("Database error");
+        }
+    }
+
+    // Send the email (fire-and-forget; don't leak token in error response).
+    if email_service.is_enabled() {
+        if let Err(e) = email_service.send_password_reset_email(
+            &email,
+            &raw_token,
+            &config.api.domain,
+            &config.babamul.webapp_url,
+        ) {
+            eprintln!("Failed to send password reset email to {}: {}", email, e);
+        }
+    } else {
+        if let Some(webapp_url) = &config.babamul.webapp_url {
+            println!(
+                "Email service disabled – password reset link for {}: {}/reset-password?token={}&email={}",
+                email, webapp_url, raw_token, email
+            );
+        } else {
+            println!(
+                "Email service disabled – password reset token for {}: {}",
+                email, raw_token
+            );
+        }
+    }
+
+    HttpResponse::Ok().json(generic_response)
+}
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct BabamulResetPasswordPost {
+    pub email: String,
+    pub token: String,
+    pub new_password: String,
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct BabamulResetPasswordResponse {
+    pub message: String,
+}
+
+/// Reset a Babamul account password using a reset token
+///
+/// Validates the token, checks it has not expired, updates the password hash,
+/// then invalidates the token so it cannot be reused.
+#[utoipa::path(
+    post,
+    path = "/babamul/reset-password",
+    request_body = BabamulResetPasswordPost,
+    responses(
+        (status = 200, description = "Password reset successfully", body = BabamulResetPasswordResponse),
+        (status = 400, description = "Invalid or expired token, or password too short"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[post("/reset-password")]
+pub async fn post_babamul_reset_password(
+    db: web::Data<Database>,
+    body: web::Json<BabamulResetPasswordPost>,
+) -> HttpResponse {
+    let raw_token = body.token.trim();
+    let new_password = &body.new_password;
+
+    // Enforce a minimum password length.
+    if new_password.len() < 8 {
+        return response::bad_request("New password must be at least 8 characters long");
+    }
+
+    // Hash the incoming token to look it up in the database.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(raw_token.as_bytes());
+    let token_hash = format!("{:x}", hasher.finalize());
+
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    // Look up the user by ALL three conditions in a single compound query.  This is
+    // intentional: whether the token is wrong, the email is wrong, or the token has
+    // expired, MongoDB returns the same `Ok(None)` result, so we always respond with
+    // the same generic message.  A separate lookup (e.g. first by token, then by email)
+    // would let an attacker probe which part of the input was incorrect.
+    let now = flare::Time::now().to_utc().timestamp();
+
+    let user = match babamul_users_collection
+        .find_one(doc! {
+            "email": &body.email.trim().to_lowercase(),
+            "password_reset_token_hash": &token_hash,
+            "password_reset_token_expires_at": { "$gt": now }
+        })
+        .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return response::bad_request("Invalid or expired password reset token");
+        }
+        Err(e) => {
+            eprintln!("Database error during reset-password lookup: {}", e);
+            return response::internal_error("Database error");
+        }
+    };
+
+    // Hash the new password with bcrypt.
+    let password_hash = match bcrypt::hash(new_password, bcrypt::DEFAULT_COST) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Failed to hash new password: {}", e);
+            return response::internal_error("Failed to update password");
+        }
+    };
+
+    // Atomically update password and invalidate the reset token.
+    match babamul_users_collection
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! {
+                "$set":   { "password_hash": &password_hash },
+                "$unset": {
+                    "password_reset_token_hash": "",
+                    "password_reset_token_expires_at": ""
+                }
+            },
+        )
+        .await
+    {
+        Ok(_) => HttpResponse::Ok().json(BabamulResetPasswordResponse {
+            message:
+                "Password has been reset successfully. You can now log in with your new password."
+                    .to_string(),
+        }),
+        Err(e) => {
+            eprintln!(
+                "Database error resetting password for user {}: {}",
+                user.id, e
+            );
+            response::internal_error("Failed to reset password")
         }
     }
 }

@@ -263,6 +263,131 @@ impl EmailService {
 
         Ok(())
     }
+
+    /// Send a password reset email with a raw token link
+    pub fn send_password_reset_email(
+        &self,
+        to_email: &str,
+        raw_token: &str,
+        domain: &str,
+        webapp_url: &Option<String>,
+    ) -> Result<(), String> {
+        if !self.enabled {
+            return Err("Email service is not enabled".to_string());
+        }
+
+        let mailer = self
+            .mailer
+            .as_ref()
+            .ok_or("SMTP transport not configured")?;
+
+        // Build the CTA block depending on whether a webapp URL is available
+        let cta_block = if let Some(url) = webapp_url {
+            format!(
+                r#"<table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
+                <a href="{url}/reset-password?token={token}&email={email}"
+                   style="display:inline-block;margin:18px 0 8px;padding:14px 36px;
+                          background:#4f8ef7;color:#ffffff;text-decoration:none;
+                          font-size:16px;font-weight:700;border-radius:6px;letter-spacing:0.5px;">
+                  Reset My Password
+                </a></td></tr></table>
+                <p style="margin:8px 0 0;font-size:12px;color:#8899aa;text-align:center;">
+                  Or paste this URL into your browser:<br>
+                  <a href="{url}/reset-password?token={token}&email={email}"
+                     style="color:#4f8ef7;word-break:break-all;">
+                    {url}/reset-password?token={token}&email={email}
+                  </a>
+                </p>"#,
+                url = url,
+                token = raw_token,
+                email = to_email,
+            )
+        } else {
+            format!(
+                r#"<p style="margin:16px 0 8px;font-size:14px;color:#334155;">
+                  Reset via <code style="font-family:monospace;">curl</code>:
+                </p>
+                <pre style="background:#0f172a;color:#e2e8f0;padding:18px 20px;
+                            border-radius:8px;font-size:13px;line-height:1.6;
+                            overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0 0 8px;">curl -X POST https://{domain}/babamul/reset-password \
+     -H 'Content-Type: application/json' \
+     -d '{{"token":"{token}","new_password":"YOUR_NEW_PASSWORD"}}'</pre>"#,
+                domain = domain,
+                token = raw_token,
+            )
+        };
+
+        let email_body = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0b1120;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0b1120;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:560px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,0.5);">
+        <!-- Header -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#0b1120 0%,#1a2e50 60%,#1e3a6e 100%);padding:36px 40px 28px;text-align:center;">
+            <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:3px;color:#4f8ef7;text-transform:uppercase;">Zwicky Transient Facility &middot; LSST</p>
+            <h1 style="margin:0;font-size:40px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">Babamul</h1>
+            <p style="margin:6px 0 0;font-size:15px;color:#7ca4d4;">A real-time multi-survey alert broker for the LSST era.</p>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 40px 28px;">
+            <p style="margin:0 0 16px;font-size:16px;color:#1e293b;">Hi there,</p>
+            <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#334155;">
+              We received a request to reset the password for your Babamul account.
+              Use the link below to choose a new password.
+            </p>
+            <!-- CTA / curl block -->
+            <div style="margin-top:10px;">{cta}</div>
+            <!-- Expiry notice -->
+            <p style="margin:28px 0 0;font-size:13px;color:#64748b;background:#f8fafc;border-left:3px solid #f59e0b;padding:10px 14px;border-radius:0 6px 6px 0;">
+              &#x23F0;&nbsp; This link expires in <strong>1 hour</strong>.
+              If you did not request a password reset, you can safely ignore this email &mdash; your password will not change.
+            </p>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f8fafc;padding:20px 40px;border-top:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.6;">
+              BOOM &mdash; Babamul Alert Broker &bull; Caltech / ZTF / LSST<br>
+              This is an automated message. Please do not reply.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"#,
+            cta = cta_block,
+        );
+
+        let email = Message::builder()
+            .from(
+                format!("Babamul <{}>", self.from_address)
+                    .parse()
+                    .map_err(|e| format!("Invalid from address: {}", e))?,
+            )
+            .to(to_email
+                .parse()
+                .map_err(|e| format!("Invalid to address: {}", e))?)
+            .subject("Reset Your Babamul Password")
+            .header(ContentType::TEXT_HTML)
+            .body(email_body)
+            .map_err(|e| format!("Failed to build email: {}", e))?;
+
+        mailer
+            .send(&email)
+            .map_err(|e| format!("Failed to send email: {}", e))?;
+
+        Ok(())
+    }
 }
 
 impl Default for EmailService {

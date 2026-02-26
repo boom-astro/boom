@@ -55,6 +55,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_signup)
                     .service(routes::babamul::post_babamul_activate)
                     .service(routes::babamul::post_babamul_auth)
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
