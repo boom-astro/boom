@@ -262,7 +262,7 @@ start_consumer() {
   local date="${3:?}"
 
   info "starting the consumer"
-  eval "${consumer} --clear ${survey} ${date} >&2 &"
+  eval "${consumer} --clear ${survey} --date ${date} >&2 &"
   echo "$!"
 }
 
