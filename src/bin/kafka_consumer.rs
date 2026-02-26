@@ -27,9 +27,9 @@ struct Cli {
     #[arg(long, value_parser = parse_date)]
     date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
 
-    /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --program-ids public,partnership,caltech).
+    /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --programids public,partnership,caltech).
     #[arg(long, value_enum, value_delimiter = ',', default_value = "public")]
-    program_ids: Vec<ProgramId>,
+    programids: Vec<ProgramId>,
 
     /// Path to the configuration file
     #[arg(long, value_name = "FILE", default_value = "config.yaml")]
@@ -94,7 +94,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 
     match args.survey {
         Survey::Ztf => {
-            let consumer = ZtfAlertConsumer::new(None, Some(args.program_ids));
+            let consumer = ZtfAlertConsumer::new(None, Some(args.programids));
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config).await;
             }

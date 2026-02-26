@@ -148,7 +148,7 @@ Here's the command I ran for the baseline scenario "none-info":
   --consumer 'RUST_LOG=info,ort=error 2>./env/runs/throughput-20250714-20240617-none-info-consumer.log ./env/none/bin/kafka_consumer' \
   --scheduler 'RUST_LOG=info,ort=error 2>./env/runs/throughput-20250714-20240617-none-info-scheduler.log ./env/none/bin/scheduler' \
   --output ./env/runs/throughput-20250714-20240617-none-info.dat \
-  -- ztf 20240617
+  -- ztf --date 20240617
 ```
 
 I used the debug build of the producer due to an obscure bug in LLVM that
@@ -172,7 +172,7 @@ Here is the command for the "none-debug" scenario:
   --consumer 'RUST_LOG=debug,ort=error 2>throughput-20250714-20240617-none-debug-consumer.log ./env/none/bin/kafka_consumer' \
   --scheduler 'RUST_LOG=debug,ort=error 2>throughput-20250714-20240617-none-debug-scheduler.log ./env/none/bin/scheduler' \
   --output throughput-20250714-20240617-none-debug.dat \
-  -- ztf 20240617
+  -- ztf --date 20240617
 ```
 
 There were a couple of surprises in these results:
@@ -217,7 +217,7 @@ command that was used:
   --consumer 'RUST_LOG=debug 2>throughput-20250714-20240617-none-debug2-consumer.log ./env/none/bin/kafka_consumer' \
   --scheduler 'RUST_LOG=debug 2>throughput-20250714-20240617-none-debug2-scheduler.log ./env/none/bin/scheduler' \
   --output throughput-20250714-20240617-none-debug2.dat \
-  -- ztf 20240617
+  -- ztf --date 20240617
 ```
 
 The scheduler log in this case had 667 lines, more than 20x the events in
@@ -254,7 +254,7 @@ of compile-time filtering:
   --consumer 'RUST_LOG=debug 2>throughput-20250714-20240617-info-debug-consumer.log ./env/info/bin/kafka_consumer' \
   --scheduler 'RUST_LOG=debug 2>throughput-20250714-20240617-info-debug-scheduler.log ./env/info/bin/scheduler' \
   --output throughput-20250714-20240617-info-debug.dat \
-  -- ztf 20240617
+  -- ztf --date 20240617
 ```
 
 The distribution of throughputs from this scenario looked basically identical to
@@ -288,7 +288,7 @@ Here is the command for the "off-debug" scenario:
   --consumer 'RUST_LOG=debug 2>throughput-20250714-20240617-off-debug-consumer.log ./env/off/bin/kafka_consumer' \
   --scheduler 'RUST_LOG=debug 2>throughput-20250714-20240617-off-debug-scheduler.log ./env/off/bin/scheduler' \
   --output throughput-20250714-20240617-off-debug.dat \
-  -- ztf 20240617
+  -- ztf --date 20240617
 ```
 
 If there's any measurable cost at all to tracing, this scenario should have
