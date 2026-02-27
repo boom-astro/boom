@@ -6,6 +6,7 @@ use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::db::initialize_watchlist_indexes;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -29,6 +30,14 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Babamul API endpoints are ENABLED");
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
+    }
+
+    let watchlist_is_enabled = config.watchlist.enabled;
+    if watchlist_is_enabled {
+        println!("Watchlist module is ENABLED");
+        initialize_watchlist_indexes(&database).await.unwrap();
+    } else {
+        println!("Watchlist module is DISABLED");
     }
 
     // Create API docs from OpenAPI spec
@@ -76,38 +85,47 @@ async fn main() -> std::io::Result<()> {
             )
         }
 
-        app.service(
-            actix_web::web::scope("")
-                .wrap(from_fn(auth_middleware))
-                // Public routes
-                .service(Scalar::with_url("/docs", api_doc.clone()))
-                .service(routes::info::get_health)
-                .service(routes::auth::post_auth)
-                // Protected routes
-                .service(routes::info::get_db_info)
-                .service(routes::kafka::get_kafka_acls)
-                .service(routes::kafka::delete_kafka_credentials)
-                .service(routes::filters::post_filter)
-                .service(routes::filters::patch_filter)
-                .service(routes::filters::get_filters)
-                .service(routes::filters::get_filter)
-                .service(routes::filters::post_filter_version)
-                .service(routes::filters::post_filter_test)
-                .service(routes::filters::post_filter_test_count)
-                .service(routes::filters::get_filter_schema)
-                .service(routes::users::post_user)
-                .service(routes::users::get_users)
-                .service(routes::users::delete_user)
-                .service(routes::catalogs::get_catalogs)
-                .service(routes::catalogs::get_catalog_indexes)
-                .service(routes::catalogs::get_catalog_sample)
-                .service(routes::queries::post_find_query)
-                .service(routes::queries::post_cone_search_query)
-                .service(routes::queries::post_count_query)
-                .service(routes::queries::post_estimated_count_query)
-                .service(routes::queries::post_pipeline_query)
-                .wrap(Logger::default()),
-        )
+        let mut main_scope = actix_web::web::scope("")
+            .wrap(from_fn(auth_middleware))
+            // Public routes
+            .service(Scalar::with_url("/docs", api_doc.clone()))
+            .service(routes::info::get_health)
+            .service(routes::auth::post_auth)
+            // Protected routes
+            .service(routes::info::get_db_info)
+            .service(routes::kafka::get_kafka_acls)
+            .service(routes::kafka::delete_kafka_credentials)
+            .service(routes::filters::post_filter)
+            .service(routes::filters::patch_filter)
+            .service(routes::filters::get_filters)
+            .service(routes::filters::get_filter)
+            .service(routes::filters::post_filter_version)
+            .service(routes::filters::post_filter_test)
+            .service(routes::filters::post_filter_test_count)
+            .service(routes::filters::get_filter_schema)
+            .service(routes::users::post_user)
+            .service(routes::users::get_users)
+            .service(routes::users::delete_user)
+            .service(routes::catalogs::get_catalogs)
+            .service(routes::catalogs::get_catalog_indexes)
+            .service(routes::catalogs::get_catalog_sample)
+            .service(routes::queries::post_find_query)
+            .service(routes::queries::post_cone_search_query)
+            .service(routes::queries::post_count_query)
+            .service(routes::queries::post_estimated_count_query)
+            .service(routes::queries::post_pipeline_query);
+
+        // Conditionally register watchlist endpoints inside the auth scope
+        if watchlist_is_enabled {
+            main_scope = main_scope
+                .service(routes::watchlists::post_watchlist)
+                .service(routes::watchlists::get_watchlists)
+                .service(routes::watchlists::get_watchlist)
+                .service(routes::watchlists::patch_watchlist)
+                .service(routes::watchlists::delete_watchlist);
+        }
+
+        app.service(main_scope.wrap(Logger::default()))
     })
     .bind(("0.0.0.0", port))?
     .run()

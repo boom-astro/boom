@@ -417,6 +417,56 @@ pub struct SurveyWorkerConfig {
     pub filter: WorkerConfig,
 }
 
+// ==================== Watchlist Configuration ====================
+
+fn default_watchlist_enabled() -> bool {
+    false
+}
+
+fn default_watchlist_max_per_user() -> usize {
+    100
+}
+
+fn default_watchlist_max_radius_deg() -> f64 {
+    10.0
+}
+
+/// Per-user watchlist limits
+#[derive(Deserialize, Debug, Clone)]
+pub struct WatchlistLimitsConfig {
+    #[serde(default = "default_watchlist_max_per_user")]
+    pub max_per_user: usize,
+    #[serde(default = "default_watchlist_max_radius_deg")]
+    pub max_radius_deg: f64,
+}
+
+impl Default for WatchlistLimitsConfig {
+    fn default() -> Self {
+        WatchlistLimitsConfig {
+            max_per_user: default_watchlist_max_per_user(),
+            max_radius_deg: default_watchlist_max_radius_deg(),
+        }
+    }
+}
+
+/// Watchlist module configuration
+#[derive(Deserialize, Debug, Clone)]
+pub struct WatchlistConfig {
+    #[serde(default = "default_watchlist_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub limits: WatchlistLimitsConfig,
+}
+
+impl Default for WatchlistConfig {
+    fn default() -> Self {
+        WatchlistConfig {
+            enabled: default_watchlist_enabled(),
+            limits: WatchlistLimitsConfig::default(),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -425,6 +475,8 @@ pub struct AppConfig {
     pub redis: RedisConfig,
     #[serde(default)]
     pub babamul: BabamulConfig,
+    #[serde(default)]
+    pub watchlist: WatchlistConfig,
     pub kafka: KafkaConfig,
     #[serde(default)]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
