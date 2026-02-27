@@ -5,6 +5,8 @@ import {
   IconHelp,
   IconSearch,
   IconBinaryTree,
+  IconPackage,
+  IconNotebook,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from "@/components/nav-documents"
@@ -33,7 +35,7 @@ const data = {
   navSecondary: [
     {
       title: "Get Help",
-      url: "#",
+      url: "/help",
       icon: IconHelp,
     },
   ],
@@ -47,7 +49,21 @@ const data = {
       name: "API Documentation",
       url: "/docs/api",
       icon: IconDatabase,
-    }
+    },
+  ],
+  tools: [
+    {
+      name: "Python Client (PyPI)",
+      url: "https://pypi.org/project/babamul/",
+      icon: IconPackage,
+      external: true,
+    },
+    {
+      name: "Notebook Examples",
+      url: "https://github.com/boom-astro/babamul/tree/main/examples",
+      icon: IconNotebook,
+      external: true,
+    },
   ],
 }
 
@@ -57,11 +73,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-              <SidebarMenuButton
+            <SidebarMenuButton
               asChild
               className="data-[slot=sidebar-menu-button]:!p-1.5"
             >
-              <Link to="/" className="flex items-center gap-2">
+              <Link to="/" state={{ explicit: true }} className="flex items-center gap-2">
                 {/* Collapsed version - stacked */}
                 <div className="hidden group-data-[collapsible=icon]:flex flex-col items-center justify-center leading-[1.1] text-md -ml-1">
                   <span>𒁀𒁀</span>
@@ -79,6 +95,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <NavMain items={data.navMain} />
         <SidebarSeparator />
         <NavDocuments items={data.documentation} />
+        <SidebarSeparator />
+        <NavDocuments items={data.tools} label="Tools" />
         <SidebarSeparator />
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>

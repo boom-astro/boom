@@ -28,27 +28,37 @@ import {
 
 export function NavDocuments({
   items,
+  label = 'Documentation',
 }: {
   items: {
     name: string
     url: string
     icon: Icon
+    external?: boolean
   }[]
+  label?: string
 }) {
   const { isMobile } = useSidebar()
   const location = useLocation()
 
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>Documentation</SidebarGroupLabel>
+      <SidebarGroupLabel>{label}</SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => (
           <SidebarMenuItem key={item.name}>
             <SidebarMenuButton asChild tooltip={item.name}>
-              <Link to={item.url} state={{ from: location.pathname }}>
-                <item.icon />
-                <span>{item.name}</span>
-              </Link>
+              {item.external ? (
+                <a href={item.url} target="_blank" rel="noopener noreferrer">
+                  <item.icon />
+                  <span>{item.name}</span>
+                </a>
+              ) : (
+                <Link to={item.url} state={{ from: location.pathname }}>
+                  <item.icon />
+                  <span>{item.name}</span>
+                </Link>
+              )}
             </SidebarMenuButton>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -82,12 +92,6 @@ export function NavDocuments({
             </DropdownMenu>
           </SidebarMenuItem>
         ))}
-        <SidebarMenuItem>
-          <SidebarMenuButton className="text-sidebar-foreground/70">
-            <IconDots className="text-sidebar-foreground/70" />
-            <span>More (coming soon)</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
       </SidebarMenu>
     </SidebarGroup>
   )

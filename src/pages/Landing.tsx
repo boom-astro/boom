@@ -1,14 +1,24 @@
-import { Link } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import api from '@/lib/api';
 import Kilonova from '@/components/Kilonova';
-import { IconNews } from '@tabler/icons-react';
+import { IconNews, IconBrandPython } from '@tabler/icons-react';
+import { useEffect } from 'react';
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
 
 export default function Landing() {
   const token = api.getTokenRecord();
   const loggedIn = !!token;
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Redirect logged-in users to /query unless they explicitly navigated here
+  useEffect(() => {
+    if (loggedIn && !(location.state as { explicit?: boolean })?.explicit) {
+      navigate('/query', { replace: true });
+    }
+  }, [loggedIn, navigate, location.state]);
 
   return (
     <div className="w-full min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-950 to-slate-900 text-white">
@@ -30,14 +40,14 @@ export default function Landing() {
       </div>
 
       {/* Paper link in top right - hidden on mobile */}
-      <a 
-        href="https://arxiv.org/abs/2511.00164" 
-        target="_blank" 
+      <a
+        href="https://arxiv.org/abs/2511.00164"
+        target="_blank"
         rel="noopener noreferrer"
         className="hidden md:flex fixed top-6 right-6 z-20 px-4 py-2 bg-slate-800/80 backdrop-blur-sm border border-slate-600 rounded-lg text-slate-100 hover:bg-slate-700/90 hover:text-white hover:border-slate-500 transition-all duration-200 shadow-lg hover:shadow-xl items-center gap-2 fade-in-up"
       >
         <IconNews className="w-5 h-5" />
-        Read our paper  
+        Read our paper
       </a>
 
       <div className="relative max-w-6xl w-full px-6 lg:px-12 py-12 md:py-20">
@@ -70,6 +80,12 @@ export default function Landing() {
             <Link to="/docs/api" state={{ from: '/' }} className="col-span-1">
               <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md">API docs</Button>
             </Link>
+            <a href="https://pypi.org/project/babamul/" target="_blank" rel="noopener noreferrer" className="col-span-2 md:col-span-1">
+              <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md flex items-center justify-center gap-2">
+                <IconBrandPython className="w-4 h-4" />
+                Python Client
+              </Button>
+            </a>
             <a href="https://arxiv.org/abs/2511.00164" target="_blank" rel="noopener noreferrer" className="col-span-2 md:hidden">
               <Button variant="outline" className="w-full px-6 py-3 bg-slate-800/40 border-slate-600 text-slate-100 hover:bg-slate-700/60 hover:text-white transform transition duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md flex items-center justify-center gap-2">
                 <IconNews className="w-4 h-4" />

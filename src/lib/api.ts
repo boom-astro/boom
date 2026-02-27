@@ -121,6 +121,30 @@ export function getEmail(): string | null {
   }
 }
 
+export async function forgotPassword(email: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Request failed: ${res.status} ${txt}`);
+  }
+}
+
+export async function resetPassword(email: string, token: string, new_password: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, token, new_password }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Password reset failed: ${res.status} ${txt}`);
+  }
+}
+
 async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) {
@@ -375,6 +399,8 @@ export default {
   login,
   logout,
   getTokenRecord,
+  forgotPassword,
+  resetPassword,
   fetchObject,
   fetchProfile,
   fetchKafkaCredentials,
