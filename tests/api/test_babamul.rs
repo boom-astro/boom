@@ -2613,7 +2613,7 @@ mod tests {
     /// - Invalid (wrong) token → 400
     /// - Correct token but wrong email → 400
     /// - Expired token → 400
-    /// - New password shorter than 8 characters → 400
+    /// - New password shorter than 12 characters → 400
     /// - Token is single-use: second attempt with the same token → 400
     #[actix_rt::test]
     async fn test_babamul_reset_password() {
@@ -2673,7 +2673,7 @@ mod tests {
         let raw_token = "happypathtokenXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
         set_reset_token(&database, &id, raw_token, now + 3600).await;
 
-        let new_password = "newpassword5678!";
+        let new_password = "NewPassword5678!";
         let resp = test::call_service(
             &app,
             test::TestRequest::post()
@@ -2749,7 +2749,7 @@ mod tests {
                 .set_json(serde_json::json!({
                     "email": email2,
                     "token": "this_is_the_wrong_token_XXXXXXXXXXXXXXXXXXXXXXXXX",
-                    "new_password": "newpassword5678!"
+                    "new_password": "NewPassword5678!"
                 }))
                 .to_request(),
         )
@@ -2782,7 +2782,7 @@ mod tests {
                 .set_json(serde_json::json!({
                     "email": "someone_else@other.example.com",
                     "token": token3,
-                    "new_password": "newpassword5678!"
+                    "new_password": "NewPassword5678!"
                 }))
                 .to_request(),
         )
@@ -2815,7 +2815,7 @@ mod tests {
                 .set_json(serde_json::json!({
                     "email": email4,
                     "token": token4,
-                    "new_password": "newpassword5678!"
+                    "new_password": "NewPassword5678!"
                 }))
                 .to_request(),
         )
@@ -2848,7 +2848,7 @@ mod tests {
                 .set_json(serde_json::json!({
                     "email": email_rl,
                     "token": token_rl,
-                    "new_password": "newpassword5678!"
+                    "new_password": "NewPassword5678!"
                 }))
                 .to_request(),
         )
@@ -2874,17 +2874,27 @@ mod tests {
             retry_after
         );
 
-        // ── Password too short → 400 ──────────────────────────────────────────
+        // ── Weak / non-complex passwords → 400 ───────────────────────────────
         let id5 = uuid::Uuid::new_v4().to_string();
         let email5 = format!("test+{}@babamul.example.com", id5);
-        col.insert_one(&insert_user(&id5, &email5, "tooshort"))
+        col.insert_one(&insert_user(&id5, &email5, "weakpw"))
             .await
             .unwrap();
         ids_to_cleanup.push(id5.clone());
         let token5 = "tooshorttoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
         set_reset_token(&database, &id5, token5, now + 3600).await;
 
-        for short_pw in &["short", "seven77", ""] {
+        let weak_passwords = [
+            ("", "empty"),
+            ("short", "too short"),
+            ("seven77", "too short"),
+            ("alllowercase1!", "no uppercase"),
+            ("ALLUPPERCASE1!", "no lowercase"),
+            ("NoDigitsHere!", "no digit"),
+            ("NoSpecialChar1", "no special character"),
+            ("12345678", "no letters or special character"),
+        ];
+        for (pw, reason) in &weak_passwords {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
@@ -2892,7 +2902,7 @@ mod tests {
                     .set_json(serde_json::json!({
                         "email": email5,
                         "token": token5,
-                        "new_password": short_pw
+                        "new_password": pw
                     }))
                     .to_request(),
             )
@@ -2900,8 +2910,9 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::BAD_REQUEST,
-                "password '{}' should be rejected as too short",
-                short_pw
+                "password '{}' should be rejected ({})",
+                pw,
+                reason
             );
         }
 
@@ -2922,7 +2933,7 @@ mod tests {
                 .set_json(serde_json::json!({
                     "email": email6,
                     "token": token6,
-                    "new_password": "newpw12345678"
+                    "new_password": "NewPw12345678!"
                 }))
                 .to_request(),
         )
@@ -2936,7 +2947,7 @@ mod tests {
                 .set_json(serde_json::json!({
                     "email": email6,
                     "token": token6,
-                    "new_password": "anothernewpw5678"
+                    "new_password": "AnotherNewPw5678!"
                 }))
                 .to_request(),
         )

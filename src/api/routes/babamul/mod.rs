@@ -19,6 +19,36 @@ use aes_gcm::{
 };
 use base64::{engine::general_purpose, Engine as _};
 
+/// Validate password complexity.
+///
+/// Requirements (standard NIST-aligned policy):
+/// - At least 12 characters
+/// - At least one uppercase letter (A-Z)
+/// - At least one lowercase letter (a-z)
+/// - At least one digit (0-9)
+/// - At least one special character
+fn validate_password_complexity(password: &str) -> Result<(), &'static str> {
+    if password.len() < 12 {
+        return Err("Password must be at least 12 characters long");
+    }
+    if !password.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err("Password must contain at least one uppercase letter");
+    }
+    if !password.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err("Password must contain at least one lowercase letter");
+    }
+    if !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err("Password must contain at least one digit");
+    }
+    if !password
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && c.is_ascii())
+    {
+        return Err("Password must contain at least one special character");
+    }
+    Ok(())
+}
+
 // Generate a random nonce for each encryption
 fn encrypt_password(
     password: &str,
@@ -912,9 +942,9 @@ pub async fn post_babamul_reset_password(
     let raw_token = body.token.trim();
     let new_password = &body.new_password;
 
-    // Enforce a minimum password length.
-    if new_password.len() < 8 {
-        return response::bad_request("New password must be at least 8 characters long");
+    // Enforce password complexity requirements.
+    if let Err(msg) = validate_password_complexity(new_password) {
+        return response::bad_request(msg);
     }
 
     // Hash the incoming token to look it up in the database.
