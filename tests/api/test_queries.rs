@@ -78,7 +78,8 @@ mod tests {
             .uri("/queries/find")
             .set_json(&serde_json::json!({
                 "catalog_name": test_catalog_name,
-                "filter": {}
+                "filter": {},
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -91,7 +92,8 @@ mod tests {
             .uri("/queries/find")
             .set_json(&serde_json::json!({
                 "catalog_name": test_catalog_name,
-                "filter": { "non_existent_field": "no_value" }
+                "filter": { "non_existent_field": "no_value" },
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -105,7 +107,8 @@ mod tests {
             .uri("/queries/find")
             .set_json(&serde_json::json!({
                 "catalog_name": test_catalog_name,
-                "filter": { "test_field": "test_value" }
+                "filter": { "test_field": "test_value" },
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -120,7 +123,8 @@ mod tests {
             .set_json(&serde_json::json!({
                 "catalog_name": test_catalog_name,
                 "filter": { "test_field": "test_value" },
-                "projection": { "test_field": 1, "_id": 0 }
+                "projection": { "test_field": 1, "_id": 0 },
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -134,6 +138,31 @@ mod tests {
         assert!(first_doc.get("_id").is_none());
         assert!(first_doc.get("test_other_field").is_none());
         assert!(first_doc.get("coordinates").is_none());
+
+        // limit = 0 should be rejected
+        let req = test::TestRequest::post()
+            .uri("/queries/find")
+            .set_json(&serde_json::json!({
+                "catalog_name": test_catalog_name,
+                "filter": {},
+                "limit": 0
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // limit > 100_000 should be rejected
+        let req = test::TestRequest::post()
+            .uri("/queries/find")
+            .set_json(&serde_json::json!({
+                "catalog_name": test_catalog_name,
+                "filter": {},
+                "limit": 100_001
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
         // clean up
         delete_test_catalog(&database, &test_catalog_name).await;
     }
@@ -157,7 +186,8 @@ mod tests {
                 "object_coordinates": { "test": [10.0, 20.0] },
                 "radius": 1.0,
                 "unit": "Degrees",
-                "filter": {}
+                "filter": {},
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -175,7 +205,8 @@ mod tests {
                 "object_coordinates": { "test": [0.0, 0.0] },
                 "radius": 1.0,
                 "unit": "Degrees",
-                "filter": {}
+                "filter": {},
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -184,6 +215,37 @@ mod tests {
         assert!(resp["data"].is_object());
         assert!(resp["data"]["test"].is_array());
         assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 0);
+
+        // limit = 0 should be rejected
+        let req = test::TestRequest::post()
+            .uri("/queries/cone_search")
+            .set_json(&serde_json::json!({
+                "catalog_name": test_catalog_name,
+                "object_coordinates": { "test": [10.0, 20.0] },
+                "radius": 1.0,
+                "unit": "Degrees",
+                "filter": {},
+                "limit": 0
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // limit > 100_000 should be rejected
+        let req = test::TestRequest::post()
+            .uri("/queries/cone_search")
+            .set_json(&serde_json::json!({
+                "catalog_name": test_catalog_name,
+                "object_coordinates": { "test": [10.0, 20.0] },
+                "radius": 1.0,
+                "unit": "Degrees",
+                "filter": {},
+                "limit": 100_001
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
         // clean up
         delete_test_catalog(&database, &test_catalog_name).await;
     }
@@ -206,7 +268,8 @@ mod tests {
                 "pipeline": [
                     { "$match": { "test_field": "test_value" } },
                     { "$project": { "test_field": 1, "_id": 0 } }
-                ]
+                ],
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -220,6 +283,21 @@ mod tests {
         assert!(first_doc.get("test_other_field").is_none());
         assert!(first_doc.get("coordinates").is_none());
 
+        // with limit = 0 should be rejected
+        let req = test::TestRequest::post()
+            .uri("/queries/pipeline")
+            .set_json(&serde_json::json!({
+                "catalog_name": test_catalog_name,
+                "pipeline": [
+                    { "$match": { "test_field": "test_value" } },
+                    { "$project": { "test_field": 1, "_id": 0 } }
+                ],
+                "limit": 0
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
         // test with a pipeline that returns no results
         let req = test::TestRequest::post()
             .uri("/queries/pipeline")
@@ -228,7 +306,8 @@ mod tests {
                 "pipeline": [
                     { "$match": { "test_field": "non_existent_value" } },
                     { "$project": { "test_field": 1, "_id": 0 } }
-                ]
+                ],
+                "limit": 10
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
