@@ -26,9 +26,9 @@ async fn main() -> std::io::Result<()> {
 
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
-        println!("Babamul API endpoints are ENABLED");
+        tracing::info!("Babamul API endpoints are ENABLED");
     } else {
-        println!("Babamul API endpoints are DISABLED");
+        tracing::info!("Babamul API endpoints are DISABLED");
     }
 
     // Create API docs from OpenAPI spec
@@ -55,6 +55,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_signup)
                     .service(routes::babamul::post_babamul_activate)
                     .service(routes::babamul::post_babamul_auth)
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)

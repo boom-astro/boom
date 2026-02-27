@@ -93,7 +93,7 @@ pub async fn post_find_query(db: web::Data<Database>, body: web::Json<FindQuery>
         match result {
             Ok(doc) => docs.push(doc),
             Err(e) => {
-                eprintln!("Error retrieving document from the database: {}", e);
+                tracing::error!("Error retrieving document from the database: {}", e);
                 return response::internal_error("Error retrieving document from the database");
             }
         }
