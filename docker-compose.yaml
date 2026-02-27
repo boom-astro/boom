@@ -178,9 +178,15 @@ services:
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-www-redirect.redirectregex.regex=^http(s)?://www.(${DOMAIN?Variable not set})/(.*)
       # Redirect a domain with www to non-www
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-www-redirect.redirectregex.replacement=http$${1}://${DOMAIN?Variable not set}/$${3}
+      # Compression middleware
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-compress.compress=true
+      # Rate limiting middleware
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-ratelimit.ratelimit.average=${BOOM_API_RATE_LIMIT_AVERAGE:-50}
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-ratelimit.ratelimit.burst=${BOOM_API_RATE_LIMIT_BURST:-200}
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-ratelimit.ratelimit.period=${BOOM_API_RATE_LIMIT_PERIOD:-1s}
       # Enable www redirection for HTTP and HTTPS
-      - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect
-      - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect
+      - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
+      - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   consumer-ztf:
     image: boom-astro/boom:latest
     hostname: consumer-ztf
