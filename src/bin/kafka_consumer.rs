@@ -23,13 +23,13 @@ struct Cli {
     survey: Survey,
 
     /// UTC date for which we want to consume alerts, with format YYYYMMDD
-    /// [default: yesterday's date]
+    /// [default: today's date at 00:00:00 UTC]
     #[arg(value_parser = parse_date)]
-    date: Option<NaiveDate>, // Easier to deal with the default value after clap
+    date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
 
-    /// ID of the program to consume the alerts (ZTF-only)
-    #[arg(default_value_t, value_enum)]
-    program_id: ProgramId,
+    /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --programids public,partnership,caltech).
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "public")]
+    programids: Vec<ProgramId>,
 
     /// Path to the configuration file
     #[arg(long, value_name = "FILE", default_value = "config.yaml")]
@@ -62,31 +62,25 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     exit_on_eof: bool,
 
-    /// Overridethe topic name (useful if data has been produced to a non-default topic)
-    #[arg(long, value_name = "TOPIC")]
-    topic_override: Option<String>,
+    /// Override the topic name(s) (useful if data has been produced to a non-default topic)
+    #[arg(long, value_name = "TOPICS")]
+    topics_override: Option<Vec<String>>,
 
     /// Name of the environment where this instance is deployed
     #[arg(long, env = "BOOM_DEPLOYMENT_ENV", default_value = "dev")]
     deployment_env: String,
 }
 
-fn parse_date(s: &str) -> Result<NaiveDate, String> {
+fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
     let date =
         NaiveDate::parse_from_str(s, "%Y%m%d").map_err(|_| "expected a date in YYYYMMDD format")?;
-    Ok(date)
+    Ok(date.and_hms_opt(0, 0, 0).unwrap())
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
 async fn run(args: Cli, meter_provider: SdkMeterProvider) {
-    let timestamp = NaiveDateTime::from(args.date.unwrap_or_else(|| {
-        chrono::Utc::now()
-            .date_naive()
-            .pred_opt()
-            .expect("previous date is not representable")
-    }))
-    .and_utc()
-    .timestamp();
+    let date = args.date.unwrap_or_else(|| chrono::Utc::now().naive_utc());
+    let timestamp = date.and_utc().timestamp();
 
     let exit_on_eof = if args.deployment_env == "dev" {
         args.exit_on_eof
@@ -96,17 +90,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 
     // If topic override is provided, use it. Otherwise, the consumer
     // will determine the topic based on the survey, program ID, and date.
-    let topic = args.topic_override;
+    let topics = args.topics_override;
 
     match args.survey {
         Survey::Ztf => {
-            let consumer = ZtfAlertConsumer::new(None, Some(args.program_id));
+            let consumer = ZtfAlertConsumer::new(None, Some(args.programids));
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config).await;
             }
             match consumer
                 .consume(
-                    topic,
+                    topics,
                     timestamp,
                     None,
                     Some(args.processes),
@@ -127,7 +121,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    topic,
+                    topics,
                     timestamp,
                     None,
                     Some(args.processes),
@@ -148,7 +142,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
             }
             match consumer
                 .consume(
-                    topic,
+                    topics,
                     timestamp,
                     None,
                     Some(args.processes),

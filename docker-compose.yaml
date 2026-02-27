@@ -210,7 +210,6 @@ services:
     command:
       - /app/kafka_consumer
       - ztf
-      - --auto-switch-date
   consumer-lsst:
     image: boom-astro/boom:latest
     hostname: consumer-lsst
