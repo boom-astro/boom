@@ -2471,6 +2471,7 @@ mod tests {
     /// - Known activated user: token hash and expiry are written to DB
     /// - Unknown email: returns 200 with generic message (no enumeration)
     /// - Non-activated account: returns 200 but no token is stored
+    /// - Password changed too recently: returns 429 with Retry-After header
     #[actix_rt::test]
     async fn test_babamul_forgot_password() {
         load_dotenv();
@@ -2601,9 +2602,69 @@ mod tests {
             "no reset token should be stored for a non-activated account"
         );
 
+        // ── Case 4: password changed too recently – returns 429 ──────────────
+        let now = flare::Time::now().to_utc().timestamp();
+        let id_rl = uuid::Uuid::new_v4().to_string();
+        let email_rl = format!("test+{}@babamul.example.com", id_rl);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            id: id_rl.clone(),
+            username: "ratelimitforgot".to_string(),
+            email: email_rl.clone(),
+            password_hash: bcrypt::hash("hunter22hunter22", 4).unwrap(),
+            activation_code: None,
+            is_activated: true,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+            // halfway through the cooldown window
+            password_last_changed_at: Some(
+                now - config.babamul.password_reset_cooldown_minutes as i64 * 30,
+            ),
+        })
+        .await
+        .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": email_rl }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "forgot-password should return 429 when password was changed too recently"
+        );
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("429 response must include a Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<i64>()
+            .expect("Retry-After must be an integer number of seconds");
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        assert!(
+            retry_after > 0 && retry_after <= cooldown_secs,
+            "Retry-After should be between 1 and {} seconds (configured cooldown), got {}",
+            cooldown_secs,
+            retry_after
+        );
+        // No reset token should have been written for this user
+        let rl_user = col.find_one(doc! { "_id": &id_rl }).await.unwrap().unwrap();
+        assert!(
+            rl_user.password_reset_token_hash.is_none(),
+            "no reset token should be stored when the cooldown is active"
+        );
+
         // Clean up
         col.delete_one(doc! { "_id": &id_activated }).await.unwrap();
         col.delete_one(doc! { "_id": &id_inactive }).await.unwrap();
+        col.delete_one(doc! { "_id": &id_rl }).await.unwrap();
     }
 
     /// POST /babamul/reset-password

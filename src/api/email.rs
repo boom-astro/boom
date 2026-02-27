@@ -32,7 +32,7 @@ impl EmailService {
             .unwrap_or(true);
 
         if !enabled {
-            println!("Email service is DISABLED (EMAIL_ENABLED=false)");
+            tracing::info!("Email service is DISABLED (EMAIL_ENABLED=false)");
             return Self {
                 mailer: None,
                 from_address: String::new(),
@@ -49,7 +49,7 @@ impl EmailService {
 
         // If any SMTP config is missing, disable email
         if smtp_server.is_none() {
-            println!("Email service is DISABLED (missing SMTP configuration: SMTP_SERVER)");
+            tracing::info!("Email service is DISABLED (missing SMTP configuration: SMTP_SERVER)");
             return Self {
                 mailer: None,
                 from_address,
@@ -73,8 +73,10 @@ impl EmailService {
                         Some(transport.port(port).credentials(creds).build())
                     }
                     Err(e) => {
-                        eprintln!("Failed to create SMTP transport: {}", e);
-                        println!("Email service is DISABLED (SMTP transport creation failed)");
+                        tracing::error!("Failed to create SMTP transport: {}", e);
+                        tracing::info!(
+                            "Email service is DISABLED (SMTP transport creation failed)"
+                        );
                         return Self {
                             mailer: None,
                             from_address,
@@ -86,7 +88,7 @@ impl EmailService {
             _ => {
                 // No credentials: use plain unauthenticated SMTP (port 25 by default)
                 let port = smtp_port.unwrap_or(25);
-                println!(
+                tracing::info!(
                     "SMTP_USERNAME/SMTP_PASSWORD not set — using unauthenticated plain SMTP on port {}.",
                     port
                 );
@@ -98,7 +100,7 @@ impl EmailService {
             }
         };
 
-        println!("Email service is ENABLED (SMTP configured)");
+        tracing::info!("Email service is ENABLED (SMTP configured)");
         Self {
             mailer,
             from_address,

@@ -26,9 +26,9 @@ async fn main() -> std::io::Result<()> {
 
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
-        println!("Babamul API endpoints are ENABLED");
+        tracing::info!("Babamul API endpoints are ENABLED");
     } else {
-        println!("Babamul API endpoints are DISABLED");
+        tracing::info!("Babamul API endpoints are DISABLED");
     }
 
     // Create API docs from OpenAPI spec
