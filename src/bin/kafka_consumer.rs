@@ -23,7 +23,7 @@ struct Cli {
     survey: Survey,
 
     /// UTC date for which we want to consume alerts, with format YYYYMMDD
-    /// [default: yesterday's date]
+    /// [default: today's date at 00:00:00 UTC]
     #[arg(value_parser = parse_date)]
     date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
 
