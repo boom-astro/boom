@@ -6,6 +6,7 @@ use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::db::initialize_watchlist_indexes;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -29,6 +30,13 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Babamul API endpoints are ENABLED");
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
+    }
+
+    if config.watchlist.enabled {
+        println!("Watchlist module is ENABLED");
+        initialize_watchlist_indexes(&database).await.unwrap();
+    } else {
+        println!("Watchlist module is DISABLED");
     }
 
     // Create API docs from OpenAPI spec
