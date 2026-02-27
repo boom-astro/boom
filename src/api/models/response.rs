@@ -55,7 +55,7 @@ pub fn ok_ser<T: serde::Serialize>(message: &str, data: T) -> HttpResponse {
     match serde_json::to_value(data) {
         Ok(data_value) => HttpResponse::Ok().json(ApiResponseBody::ok(message, data_value)),
         Err(e) => {
-            println!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+            tracing::info!("Serialization error: {}", e); // TODO: replace with tracing once integrated
             HttpResponse::InternalServerError()
                 .json(ApiResponseBody::error("Failed to serialize response data"))
         }

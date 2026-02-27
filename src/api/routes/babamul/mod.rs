@@ -9,6 +9,7 @@ use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
+use sha2::{Digest, Sha256};
 use std::process::Command;
 use utoipa::ToSchema;
 
@@ -17,6 +18,36 @@ use aes_gcm::{
     AeadCore, Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose, Engine as _};
+
+/// Validate password complexity.
+///
+/// Requirements (standard NIST-aligned policy):
+/// - At least 12 characters
+/// - At least one uppercase letter (A-Z)
+/// - At least one lowercase letter (a-z)
+/// - At least one digit (0-9)
+/// - At least one special character
+fn validate_password_complexity(password: &str) -> Result<(), &'static str> {
+    if password.len() < 12 {
+        return Err("Password must be at least 12 characters long");
+    }
+    if !password.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err("Password must contain at least one uppercase letter");
+    }
+    if !password.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err("Password must contain at least one lowercase letter");
+    }
+    if !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err("Password must contain at least one digit");
+    }
+    if !password
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && c.is_ascii())
+    {
+        return Err("Password must contain at least one special character");
+    }
+    Ok(())
+}
 
 // Generate a random nonce for each encryption
 fn encrypt_password(
@@ -117,6 +148,9 @@ pub struct BabamulUser {
     #[serde(default)]
     pub kafka_credentials: Vec<KafkaCredentialEncrypted>, // List of Kafka credentials (w/ encrypted passwords)
     pub tokens: Vec<BabamulUserToken>, // List of API tokens
+    pub password_reset_token_hash: Option<String>, // SHA-256 hash of the password reset token
+    pub password_reset_token_expires_at: Option<i64>, // Unix timestamp expiry for the reset token
+    pub password_last_changed_at: Option<i64>, // Unix timestamp of the last successful password reset
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -205,7 +239,7 @@ pub async fn post_babamul_signup(
                 {
                     Ok(_) => existing_user,
                     Err(e) => {
-                        eprintln!("Database error updating activation code: {}", e);
+                        tracing::error!("Database error updating activation code: {}", e);
                         return response::internal_error("Database error");
                     }
                 }
@@ -228,7 +262,7 @@ pub async fn post_babamul_signup(
             let password_hash = match bcrypt::hash(&password, bcrypt::DEFAULT_COST) {
                 Ok(hash) => hash,
                 Err(e) => {
-                    eprintln!("Failed to hash password: {}", e);
+                    tracing::error!("Failed to hash password: {}", e);
                     return response::internal_error("Failed to generate credentials");
                 }
             };
@@ -260,6 +294,9 @@ pub async fn post_babamul_signup(
                 created_at: flare::Time::now().to_utc().timestamp(),
                 kafka_credentials: Vec::new(), // Empty list, credentials created on demand
                 tokens: Vec::new(),            // Empty list of tokens
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
+                password_last_changed_at: None,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -269,7 +306,7 @@ pub async fn post_babamul_signup(
             {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("Database error inserting babamul user: {}", e);
+                    tracing::error!("Database error inserting babamul user: {}", e);
                     if e.to_string().contains("E11000 duplicate key error") {
                         return HttpResponse::Conflict().json(serde_json::json!({
                             "message": "Email already registered",
@@ -283,7 +320,7 @@ pub async fn post_babamul_signup(
             babamul_user
         }
         Err(e) => {
-            eprintln!("Database error checking email existence: {}", e);
+            tracing::error!("Database error checking email existence: {}", e);
             return response::internal_error("Database error");
         }
     };
@@ -298,20 +335,21 @@ pub async fn post_babamul_signup(
             &config.api.domain,
             &config.babamul.webapp_url,
         ) {
-            eprintln!("Failed to send activation email to {}: {}", email, e);
+            tracing::error!("Failed to send activation email to {}: {}", email, e);
             // Don't fail the signup, just log the error
             // In production, you might want to queue this for retry
         }
     } else {
         if let Some(webapp_url) = &config.babamul.webapp_url {
-            println!(
+            tracing::info!(
                 "Email service disabled - activation code for {}: {} (link: {}/signup?email={}&activation_code={})",
                 email, activation_code, webapp_url, email, activation_code
             );
         } else {
-            println!(
+            tracing::info!(
                 "Email service disabled - activation code for {}: {}",
-                email, activation_code
+                email,
+                activation_code
             );
         }
     }
@@ -623,7 +661,7 @@ pub async fn post_babamul_activate(
                     let password_hash = match bcrypt::hash(&password, bcrypt::DEFAULT_COST) {
                         Ok(hash) => hash,
                         Err(e) => {
-                            eprintln!("Failed to hash password: {}", e);
+                            tracing::error!("Failed to hash password: {}", e);
                             return response::internal_error("Failed to generate password");
                         }
                     };
@@ -653,7 +691,7 @@ pub async fn post_babamul_activate(
                             })
                         }
                         Err(e) => {
-                            eprintln!("Database error activating user: {}", e);
+                            tracing::error!("Database error activating user: {}", e);
                             response::internal_error("Failed to activate account")
                         }
                     }
@@ -663,7 +701,7 @@ pub async fn post_babamul_activate(
         }
         Ok(None) => response::not_found("User not found"),
         Err(e) => {
-            eprintln!("Database error fetching user: {}", e);
+            tracing::error!("Database error fetching user: {}", e);
             response::internal_error("Database error")
         }
     }
@@ -734,7 +772,7 @@ pub async fn post_babamul_auth(
                                 expires_in,
                             }),
                         Err(e) => {
-                            eprintln!("Failed to create JWT token: {}", e);
+                            tracing::error!("Failed to create JWT token: {}", e);
                             response::internal_error("Failed to generate token")
                         }
                     }
@@ -743,7 +781,7 @@ pub async fn post_babamul_auth(
                     "error": "Invalid credentials"
                 })),
                 Err(e) => {
-                    eprintln!("Password verification error: {}", e);
+                    tracing::error!("Password verification error: {}", e);
                     response::internal_error("Authentication error")
                 }
             }
@@ -752,8 +790,261 @@ pub async fn post_babamul_auth(
             "error": "Invalid credentials"
         })),
         Err(e) => {
-            eprintln!("Database error fetching user: {}", e);
+            tracing::error!("Database error fetching user: {}", e);
             response::internal_error("Database error")
+        }
+    }
+}
+
+// ─── Password reset ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct BabamulForgotPasswordPost {
+    pub email: String,
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct BabamulForgotPasswordResponse {
+    pub message: String,
+}
+
+/// Request a password reset link
+///
+/// Accepts an email address and sends a password-reset link to that address if
+/// an activated account with that email exists.  The response is always the same
+/// regardless of whether the email is found – this prevents account enumeration.
+#[utoipa::path(
+    post,
+    path = "/babamul/forgot-password",
+    request_body = BabamulForgotPasswordPost,
+    responses(
+        (status = 200, description = "Reset email sent (or silently skipped)", body = BabamulForgotPasswordResponse),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[post("/forgot-password")]
+pub async fn post_babamul_forgot_password(
+    db: web::Data<Database>,
+    email_service: web::Data<EmailService>,
+    body: web::Json<BabamulForgotPasswordPost>,
+    config: web::Data<crate::conf::AppConfig>,
+) -> HttpResponse {
+    let email = body.email.trim().to_lowercase();
+
+    // Always return the same generic message to prevent account enumeration.
+    let generic_response = BabamulForgotPasswordResponse {
+        message: "If an account with that email exists, a password reset link has been sent."
+            .to_string(),
+    };
+
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    let user = match babamul_users_collection
+        .find_one(doc! { "email": &email })
+        .await
+    {
+        Ok(Some(u)) if u.is_activated => u,
+        Ok(_) => return HttpResponse::Ok().json(generic_response), // unknown email or not activated – silent no-op
+        Err(e) => {
+            tracing::error!("Database error during forgot-password lookup: {}", e);
+            return response::internal_error("Database error");
+        }
+    };
+
+    if let Some(last_changed) = user.password_last_changed_at {
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        let now = flare::Time::now().to_utc().timestamp();
+        let seconds_since = now - last_changed;
+        if seconds_since < cooldown_secs {
+            let retry_after = cooldown_secs - seconds_since;
+            return HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", retry_after.to_string()))
+                .json(crate::api::models::response::ApiResponseBody::error(
+                    "Password was changed recently. Please wait 15 minutes before requesting another reset.",
+                ));
+        }
+    }
+
+    // Generate a secure random raw token and store its SHA-256 hash.
+    let raw_token = generate_random_string(48);
+    let mut hasher = Sha256::new();
+    hasher.update(raw_token.as_bytes());
+    let token_hash = format!("{:x}", hasher.finalize());
+
+    // Expiry: 1 hour from now.
+    let expires_at = flare::Time::now().to_utc().timestamp() + 3600;
+
+    match babamul_users_collection
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! {
+                "$set": {
+                    "password_reset_token_hash": &token_hash,
+                    "password_reset_token_expires_at": expires_at
+                }
+            },
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Database error storing reset token: {}", e);
+            return response::internal_error("Database error");
+        }
+    }
+
+    // Send the email (fire-and-forget; don't leak token in error response).
+    if email_service.is_enabled() {
+        if let Err(e) = email_service.send_password_reset_email(
+            &email,
+            &raw_token,
+            &config.api.domain,
+            &config.babamul.webapp_url,
+        ) {
+            tracing::error!("Failed to send password reset email to {}: {}", email, e);
+        }
+    } else {
+        if let Some(webapp_url) = &config.babamul.webapp_url {
+            tracing::info!(
+                "Email service disabled – password reset link for {}: {}/reset-password?token={}&email={}",
+                email, webapp_url, raw_token, email
+            );
+        } else {
+            tracing::info!(
+                "Email service disabled – password reset token for {}: {}",
+                email,
+                raw_token
+            );
+        }
+    }
+
+    HttpResponse::Ok().json(generic_response)
+}
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct BabamulResetPasswordPost {
+    pub email: String,
+    pub token: String,
+    pub new_password: String,
+}
+
+#[derive(Serialize, Clone, ToSchema)]
+pub struct BabamulResetPasswordResponse {
+    pub message: String,
+}
+
+/// Reset a Babamul account password using a reset token
+///
+/// Validates the token, checks it has not expired, updates the password hash,
+/// then invalidates the token so it cannot be reused.
+#[utoipa::path(
+    post,
+    path = "/babamul/reset-password",
+    request_body = BabamulResetPasswordPost,
+    responses(
+        (status = 200, description = "Password reset successfully", body = BabamulResetPasswordResponse),
+        (status = 400, description = "Invalid or expired token, or password too short"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[post("/reset-password")]
+pub async fn post_babamul_reset_password(
+    db: web::Data<Database>,
+    config: web::Data<crate::conf::AppConfig>,
+    body: web::Json<BabamulResetPasswordPost>,
+) -> HttpResponse {
+    let raw_token = body.token.trim();
+    let new_password = &body.new_password;
+
+    // Enforce password complexity requirements.
+    if let Err(msg) = validate_password_complexity(new_password) {
+        return response::bad_request(msg);
+    }
+
+    // Hash the incoming token to look it up in the database.
+    let mut hasher = Sha256::new();
+    hasher.update(raw_token.as_bytes());
+    let token_hash = format!("{:x}", hasher.finalize());
+
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    // Look up the user by ALL three conditions in a single compound query.  This is
+    // intentional: whether the token is wrong, the email is wrong, or the token has
+    // expired, MongoDB returns the same `Ok(None)` result, so we always respond with
+    // the same generic message.  A separate lookup (e.g. first by token, then by email)
+    // would let an attacker probe which part of the input was incorrect.
+    let now = flare::Time::now().to_utc().timestamp();
+
+    let user = match babamul_users_collection
+        .find_one(doc! {
+            "email": &body.email.trim().to_lowercase(),
+            "password_reset_token_hash": &token_hash,
+            "password_reset_token_expires_at": { "$gt": now }
+        })
+        .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return response::bad_request("Invalid or expired password reset token");
+        }
+        Err(e) => {
+            tracing::error!("Database error during reset-password lookup: {}", e);
+            return response::internal_error("Database error");
+        }
+    };
+
+    // Rate-limit: prevent password changes more often than once every N minutes (configured via
+    // babamul.password_reset_cooldown_minutes; defaults to 15).
+    if let Some(last_changed) = user.password_last_changed_at {
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        let seconds_since = now - last_changed;
+        if seconds_since < cooldown_secs {
+            let retry_after = cooldown_secs - seconds_since;
+            return HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", retry_after.to_string()))
+                .json(crate::api::models::response::ApiResponseBody::error(
+                    "Password was changed recently. Please wait 15 minutes before resetting again.",
+                ));
+        }
+    }
+
+    // Hash the new password with bcrypt.
+    let password_hash = match bcrypt::hash(new_password, bcrypt::DEFAULT_COST) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("Failed to hash new password: {}", e);
+            return response::internal_error("Failed to update password");
+        }
+    };
+
+    // Atomically update password and invalidate the reset token.
+    match babamul_users_collection
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! {
+                "$set":   { "password_hash": &password_hash, "password_last_changed_at": now },
+                "$unset": {
+                    "password_reset_token_hash": "",
+                    "password_reset_token_expires_at": ""
+                }
+            },
+        )
+        .await
+    {
+        Ok(_) => HttpResponse::Ok().json(BabamulResetPasswordResponse {
+            message:
+                "Password has been reset successfully. You can now log in with your new password."
+                    .to_string(),
+        }),
+        Err(e) => {
+            tracing::error!(
+                "Database error resetting password for user {}: {}",
+                user.id,
+                e
+            );
+            response::internal_error("Failed to reset password")
         }
     }
 }
@@ -835,7 +1126,7 @@ pub async fn post_kafka_credentials(
         match encrypt_password(&kafka_password, &config.api.auth.get_hashed_secret_key()) {
             Ok(enc) => enc,
             Err(e) => {
-                eprintln!("Failed to encrypt Kafka password: {}", e);
+                tracing::error!("Failed to encrypt Kafka password: {}", e);
                 return response::internal_error("Failed to encrypt Kafka credential");
             }
         };
@@ -851,7 +1142,7 @@ pub async fn post_kafka_credentials(
     let kafka_credentials_bson = match mongodb::bson::to_bson(&kafka_credential) {
         Ok(bson) => bson,
         Err(e) => {
-            eprintln!("Failed to convert Kafka credential to BSON: {}", e);
+            tracing::error!("Failed to convert Kafka credential to BSON: {}", e);
             return response::internal_error("Failed to process Kafka credential");
         }
     };
@@ -864,9 +1155,10 @@ pub async fn post_kafka_credentials(
     )
     .await
     {
-        eprintln!(
+        tracing::error!(
             "Failed to create Kafka user/ACLs for {}: {}",
-            kafka_username, e
+            kafka_username,
+            e
         );
         return response::internal_error(
             "Failed to configure Kafka access. Please try again or contact support.",
@@ -897,7 +1189,7 @@ pub async fn post_kafka_credentials(
             },
         ),
         Err(e) => {
-            eprintln!("Database error adding Kafka credential: {}", e);
+            tracing::error!("Database error adding Kafka credential: {}", e);
             response::internal_error("Failed to save Kafka credential")
         }
     }
@@ -931,7 +1223,7 @@ pub async fn get_kafka_credentials(
         match cred.decrypt(secret_key) {
             Ok(decrypted) => decrypted_credentials.push(decrypted),
             Err(e) => {
-                eprintln!("Failed to decrypt Kafka credential {}: {}", cred.id, e);
+                tracing::error!("Failed to decrypt Kafka credential {}: {}", cred.id, e);
                 return response::internal_error("Failed to decrypt Kafka credentials");
             }
         }
@@ -1004,9 +1296,10 @@ pub async fn delete_kafka_credential(
                     )
                     .await
                     {
-                        eprintln!(
+                        tracing::error!(
                             "Failed to delete Kafka user/ACLs for {}: {}",
-                            credential.kafka_username, e
+                            credential.kafka_username,
+                            e
                         );
                         return response::internal_error(
                             "Failed to revoke Kafka access. Please try again or contact support.",
@@ -1033,7 +1326,7 @@ pub async fn delete_kafka_credential(
                             deleted: true,
                         }),
                         Err(e) => {
-                            eprintln!("Database error removing Kafka credential: {}", e);
+                            tracing::error!("Database error removing Kafka credential: {}", e);
                             response::internal_error("Failed to remove credential from database")
                         }
                     }
@@ -1043,7 +1336,7 @@ pub async fn delete_kafka_credential(
         }
         Ok(None) => response::not_found("User not found"),
         Err(e) => {
-            eprintln!("Database error fetching user: {}", e);
+            tracing::error!("Database error fetching user: {}", e);
             response::internal_error("Database error")
         }
     }

@@ -380,6 +380,9 @@ pub struct BabamulConfig {
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
+    /// Minimum number of minutes that must elapse between successive password resets (default: 15)
+    #[serde(default = "default_password_reset_cooldown_minutes")]
+    pub password_reset_cooldown_minutes: u32,
 }
 
 impl Default for BabamulConfig {
@@ -388,12 +391,17 @@ impl Default for BabamulConfig {
             enabled: false,
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
+            password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
         }
     }
 }
 
 fn default_babamul_retention_days() -> u32 {
     3
+}
+
+fn default_password_reset_cooldown_minutes() -> u32 {
+    15
 }
 
 #[derive(Deserialize, Debug, Clone)]

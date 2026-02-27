@@ -92,6 +92,8 @@ pub struct ApiDoc;
         routes::babamul::post_babamul_signup,
         routes::babamul::post_babamul_activate,
         routes::babamul::post_babamul_auth,
+        routes::babamul::post_babamul_forgot_password,
+        routes::babamul::post_babamul_reset_password,
         routes::babamul::get_babamul_profile,
         routes::babamul::post_kafka_credentials,
         routes::babamul::get_kafka_credentials,
