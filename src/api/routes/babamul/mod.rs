@@ -120,6 +120,7 @@ pub struct BabamulUser {
     pub tokens: Vec<BabamulUserToken>, // List of API tokens
     pub password_reset_token_hash: Option<String>, // SHA-256 hash of the password reset token
     pub password_reset_token_expires_at: Option<i64>, // Unix timestamp expiry for the reset token
+    pub password_last_changed_at: Option<i64>, // Unix timestamp of the last successful password reset
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -265,6 +266,7 @@ pub async fn post_babamul_signup(
                 tokens: Vec::new(),            // Empty list of tokens
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
+                password_last_changed_at: None,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -904,6 +906,7 @@ pub struct BabamulResetPasswordResponse {
 #[post("/reset-password")]
 pub async fn post_babamul_reset_password(
     db: web::Data<Database>,
+    config: web::Data<crate::conf::AppConfig>,
     body: web::Json<BabamulResetPasswordPost>,
 ) -> HttpResponse {
     let raw_token = body.token.trim();
@@ -946,6 +949,21 @@ pub async fn post_babamul_reset_password(
         }
     };
 
+    // Rate-limit: prevent password changes more often than once every N minutes (configured via
+    // babamul.password_reset_cooldown_minutes; defaults to 15).
+    if let Some(last_changed) = user.password_last_changed_at {
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        let seconds_since = now - last_changed;
+        if seconds_since < cooldown_secs {
+            let retry_after = cooldown_secs - seconds_since;
+            return HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", retry_after.to_string()))
+                .json(crate::api::models::response::ApiResponseBody::error(
+                    "Password was changed recently. Please wait 15 minutes before resetting again.",
+                ));
+        }
+    }
+
     // Hash the new password with bcrypt.
     let password_hash = match bcrypt::hash(new_password, bcrypt::DEFAULT_COST) {
         Ok(h) => h,
@@ -960,7 +978,7 @@ pub async fn post_babamul_reset_password(
         .update_one(
             doc! { "_id": &user.id },
             doc! {
-                "$set":   { "password_hash": &password_hash },
+                "$set":   { "password_hash": &password_hash, "password_last_changed_at": now },
                 "$unset": {
                     "password_reset_token_hash": "",
                     "password_reset_token_expires_at": ""

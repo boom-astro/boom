@@ -46,6 +46,7 @@ mod tests {
                 tokens: vec![],
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
+                password_last_changed_at: None,
             };
 
             let babamul_users_collection: mongodb::Collection<
@@ -2508,6 +2509,7 @@ mod tests {
             tokens: vec![],
             password_reset_token_hash: None,
             password_reset_token_expires_at: None,
+            password_last_changed_at: None,
         })
         .await
         .unwrap();
@@ -2574,6 +2576,7 @@ mod tests {
             tokens: vec![],
             password_reset_token_hash: None,
             password_reset_token_expires_at: None,
+            password_last_changed_at: None,
         })
         .await
         .unwrap();
@@ -2650,6 +2653,7 @@ mod tests {
                 tokens: vec![],
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
+                password_last_changed_at: None,
             };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
@@ -2820,6 +2824,54 @@ mod tests {
             resp.status(),
             StatusCode::BAD_REQUEST,
             "expired token must be rejected"
+        );
+
+        // ── Password changed too recently → 429 ───────────────────────────────
+        let id_rl = uuid::Uuid::new_v4().to_string();
+        let email_rl = format!("test+{}@babamul.example.com", id_rl);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            password_last_changed_at: Some(
+                now - config.babamul.password_reset_cooldown_minutes as i64 * 30,
+            ), // halfway through the cooldown window
+            ..insert_user(&id_rl, &email_rl, "ratelimit")
+        })
+        .await
+        .unwrap();
+        ids_to_cleanup.push(id_rl.clone());
+        let token_rl = "ratelimittoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id_rl, token_rl, now + 3600).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email_rl,
+                    "token": token_rl,
+                    "new_password": "newpassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "password changed too recently should return 429"
+        );
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("429 response must include a Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<i64>()
+            .expect("Retry-After must be an integer number of seconds");
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        assert!(
+            retry_after > 0 && retry_after <= cooldown_secs,
+            "Retry-After should be between 1 and {} seconds (configured cooldown), got {}",
+            cooldown_secs,
+            retry_after
         );
 
         // ── Password too short → 400 ──────────────────────────────────────────
