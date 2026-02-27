@@ -40,16 +40,16 @@ pub async fn post_count_query(
     // Count documents with optional filter
     let filter = match parse_filter(&query.filter) {
         Ok(f) => f,
-        Err(e) => return response::bad_request(&format!("Invalid filter: {:?}", e)),
+        Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
     let count = match collection.count_documents(filter).await {
         Ok(c) => c,
         Err(e) => {
-            return response::internal_error(&format!("Error counting documents: {:?}", e));
+            return response::internal_error(&format!("Error counting documents: {}", e));
         }
     };
     // Return the count
-    response::ok("success", serde_json::to_value(count).unwrap())
+    response::ok_ser("success", count)
 }
 
 #[derive(serde::Deserialize, Clone, ToSchema)]
@@ -84,9 +84,9 @@ pub async fn post_estimated_count_query(
     let count = match collection.estimated_document_count().await {
         Ok(c) => c,
         Err(e) => {
-            return response::internal_error(&format!("Error counting documents: {:?}", e));
+            return response::internal_error(&format!("Error counting documents: {}", e));
         }
     };
     // Return the count
-    response::ok("success", serde_json::to_value(count).unwrap())
+    response::ok_ser("success", count)
 }
