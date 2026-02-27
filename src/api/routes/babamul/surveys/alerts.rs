@@ -36,22 +36,29 @@ pub struct EnrichedLsstAlert {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 struct AlertsQuery {
     object_id: Option<String>,
+    #[schema(minimum = 0.0, maximum = 360.0)]
     ra: Option<f64>,
+    #[schema(minimum = -90.0, maximum = 90.0)]
     dec: Option<f64>,
+    #[schema(minimum = 0.0, maximum = 600.0)]
     radius_arcsec: Option<f64>,
     start_jd: Option<f64>,
     end_jd: Option<f64>,
     min_magpsf: Option<f64>,
     max_magpsf: Option<f64>,
     #[serde(alias = "min_reliability")]
+    #[schema(minimum = 0.0, maximum = 1.0)]
     min_drb: Option<f64>,
     #[serde(alias = "max_reliability")]
+    #[schema(minimum = 0.0, maximum = 1.0)]
     max_drb: Option<f64>,
     is_rock: Option<bool>,
     is_star: Option<bool>,
     is_near_brightstar: Option<bool>,
     is_stationary: Option<bool>,
+    #[schema(minimum = 1, maximum = 100_000)]
     limit: Option<u32>,
+    #[schema(minimum = 0)]
     skip: Option<u64>,
 }
 
@@ -105,8 +112,8 @@ pub async fn get_alerts(
     };
     let survey = path.into_inner();
 
-    let limit = query.limit.unwrap_or(100000);
-    if limit == 0 || limit > 100000 {
+    let limit = query.limit.unwrap_or(100_000);
+    if limit == 0 || limit > 100_000 {
         return response::bad_request("Invalid limit, must be between 1 and 100000");
     }
     let skip = query.skip.unwrap_or(0);
@@ -312,19 +319,28 @@ pub async fn get_alerts(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 struct AlertsConeSearchQuery {
     coordinates: HashMap<String, [f64; 2]>,
+    #[schema(minimum = 0.0, maximum = 600.0)]
     radius_arcsec: f64,
     start_jd: Option<f64>,
     end_jd: Option<f64>,
     min_magpsf: Option<f64>,
     max_magpsf: Option<f64>,
     #[serde(alias = "min_reliability")]
+    #[schema(minimum = 0.0, maximum = 1.0)]
     min_drb: Option<f64>,
     #[serde(alias = "max_reliability")]
+    #[schema(minimum = 0.0, maximum = 1.0)]
     max_drb: Option<f64>,
     is_rock: Option<bool>,
     is_star: Option<bool>,
     is_near_brightstar: Option<bool>,
     is_stationary: Option<bool>,
+    /// Maximum number of alerts to return per coordinate pair, default and maximum is 1,000
+    #[schema(minimum = 1, maximum = 1000)]
+    limit: u32,
+    /// Number of alerts to skip for pagination, default is 0
+    #[schema(minimum = 0)]
+    skip: Option<u64>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -376,6 +392,17 @@ pub async fn cone_search_alerts(
         );
     }
     let radius_radians = (radius_arcsec / 3600.0).to_radians();
+
+    let mut find_options = mongodb::options::FindOptions::default();
+    if query.limit == 0 || query.limit > 1000 {
+        return response::bad_request(
+            "Invalid limit, must be a positive integer less than or equal to 1000",
+        );
+    }
+    find_options.limit = Some(query.limit as i64);
+    if let Some(skip) = query.skip {
+        find_options.skip = Some(skip);
+    }
 
     let mut base_filter_doc = if survey == Survey::Ztf {
         doc! {"candidate.programid": 1} // Babamul only returns public ZTF alerts
