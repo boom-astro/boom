@@ -13,11 +13,11 @@ struct PipelineQuery {
     catalog_name: String,
     pipeline: serde_json::Value,
     limit: u32,
-    skip: Option<u32>,
+    skip: Option<u64>,
     max_time_ms: Option<u64>,
 }
 impl PipelineQuery {
-    /// Convert to MongoDB Find options
+    /// Convert to MongoDB Aggregation options
     fn to_pipeline_options(&self) -> mongodb::options::AggregateOptions {
         let mut options = mongodb::options::AggregateOptions::default();
         if let Some(max_time_ms) = self.max_time_ms {
@@ -56,13 +56,13 @@ pub async fn post_pipeline_query(
     // Find documents with the provided filter
     let pipeline = match parse_pipeline(&body.pipeline) {
         Ok(pipeline) => pipeline,
-        Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
+        Err(e) => return response::bad_request(&format!("Invalid pipeline: {}", e)),
     };
     let mut pipeline = pipeline;
 
     // add a skip stage to the pipeline if skip is set (must come before $limit)
     if let Some(skip) = body.skip {
-        let skip_stage = doc! { "$skip": skip };
+        let skip_stage = doc! { "$skip": skip as i64 };
         pipeline.push(skip_stage);
     }
     // add a limit stage to the pipeline after validating that the limit is a positive integer < 100_000
