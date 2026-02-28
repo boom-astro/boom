@@ -7,8 +7,8 @@ use boom::{
             BabamulLsstAlert, BabamulSurveyMatch, BabamulSurveyMatches, BabamulZtfAlert,
             ForcedPhotometry,
         },
-        EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
-        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
+        EnrichmentWorker, LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker,
+        LsstPhotometry, ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
     },
     utils::{
         lightcurves::{flux2mag, Band, PerBandProperties, ZTF_ZP},
@@ -189,7 +189,6 @@ async fn create_mock_enriched_lsst_alert(
     candid: i64,
     object_id: &str,
     reliability: f64,
-    pixel_flags: bool,
     is_rock: bool,
     ra_override: Option<f64>,
     dec_override: Option<f64>,
@@ -198,7 +197,6 @@ async fn create_mock_enriched_lsst_alert(
         candid,
         object_id,
         reliability,
-        pixel_flags,
         is_rock,
         None,
         None,
@@ -212,7 +210,6 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     candid: i64,
     object_id: &str,
     reliability: f64,
-    pixel_flags: bool,
     is_rock: bool,
     cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
     survey_matches: Option<boom::enrichment::LsstSurveyMatches>,
@@ -232,8 +229,8 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     dia_source.psf_flux_err = Some(10.0);
     dia_source.ap_flux = Some(1100.0);
     dia_source.ap_flux_err = Some(15.0);
-    dia_source.pixel_flags = Some(pixel_flags);
     dia_source.reliability = Some(reliability as f32);
+    dia_source.extendedness = Some(0.2); // Set extendedness to a non-zero value to avoid filtering out the alert
 
     let ss_object_id = if is_rock { Some(555555_i64) } else { None };
     dia_source.ss_object_id = ss_object_id;
@@ -344,7 +341,6 @@ async fn test_compute_babamul_category_lsst() {
         "LSST24aaaaaaa",
         0.8,
         false,
-        false,
         Some(cross_matches),
         None, // No ZTF survey match
         None,
@@ -364,7 +360,6 @@ async fn test_compute_babamul_category_lsst() {
         9876543211,
         "LSST24aaaaaab",
         0.8,
-        false,
         false,
         Some(cross_matches),
         None,
@@ -386,7 +381,6 @@ async fn test_compute_babamul_category_lsst() {
         "LSST24aaaaaac",
         0.8,
         false,
-        false,
         Some(cross_matches),
         None,
         None,
@@ -404,7 +398,6 @@ async fn test_compute_babamul_category_lsst() {
         9876543213,
         "LSST24aaaaaad",
         0.8,
-        false,
         false,
         None,
         None, // No ZTF survey match
@@ -449,7 +442,6 @@ async fn test_compute_babamul_category_lsst() {
         "LSST24aaaaaae",
         0.8,
         false,
-        false,
         Some(cross_matches),
         survey_matches,
         None,
@@ -478,7 +470,6 @@ async fn test_compute_babamul_category_lsst() {
         9876543215,
         "LSST24aaaaaaf",
         0.8,
-        false,
         false,
         Some(cross_matches),
         survey_matches,
@@ -509,7 +500,6 @@ async fn test_compute_babamul_category_lsst() {
         "LSST24aaaaaag",
         0.8,
         false,
-        false,
         Some(cross_matches),
         survey_matches,
         None,
@@ -538,7 +528,6 @@ async fn test_compute_babamul_category_lsst() {
         "LSST24aaaaaah",
         0.8,
         false,
-        false,
         None, // No LSPSC cross-matches
         survey_matches,
         None,
@@ -557,7 +546,6 @@ async fn test_compute_babamul_category_lsst() {
         "LSST24aaaaaai",
         0.8,
         false,
-        false,
         Some(std::collections::HashMap::new()), // No matches
         None,                                   // No ZTF survey match
         Some(265.05),                           // RA out of footprint
@@ -575,7 +563,6 @@ async fn test_compute_babamul_category_lsst() {
         9876543219,
         "LSST24aaaaaaj",
         0.8,
-        false,
         false,
         Some(std::collections::HashMap::new()), // Empty LSPSC matches
         None,                                   // No ZTF survey match
@@ -621,7 +608,6 @@ async fn test_compute_babamul_category_lsst() {
         9876543220,
         "LSST24aaaaaak",
         0.8,
-        false,
         false,
         Some(cross_matches),
         survey_matches_non_public,
@@ -882,11 +868,9 @@ async fn test_babamul_process_lsst_alerts() {
 
     // Create mock enriched LSST alerts with good reliability and no flags
     let alert1 =
-        create_mock_enriched_lsst_alert(9876543210, &lsst_obj1, 0.8, false, false, None, None)
-            .await;
+        create_mock_enriched_lsst_alert(9876543210, &lsst_obj1, 0.8, false, None, None).await;
     let alert2 =
-        create_mock_enriched_lsst_alert(9876543211, &lsst_obj2, 0.9, false, false, None, None)
-            .await;
+        create_mock_enriched_lsst_alert(9876543211, &lsst_obj2, 0.9, false, None, None).await;
 
     // Process the alerts
     let _result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -931,11 +915,9 @@ async fn test_babamul_filters_low_reliability() {
 
     // Create alerts with low reliability (should be filtered out)
     let alert1 =
-        create_mock_enriched_lsst_alert(9876543212, "LSST24aaaaaac", 0.3, false, false, None, None)
-            .await;
+        create_mock_enriched_lsst_alert(9876543212, "LSST24aaaaaac", 0.3, false, None, None).await;
     let alert2 =
-        create_mock_enriched_lsst_alert(9876543213, "LSST24aaaaaad", 0.4, false, false, None, None)
-            .await;
+        create_mock_enriched_lsst_alert(9876543213, "LSST24aaaaaad", 0.4, false, None, None).await;
 
     // Process the alerts
     let result = babamul.process_lsst_alerts(vec![alert1, alert2]).await;
@@ -946,7 +928,12 @@ async fn test_babamul_filters_low_reliability() {
     );
 
     // Low reliability alerts should not be sent (filtered by Babamul)
-    // Just verify the processing succeeded
+    // Let's just verify the processing succeeded and no messages were sent to Kafka
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Expected 0 messages for LSST alerts with reliability below threshold"
+    );
 }
 
 #[tokio::test]
@@ -959,8 +946,7 @@ async fn test_babamul_filters_rocks() {
     // Create alerts marked as rocks (should be filtered out)
     let ztf_rock = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", true);
     let lsst_rock =
-        create_mock_enriched_lsst_alert(9876543214, "LSST24aaaaaae", 0.9, false, true, None, None)
-            .await;
+        create_mock_enriched_lsst_alert(9876543214, "LSST24aaaaaae", 0.9, true, None, None).await;
 
     // Process the alerts
     let ztf_result = babamul.process_ztf_alerts(vec![ztf_rock]).await;
@@ -971,6 +957,16 @@ async fn test_babamul_filters_rocks() {
 
     // Rock alerts should not be sent to any topic
     // Since they're filtered out at the source, we just verify the processing succeeded
+    assert_eq!(
+        ztf_result.unwrap(),
+        0,
+        "Expected 0 messages for ZTF alerts marked as rocks"
+    );
+    assert_eq!(
+        lsst_result.unwrap(),
+        0,
+        "Expected 0 messages for LSST alerts marked as rocks"
+    );
 }
 
 #[tokio::test]
@@ -1005,26 +1001,138 @@ async fn test_babamul_filters_low_drb() {
     );
 }
 
+/// Create a `BabamulLsstAlert` that passes every Babamul LSST filter condition.
+/// Used as the base for filter-condition tests: clone, mutate one field, assert it is dropped.
+fn create_valid_babamul_lsst_alert() -> (BabamulLsstAlert, HashMap<String, Vec<serde_json::Value>>)
+{
+    let mut dia = DiaSource::default();
+    dia.candid = 1_i64;
+    dia.visit = 123456789;
+    dia.detector = 1;
+    dia.dia_object_id = Some(987654321);
+    dia.midpoint_mjd_tai = 60000.5;
+    dia.ra = 150.0;
+    dia.dec = 30.0;
+    dia.psf_flux = Some(1000.0);
+    dia.psf_flux_err = Some(10.0);
+    dia.ap_flux = Some(1100.0);
+    dia.ap_flux_err = Some(15.0);
+    dia.reliability = Some(0.9);
+    dia.extendedness = Some(0.2); // valid: not None, not NaN, not 1.0
+                                  // All quality-flag fields explicitly false
+    dia.psf_flux_flag = Some(false);
+    dia.psf_flux_flag_edge = Some(false);
+    dia.ap_flux_flag = Some(false);
+    dia.pixel_flags_streak = Some(false);
+    dia.pixel_flags_nodata = Some(false);
+    dia.pixel_flags_cr = Some(false);
+    dia.pixel_flags_bad = Some(false);
+    dia.pixel_flags_saturated = Some(false);
+    dia.shape_flag = Some(false);
+    dia.centroid_flag = Some(false);
+    dia.glint_trail = Some(false);
+    dia.is_dipole = Some(false);
+
+    let candidate = LsstCandidate {
+        dia_source: dia,
+        object_id: "987654321".to_string(),
+        jd: 2460000.5,
+        magpsf: 18.5,
+        sigmapsf: 0.1,
+        diffmaglim: 20.5,
+        isdiffpos: true,
+        snr_psf: Some(100.0),
+        chipsf: None,
+        magap: 18.6,
+        sigmagap: 0.12,
+        snr_ap: Some(90.0),
+        jdstarthist: None,
+        ndethist: None,
+    };
+
+    let alert = BabamulLsstAlert {
+        candid: 1,
+        object_id: "987654321".to_string(),
+        candidate,
+        prv_candidates: vec![],
+        fp_hists: vec![],
+        properties: LsstAlertProperties {
+            rock: false,
+            stationary: false,
+            star: Some(false),
+            near_brightstar: Some(false),
+            photstats: PerBandProperties::default(),
+            multisurvey_photstats: PerBandProperties::default(),
+        },
+        survey_matches: BabamulSurveyMatches::default(),
+    };
+
+    (alert, HashMap::new())
+}
+
+/// Table-driven test covering every individual LSST filter condition in
+/// `Babamul::process_lsst_alerts`. Starts from a known-good alert and mutates
+/// exactly one field per case, asserting the alert is dropped (0 messages sent).
 #[tokio::test]
-async fn test_babamul_filters_pixel_flags() {
+async fn test_babamul_lsst_filter_conditions() {
     use boom::enrichment::babamul::Babamul;
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let babamul = Babamul::new(&config);
 
-    // Create LSST alert with pixel_flags set (should be filtered out)
-    let alert =
-        create_mock_enriched_lsst_alert(9876543215, "LSST24aaaaaaf", 0.9, true, false, None, None)
+    #[rustfmt::skip]
+    let filter_cases: &[(&str, fn(&mut BabamulLsstAlert))] = &[
+        ("rock",               |a| a.properties.rock = true),
+        ("low_snr_psf",        |a| a.candidate.snr_psf = Some(2.9)),
+        ("snr_psf_none",       |a| a.candidate.snr_psf = None),
+        ("low_reliability",    |a| a.candidate.dia_source.reliability = Some(0.4)),
+        ("reliability_none",   |a| a.candidate.dia_source.reliability = None),
+        ("psf_flux_flag",      |a| a.candidate.dia_source.psf_flux_flag = Some(true)),
+        ("psf_flux_flag_edge", |a| a.candidate.dia_source.psf_flux_flag_edge = Some(true)),
+        ("ap_flux_flag",       |a| a.candidate.dia_source.ap_flux_flag = Some(true)),
+        ("pixel_flags_streak", |a| a.candidate.dia_source.pixel_flags_streak = Some(true)),
+        ("pixel_flags_nodata", |a| a.candidate.dia_source.pixel_flags_nodata = Some(true)),
+        ("pixel_flags_cr",     |a| a.candidate.dia_source.pixel_flags_cr = Some(true)),
+        ("pixel_flags_bad",    |a| a.candidate.dia_source.pixel_flags_bad = Some(true)),
+        ("pixel_flags_saturated", |a| a.candidate.dia_source.pixel_flags_saturated = Some(true)),
+        ("shape_flag",         |a| a.candidate.dia_source.shape_flag = Some(true)),
+        ("centroid_flag",      |a| a.candidate.dia_source.centroid_flag = Some(true)),
+        ("extendedness_none",  |a| a.candidate.dia_source.extendedness = None),
+        ("extendedness_nan",   |a| a.candidate.dia_source.extendedness = Some(f32::NAN)),
+        ("extendedness_one",   |a| a.candidate.dia_source.extendedness = Some(1.0_f32)),
+        ("glint_trail",        |a| a.candidate.dia_source.glint_trail = Some(true)),
+        ("is_dipole",          |a| a.candidate.dia_source.is_dipole = Some(true)),
+    ];
+
+    for (label, mutate) in filter_cases {
+        let (mut alert, cross_matches) = create_valid_babamul_lsst_alert();
+        mutate(&mut alert);
+        let result = babamul
+            .process_lsst_alerts(vec![(alert, cross_matches)])
             .await;
+        assert!(
+            result.is_ok(),
+            "process_lsst_alerts failed for filter case '{}': {:?}",
+            label,
+            result.err()
+        );
+        assert_eq!(
+            result.unwrap(),
+            0,
+            "Expected 0 Kafka messages for filter condition '{}'",
+            label
+        );
+    }
 
-    let result = babamul.process_lsst_alerts(vec![alert]).await;
-    assert!(result.is_ok());
-
-    // No messages should be sent for alerts with pixel flags
-    assert_eq!(
-        result.unwrap(),
-        0,
-        "Expected 0 messages for LSST alerts with pixel flags"
+    // last but not least: test that the valid alert (with no mutations) is processed successfully
+    let (alert, cross_matches) = create_valid_babamul_lsst_alert();
+    let result = babamul
+        .process_lsst_alerts(vec![(alert, cross_matches)])
+        .await;
+    assert!(
+        result.is_ok(),
+        "process_lsst_alerts failed for valid alert: {:?}",
+        result.err()
     );
 }
 
@@ -1166,6 +1274,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         dia_source.ap_flux_err = Some(15.0);
         dia_source.pixel_flags = Some(false);
         dia_source.reliability = Some(0.9);
+        dia_source.extendedness = Some(0.2);
         dia_source.band = Some(Band::G);
         dia_source
     };
@@ -1455,6 +1564,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         dia.ap_flux_err = Some(13.0);
         dia.pixel_flags = Some(false);
         dia.reliability = Some(0.95);
+        dia.extendedness = Some(0.2);
         dia.band = Some(Band::G);
         dia
     };
