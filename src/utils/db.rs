@@ -70,6 +70,12 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    // create an index on candidate.jd for temporal range queries (MOC search, etc.)
+    let jd_index = doc! {
+        "candidate.jd": 1,
+    };
+    create_index(&alerts_collection, jd_index, false).await?;
+
     // if survey is LSST, create an index on the ss_object_id field of the alerts collection
     if survey == &Survey::Lsst {
         let index = doc! {

@@ -11,56 +11,32 @@ use crate::utils::lightcurves::{
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
-use cdshealpix::nested::get;
-use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
-use moc::moc::range::RangeMOC;
-use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
-use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
 
+use crate::utils::moc::{is_in_moc, moc_from_fits_bytes, HpxMoc};
+
 pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
 pub const IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC: f64 = 20.0;
 pub const IS_NEAR_BRIGHTSTAR_MAG_THRESH: f64 = 15.0;
 pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
-const MOC_DEPTH: u8 = 11;
 
 // Lazy-loaded footprint MOC
-static FOOTPRINT_MOC: OnceLock<RangeMOC<u64, Hpx<u64>>> = OnceLock::new();
+static FOOTPRINT_MOC: OnceLock<HpxMoc> = OnceLock::new();
 
-fn load_footprint_moc() -> RangeMOC<u64, Hpx<u64>> {
-    let file = std::fs::File::open(MOC_FOOTPRINT_PATH).expect("Failed to open footprint MOC file");
-
-    let reader = std::io::BufReader::new(file);
-    match from_fits_ivoa(reader) {
-        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
-            RangeMOC::new(moc.depth_max(), moc.collect())
-        }
-        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
-            let depth = cell_moc.depth_max();
-            let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
-            RangeMOC::new(depth, ranges)
-        }
-        Ok(_) => {
-            panic!("Unexpected MOC type in footprint MOC file");
-        }
-        Err(e) => {
-            panic!("Failed to parse footprint MOC: {}", e);
-        }
-    }
+fn load_footprint_moc() -> HpxMoc {
+    let bytes =
+        std::fs::read(MOC_FOOTPRINT_PATH).expect("Failed to read footprint MOC file");
+    moc_from_fits_bytes(&bytes).expect("Failed to parse footprint MOC")
 }
 
 pub fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
     let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
-    let ra_rad = ra_deg.to_radians();
-    let dec_rad = dec_deg.to_radians();
-    let layer = get(MOC_DEPTH);
-    let cell = layer.hash(ra_rad, dec_rad);
-    moc.contains_cell(MOC_DEPTH, cell)
+    is_in_moc(moc, ra_deg, dec_deg)
 }
 
 #[serdavro]

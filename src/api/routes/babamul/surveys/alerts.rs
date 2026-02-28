@@ -3,7 +3,12 @@ use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
+use crate::utils::moc::{
+    is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes, moc_to_covering_cones,
+    select_covering_depth,
+};
 use actix_web::{get, post, web, HttpResponse};
+use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, Document},
@@ -608,5 +613,324 @@ pub async fn cone_search_alerts(
                 "Invalid survey specified, only ZTF and LSST are supported",
             );
         }
+    }
+}
+
+/// Maximum time window for MOC search queries (7 days).
+const MOC_SEARCH_MAX_TIME_WINDOW_JD: f64 = 7.0;
+/// Maximum number of covering cones before rejecting the query.
+const MOC_SEARCH_MAX_CONES: usize = 500;
+/// MongoDB server-side query timeout for MOC search (30 seconds).
+const MOC_SEARCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+struct AlertsMocSearchQuery {
+    /// Base64-encoded MOC FITS file (exactly one of moc_fits_base64 or skymap_fits_base64 required)
+    moc_fits_base64: Option<String>,
+    /// Base64-encoded HEALPix skymap FITS file
+    skymap_fits_base64: Option<String>,
+    /// Credible level for skymap thresholding (default: 0.9, required if skymap_fits_base64 is provided)
+    credible_level: Option<f64>,
+    /// Start of time window (required, Julian Date)
+    start_jd: f64,
+    /// End of time window (required, Julian Date, max 7 days after start_jd)
+    end_jd: f64,
+    min_magpsf: Option<f64>,
+    max_magpsf: Option<f64>,
+    #[serde(alias = "min_reliability")]
+    min_drb: Option<f64>,
+    #[serde(alias = "max_reliability")]
+    max_drb: Option<f64>,
+    is_rock: Option<bool>,
+    is_star: Option<bool>,
+    is_near_brightstar: Option<bool>,
+    is_stationary: Option<bool>,
+    limit: Option<u32>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/alerts/moc-search",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    request_body = AlertsMocSearchQuery,
+    responses(
+        (status = 200, description = "Alerts within the MOC region", body = AlertsQueryResult),
+        (status = 400, description = "Invalid query parameters or MOC data"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/alerts/moc-search")]
+pub async fn moc_search_alerts(
+    path: web::Path<Survey>,
+    query: web::Json<AlertsMocSearchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    let survey = path.into_inner();
+
+    // Validate time window (required, capped at 7 days)
+    let time_window = query.end_jd - query.start_jd;
+    if time_window <= 0.0 {
+        return response::bad_request("end_jd must be greater than start_jd");
+    }
+    if time_window > MOC_SEARCH_MAX_TIME_WINDOW_JD {
+        return response::bad_request(&format!(
+            "Time window too large ({:.1} days), maximum allowed is {} days",
+            time_window, MOC_SEARCH_MAX_TIME_WINDOW_JD
+        ));
+    }
+
+    // Parse the MOC from the request
+    let moc = match (&query.moc_fits_base64, &query.skymap_fits_base64) {
+        (Some(moc_b64), None) => {
+            let bytes = match BASE64_STANDARD.decode(moc_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    return response::bad_request(&format!(
+                        "Invalid base64 in moc_fits_base64: {}",
+                        e
+                    ));
+                }
+            };
+            match moc_from_fits_bytes(&bytes) {
+                Ok(moc) => moc,
+                Err(e) => {
+                    return response::bad_request(&format!("Failed to parse MOC FITS: {}", e));
+                }
+            }
+        }
+        (None, Some(skymap_b64)) => {
+            let credible_level = query.credible_level.unwrap_or(0.9);
+            if !(0.0..=1.0).contains(&credible_level) {
+                return response::bad_request("credible_level must be between 0.0 and 1.0");
+            }
+            let bytes = match BASE64_STANDARD.decode(skymap_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    return response::bad_request(&format!(
+                        "Invalid base64 in skymap_fits_base64: {}",
+                        e
+                    ));
+                }
+            };
+            match moc_from_skymap_bytes(&bytes, credible_level) {
+                Ok(moc) => moc,
+                Err(e) => {
+                    return response::bad_request(&format!(
+                        "Failed to parse skymap FITS: {}",
+                        e
+                    ));
+                }
+            }
+        }
+        (Some(_), Some(_)) => {
+            return response::bad_request(
+                "Provide exactly one of moc_fits_base64 or skymap_fits_base64, not both",
+            );
+        }
+        (None, None) => {
+            return response::bad_request(
+                "Must provide either moc_fits_base64 or skymap_fits_base64",
+            );
+        }
+    };
+
+    let limit = query.limit.unwrap_or(10000).min(10000);
+    if limit == 0 {
+        return response::bad_request("limit must be between 1 and 10000");
+    }
+
+    // Compute covering cones for the MOC
+    let depth = select_covering_depth(&moc);
+    let cones = moc_to_covering_cones(&moc, depth);
+    if cones.is_empty() {
+        return response::ok("MOC region is empty, no alerts to search", serde_json::json!([]));
+    }
+    if cones.len() > MOC_SEARCH_MAX_CONES {
+        return response::bad_request(&format!(
+            "MOC region too large: {} covering cones at depth {} (max {}). Use a smaller credible level or a more targeted MOC.",
+            cones.len(),
+            depth,
+            MOC_SEARCH_MAX_CONES
+        ));
+    }
+
+    // Build the query with JD range first (uses the candidate.jd index to narrow quickly),
+    // then spatial $or to filter by sky region, then post-filter with the full-resolution MOC.
+    let jd_filter = doc! { "candidate.jd": { "$gte": query.start_jd, "$lte": query.end_jd } };
+
+    let or_conditions: Vec<Document> = cones
+        .iter()
+        .map(|&(ra, dec, radius_rad)| {
+            doc! {
+                "coordinates.radec_geojson": {
+                    "$geoWithin": {
+                        "$centerSphere": [
+                            [ra - 180.0, dec],
+                            radius_rad
+                        ]
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Start with JD filter (indexed), then add spatial $or, then other filters
+    let mut filter_doc = jd_filter;
+    filter_doc.insert("$or", or_conditions);
+
+    if survey == Survey::Ztf {
+        filter_doc.insert("candidate.programid", 1);
+    }
+    if query.min_magpsf.is_some() || query.max_magpsf.is_some() {
+        let mut magpsf_filter = Document::new();
+        if let Some(min_magpsf) = query.min_magpsf {
+            magpsf_filter.insert("$gte", min_magpsf);
+        }
+        if let Some(max_magpsf) = query.max_magpsf {
+            magpsf_filter.insert("$lte", max_magpsf);
+        }
+        filter_doc.insert("candidate.magpsf", magpsf_filter);
+    }
+    if query.min_drb.is_some() || query.max_drb.is_some() {
+        let drb_key = match survey {
+            Survey::Ztf => "candidate.drb",
+            Survey::Lsst => "candidate.reliability",
+            _ => {
+                return response::bad_request(
+                    "Invalid survey specified, only ZTF and LSST are supported",
+                );
+            }
+        };
+        let mut drb_filter = Document::new();
+        if let Some(min_drb) = query.min_drb {
+            drb_filter.insert("$gte", min_drb);
+        }
+        if let Some(max_drb) = query.max_drb {
+            drb_filter.insert("$lte", max_drb);
+        }
+        filter_doc.insert(drb_key, drb_filter);
+    }
+    if let Some(is_rock) = query.is_rock {
+        filter_doc.insert("properties.rock", is_rock);
+    }
+    if let Some(is_star) = query.is_star {
+        filter_doc.insert("properties.star", is_star);
+    }
+    if let Some(is_near_brightstar) = query.is_near_brightstar {
+        filter_doc.insert("properties.near_brightstar", is_near_brightstar);
+    }
+    if let Some(is_stationary) = query.is_stationary {
+        filter_doc.insert("properties.stationary", is_stationary);
+    }
+
+    match survey {
+        Survey::Ztf => {
+            let alerts_collection: Collection<EnrichedZtfAlert> =
+                db.collection(&format!("{}_alerts", survey));
+            let mut alert_cursor = match alerts_collection
+                .find(filter_doc)
+                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
+                .limit((limit as i64) * 2) // over-fetch since we post-filter
+                .await
+            {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error retrieving alerts for survey {}: {}",
+                        survey, error
+                    ));
+                }
+            };
+
+            let mut results: Vec<EnrichedZtfAlert> = Vec::new();
+            while let Some(alert_doc) = match alert_cursor.try_next().await {
+                Ok(Some(doc)) => Some(doc),
+                Ok(None) => None,
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error getting documents: {}",
+                        error
+                    ));
+                }
+            } {
+                // Post-filter: check that the alert is actually inside the MOC
+                let ra = alert_doc.candidate.candidate.ra;
+                let dec = alert_doc.candidate.candidate.dec;
+                if is_in_moc(&moc, ra, dec) {
+                    results.push(alert_doc);
+                    if results.len() >= limit as usize {
+                        break;
+                    }
+                }
+            }
+            response::ok(
+                &format!(
+                    "found {} alerts within MOC region ({} covering cones at depth {})",
+                    results.len(),
+                    cones.len(),
+                    depth
+                ),
+                serde_json::json!(results),
+            )
+        }
+        Survey::Lsst => {
+            let alerts_collection: Collection<EnrichedLsstAlert> =
+                db.collection(&format!("{}_alerts", survey));
+            let mut alert_cursor = match alerts_collection
+                .find(filter_doc)
+                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
+                .limit((limit as i64) * 2)
+                .await
+            {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error retrieving alerts for survey {}: {}",
+                        survey, error
+                    ));
+                }
+            };
+
+            let mut results: Vec<EnrichedLsstAlert> = Vec::new();
+            while let Some(alert_doc) = match alert_cursor.try_next().await {
+                Ok(Some(doc)) => Some(doc),
+                Ok(None) => None,
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error getting documents: {}",
+                        error
+                    ));
+                }
+            } {
+                let ra = alert_doc.candidate.dia_source.ra;
+                let dec = alert_doc.candidate.dia_source.dec;
+                if is_in_moc(&moc, ra, dec) {
+                    results.push(alert_doc);
+                    if results.len() >= limit as usize {
+                        break;
+                    }
+                }
+            }
+            response::ok(
+                &format!(
+                    "found {} alerts within MOC region ({} covering cones at depth {})",
+                    results.len(),
+                    cones.len(),
+                    depth
+                ),
+                serde_json::json!(results),
+            )
+        }
+        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
     }
 }
