@@ -33,13 +33,13 @@ pub fn moc_from_skymap_bytes(bytes: &[u8], credible_level: f64) -> Result<HpxMoc
     let reader = BufReader::new(Cursor::new(bytes));
     from_fits_skymap(
         reader,
-        0.0,              // skip_value_le_this: don't skip any pixels by value
-        0.0,              // cumul_from: start from 0
-        credible_level,   // cumul_to: stop at the credible level
-        false,            // asc=false: accumulate from highest probability densities
-        false,            // strict: include cells overlapping the boundary
-        false,            // no_split: allow splitting cells at boundary
-        false,            // reverse_decent
+        0.0,            // skip_value_le_this: don't skip any pixels by value
+        0.0,            // cumul_from: start from 0
+        credible_level, // cumul_to: stop at the credible level
+        false,          // asc=false: accumulate from highest probability densities
+        false,          // strict: include cells overlapping the boundary
+        false,          // no_split: allow splitting cells at boundary
+        false,          // reverse_decent
     )
     .map_err(|e| format!("Failed to parse skymap FITS: {}", e))
 }
@@ -168,10 +168,7 @@ mod tests {
 
         // Sample some points from the MOC by taking cell centers at the MOC's depth
         let degraded = moc.degraded(8);
-        let sample_cells: Vec<u64> = degraded
-            .flatten_to_fixed_depth_cells()
-            .take(100)
-            .collect();
+        let sample_cells: Vec<u64> = degraded.flatten_to_fixed_depth_cells().take(100).collect();
 
         for cell_idx in sample_cells {
             let (lon_rad, lat_rad) = nested::center(8, cell_idx);
@@ -254,8 +251,8 @@ mod tests {
             .expect("Failed to read GRB 200524A skymap");
 
         // 1. At 90% credible level: counterpart IS inside the MOC
-        let moc_90 = moc_from_skymap_bytes(&skymap_bytes, 0.9)
-            .expect("Failed to parse skymap at CL=0.9");
+        let moc_90 =
+            moc_from_skymap_bytes(&skymap_bytes, 0.9).expect("Failed to parse skymap at CL=0.9");
         assert!(
             is_in_moc(&moc_90, counterpart_ra, counterpart_dec),
             "ZTF20abbiixp (RA={}, Dec={}) should be inside the 90% credible region",
@@ -265,8 +262,8 @@ mod tests {
 
         // 2. At 5% credible level: counterpart is NOT inside the MOC
         //    (it enters between CL~6-6.5%, so 5% is just tight enough to exclude it)
-        let moc_05 = moc_from_skymap_bytes(&skymap_bytes, 0.05)
-            .expect("Failed to parse skymap at CL=0.05");
+        let moc_05 =
+            moc_from_skymap_bytes(&skymap_bytes, 0.05).expect("Failed to parse skymap at CL=0.05");
         assert!(
             !is_in_moc(&moc_05, counterpart_ra, counterpart_dec),
             "ZTF20abbiixp should NOT be inside the 5% credible region"
@@ -321,7 +318,12 @@ mod tests {
         // Same point
         assert!((angular_distance(0.0, 0.0, 0.0, 0.0)).abs() < 1e-10);
         // Opposite poles
-        let dist = angular_distance(0.0, std::f64::consts::FRAC_PI_2, 0.0, -std::f64::consts::FRAC_PI_2);
+        let dist = angular_distance(
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+            0.0,
+            -std::f64::consts::FRAC_PI_2,
+        );
         assert!((dist - std::f64::consts::PI).abs() < 1e-10);
         // 90 degrees apart along equator
         let dist = angular_distance(0.0, 0.0, std::f64::consts::FRAC_PI_2, 0.0);

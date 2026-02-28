@@ -725,10 +725,7 @@ pub async fn moc_search_alerts(
             match moc_from_skymap_bytes(&bytes, credible_level) {
                 Ok(moc) => moc,
                 Err(e) => {
-                    return response::bad_request(&format!(
-                        "Failed to parse skymap FITS: {}",
-                        e
-                    ));
+                    return response::bad_request(&format!("Failed to parse skymap FITS: {}", e));
                 }
             }
         }
@@ -753,7 +750,10 @@ pub async fn moc_search_alerts(
     let depth = select_covering_depth(&moc);
     let cones = moc_to_covering_cones(&moc, depth);
     if cones.is_empty() {
-        return response::ok("MOC region is empty, no alerts to search", serde_json::json!([]));
+        return response::ok(
+            "MOC region is empty, no alerts to search",
+            serde_json::json!([]),
+        );
     }
     if cones.len() > MOC_SEARCH_MAX_CONES {
         return response::bad_request(&format!(
