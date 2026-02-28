@@ -133,7 +133,7 @@ mod tests {
         let in_footprint = is_in_moc(&moc, 0.0, -30.0);
         // A point at the north pole (unlikely in LSST footprint)
         let at_north_pole = is_in_moc(&moc, 0.0, 89.0);
-        // At least one should differ from the other (footprint is partial sky)
+        // The two points should differ (footprint is partial sky)
         assert_ne!(in_footprint, at_north_pole);
     }
 
