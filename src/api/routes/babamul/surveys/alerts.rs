@@ -629,7 +629,7 @@ struct AlertsMocSearchQuery {
     moc_fits_base64: Option<String>,
     /// Base64-encoded HEALPix skymap FITS file
     skymap_fits_base64: Option<String>,
-    /// Credible level for skymap thresholding (default: 0.9, required if skymap_fits_base64 is provided)
+    /// Credible level for skymap thresholding (optional, defaults to 0.9 if omitted when skymap_fits_base64 is provided)
     credible_level: Option<f64>,
     /// Start of time window (required, Julian Date)
     start_jd: f64,
