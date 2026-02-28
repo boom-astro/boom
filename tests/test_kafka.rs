@@ -95,7 +95,8 @@ async fn test_produce_and_consume_from_archive() {
 
     /* Part 2: Consumer */
 
-    let ztf_alert_consumer = ZtfAlertConsumer::new(Some(&output_queue), Some(ProgramId::Public));
+    let ztf_alert_consumer =
+        ZtfAlertConsumer::new(Some(&output_queue), Some(vec![ProgramId::Public]));
 
     ztf_alert_consumer
         .clear_output_queue(TEST_CONFIG_FILE)
@@ -105,7 +106,7 @@ async fn test_produce_and_consume_from_archive() {
     let timestamp = datetime.and_utc().timestamp();
     ztf_alert_consumer
         .consume(
-            Some(topic),
+            Some(vec![topic]),
             timestamp,
             None,
             Some(1),

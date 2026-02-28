@@ -22,9 +22,9 @@ impl DecamAlertConsumer {
 
 #[async_trait::async_trait]
 impl AlertConsumer for DecamAlertConsumer {
-    fn topic_name(&self, timestamp: i64) -> String {
+    fn topic_names(&self, timestamp: i64) -> Vec<String> {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)
+        vec![format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)]
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
