@@ -48,8 +48,6 @@ async fn main() -> std::io::Result<()> {
             app = app.service(
                 actix_web::web::scope("/babamul")
                     .app_data(web::Data::new(babamul_avro_schemas))
-                    // Larger JSON payload limit for MOC/skymap uploads (100 MB)
-                    .app_data(web::JsonConfig::default().limit(104_857_600))
                     .wrap(from_fn(babamul_auth_middleware))
                     // Public routes
                     .service(Scalar::with_url("/docs", babamul_doc.clone()))
@@ -72,7 +70,12 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_cutouts)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
-                    .service(routes::babamul::surveys::moc_search_alerts)
+                    // MOC search has its own larger JSON limit for skymap uploads (70 MB)
+                    .service(
+                        actix_web::web::scope("")
+                            .app_data(web::JsonConfig::default().limit(73_400_320))
+                            .service(routes::babamul::surveys::moc_search_alerts),
+                    )
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token),
