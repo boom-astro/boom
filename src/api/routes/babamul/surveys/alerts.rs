@@ -704,7 +704,7 @@ pub async fn moc_search_alerts(
             match moc_from_fits_bytes(&bytes) {
                 Ok(moc) => moc,
                 Err(e) => {
-                    return response::bad_request(&format!("Failed to parse MOC FITS: {}", e));
+                    return response::bad_request(&e.to_string());
                 }
             }
         }
