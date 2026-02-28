@@ -704,7 +704,7 @@ pub async fn moc_search_alerts(
             match moc_from_fits_bytes(&bytes) {
                 Ok(moc) => moc,
                 Err(e) => {
-                    return response::bad_request(&e.to_string());
+                    return response::bad_request(&e);
                 }
             }
         }
@@ -840,7 +840,6 @@ pub async fn moc_search_alerts(
             let mut alert_cursor = match alerts_collection
                 .find(filter_doc)
                 .max_time(MOC_SEARCH_QUERY_TIMEOUT)
-                .limit((limit as i64) * 2) // over-fetch since we post-filter
                 .await
             {
                 Ok(cursor) => cursor,
@@ -889,7 +888,6 @@ pub async fn moc_search_alerts(
             let mut alert_cursor = match alerts_collection
                 .find(filter_doc)
                 .max_time(MOC_SEARCH_QUERY_TIMEOUT)
-                .limit((limit as i64) * 2)
                 .await
             {
                 Ok(cursor) => cursor,
