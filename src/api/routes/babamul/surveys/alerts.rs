@@ -725,7 +725,7 @@ pub async fn moc_search_alerts(
             match moc_from_skymap_bytes(&bytes, credible_level) {
                 Ok(moc) => moc,
                 Err(e) => {
-                    return response::bad_request(&format!("Failed to parse skymap FITS: {}", e));
+                    return response::bad_request(&e);
                 }
             }
         }
