@@ -29,8 +29,7 @@ const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
 static FOOTPRINT_MOC: OnceLock<HpxMoc> = OnceLock::new();
 
 fn load_footprint_moc() -> HpxMoc {
-    let bytes =
-        std::fs::read(MOC_FOOTPRINT_PATH).expect("Failed to read footprint MOC file");
+    let bytes = std::fs::read(MOC_FOOTPRINT_PATH).expect("Failed to read footprint MOC file");
     moc_from_fits_bytes(&bytes).expect("Failed to parse footprint MOC")
 }
 
