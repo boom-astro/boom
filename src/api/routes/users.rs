@@ -62,7 +62,12 @@ pub async fn post_user(
     body: web::Json<UserPost>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     if !current_user.is_admin {
         return HttpResponse::Forbidden().body("Only admins can create new users");
     }
@@ -84,10 +89,7 @@ pub async fn post_user(
 
     // Save new user to database
     match user_collection.insert_one(user_insert.clone()).await {
-        Ok(_) => response::ok(
-            "success",
-            serde_json::to_value(UserPublic::from(user_insert)).unwrap(),
-        ),
+        Ok(_) => response::ok_ser("success", UserPublic::from(user_insert)),
         // Catch unique index constraint error
         Err(e) if e.to_string().contains("E11000 duplicate key error") => HttpResponse::Conflict()
             .body(format!(
@@ -129,7 +131,7 @@ pub async fn get_users(db: web::Data<Database>) -> HttpResponse {
                     }
                 }
             }
-            response::ok("success", serde_json::to_value(&user_list).unwrap())
+            response::ok_ser("success", user_list)
         }
         Err(e) => HttpResponse::InternalServerError().body(format!("failed to query users: {}", e)),
     }
@@ -152,7 +154,12 @@ pub async fn delete_user(
     path: web::Path<String>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     if !current_user.is_admin {
         return HttpResponse::Forbidden().body("Only admins can delete users");
     }

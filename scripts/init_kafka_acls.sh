@@ -37,68 +37,61 @@ TIMEOUT=60 # seconds
 
 kafka_log() { echo "[init-kafka] $*"; }
 
-# Wait for broker hostname to be resolvable and port to be reachable
-# This handles Docker DNS/networking race conditions in CI
+# Best-effort wait for broker hostname to be resolvable and port to be reachable.
+# This is NOT fatal — wait_for_kafka() below does the authoritative check using
+# Kafka CLI tools.  The pre-check only exists to give Docker DNS a moment to
+# propagate.  Tools like nc / getent / timeout may be absent in minimal images
+# (e.g. apache/kafka), so failures here are expected and harmless.
 wait_for_broker_network() {
   local host="${BROKER%%:*}"  # Extract hostname from broker:port
   local port="${BROKER##*:}"  # Extract port
-  start_ts=$(date +%s)
-  local max_wait=$TIMEOUT
+  local max_wait=15           # short grace period; Kafka CLI does the real wait
 
-  kafka_log "Waiting for broker DNS resolution: $host"
-  until getent hosts "$host" >/dev/null 2>&1; do
-    if (( $(date +%s) - start_ts > max_wait )); then
-      kafka_log "DNS resolution failed for $host after ${max_wait}s"
-      kafka_log "Trying nc/telnet as fallback..."
-      break
-    fi
-    sleep 1
-  done
-
-  kafka_log "Waiting for broker port connectivity: $BROKER"
-  start_ts=$(date +%s)
-  until nc -z "$host" "$port" 2>/dev/null || timeout 1 bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null; do
-    if (( $(date +%s) - start_ts > max_wait )); then
-      kafka_log "ERROR: Could not connect to $BROKER after ${max_wait} s"
-      exit 1
+  kafka_log "Best-effort network pre-check for $BROKER (${max_wait}s max)"
+  local start=$(date +%s)
+  while (( $(date +%s) - start < max_wait )); do
+    if nc -z "$host" "$port" 2>/dev/null \
+       || bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null; then
+      kafka_log "Network pre-check passed"
+      return 0
     fi
     sleep 2
   done
-  kafka_log "Network pre-check complete for $BROKER"
+  kafka_log "Network pre-check did not pass within ${max_wait}s (non-fatal, continuing)"
 }
 
 wait_for_kafka() {
-  start_ts=$(date +%s)
+  local start=$(date +%s)
   kafka_log "Waiting for Kafka at $BROKER (cluster-id)"
   until /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server "$BROKER" >/dev/null 2>&1; do
-    if (( $(date +%s) - start_ts > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for cluster-id from $BROKER"; exit 1
     fi
     sleep 3
   done
 
-  start_ts=$(date +%s)
+  local start=$(date +%s)
   kafka_log "Waiting for metadata quorum readiness"
   until /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server "$BROKER" describe --status >/dev/null 2>&1; do
-    if (( $(date +%s) - start_ts > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for metadata quorum describe --status"; exit 1
     fi
     sleep 3
   done
 
-  start_ts=$(date +%s)
+  local start=$(date +%s)
   kafka_log "Waiting for configs API (users --describe)"
   until /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BROKER" --entity-type users --describe >/dev/null 2>&1; do
-    if (( $(date +%s) - start_ts > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for configs API to respond"; exit 1
     fi
     sleep 3
   done
 
-  start_ts=$(date +%s)
+  local start=$(date +%s)
   kafka_log "Waiting for authorizer (acls --list)"
   until /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$BROKER" --list >/dev/null 2>&1; do
-    if (( $(date +%s) - start_ts > TIMEOUT )); then
+    if (( $(date +%s) - $start > $TIMEOUT )); then
       kafka_log "Timed out waiting for authorizer to respond"; exit 1
     fi
     sleep 3

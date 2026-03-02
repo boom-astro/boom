@@ -134,7 +134,7 @@ if [ "$PLATFORM" == "apptainer" ]; then
     echo -e "${RED}Boom consumer already running.${END}"
   else
     apptainer exec --pwd /app \
-      instance://boom /app/kafka_consumer ztf 20250311 public \
+      instance://boom /app/kafka_consumer ztf 20250311 --programids public \
       > "$LOGS_DIR/consumer.log" 2>&1 &
     echo -e "${GREEN}Boom consumer started for survey ztf${END}"
   fi

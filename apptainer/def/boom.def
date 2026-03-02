@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: rust:1.91.1-slim-trixie
+From: rust:1.93.1-slim-trixie
 
 %environment
     export PATH=/app:/opt/kafka/bin:$PATH
@@ -38,3 +38,5 @@ From: rust:1.91.1-slim-trixie
     cp /app/target/release/kafka_consumer /app/kafka_consumer
     cp /app/target/release/scheduler /app/scheduler
     cp /app/target/release/api /app/boom-api
+    cp /app/target/release/migrate_fp_flux /app/migrate_fp_flux
+    cp /app/target/release/migrate_snr /app/migrate_snr

@@ -213,20 +213,17 @@ pub async fn get_alerts(
         filter_doc.insert(drb_key, drb_filter);
     }
 
-    if query.is_rock.is_some() {
-        filter_doc.insert("properties.rock", query.is_rock.unwrap());
+    if let Some(is_rock) = query.is_rock {
+        filter_doc.insert("properties.rock", is_rock);
     }
-    if query.is_star.is_some() {
-        filter_doc.insert("properties.star", query.is_star.unwrap());
+    if let Some(is_star) = query.is_star {
+        filter_doc.insert("properties.star", is_star);
     }
-    if query.is_near_brightstar.is_some() {
-        filter_doc.insert(
-            "properties.near_brightstar",
-            query.is_near_brightstar.unwrap(),
-        );
+    if let Some(is_near_brightstar) = query.is_near_brightstar {
+        filter_doc.insert("properties.near_brightstar", is_near_brightstar);
     }
-    if query.is_stationary.is_some() {
-        filter_doc.insert("properties.stationary", query.is_stationary.unwrap());
+    if let Some(is_stationary) = query.is_stationary {
+        filter_doc.insert("properties.stationary", is_stationary);
     }
 
     match survey {
@@ -425,20 +422,17 @@ pub async fn cone_search_alerts(
         }
         base_filter_doc.insert(drb_key, drb_filter);
     }
-    if query.is_rock.is_some() {
-        base_filter_doc.insert("properties.rock", query.is_rock.unwrap());
+    if let Some(is_rock) = query.is_rock {
+        base_filter_doc.insert("properties.rock", is_rock);
     }
-    if query.is_star.is_some() {
-        base_filter_doc.insert("properties.star", query.is_star.unwrap());
+    if let Some(is_star) = query.is_star {
+        base_filter_doc.insert("properties.star", is_star);
     }
-    if query.is_near_brightstar.is_some() {
-        base_filter_doc.insert(
-            "properties.near_brightstar",
-            query.is_near_brightstar.unwrap(),
-        );
+    if let Some(is_near_brightstar) = query.is_near_brightstar {
+        base_filter_doc.insert("properties.near_brightstar", is_near_brightstar);
     }
-    if query.is_stationary.is_some() {
-        base_filter_doc.insert("properties.stationary", query.is_stationary.unwrap());
+    if let Some(is_stationary) = query.is_stationary {
+        base_filter_doc.insert("properties.stationary", is_stationary);
     }
 
     match survey {

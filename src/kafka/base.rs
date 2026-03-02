@@ -395,7 +395,7 @@ pub enum ConsumerError {
 
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
-    fn topic_name(&self, timestamp: i64) -> String;
+    fn topic_names(&self, timestamp: i64) -> Vec<String>;
     fn output_queue(&self) -> String;
     fn survey(&self) -> crate::utils::enums::Survey;
     #[instrument(skip(self))]
@@ -418,7 +418,7 @@ pub trait AlertConsumer: Sized {
     #[instrument(skip(self))]
     async fn consume(
         &self,
-        topic: Option<String>,
+        topics: Option<Vec<String>>,
         timestamp: i64,
         kafka_config: Option<KafkaConsumerConfig>,
         n_threads: Option<usize>,
@@ -428,7 +428,7 @@ pub trait AlertConsumer: Sized {
     ) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
 
-        let topic = topic.unwrap_or_else(|| self.topic_name(timestamp));
+        let topics = topics.unwrap_or_else(|| self.topic_names(timestamp));
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
             None => config
@@ -449,14 +449,14 @@ pub trait AlertConsumer: Sized {
 
         let mut handles = vec![];
         for i in 0..n_threads {
-            let topic = topic.clone();
+            let topics = topics.clone();
             let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
             let handle = tokio::spawn(async move {
                 let result = consumer(
                     &i.to_string(),
-                    &topic,
+                    topics.iter().map(|s| s.as_str()).collect(),
                     &output_queue,
                     max_in_queue,
                     timestamp,
@@ -542,7 +542,7 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
 #[instrument(skip(config, survey_consumer_config))]
 pub async fn consumer(
     id: &str,
-    topic: &str,
+    topics: Vec<&str>,
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
@@ -554,6 +554,44 @@ pub async fn consumer(
     let group_id = survey_consumer_config.group_id.clone();
     let username = survey_consumer_config.username.clone();
     let password = survey_consumer_config.password.clone();
+
+    let topics = if exit_on_eof {
+        // if exit_on_eof is true, let's only consume from the topics that have messages, and exit if they are all empty
+        let mut non_empty_topics = vec![];
+        for topic in &topics {
+            let nb_messages = count_messages(&server, topic)?;
+            match nb_messages {
+                Some(0) => {
+                    info!(
+                        "No messages available in topic {}, skipping it for consumer {}",
+                        topic, id
+                    );
+                }
+                Some(_) => {
+                    debug!(
+                        "Topic {} has messages, including it for consumer {}",
+                        topic, id
+                    );
+                    non_empty_topics.push(*topic);
+                }
+                None => {
+                    info!("Topic {} not found, skipping it for consumer {}", topic, id);
+                }
+            }
+        }
+        if non_empty_topics.is_empty() {
+            info!(
+                "No messages available in any topic, exiting consumer {}",
+                id
+            );
+            return Ok(());
+        }
+        non_empty_topics
+    } else {
+        // otherwise, we want to consume from all topics and never exit, even if they are empty at the beginning
+        debug!("exit_on_eof is false, consuming from all topics indefinitely");
+        topics
+    };
 
     let mut client_config = ClientConfig::new();
     client_config
@@ -582,20 +620,8 @@ pub async fn consumer(
 
     // Subscribe to topic(s) - broker will handle partition assignment
     consumer
-        .subscribe(&[topic])
-        .inspect_err(as_error!("failed to subscribe to topic"))?;
-
-    if exit_on_eof {
-        // check how many messages are in the topic
-        let nb_messages = count_messages(&server, topic)?;
-        if let Some(0) = nb_messages {
-            info!(
-                "No messages available in topic {}, exiting consumer {}",
-                topic, id
-            );
-            return Ok(());
-        }
-    }
+        .subscribe(&topics)
+        .inspect_err(as_error!("failed to subscribe to topics"))?;
 
     // Wait for initial assignment
     debug!("Waiting for partition assignment...");
@@ -634,7 +660,7 @@ pub async fn consumer(
     // OTel attributes informed by https://opentelemetry.io/docs/specs/semconv/messaging/kafka/
     let consumer_attrs = [
         KeyValue::new("messaging.system", "kafka"),
-        KeyValue::new("messaging.destination.name", topic.to_string()),
+        KeyValue::new("messaging.destination.name", topics.join(",")),
         KeyValue::new("messaging.consumer.group.name", group_id.to_string()),
         KeyValue::new("messaging.operation.name", "poll"),
         KeyValue::new("messaging.operation.type", "receive"),

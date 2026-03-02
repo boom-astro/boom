@@ -142,14 +142,14 @@ apptainer exec instance://kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-serve
 
 Next, you can start the `Kafka` consumer with:
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 ```
 
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
 To continue with the previous example, you can run:
 ```bash
-cargo run --release --bin kafka_consumer ztf 20240617 public
+cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ```
 
 ### Alert Processing
@@ -173,12 +173,12 @@ docker exec -it -w /app boom /bin/bash
 ```
 Then you can run the binaries with:
 ```bash
-./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+./kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 ./scheduler <SURVEY> [CONFIG_PATH]
 ```
 Or you can run them directly with:
 ```bash
-docker exec -it -w /app boom ./kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+docker exec -it -w /app boom ./kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 docker exec -it -w /app boom ./scheduler <SURVEY> [CONFIG_PATH]
 ```
 
@@ -189,12 +189,12 @@ apptainer shell --pwd /app instance://boom
 ```
 Then you can run the binaries with:
 ```bash
-/app/kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+/app/kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 /app/scheduler <SURVEY> [CONFIG_PATH]
 ```
 Or you can run them directly with:
 ```bash
-apptainer exec instance://boom /app/kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+apptainer exec instance://boom /app/kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 apptainer exec instance://boom /app/scheduler <SURVEY> [CONFIG_PATH]
 ```
 

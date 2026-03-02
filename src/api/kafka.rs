@@ -294,9 +294,10 @@ pub async fn delete_acls_for_username(
 
     if !errors.is_empty() {
         let combined = errors.join("; ");
-        eprintln!(
+        tracing::error!(
             "Error deleting ACLs for user {}: {}",
-            kafka_username, combined
+            kafka_username,
+            combined
         );
         return Err(format!(
             "Failed to delete ACLs for user {}: {}",
@@ -346,7 +347,7 @@ pub async fn delete_kafka_credentials_and_acls(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Log the error but don't fail if the user doesn't exist
-            eprintln!(
+            tracing::error!(
                 "Note: SCRAM user deletion may have failed (user may not exist): {}",
                 stderr
             );
