@@ -196,6 +196,8 @@ pub enum SchemaRegistryError {
 pub enum AlertError {
     #[error("error from avro")]
     Avro(#[from] apache_avro::Error),
+    #[error("no records in avro data")]
+    AvroNoRecords,
     #[error("value access error from bson")]
     BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
     #[error("error from mongodb")]
@@ -580,12 +582,17 @@ impl SchemaCache {
                 let (schema, startidx) =
                     get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
 
-                // if it's not an error this time, cache the new schema
-                // otherwise return the error
-                let value = from_avro_datum(&schema, &mut &avro_bytes[startidx..], None)
-                    .inspect_err(as_error!())?;
+                // try deserializing again with the schemaless approach
+                let reader = apache_avro::Reader::new(&avro_bytes[startidx..])?;
+
+                let value = reader
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| AlertError::AvroNoRecords)??;
+
                 self.cached_schema = Some(schema);
                 self.cached_start_idx = Some(startidx);
+
                 value
             }
         };
