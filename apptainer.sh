@@ -235,57 +235,29 @@ fi
 # -----------------------------
 if [ "$1" == "log" ]; then
   survey="${2:-lsst}"
-  service="${3:-scheduler}"
-  if { [ "$survey" != "lsst" ] && [ "$survey" != "ztf" ] && [ "$survey" != "decam" ]; } \
-  || { [ "$service" != "scheduler" ] && [ "$service" != "s" ] && [ "$service" != "consumer" ] \
-  && [ "$service" != "cons" ] && [ "$service" != "c" ]; }; then
+  error_log=$3
+
+  if [ "$survey" == "error" ]; then
+    survey="lsst"
+    error_log="error"
+  fi
+
+  if { [ "$survey" != "lsst" ] && [ "$survey" != "ztf" ] && [ "$survey" != "decam" ]; } || { [ -n "$error_log" ] && [ "$error_log" != "error" ]; }; then
     echo -e "${RED}Error: Invalid survey name '$survey'.${END}"
     echo -e "  ${BLUE}<survey>:${END} ${GREEN}lsst | ztf | decam${END} ${YELLOW}(optional, defaults to lsst)${END}"
-    echo -e "  ${BLUE}<service>:${END} ${GREEN}scheduler | s | consumer | cons | c${END} ${YELLOW}(optional, defaults to scheduler)${END}"
-    echo -e "  ${BLUE}<date>:${END} ${GREEN}YYYYMMDD${END} ${YELLOW}(optional, defaults to latest)${END}"
-    echo -e "  ${BLUE}<program_id>:${END} ${GREEN}public | partnership (part) | caltech${END} ${YELLOW}(only for ztf)${END}"
+    echo -e "  ${BLUE}<error_log>:${END} ${GREEN}error${END} ${YELLOW}(optional, if provided, will grep for ERROR|WARN in the logs)${END}"
     exit 1
   fi
+  log_file="$LOGS_DIR/${survey}_scheduler.log"
 
-  if [ "$service" = "scheduler" ] || [ "$service" = "s" ]; then
-    echo -e "${BLUE}Displaying $survey scheduler log...${END}"
-    tail -f "$LOGS_DIR/${survey}_scheduler.log"
-    exit 0
+  echo -e "${BLUE}Displaying $survey scheduler ${error_log:+ERROR and WARN }log...${END}"
+  if [ -n "$error_log" ]; then
+    grep -E "ERROR|WARN" "$log_file"
+  else
+    tail -f "$log_file"
   fi
 
-  # --- Consumer ---
-  shift 3
-  args=("$@")
-
-  date_arg=""
-  program_arg=""
-  logs_found=($(ls "$LOGS_DIR" | grep -E "^${survey}_[0-9]{8}_[a-z]+_consumer\.log$" | sort))
-
-  for arg in "${args[@]}"; do
-    case "$arg" in
-      public|partnership|part|caltech)
-        [ "$arg" = "part" ] && arg="partnership"
-        program_arg="$arg"
-        ;;
-      last) # find the latest date available
-        date_arg=$(echo "${logs_found[-1]}" | cut -d'_' -f2)
-        ;;
-      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
-        date_arg="$arg"
-        ;;
-    esac
-  done
-
-  log_pattern="${survey}_${date_arg:-*}${program_arg:+_${program_arg}}*consumer.log"
-  log_files=($LOGS_DIR/$log_pattern)
-
-  if [ ${#log_files[@]} -eq 0 ]; then
-    echo -e "${RED}No matching log files found for pattern: ${log_pattern}${END}"
-    exit 1
-  fi
-
-  echo -e "${BLUE}Displaying ${log_pattern} file(s):${END}"
-  tail -f "${log_files[@]}"
+  exit 0
 fi
 
 # -----------------------------
