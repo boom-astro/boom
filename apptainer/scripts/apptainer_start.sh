@@ -122,9 +122,11 @@ if start_service "kafka" "$2"; then
       "$SIF_DIR/kafka.sif" kafka
     "$HEALTHCHECK_DIR/kafka-healthcheck.sh"
 
-    echo "$(current_datetime) - Initializing Kafka ACLs"
-    apptainer exec --bind "$BOOM_DIR/scripts/init_kafka_acls.sh:/init_kafka_acls.sh" \
-      "$SIF_DIR/kafka.sif" /bin/bash /init_kafka_acls.sh apptainer
+    if [ "$3" = "init" ]; then
+      echo "$(current_datetime) - Initializing Kafka ACLs"
+      apptainer exec --bind "$BOOM_DIR/scripts/init_kafka_acls.sh:/init_kafka_acls.sh" \
+        "$SIF_DIR/kafka.sif" /bin/bash /init_kafka_acls.sh apptainer
+    fi
   fi
 fi
 
