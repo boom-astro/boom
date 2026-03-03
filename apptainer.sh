@@ -143,11 +143,13 @@ if [ "$1" == "stop" ]; then
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
     [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all dates are killed
-    if [ "$5" == "all" ]; then
-      ARGS+=("--programids" "public,partnership,caltech")
-    else
-      match_mode="exact"
-      [ -n "$5" ] && ARGS+=("--programids" "$5") # program ID, if not provided, all program IDs are killed
+    if [ -n "$5" ]; then
+      if [ "$5" == "all" ]; then
+        ARGS+=("--programids" "public,partnership,caltech")
+      else
+        match_mode="exact"
+        ARGS+=("--programids" "$5") # program ID, if not provided, all program IDs are killed
+      fi
     fi
     kill_process "/app/kafka_consumer ${ARGS[*]}" consumer "$match_mode"
   elif stop_service "scheduler" "$target"; then
