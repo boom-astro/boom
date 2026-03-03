@@ -221,32 +221,33 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
     # Boom Consumer
     # -----------------------------
     if start_service "boom" "$2" || start_service "consumer" "$2"; then
-      # If program ID is "all", consume for all programs
-      if [ "$5" = "all" ]; then
-        PROGRAMS=("public" "partnership" "caltech")
-      elif [ -z "$5" ]; then
-        PROGRAMS=("")
-      elif [ "$5" = "public" ] || [ "$5" = "partnership" ] || [ "$5" = "caltech" ]; then
-        PROGRAMS=("$5")
-      else
-        echo -e "${RED}Error: Invalid program ID '$5'.${END}"
-        echo -e "  ${BLUE}[program_id]:${END} ${GREEN}public | partnership | caltech | all${END}"
+      date="$4"
+      progs="$5"
+
+      if [ -z "$date" ]; then
+        echo -e "${RED}Error: Date argument is required for consumer.${END}"
         exit 1
       fi
 
-      for prog in "${PROGRAMS[@]}"; do
-        ARGS=("$survey")
-        [ -n "$4" ] && ARGS+=("$4") # date
-        [ -n "$prog" ] && ARGS+=("$prog") # program ID
-        if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
-          echo -e "${YELLOW}Boom consumer already running for survey $survey${4:+ on date $4}${prog:+ for program $prog}.${END}"
-        else
-          apptainer exec --pwd /app \
-            "instance://boom_$survey" /app/kafka_consumer "${ARGS[@]}" \
-            > "$LOGS_DIR/${survey}${4:+_$4}${prog:+_$prog}_consumer.log" 2>&1 &
-          echo -e "${GREEN}Boom consumer started for survey $survey${4:+ on date $4}${prog:+ for program $prog}${END}"
-        fi
-      done
+      if [[ -n "$progs" && "$progs" == "all" ]]; then
+        progs="public,partnership,caltech"
+      elif [[ -n "$progs" && ! "$progs" =~ ^(public|partnership|caltech)(,(public|partnership|caltech))*$ ]]; then
+        echo -e "${RED}Error: Invalid program IDs '$5'.${END}"
+        echo -e "  ${BLUE}[program_ids]:${END} ${GREEN}public | partnership | caltech${END} (comma-separated)"
+        exit 1
+      fi
+
+      ARGS=("$survey")
+      [ -n "$4" ] && ARGS+=("$date")
+      [ -n "$progs" ] && ARGS+=("--programids" "$progs")
+      if pgrep -f "/app/kafka_consumer ${ARGS[*]}" > /dev/null; then
+        echo -e "${YELLOW}Boom consumer already running for survey $survey${4:+ on date $4}${progs:+ for program $progs}.${END}"
+      else
+        apptainer exec --pwd /app \
+          "instance://boom_$survey" /app/kafka_consumer "${ARGS[@]}" \
+          > "$LOGS_DIR/${survey}${4:+_$4}${progs:+_${progs//,/_}}_consumer.log" 2>&1 &
+        echo -e "${GREEN}Boom consumer started for survey $survey${4:+ on date $4}${progs:+ for program $progs}${END}"
+      fi
     fi
 
     # -----------------------------

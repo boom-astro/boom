@@ -29,6 +29,12 @@ load_env() {
 kill_process() {
   local process="$1"
   local name="$2"
+  local match_mode="$3"  # "exact" to match the exact process, "partial" to match any process containing the string (default: "partial")
+
+  if [ "$match_mode" == "exact" ]; then
+    process="${process}$"
+  fi
+
   if pgrep -f "$process" > /dev/null; then
     pkill -f "$process"
     echo -e "${BLUE}INFO${END}:    Stopping $name process"
@@ -133,11 +139,17 @@ if [ "$1" == "stop" ]; then
       apptainer instance stop "boom_decam"
     fi
   elif stop_service "consumer" "$target"; then
+    match_mode="partial"
     ARGS=()
     [ -n "$3" ] && ARGS+=("$3") # survey, if not provided, all consumers are killed
     [ -n "$4" ] && ARGS+=("$4") # date, if not provided, all dates are killed
-    [ -n "$5" ] && ARGS+=("$5") # program ID, if not provided, all program IDs are killed
-    kill_process "/app/kafka_consumer ${ARGS[*]}" consumer
+    if [ "$5" == "all" ]; then
+      ARGS+=("--programids" "public,partnership,caltech")
+    else
+      match_mode="exact"
+      [ -n "$5" ] && ARGS+=("--programids" "$5") # program ID, if not provided, all program IDs are killed
+    fi
+    kill_process "/app/kafka_consumer ${ARGS[*]}" consumer "$match_mode"
   elif stop_service "scheduler" "$target"; then
     survey=$3 # if no survey is provided, all schedulers are killed
     kill_process "/app/scheduler $survey" scheduler
