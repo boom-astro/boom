@@ -34,7 +34,7 @@ services:
       - boom
     volumes:
       - ${PWD}/tests/throughput/mongo-init.sh:/mongo-init.sh
-      - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
+      - ${PWD}/tests/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
       - ${PWD}/tests/throughput/cats150.filter.json:/cats150.filter.json
     environment:
       - DB_NAME=boom-benchmarking
@@ -118,7 +118,7 @@ services:
         condition: service_healthy
     # Mount local data directory so we don't need to redownload
     volumes:
-      - ${PWD}/data/alerts:/app/data/alerts
+      - ${PWD}/tests/data/alerts:/app/data/alerts
       - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
   consumer:
     image: boom-astro/boom:latest
