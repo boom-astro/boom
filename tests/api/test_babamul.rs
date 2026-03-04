@@ -44,6 +44,9 @@ mod tests {
                 created_at: 0,
                 kafka_credentials: vec![],
                 tokens: vec![],
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
+                password_last_changed_at: None,
             };
 
             let babamul_users_collection: mongodb::Collection<
@@ -468,7 +471,7 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey_name}/objects/{candid}/cutouts success case
+    /// Test GET /babamul/surveys/{survey_name}/cutouts success case
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
         load_dotenv();
@@ -501,14 +504,14 @@ mod tests {
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
                     .wrap(from_fn(babamul_auth_middleware))
-                    .service(routes::babamul::surveys::get_alert_cutouts),
+                    .service(routes::babamul::surveys::get_cutouts),
             ),
         )
         .await;
 
         let req = test::TestRequest::get()
             .uri(&format!(
-                "/babamul/surveys/ztf/alerts/{}/cutouts",
+                "/babamul/surveys/ztf/cutouts?candid={}",
                 test_candid
             ))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -518,7 +521,8 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "Should successfully retrieve cutouts"
+            "Should successfully retrieve cutouts: {}",
+            read_str_response(resp).await
         );
 
         let body = read_json_response(resp).await;
@@ -540,7 +544,7 @@ mod tests {
 
         // Test retrieval of non-existent candid
         let req = test::TestRequest::get()
-            .uri("/babamul/surveys/ztf/alerts/8888888888/cutouts")
+            .uri("/babamul/surveys/ztf/cutouts?candid=8888888888")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
 
@@ -732,10 +736,6 @@ mod tests {
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
         );
-        assert!(
-            body["data"]["cutoutScience"].is_string(),
-            "Cutout should be base64 encoded string"
-        );
 
         // Clean up
         drop_alert_from_collections(candid, "LSST").await.unwrap();
@@ -806,10 +806,6 @@ mod tests {
         assert!(
             body["data"]["candidate"].is_object(),
             "Response should contain candidate"
-        );
-        assert!(
-            body["data"]["cutoutScience"].is_string(),
-            "Cutout should be base64 encoded string"
         );
 
         // Clean up
@@ -965,12 +961,12 @@ mod tests {
             "Response should contain message"
         );
         assert!(
-            body["credential"].is_object(),
+            body["data"].is_object(),
             "Response should contain credential object"
         );
 
         // Verify credential structure
-        let credential = &body["credential"];
+        let credential = &body["data"];
         assert!(credential["id"].is_string(), "Credential should have id");
         assert_eq!(
             credential["name"].as_str().unwrap(),
@@ -1136,7 +1132,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body1 = read_json_response(resp).await;
-        let credential_id_1 = body1["credential"]["id"].as_str().unwrap();
+        let credential_id_1 = body1["data"]["id"].as_str().unwrap();
 
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
@@ -1149,7 +1145,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body2 = read_json_response(resp).await;
-        let credential_id_2 = body2["credential"]["id"].as_str().unwrap();
+        let credential_id_2 = body2["data"]["id"].as_str().unwrap();
 
         // Now list should show 2 credentials
         let req = test::TestRequest::get()
@@ -1238,7 +1234,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = read_json_response(resp).await;
-        let credential_id = body["credential"]["id"].as_str().unwrap();
+        let credential_id = body["data"]["id"].as_str().unwrap();
 
         // Verify credential exists before deletion
         let req = test::TestRequest::get()
@@ -1908,5 +1904,1124 @@ mod tests {
             StatusCode::NOT_FOUND,
             "Should not be able to delete another user's token"
         );
+    }
+
+    /// Test GET /babamul/surveys/{survey}/objects/{object_id}/cross-matches
+    #[actix_rt::test]
+    async fn test_get_object_xmatches() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        // Create test aux data with cross_matches
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let test_object_id = "ZTF24aaaaaaa".to_string();
+
+        let test_object = boom::alert::ZtfObject {
+            object_id: test_object_id.clone(),
+            coordinates: Coordinates::new(124.5, -12.3),
+            prv_candidates: vec![],
+            prv_nondetections: vec![],
+            fp_hists: vec![],
+            aliases: None,
+            created_at: 0.0,
+            updated_at: 0.0,
+            cross_matches: Some(
+                serde_json::json!({
+                    "gaia": [{"mag": 15.2, "distance": 0.5}],
+                    "panstarrs": []
+                })
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|item| mongodb::bson::to_document(item).ok())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>(),
+            ),
+        };
+
+        aux_collection
+            .insert_one(&test_object)
+            .await
+            .expect("Failed to insert test object");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_object_xmatches),
+                ),
+        )
+        .await;
+
+        // Test successful retrieval
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/objects/{}/cross-matches",
+                test_object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve cross-matches"
+        );
+
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data"
+        );
+
+        // Test not found
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/objects/ZTF99nonexistent/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Clean up
+        aux_collection
+            .delete_one(doc! { "_id": &test_object_id })
+            .await
+            .ok();
+    }
+
+    // Test POST /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
+    #[actix_rt::test]
+    async fn test_get_cross_matches_batch() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+        // Create test aux data with cross_matches
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let test_objects = vec![
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj001_{}", unique_suffix),
+                coordinates: Coordinates::new(125.0, -12.0),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: Some(
+                    serde_json::json!({
+                        "gaia": [{"mag": 15.2, "distance": 0.5}],
+                        "panstarrs": []
+                    })
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|item| mongodb::bson::to_document(item).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                ),
+            },
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj002_{}", unique_suffix),
+                coordinates: Coordinates::new(126.0, -11.5),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: Some(
+                    serde_json::json!({
+                        "gaia": [{"mag": 16.5, "distance": 1.0}],
+                        "panstarrs": [{"mag": 17.0, "distance": 0.8}]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|item| mongodb::bson::to_document(item).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                ),
+            },
+        ];
+
+        for obj in &test_objects {
+            aux_collection
+                .insert_one(obj)
+                .await
+                .expect("Failed to insert test object");
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_objects_xmatches),
+                ),
+        )
+        .await;
+
+        // Test successful batch retrieval
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "objectIds": [
+                    format!("ZTF24obj001_{}", unique_suffix),
+                    format!("ZTF24obj002_{}", unique_suffix)
+                ]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve batch cross-matches"
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data"
+        );
+
+        // Test with some non-existent object IDs
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cross-matches")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "objectIds": [
+                    format!("ZTF24obj001_{}", unique_suffix),
+                    "ZTF99nonexistent"
+                ]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve cross-matches even if some object IDs do not exist"
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["status"].as_str().unwrap(), "success");
+        assert!(
+            body["data"].is_object(),
+            "Should contain cross_matches data for existing object"
+        );
+        assert!(
+            body["data"].get("ZTF99nonexistent").is_none(),
+            "Should not have data for non-existent object"
+        );
+
+        // Clean up test objects
+        for obj in test_objects {
+            aux_collection
+                .delete_one(doc! { "_id": &obj.object_id })
+                .await
+                .ok();
+        }
+    }
+
+    /// Test POST /babamul/surveys/{survey}/objects/cone-search
+    #[actix_rt::test]
+    async fn test_cone_search_objects() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        // Insert test objects with specific coordinates
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let test_objects = vec![
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj001_{}", unique_suffix),
+                coordinates: Coordinates::new(125.0, -12.0),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            },
+            boom::alert::ZtfObject {
+                object_id: format!("ZTF24obj002_{}", unique_suffix),
+                coordinates: Coordinates::new(126.0, -11.5),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            },
+        ];
+
+        for obj in &test_objects {
+            aux_collection
+                .insert_one(obj)
+                .await
+                .expect("Failed to insert test object");
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::cone_search_objects),
+                ),
+        )
+        .await;
+
+        // Test successful cone search with multiple coordinates
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0],
+                    "search2": [126.0, -11.5]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cone search should succeed (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(body["data"].is_object(), "Should return results as object");
+
+        // Test with invalid radius (too large)
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 700.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius > 600 arcsec"
+        );
+
+        // Test with no coordinates
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {},
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject empty coordinates"
+        );
+
+        // Test with unauthorized access
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/cone-search")
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Clean up
+        for obj in test_objects {
+            aux_collection
+                .delete_one(doc! { "_id": &obj.object_id })
+                .await
+                .ok();
+        }
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/cone-search
+    #[actix_rt::test]
+    async fn test_cone_search_alerts() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        // Create a test user
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::cone_search_alerts),
+                ),
+        )
+        .await;
+
+        // Test with invalid radius (too small)
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 0.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius <= 0"
+        );
+
+        // Test with invalid radius (too large)
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 700.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius > 600"
+        );
+
+        // Test with no coordinates
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {},
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject empty coordinates"
+        );
+
+        // Test with unauthorized access
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Test successful cone search with valid parameters
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/alerts/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0,
+                "start_jd": 2450000.0,
+                "end_jd": 2460000.0,
+                "min_magpsf": 10.0,
+                "max_magpsf": 20.0,
+                "is_rock": false,
+                "is_star": false
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cone search with valid parameters should succeed (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        assert!(body["message"].is_string(), "Should include a message");
+        assert!(body["data"].is_object(), "Should return results as object");
+    }
+
+    // ─── Password reset tests ─────────────────────────────────────────────────
+
+    /// Helper: compute the SHA-256 hex digest of a string (mirrors the production code).
+    fn sha256_hex(input: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(input.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
+    /// Helper: insert a password-reset token directly into the DB for a user.
+    async fn set_reset_token(database: &Database, user_id: &str, raw_token: &str, expires_at: i64) {
+        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let token_hash = sha256_hex(raw_token);
+        col.update_one(
+            doc! { "_id": user_id },
+            doc! {
+                "$set": {
+                    "password_reset_token_hash": &token_hash,
+                    "password_reset_token_expires_at": expires_at
+                }
+            },
+        )
+        .await
+        .expect("Failed to set reset token in DB");
+    }
+
+    /// POST /babamul/forgot-password
+    ///
+    /// Covers:
+    /// - Known activated user: token hash and expiry are written to DB
+    /// - Unknown email: returns 200 with generic message (no enumeration)
+    /// - Non-activated account: returns 200 but no token is stored
+    /// - Password changed too recently: returns 429 with Retry-After header
+    #[actix_rt::test]
+    async fn test_babamul_forgot_password() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::post_babamul_auth),
+            ),
+        )
+        .await;
+
+        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+
+        // ── Case 1: activated user – token is written to DB ──────────────────
+        let id_activated = uuid::Uuid::new_v4().to_string();
+        let email_activated = format!("test+{}@babamul.example.com", id_activated);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            id: id_activated.clone(),
+            username: "resettest".to_string(),
+            email: email_activated.clone(),
+            password_hash: bcrypt::hash("hunter22hunter22", 4).unwrap(),
+            activation_code: None,
+            is_activated: true,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+            password_last_changed_at: None,
+        })
+        .await
+        .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": email_activated }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "should always return 200");
+
+        let updated = col
+            .find_one(doc! { "_id": &id_activated })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            updated.password_reset_token_hash.is_some(),
+            "reset token hash should be written to DB"
+        );
+        let expiry = updated.password_reset_token_expires_at.unwrap();
+        let now = flare::Time::now().to_utc().timestamp();
+        assert!(expiry > now, "token expiry should be in the future");
+        assert!(
+            expiry <= now + 3600 + 5,
+            "token expiry should be ~1 hour from now"
+        );
+
+        // ── Case 2: unknown email – generic 200 response, no enumeration ─────
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": "nobody@nowhere.example.com" }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unknown email must not cause a non-200 status"
+        );
+        let body = read_json_response(resp).await;
+        assert!(
+            body["message"].as_str().unwrap().contains("If an account"),
+            "response must use the generic non-revealing message"
+        );
+
+        // ── Case 3: non-activated account – no token stored ──────────────────
+        let id_inactive = uuid::Uuid::new_v4().to_string();
+        let email_inactive = format!("test+{}@babamul.example.com", id_inactive);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            id: id_inactive.clone(),
+            username: "notactivated".to_string(),
+            email: email_inactive.clone(),
+            password_hash: "x".to_string(),
+            activation_code: Some("code".to_string()),
+            is_activated: false,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+            password_last_changed_at: None,
+        })
+        .await
+        .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": email_inactive }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let inactive = col
+            .find_one(doc! { "_id": &id_inactive })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            inactive.password_reset_token_hash.is_none(),
+            "no reset token should be stored for a non-activated account"
+        );
+
+        // ── Case 4: password changed too recently – returns 429 ──────────────
+        let now = flare::Time::now().to_utc().timestamp();
+        let id_rl = uuid::Uuid::new_v4().to_string();
+        let email_rl = format!("test+{}@babamul.example.com", id_rl);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            id: id_rl.clone(),
+            username: "ratelimitforgot".to_string(),
+            email: email_rl.clone(),
+            password_hash: bcrypt::hash("hunter22hunter22", 4).unwrap(),
+            activation_code: None,
+            is_activated: true,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+            // halfway through the cooldown window
+            password_last_changed_at: Some(
+                now - config.babamul.password_reset_cooldown_minutes as i64 * 30,
+            ),
+        })
+        .await
+        .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/forgot-password")
+                .set_json(serde_json::json!({ "email": email_rl }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "forgot-password should return 429 when password was changed too recently"
+        );
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("429 response must include a Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<i64>()
+            .expect("Retry-After must be an integer number of seconds");
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        assert!(
+            retry_after > 0 && retry_after <= cooldown_secs,
+            "Retry-After should be between 1 and {} seconds (configured cooldown), got {}",
+            cooldown_secs,
+            retry_after
+        );
+        // No reset token should have been written for this user
+        let rl_user = col.find_one(doc! { "_id": &id_rl }).await.unwrap().unwrap();
+        assert!(
+            rl_user.password_reset_token_hash.is_none(),
+            "no reset token should be stored when the cooldown is active"
+        );
+
+        // Clean up
+        col.delete_one(doc! { "_id": &id_activated }).await.unwrap();
+        col.delete_one(doc! { "_id": &id_inactive }).await.unwrap();
+        col.delete_one(doc! { "_id": &id_rl }).await.unwrap();
+    }
+
+    /// POST /babamul/reset-password
+    ///
+    /// Covers:
+    /// - Happy path: successful reset clears token, old password fails, new password logs in
+    /// - Invalid (wrong) token → 400
+    /// - Correct token but wrong email → 400
+    /// - Expired token → 400
+    /// - New password shorter than 12 characters → 400
+    /// - Token is single-use: second attempt with the same token → 400
+    #[actix_rt::test]
+    async fn test_babamul_reset_password() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::post_babamul_auth),
+            ),
+        )
+        .await;
+
+        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let now = flare::Time::now().to_utc().timestamp();
+
+        // Helper closure for inserting a plain activated user
+        let insert_user =
+            |id: &str, email: &str, username: &str| boom::api::routes::babamul::BabamulUser {
+                id: id.to_string(),
+                username: username.to_string(),
+                email: email.to_string(),
+                password_hash: bcrypt::hash("pw12345678", 4).unwrap(),
+                activation_code: None,
+                is_activated: true,
+                created_at: 0,
+                kafka_credentials: vec![],
+                tokens: vec![],
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
+                password_last_changed_at: None,
+            };
+
+        let mut ids_to_cleanup: Vec<String> = Vec::new();
+
+        // ── Happy path ────────────────────────────────────────────────────────
+        let id = uuid::Uuid::new_v4().to_string();
+        let email = format!("test+{}@babamul.example.com", id);
+        let old_password = "oldpassword1234!";
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            password_hash: bcrypt::hash(old_password, 4).unwrap(),
+            ..insert_user(&id, &email, "happypath")
+        })
+        .await
+        .unwrap();
+        ids_to_cleanup.push(id.clone());
+
+        let raw_token = "happypathtokenXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id, raw_token, now + 3600).await;
+
+        let new_password = "NewPassword5678!";
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email,
+                    "token": raw_token,
+                    "new_password": new_password
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "happy-path reset should succeed: {}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("reset successfully"));
+
+        let updated = col.find_one(doc! { "_id": &id }).await.unwrap().unwrap();
+        assert!(
+            updated.password_reset_token_hash.is_none(),
+            "token hash should be cleared"
+        );
+        assert!(
+            updated.password_reset_token_expires_at.is_none(),
+            "token expiry should be cleared"
+        );
+        assert!(
+            !bcrypt::verify(old_password, &updated.password_hash).unwrap(),
+            "old password should no longer work"
+        );
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/auth")
+                .set_form(serde_json::json!({ "email": email, "password": new_password }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "login with new password should succeed"
+        );
+        assert!(read_json_response(resp).await["access_token"].is_string());
+
+        // ── Invalid (wrong) token → 400 ───────────────────────────────────────
+        let id2 = uuid::Uuid::new_v4().to_string();
+        let email2 = format!("test+{}@babamul.example.com", id2);
+        col.insert_one(&insert_user(&id2, &email2, "invalidtok"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id2.clone());
+        set_reset_token(
+            &database,
+            &id2,
+            "correct_token_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            now + 3600,
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email2,
+                    "token": "this_is_the_wrong_token_XXXXXXXXXXXXXXXXXXXXXXXXX",
+                    "new_password": "NewPassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "wrong token must be rejected"
+        );
+        assert_eq!(
+            read_json_response(resp).await["message"].as_str().unwrap(),
+            "Invalid or expired password reset token",
+            "wrong-token error must use the same generic message as wrong-email to prevent oracle attacks"
+        );
+
+        // ── Correct token but wrong email → 400 ──────────────────────────────
+        let id3 = uuid::Uuid::new_v4().to_string();
+        let email3 = format!("test+{}@babamul.example.com", id3);
+        col.insert_one(&insert_user(&id3, &email3, "wrongemail"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id3.clone());
+        let token3 = "wrongemailtoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id3, token3, now + 3600).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": "someone_else@other.example.com",
+                    "token": token3,
+                    "new_password": "NewPassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "correct token with wrong email must be rejected"
+        );
+        assert_eq!(
+            read_json_response(resp).await["message"].as_str().unwrap(),
+            "Invalid or expired password reset token",
+            "wrong-email error must use the same generic message as wrong-token to prevent oracle attacks"
+        );
+
+        // ── Expired token → 400 ───────────────────────────────────────────────
+        let id4 = uuid::Uuid::new_v4().to_string();
+        let email4 = format!("test+{}@babamul.example.com", id4);
+        col.insert_one(&insert_user(&id4, &email4, "expiredtok"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id4.clone());
+        let token4 = "expiredtoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id4, token4, now - 1).await; // already expired
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email4,
+                    "token": token4,
+                    "new_password": "NewPassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expired token must be rejected"
+        );
+
+        // ── Password changed too recently → 429 ───────────────────────────────
+        let id_rl = uuid::Uuid::new_v4().to_string();
+        let email_rl = format!("test+{}@babamul.example.com", id_rl);
+        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+            password_last_changed_at: Some(
+                now - config.babamul.password_reset_cooldown_minutes as i64 * 30,
+            ), // halfway through the cooldown window
+            ..insert_user(&id_rl, &email_rl, "ratelimit")
+        })
+        .await
+        .unwrap();
+        ids_to_cleanup.push(id_rl.clone());
+        let token_rl = "ratelimittoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id_rl, token_rl, now + 3600).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email_rl,
+                    "token": token_rl,
+                    "new_password": "NewPassword5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "password changed too recently should return 429"
+        );
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("429 response must include a Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<i64>()
+            .expect("Retry-After must be an integer number of seconds");
+        let cooldown_secs = config.babamul.password_reset_cooldown_minutes as i64 * 60;
+        assert!(
+            retry_after > 0 && retry_after <= cooldown_secs,
+            "Retry-After should be between 1 and {} seconds (configured cooldown), got {}",
+            cooldown_secs,
+            retry_after
+        );
+
+        // ── Weak / non-complex passwords → 400 ───────────────────────────────
+        let id5 = uuid::Uuid::new_v4().to_string();
+        let email5 = format!("test+{}@babamul.example.com", id5);
+        col.insert_one(&insert_user(&id5, &email5, "weakpw"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id5.clone());
+        let token5 = "tooshorttoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id5, token5, now + 3600).await;
+
+        let weak_passwords = [
+            ("", "empty"),
+            ("short", "too short"),
+            ("seven77", "too short"),
+            ("alllowercase1!", "no uppercase"),
+            ("ALLUPPERCASE1!", "no lowercase"),
+            ("NoDigitsHere!", "no digit"),
+            ("NoSpecialChar1", "no special character"),
+            ("12345678", "no letters or special character"),
+        ];
+        for (pw, reason) in &weak_passwords {
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/babamul/reset-password")
+                    .set_json(serde_json::json!({
+                        "email": email5,
+                        "token": token5,
+                        "new_password": pw
+                    }))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "password '{}' should be rejected ({})",
+                pw,
+                reason
+            );
+        }
+
+        // ── Token is single-use ───────────────────────────────────────────────
+        let id6 = uuid::Uuid::new_v4().to_string();
+        let email6 = format!("test+{}@babamul.example.com", id6);
+        col.insert_one(&insert_user(&id6, &email6, "singleuse"))
+            .await
+            .unwrap();
+        ids_to_cleanup.push(id6.clone());
+        let token6 = "singleusetoken_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        set_reset_token(&database, &id6, token6, now + 3600).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email6,
+                    "token": token6,
+                    "new_password": "NewPw12345678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "first use should succeed");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/reset-password")
+                .set_json(serde_json::json!({
+                    "email": email6,
+                    "token": token6,
+                    "new_password": "AnotherNewPw5678!"
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "second use of consumed token must be rejected"
+        );
+
+        // Clean up all users created in this test
+        for id in &ids_to_cleanup {
+            col.delete_one(doc! { "_id": id }).await.unwrap();
+        }
     }
 }

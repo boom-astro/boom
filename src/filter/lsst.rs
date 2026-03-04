@@ -200,7 +200,6 @@ pub async fn build_lsst_alerts(
                 flux: Some(flux),
                 flux_err,
                 band: format!("lsst{}", band),
-                zero_point: 8.9,
                 origin: Origin::Alert,
                 programid: 1, // only one public stream for LSST
                 survey: Survey::Lsst,
@@ -227,7 +226,6 @@ pub async fn build_lsst_alerts(
                 flux,
                 flux_err,
                 band: format!("lsst{}", band),
-                zero_point: 8.9,
                 origin: Origin::ForcedPhot,
                 programid: 1, // only one public stream for LSST
                 survey: Survey::Lsst,

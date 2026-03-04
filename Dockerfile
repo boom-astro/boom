@@ -1,4 +1,4 @@
-FROM rust:1.91.1-slim-trixie AS builder
+FROM rust:1.93.1-slim-trixie AS builder
 
 RUN apt-get update && \
     apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config && \
@@ -69,6 +69,8 @@ COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
 COPY --from=builder /app/target/release/api /app/boom-api
+COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
+COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 
 # Set the entrypoint, though this will be overridden
 CMD ["/app/scheduler"]

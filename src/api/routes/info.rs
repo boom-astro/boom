@@ -39,7 +39,7 @@ pub async fn get_db_info(
         return response::forbidden("Access denied: Admins only");
     }
     match db.run_command(mongodb::bson::doc! { "dbstats": 1 }).await {
-        Ok(stats) => response::ok("success", serde_json::to_value(stats).unwrap()),
-        Err(e) => response::internal_error(&format!("Error getting database info: {:?}", e)),
+        Ok(stats) => response::ok_ser("success", stats),
+        Err(e) => response::internal_error(&format!("Error getting database info: {}", e)),
     }
 }

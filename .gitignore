@@ -18,3 +18,4 @@ logs
 *_dump.gz
 *.jsonl
 simbad_cache
+*.parquet

@@ -26,9 +26,9 @@ async fn main() -> std::io::Result<()> {
 
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
-        println!("Babamul API endpoints are ENABLED");
+        tracing::info!("Babamul API endpoints are ENABLED");
     } else {
-        println!("Babamul API endpoints are DISABLED");
+        tracing::info!("Babamul API endpoints are DISABLED");
     }
 
     // Create API docs from OpenAPI spec
@@ -55,15 +55,21 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_signup)
                     .service(routes::babamul::post_babamul_activate)
                     .service(routes::babamul::post_babamul_auth)
+                    .service(routes::babamul::post_babamul_forgot_password)
+                    .service(routes::babamul::post_babamul_reset_password)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)
                     .service(routes::babamul::surveys::get_object)
+                    .service(routes::babamul::surveys::get_object_xmatches)
+                    .service(routes::babamul::surveys::get_objects_xmatches)
                     .service(routes::babamul::surveys::get_objects)
-                    .service(routes::babamul::surveys::get_alert_cutouts)
+                    .service(routes::babamul::surveys::cone_search_objects)
+                    .service(routes::babamul::surveys::get_cutouts)
                     .service(routes::babamul::surveys::get_alerts)
+                    .service(routes::babamul::surveys::cone_search_alerts)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token),
