@@ -16,7 +16,7 @@ consumer_conf = {
     "auto.offset.reset": "earliest",
 }
 consumer = Consumer(consumer_conf)
-topic = "babamul.ztf.none"
+topic = "^babamul*"
 consumer.subscribe([topic])
 n_alerts = 0
 try:
