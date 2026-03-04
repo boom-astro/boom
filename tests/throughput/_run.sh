@@ -1,5 +1,27 @@
 #!/usr/bin/env bash
 
+# Parse args
+KEEP_UP=false
+POSITIONAL_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --keep-up)
+            KEEP_UP=true
+            ;;
+        --*)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$arg")
+            ;;
+    esac
+done
+if [ ${#POSITIONAL_ARGS[@]} -gt 1 ]; then
+    echo "Usage: $0 [--keep-up] [logs_dir]"
+    exit 1
+fi
+
 COMPOSE_CONFIG="tests/throughput/compose.yaml"
 
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
@@ -7,8 +29,8 @@ if [ "$LOW_STORAGE" = "true" ]; then
     COMPOSE_CONFIG="$COMPOSE_CONFIG -f tests/throughput/compose.low-storage.yaml"
 fi
 
-# Logs folder is the first argument to the script
-LOGS_DIR=${1:-logs/boom}
+# Logs folder is the optional positional argument to the script
+LOGS_DIR=${POSITIONAL_ARGS[0]:-logs/boom}
 
 # A function that returns the current date and time
 current_datetime() {
@@ -117,9 +139,10 @@ echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
 uv run tests/throughput/read-kafka-output.py
 
-echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
-
-# Shut down the BOOM services
-docker compose -f $COMPOSE_CONFIG down
+# Shut down the BOOM services if --keep-up was not specified
+if [ "$KEEP_UP" = false ]; then
+    echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
+    docker compose -f $COMPOSE_CONFIG down
+fi
 
 exit 0

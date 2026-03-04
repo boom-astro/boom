@@ -38,7 +38,14 @@ parser.add_argument(
     default=2,
     help="Number of filter workers to use for benchmarking.",
 )
+parser.add_argument(
+    "--keep-up",
+    action="store_true",
+    help="Whether to keep the BOOM services up after the benchmark completes.",
+    default=False,
+)
 args = parser.parse_args()
+
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
@@ -67,9 +74,7 @@ for_insert = {
     "name": "cats150-replaced-in-mongo-init-script",
     "survey": "ZTF",
     "user_id": "benchmarking",
-    "permissions": {
-        "ZTF": [1, 2, 3]
-    },
+    "permissions": {"ZTF": [1, 2, 3]},
     "active": True,
     "active_fid": "first",
     "fv": [
@@ -96,7 +101,10 @@ logs_dir = os.path.join(
 )
 
 # Now run the benchmark
-subprocess.run(["bash", "tests/throughput/_run.sh", logs_dir], check=True)
+cmd = ["bash", "tests/throughput/_run.sh", logs_dir]
+if args.keep_up:
+    cmd.append("--keep-up")
+subprocess.run(cmd, check=True)
 
 # Now analyze the logs and raise an error if we're too slow
 boom_config = (
