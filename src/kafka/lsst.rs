@@ -22,11 +22,11 @@ impl LsstAlertConsumer {
 
 #[async_trait::async_trait]
 impl AlertConsumer for LsstAlertConsumer {
-    fn topic_name(&self, _timestamp: i64) -> String {
+    fn topic_names(&self, _timestamp: i64) -> Vec<String> {
         if self.simulated {
-            "alerts-simulated".to_string()
+            vec!["alerts-simulated".to_string()]
         } else {
-            "lsst-alerts-v10.0".to_string()
+            vec!["lsst-alerts-v10.0".to_string()]
         }
     }
     fn output_queue(&self) -> String {

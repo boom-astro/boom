@@ -77,12 +77,12 @@ pub struct LsstPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    pub snr_psf: Option<f64>,
 }
 
 impl LsstPhotometry {
     pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
-        match (self.snr, self.magpsf, self.sigmapsf) {
+        match (self.snr_psf, self.magpsf, self.sigmapsf) {
             (Some(snr), Some(mag), Some(sig)) => match min_snr {
                 Some(thresh) if snr.abs() < thresh => None,
                 _ => Some(PhotometryMag {

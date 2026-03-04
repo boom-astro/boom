@@ -25,7 +25,7 @@ async fn init_api_admin_user(
 
     if existing_user.is_none() {
         // Create the admin user if it does not exist
-        println!(
+        tracing::info!(
             "Admin user does not exist, creating a new one with username: {}",
             admin_username
         );
@@ -39,7 +39,7 @@ async fn init_api_admin_user(
         };
         match users_collection.insert_one(admin_user).await {
             Ok(_) => {
-                println!("Admin user created successfully.");
+                tracing::info!("Admin user created successfully.");
                 return Ok(());
             }
             Err(e) => {
@@ -49,13 +49,13 @@ async fn init_api_admin_user(
                 // if the user already exists we just re-fetch the existing_user
                 // and if that somehow fails, we return an error
                 if !e.to_string().contains("E11000 duplicate key error") {
-                    eprintln!("Failed to create admin user: {}", e);
+                    tracing::error!("Failed to create admin user: {}", e);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         "Failed to create admin user",
                     ));
                 } else {
-                    println!(
+                    tracing::info!(
                         "Admin user already exists, but was created in another instance. Updating the user."
                     );
                     let existing_user = users_collection
@@ -80,7 +80,7 @@ async fn init_api_admin_user(
             || existing_user.email != admin_email
             || !existing_user.is_admin
         {
-            println!(
+            tracing::info!(
                 "Admin user already exists, but password or email does not match with the one in the config. Updating the user."
             );
             // Update the existing user with the new password and email
@@ -176,12 +176,12 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
             .await
             .expect("failed to create expires_at index on babamul_users collection");
 
-        println!("Babamul database collections initialized");
+        tracing::info!("Babamul database collections initialized");
     }
 
     // Initialize the API admin user if it does not exist
     if let Err(e) = init_api_admin_user(&conf.api.auth, &users_collection).await {
-        eprintln!("Failed to initialize API admin user: {}", e);
+        tracing::error!("Failed to initialize API admin user: {}", e);
     }
     Ok(db)
 }
