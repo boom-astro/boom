@@ -672,3 +672,110 @@ impl ZtfEnrichmentWorker {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_alert_photometry() -> ZtfAlertPhotometry {
+        ZtfAlertPhotometry {
+            jd: 2460000.5,
+            magpsf: Some(19.0),
+            sigmapsf: Some(0.05),
+            diffmaglim: 20.5,
+            flux: Some(100.0),
+            flux_err: 5.0,
+            band: Band::R,
+            ra: Some(180.0),
+            dec: Some(10.0),
+            snr_psf: None,
+            snr_legacy: None,
+            programid: 1,
+        }
+    }
+
+    fn base_forced_photometry() -> ZtfForcedPhotometry {
+        ZtfForcedPhotometry {
+            jd: 2460000.5,
+            magpsf: Some(19.0),
+            sigmapsf: Some(0.05),
+            diffmaglim: 20.5,
+            flux: Some(100.0),
+            flux_err: 5.0,
+            band: Band::R,
+            magzpsci: Some(ZTF_ZP as f64),
+            ra: Some(180.0),
+            dec: Some(10.0),
+            snr_psf: None,
+            snr_legacy: None,
+            programid: 1,
+            procstatus: Some("0".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_alert_photometry_snr_psf_used_when_present() {
+        let phot = ZtfAlertPhotometry {
+            snr_psf: Some(15.0),
+            snr_legacy: Some(5.0),
+            ..base_alert_photometry()
+        };
+        let result = ZtfPhotometry::try_from(phot).unwrap();
+        assert_eq!(result.snr_psf, Some(15.0));
+    }
+
+    #[test]
+    fn test_alert_photometry_snr_legacy_fallback_when_snr_psf_absent() {
+        let phot = ZtfAlertPhotometry {
+            snr_psf: None,
+            snr_legacy: Some(7.5),
+            ..base_alert_photometry()
+        };
+        let result = ZtfPhotometry::try_from(phot).unwrap();
+        assert_eq!(result.snr_psf, Some(7.5));
+    }
+
+    #[test]
+    fn test_alert_photometry_snr_none_when_both_absent() {
+        let phot = ZtfAlertPhotometry {
+            snr_psf: None,
+            snr_legacy: None,
+            ..base_alert_photometry()
+        };
+        let result = ZtfPhotometry::try_from(phot).unwrap();
+        assert_eq!(result.snr_psf, None);
+    }
+
+    #[test]
+    fn test_forced_photometry_snr_psf_used_when_present() {
+        let phot = ZtfForcedPhotometry {
+            snr_psf: Some(20.0),
+            snr_legacy: Some(3.0),
+            ..base_forced_photometry()
+        };
+        let result = ZtfPhotometry::try_from(phot).unwrap();
+        assert_eq!(result.snr_psf, Some(20.0));
+    }
+
+    #[test]
+    fn test_forced_photometry_snr_legacy_fallback_when_snr_psf_absent() {
+        let phot = ZtfForcedPhotometry {
+            snr_psf: None,
+            snr_legacy: Some(8.0),
+            ..base_forced_photometry()
+        };
+        let result = ZtfPhotometry::try_from(phot).unwrap();
+        assert_eq!(result.snr_psf, Some(8.0));
+    }
+
+    #[test]
+    fn test_forced_photometry_snr_none_when_both_absent() {
+        let phot = ZtfForcedPhotometry {
+            snr_psf: None,
+            snr_legacy: None,
+            ..base_forced_photometry()
+        };
+        let result = ZtfPhotometry::try_from(phot).unwrap();
+        assert_eq!(result.snr_psf, None);
+    }
+}
