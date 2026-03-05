@@ -37,8 +37,11 @@ pub struct ZtfAlertPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
 }
 
@@ -61,8 +64,11 @@ pub struct ZtfForcedPhotometry {
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
     pub procstatus: Option<String>,
 }
@@ -83,7 +89,6 @@ pub struct ZtfPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
     pub programid: i32,
 }
@@ -101,7 +106,7 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr_psf: phot.snr_psf,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -146,7 +151,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr_psf: phot.snr_psf,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }

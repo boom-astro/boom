@@ -127,6 +127,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
         flux: Some(flux),
         flux_err: flux_err,
         snr_psf: Some(100.0),
+        snr_legacy: None,
         band: Band::G,
         ra: Some(150.0),
         dec: Some(30.0),
