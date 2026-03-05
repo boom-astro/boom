@@ -8,7 +8,7 @@ use crate::filter::{
     build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
     update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline, Alert,
     Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
-    Origin, Photometry,
+    Origin, Photometry, SurveyMatches,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
 use crate::utils::enums::Survey;
@@ -261,6 +261,10 @@ pub async fn build_lsst_alerts(
             cutout_template,
             cutout_difference,
             survey: Survey::Lsst,
+            survey_matches: SurveyMatches {
+                ztf: None,
+                lsst: None,
+            },
         };
         alerts_output.push(alert);
     }

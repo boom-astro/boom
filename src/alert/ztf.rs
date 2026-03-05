@@ -1123,4 +1123,48 @@ mod tests {
         assert_eq!(avro_alert.cutout_template.len(), 12410);
         assert_eq!(avro_alert.cutout_difference.len(), 14878);
     }
+
+    /// Verify that SchemaCache falls back to the Reader-based path when the
+    /// cached start index is corrupted.
+    ///
+    /// Steps:
+    ///   1. Deserialize a packet once – this populates the cache correctly.
+    ///   2. Corrupt `cached_start_idx` to 0 (the Avro magic-bytes header),
+    ///      which will make `from_avro_datum` fail on the next call.
+    ///   3. Deserialize the same packet again – the fallback should kick in,
+    ///      repair the cache, and return the same alert.
+    #[test]
+    fn test_schema_cache_fallback_on_corrupt_start_idx() {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+
+        let mut cache = SchemaCache::default();
+
+        // First call: normal path, fills the cache.
+        let first: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        assert!(cache.get_cached_start_idx().is_some());
+        let good_idx = cache.get_cached_start_idx().unwrap();
+        assert!(good_idx > 0, "start index should be past the Avro header");
+
+        // Corrupt the cached start index so that it points into the Avro header
+        // (offset 0 – the 'O','b','j',1 magic bytes), causing from_avro_datum
+        // to fail on the next call and triggering the fallback.
+        cache.set_cached_start_idx(0);
+
+        // Second call: fallback path should repair the cache and produce the
+        // same result as the first call.
+        let second: ZtfRawAvroAlert = cache
+            .alert_from_avro_bytes(&avro_bytes)
+            .expect("fallback deserialization should succeed");
+
+        assert_eq!(first.candid, second.candid);
+        assert_eq!(first.object_id, second.object_id);
+        assert_eq!(first.schemavsn, second.schemavsn);
+
+        // The cache should now hold the corrected start index again.
+        assert_eq!(
+            cache.get_cached_start_idx().unwrap(),
+            good_idx,
+            "cache should be repaired after the fallback"
+        );
+    }
 }
