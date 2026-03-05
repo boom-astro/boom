@@ -546,7 +546,7 @@ impl SchemaRegistry {
 
 pub struct SchemaCache {
     cached_schema: Option<Schema>,
-    cached_start_idx: Option<usize>,
+    pub cached_start_idx: Option<usize>,
 }
 
 impl SchemaCache {
@@ -583,7 +583,9 @@ impl SchemaCache {
                     get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
 
                 // try deserializing again with the schemaless approach
-                let reader = apache_avro::Reader::new(&avro_bytes[startidx..])?;
+                // Reader::new expects the full Avro container (header included),
+                // not the raw datum bytes, so pass the whole slice here.
+                let reader = apache_avro::Reader::new(avro_bytes)?;
 
                 let value = reader
                     .into_iter()
@@ -609,6 +611,20 @@ impl Default for SchemaCache {
             cached_schema: None,
             cached_start_idx: None,
         }
+    }
+}
+
+#[cfg(test)]
+impl SchemaCache {
+    /// Overwrite the cached start index with an arbitrary value to simulate a
+    /// schema-cache corruption for testing the fallback path.
+    pub fn set_cached_start_idx(&mut self, idx: usize) {
+        self.cached_start_idx = Some(idx);
+    }
+
+    /// Return the currently cached start index (for assertions in tests).
+    pub fn get_cached_start_idx(&self) -> Option<usize> {
+        self.cached_start_idx
     }
 }
 
