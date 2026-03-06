@@ -3,17 +3,20 @@
 # Parse args
 KEEP_UP=false
 POSITIONAL_ARGS=()
-for arg in "$@"; do
-    case "$arg" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --keep-up)
             KEEP_UP=true
+            shift
             ;;
         --*)
-            echo "Unknown option: $arg"
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--keep-up] [logs_dir]"
             exit 1
             ;;
         *)
-            POSITIONAL_ARGS+=("$arg")
+            POSITIONAL_ARGS+=("$1")
+            shift
             ;;
     esac
 done
@@ -21,12 +24,16 @@ if [ ${#POSITIONAL_ARGS[@]} -gt 1 ]; then
     echo "Usage: $0 [--keep-up] [logs_dir]"
     exit 1
 fi
+if [ -z "${BOOM_REPO_ROOT:-}" ]; then
+    echo "Error: BOOM_REPO_ROOT is not set; set BOOM_REPO_ROOT environment variable"
+    exit 1
+fi
 
-COMPOSE_CONFIG="tests/throughput/compose.yaml"
+COMPOSE_CONFIG="$BOOM_REPO_ROOT/tests/throughput/compose.yaml"
 
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
 if [ "$LOW_STORAGE" = "true" ]; then
-    COMPOSE_CONFIG="$COMPOSE_CONFIG -f tests/throughput/compose.low-storage.yaml"
+    COMPOSE_CONFIG="$COMPOSE_CONFIG -f $BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml"
 fi
 
 # Logs folder is the optional positional argument to the script

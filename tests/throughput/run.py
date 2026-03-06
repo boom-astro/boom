@@ -44,9 +44,14 @@ parser.add_argument(
     help="Whether to keep the BOOM services up after the benchmark completes.",
     default=False,
 )
+parser.add_argument(
+    "--boom-repo-dir",
+    help="Path to the BOOM repo directory.",
+    default=".",
+)
 args = parser.parse_args()
 
-with open("config.yaml", "r") as f:
+with open(os.path.join(args.boom_repo_dir, "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
 config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
 config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
@@ -61,11 +66,18 @@ config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
 config["babamul"]["enabled"] = True
-with open("tests/throughput/config.yaml", "w") as f:
+with open(
+    os.path.join(args.boom_repo_dir, "tests", "throughput", "config.yaml"), "w"
+) as f:
     yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 # Reformat filter for insertion into database
-with open("tests/throughput/cats150.pipeline.json", "r") as f:
+with open(
+    os.path.join(
+        args.boom_repo_dir, "tests", "throughput", "cats150.pipeline.json"
+    ),
+    "r",
+) as f:
     cats150 = json.load(f)
 
 now_jd = Time.now().jd
@@ -87,7 +99,12 @@ for_insert = {
     "created_at": now_jd,
     "updated_at": now_jd,
 }
-with open("tests/throughput/cats150.filter.json", "w") as f:
+with open(
+    os.path.join(
+        args.boom_repo_dir, "tests", "throughput", "cats150.filter.json"
+    ),
+    "w",
+) as f:
     json.dump(for_insert, f)
 
 logs_dir = os.path.join(
@@ -101,7 +118,12 @@ logs_dir = os.path.join(
 )
 
 # Now run the benchmark
-cmd = ["bash", "tests/throughput/_run.sh", logs_dir]
+os.environ["BOOM_REPO_ROOT"] = os.path.abspath(args.boom_repo_dir)
+cmd = [
+    "bash",
+    os.path.join(args.boom_repo_dir, "tests", "throughput", "_run.sh"),
+    logs_dir,
+]
 if args.keep_up:
     cmd.append("--keep-up")
 subprocess.run(cmd, check=True)
