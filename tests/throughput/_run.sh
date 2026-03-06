@@ -154,7 +154,7 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts filtered in $FILTERING_T
 
 echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
-uv run tests/throughput/read-kafka-output.py
+python $BOOM_REPO_ROOT/tests/throughput/read-kafka-output.py
 
 # Shut down the BOOM services if --keep-up was not specified
 if [ "$KEEP_UP" = false ]; then
@@ -162,4 +162,12 @@ if [ "$KEEP_UP" = false ]; then
     docker compose -f $COMPOSE_CONFIG down
 fi
 
-exit 0
+# Check to see if any of our containers have exited with a non-zero status,
+# which would indicate an error
+EXIT_CODE=$(docker compose -f $COMPOSE_CONFIG ps -q | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
+if [ -n "$EXIT_CODE" ]; then
+    echo "$(current_datetime) - ERROR: One or more containers exited with a non-zero status"
+    exit 1
+fi
+
+echo "$(current_datetime) - All tasks completed successfully"
