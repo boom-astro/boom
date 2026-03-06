@@ -1,13 +1,57 @@
 #!/usr/bin/env bash
 
-COMPOSE_CONFIG="tests/throughput/compose.yaml"
+# Parse args
+KEEP_UP=false
+POSITIONAL_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --keep-up)
+            KEEP_UP=true
+            shift
+            ;;
+        --*)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--keep-up] [logs_dir]"
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+if [ ${#POSITIONAL_ARGS[@]} -gt 1 ]; then
+    echo "Usage: $0 [--keep-up] [logs_dir]"
+    exit 1
+fi
+if [ -z "${BOOM_REPO_ROOT:-}" ]; then
+    echo "Error: BOOM_REPO_ROOT is not set; set BOOM_REPO_ROOT environment variable"
+    exit 1
+fi
 
-# Logs folder is the first argument to the script
-LOGS_DIR=${1:-logs/boom}
+COMPOSE_CONFIG="$BOOM_REPO_ROOT/tests/throughput/compose.yaml"
+
+# If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
+if [ "$LOW_STORAGE" = "true" ]; then
+    COMPOSE_CONFIG="$COMPOSE_CONFIG -f $BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml"
+fi
+
+# Logs folder is the optional positional argument to the script
+LOGS_DIR=${POSITIONAL_ARGS[0]:-logs/boom}
 
 # A function that returns the current date and time
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
+}
+
+# Run a MongoDB count query and return a clean integer string.
+mongo_count() {
+    local query="$1"
+    local raw
+    raw=$(docker compose -f $COMPOSE_CONFIG exec -T mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "$query")
+    raw=$(printf '%s\n' "$raw" | tail -n 1 | tr -d '\r')
+    raw=$(printf '%s' "$raw" | tr -cd '0-9')
+    echo "${raw:-0}"
 }
 
 # Remove any existing containers
@@ -27,7 +71,7 @@ docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/sche
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
-TIMEOUT_SECS=300 # 5 minutes
+TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
 
 # Wait for the kafka consumer to start expecting messages (when it logs "Consumer received first message, continuing...")
 echo "$(current_datetime) - Waiting for Kafka consumer to start"
@@ -46,10 +90,17 @@ END_TIME=$(date +%s)
 STARTUP_TIME=$((END_TIME - START_TIME))
 echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 
+# IF we are in LOW_STORAGE mode, clean up the downloaded files (producer files are not mounted)
+if [ "$LOW_STORAGE" = "true" ]; then
+    echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up downloaded files to save space"
+    rm -rf ./data/alerts/kowalski.NED.json.gz || true
+    rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
+fi
+
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
+while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()")" -lt "$EXPECTED_ALERTS" ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
@@ -66,7 +117,7 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts ingested in $INGESTION_T
 # Wait until we see all alerts with classifications
 echo "$(current_datetime) - Waiting for all alerts to be classified"
 START_TIME=$(date +%s)
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })") -lt $EXPECTED_ALERTS ]; do
+while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })")" -lt "$EXPECTED_ALERTS" ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
@@ -103,11 +154,20 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts filtered in $FILTERING_T
 
 echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
-uv run tests/throughput/read-kafka-output.py
+python $BOOM_REPO_ROOT/tests/throughput/read-kafka-output.py
 
-echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
+# Shut down the BOOM services if --keep-up was not specified
+if [ "$KEEP_UP" = false ]; then
+    echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
+    docker compose -f $COMPOSE_CONFIG down
+fi
 
-# Shut down the BOOM services
-docker compose -f $COMPOSE_CONFIG down
+# Check to see if any of our containers have exited with a non-zero status,
+# which would indicate an error
+EXIT_CODE=$(docker compose -f $COMPOSE_CONFIG ps -q | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
+if [ -n "$EXIT_CODE" ]; then
+    echo "$(current_datetime) - ERROR: One or more containers exited with a non-zero status"
+    exit 1
+fi
 
-exit 0
+echo "$(current_datetime) - All tasks completed successfully"

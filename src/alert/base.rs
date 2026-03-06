@@ -67,6 +67,11 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+#[derive(Deserialize, Serialize)]
+pub struct LightcurveJdOnly {
+    pub jd: f64,
+}
+
 #[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
     let mut i = 0u64;
@@ -230,6 +235,8 @@ pub enum AlertError {
     UnknownFid(i32),
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("concurrent modification detected")]
+    ConcurrentModification,
 }
 
 #[derive(Debug, PartialEq)]
