@@ -44,6 +44,16 @@ current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
 
+# Run a MongoDB count query and return a clean integer string.
+mongo_count() {
+    local query="$1"
+    local raw
+    raw=$(docker compose -f $COMPOSE_CONFIG exec -T mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "$query")
+    raw=$(printf '%s\n' "$raw" | tail -n 1 | tr -d '\r')
+    raw=$(printf '%s' "$raw" | tr -cd '0-9')
+    echo "${raw:-0}"
+}
+
 # Remove any existing containers
 docker compose -f $COMPOSE_CONFIG down
 
@@ -90,7 +100,7 @@ fi
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
+while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()")" -lt "$EXPECTED_ALERTS" ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
@@ -107,7 +117,7 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts ingested in $INGESTION_T
 # Wait until we see all alerts with classifications
 echo "$(current_datetime) - Waiting for all alerts to be classified"
 START_TIME=$(date +%s)
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })") -lt $EXPECTED_ALERTS ]; do
+while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })")" -lt "$EXPECTED_ALERTS" ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
