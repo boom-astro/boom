@@ -63,7 +63,8 @@ echo "Loading ZTF_alerts_aux collection from archive into $DB_NAME"
 mongorestore --uri="mongodb://mongoadmin:mongoadminsecret@mongo:27017/?authSource=admin" \
     --gzip \
     --archive=/boom_throughput.ZTF_alerts_aux.dump.gz \
-    --nsInclude="$DB_NAME.ZTF_alerts_aux"
+    --nsInclude='*.ZTF_alerts_aux' \
+    --db="$DB_NAME"
 mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
     --eval "db.ZTF_alerts_aux.createIndex({ 'coordinates.radec_geojson': '2dsphere' })"
 
