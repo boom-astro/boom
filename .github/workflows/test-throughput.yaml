@@ -8,8 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TOLERANCE_PERCENTAGE: 5.0 # 5% tolerance for wall time increase
-  # If true, data required to bootstrap MongoDB and the Kafka producer 
-  # are deleted before we start processing to save storage space. 
+  # If true, data required to bootstrap MongoDB and the Kafka producer
+  # are deleted before we start processing to save storage space.
   # This is useful for CI environments where storage is limited.
   LOW_STORAGE: true
 
@@ -44,6 +44,7 @@ jobs:
             *.cache-from=type=gha
         env:
           PWD: ${{ github.workspace }}
+          BOOM_REPO_ROOT: ${{ github.workspace }}
           BUILDX_BAKE_ENTITLEMENTS_FS: 0
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
