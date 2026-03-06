@@ -71,7 +71,7 @@ docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/sche
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
-TIMEOUT_SECS=300 # 5 minutes
+TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
 
 # Wait for the kafka consumer to start expecting messages (when it logs "Consumer received first message, continuing...")
 echo "$(current_datetime) - Waiting for Kafka consumer to start"

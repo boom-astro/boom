@@ -49,6 +49,12 @@ parser.add_argument(
     help="Path to the BOOM repo directory.",
     default=".",
 )
+parser.add_argument(
+    "--timeout",
+    type=int,
+    default=300,
+    help="Number of seconds to wait before considering the benchmark a failure.",
+)
 args = parser.parse_args()
 
 with open(os.path.join(args.boom_repo_dir, "config.yaml"), "r") as f:
@@ -119,6 +125,7 @@ logs_dir = os.path.join(
 
 # Now run the benchmark
 os.environ["BOOM_REPO_ROOT"] = os.path.abspath(args.boom_repo_dir)
+os.environ["TIMEOUT_SECS"] = str(args.timeout)
 cmd = [
     "bash",
     os.path.join(args.boom_repo_dir, "tests", "throughput", "_run.sh"),
