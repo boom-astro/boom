@@ -60,11 +60,10 @@ done
 
 # Now we load the ZTF_alerts_aux table with the history for all the objects detected on 2025-03-11,
 echo "Loading ZTF_alerts_aux collection from archive into $DB_NAME"
-mongorestore --uri="mongodb://mongoadmin:mongoadminsecret@mongo:27017/?authSource=admin" \
+mongorestore --uri="mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
     --gzip \
     --archive=/boom_throughput.ZTF_alerts_aux.dump.gz \
-    --nsInclude='*.ZTF_alerts_aux' \
-    --db="$DB_NAME"
+    --nsInclude='*.ZTF_alerts_aux'
 mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
     --eval "db.ZTF_alerts_aux.createIndex({ 'coordinates.radec_geojson': '2dsphere' })"
 
