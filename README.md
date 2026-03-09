@@ -117,14 +117,14 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 
 Next, you can start the `Kafka` consumer with:
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] [PROGRAMID]
+cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 ```
 
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
 To continue with the previous example, you can run:
 ```bash
-cargo run --release --bin kafka_consumer ztf 20240617 public
+cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ```
 
 ### Alert Processing

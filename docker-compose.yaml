@@ -73,7 +73,7 @@ services:
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_NODE_ID: 1
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
-      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
@@ -150,6 +150,11 @@ services:
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      # SMTP config for email notifications
+      SMTP_SERVER: ${SMTP_SERVER:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
     networks:
       - boom
       - traefik-public
@@ -173,9 +178,15 @@ services:
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-www-redirect.redirectregex.regex=^http(s)?://www.(${DOMAIN?Variable not set})/(.*)
       # Redirect a domain with www to non-www
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-www-redirect.redirectregex.replacement=http$${1}://${DOMAIN?Variable not set}/$${3}
+      # Compression middleware
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-compress.compress=true
+      # Rate limiting middleware
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-ratelimit.ratelimit.average=${BOOM_API_RATE_LIMIT_AVERAGE:-50}
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-ratelimit.ratelimit.burst=${BOOM_API_RATE_LIMIT_BURST:-200}
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-api-ratelimit.ratelimit.period=${BOOM_API_RATE_LIMIT_PERIOD:-1s}
       # Enable www redirection for HTTP and HTTPS
-      - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect
-      - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect
+      - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
+      - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   consumer-ztf:
     image: boom-astro/boom:latest
     hostname: consumer-ztf
@@ -199,7 +210,6 @@ services:
     command:
       - /app/kafka_consumer
       - ztf
-      - --auto-switch-date
   consumer-lsst:
     image: boom-astro/boom:latest
     hostname: consumer-lsst

@@ -36,10 +36,7 @@ pub async fn get_kafka_acls(
         return response::forbidden("Access denied: Admins only");
     }
     match crate::api::kafka::get_acls(&config.kafka.producer.server).await {
-        Ok(entries) => response::ok(
-            "Kafka ACLs retrieved successfully",
-            serde_json::to_value(entries).unwrap(),
-        ),
+        Ok(entries) => response::ok_ser("Kafka ACLs retrieved successfully", entries),
         Err(e) => response::internal_error(&format!("Error retrieving Kafka ACLs: {}", e)),
     }
 }
