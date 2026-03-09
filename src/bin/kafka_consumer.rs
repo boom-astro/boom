@@ -79,7 +79,10 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
 
 #[instrument(skip_all, fields(survey = %args.survey))]
 async fn run(args: Cli, meter_provider: SdkMeterProvider) {
-    let date = args.date.unwrap_or_else(|| chrono::Utc::now().naive_utc());
+    let date = args.date.unwrap_or_else(|| {
+        let today = chrono::Utc::now().naive_utc().date();
+        today.and_hms_opt(0, 0, 0).unwrap()
+    });
     let timestamp = date.and_utc().timestamp();
 
     let exit_on_eof = if args.deployment_env == "dev" {
