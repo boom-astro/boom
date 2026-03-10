@@ -5,9 +5,11 @@ mod tests {
     use actix_web::{test, web, App};
     use boom::api::db::get_test_db_api;
     use boom::api::routes;
-    use boom::api::test_utils::{create_test_catalog, delete_test_catalog, read_json_response, read_str_response};
-    use mongodb::Database;
+    use boom::api::test_utils::{
+        create_test_catalog, delete_test_catalog, read_json_response, read_str_response,
+    };
     use mongodb::bson::doc;
+    use mongodb::Database;
 
     /// Test GET /catalogs
     #[actix_rt::test]
@@ -271,10 +273,7 @@ mod tests {
         .await;
 
         let req = test::TestRequest::get()
-            .uri(&format!(
-                "/queries/ztf/cutouts?candid={}",
-                test_candid
-            ))
+            .uri(&format!("/queries/ztf/cutouts?candid={}", test_candid))
             .to_request();
 
         let resp = test::call_service(&app, req).await;
