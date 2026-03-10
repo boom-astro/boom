@@ -59,68 +59,6 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
 
-// // This is the schema of the avro object that we will send to kafka
-// // that includes the alert data and filter results
-// const ALERT_SCHEMA: &str = r#"
-// {
-//     "type": "record",
-//     "name": "Alert",
-//     "fields": [
-//         {"name": "candid", "type": "long"},
-//         {"name": "objectId", "type": "string"},
-//         {"name": "jd", "type": "double"},
-//         {"name": "ra", "type": "double"},
-//         {"name": "dec", "type": "double"},
-//         {"name":"survey","type":{"type":"enum","name":"Survey","symbols":["ZTF","LSST","DECAM"]}},
-//         {"name": "filters", "type": {
-//             "type": "array",
-//             "items": {
-//                 "type": "record",
-//                 "name": "FilterResults",
-//                 "fields": [
-//                     {"name": "filter_id", "type": "string"},
-//                     {"name": "filter_name", "type": "string"},
-//                     {"name": "passed_at", "type": "double"},
-//                     {"name": "annotations", "type": "string"}
-//                 ]
-//             }
-//         }},
-//         {"name": "classifications", "type": {
-//             "type": "array",
-//             "items": {
-//                 "type": "record",
-//                 "name": "Classification",
-//                 "fields": [
-//                     {"name": "classifier", "type": "string"},
-//                     {"name": "score", "type": "double"}
-//                 ]
-//             }
-//         }},
-//         {"name": "photometry", "type": {
-//             "type": "array",
-//             "items": {
-//                 "type": "record",
-//                 "name": "Photometry",
-//                 "fields": [
-//                     {"name": "jd", "type": "double"},
-//                     {"name": "flux",  "type": ["null", "double"], "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
-//                     {"name": "flux_err",  "type":"double", "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
-//                     {"name":"band","type":"string"},
-//                     {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
-//                     {"name":"programid","type":"int"},
-//                     {"name":"survey","type": "Survey"},
-//                     {"name":"ra","type":["null","double"]},
-//                     {"name":"dec","type":["null","double"]}
-//                 ]
-//             }
-//         }},
-//         {"name":"cutoutScience","type":{"type":"bytes"}},
-//         {"name":"cutoutTemplate","type":{"type":"bytes"}},
-//         {"name":"cutoutDifference","type":{"type":"bytes"}}
-//     ]
-// }
-// "#;
-
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
     #[error("value access error from bson")]
