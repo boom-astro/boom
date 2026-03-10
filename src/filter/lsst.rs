@@ -263,7 +263,7 @@ pub async fn build_lsst_alerts(
             cutout_science: cutouts.cutout_science,
             cutout_template: cutouts.cutout_template,
             cutout_difference: cutouts.cutout_difference,
-            survey: Survey::Ztf,
+            survey: Survey::Lsst,
             survey_matches,
         };
 
