@@ -546,7 +546,7 @@ impl SchemaRegistry {
 
 pub struct SchemaCache {
     cached_schema: Option<Schema>,
-    pub cached_start_idx: Option<usize>,
+    cached_start_idx: Option<usize>,
 }
 
 impl SchemaCache {
