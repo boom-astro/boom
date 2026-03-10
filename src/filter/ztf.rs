@@ -5,8 +5,8 @@ use tracing::{info, instrument, warn};
 use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{
-    deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve, fetch_alert_cutouts,
-    fetch_alerts, ZtfAlertClassifications, ZtfPhotometry, ZtfSurveyMatches,
+    create_ztf_alert_pipeline, deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve,
+    fetch_alert_cutouts, fetch_alerts, ZtfAlertClassifications, ZtfPhotometry, ZtfSurveyMatches,
 };
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
@@ -126,66 +126,6 @@ pub fn insert_ztf_aux_pipeline_if_needed(
         });
         *ztf_insert_aux_pipeline = false; // only insert once
     }
-}
-
-pub fn create_ztf_alert_pipeline() -> Vec<Document> {
-    vec![
-        doc! {
-            "$match": {
-                "_id": {"$in": []}
-            }
-        },
-        doc! {
-            "$lookup": {
-                "from": "ZTF_alerts_aux",
-                "localField": "objectId",
-                "foreignField": "_id",
-                "as": "aux"
-            }
-        },
-        doc! {
-            "$unwind": {
-                "path": "$aux",
-                "preserveNullAndEmptyArrays": false
-            }
-        },
-        doc! {
-            "$lookup": {
-                "from": "LSST_alerts_aux",
-                "localField": "aux.aliases.LSST.0",
-                "foreignField": "_id",
-                "as": "lsst_aux"
-            }
-        },
-        doc! {
-            "$project": {
-                "objectId": 1,
-                "candidate": 1,
-                "classifications": 1,
-                "prv_candidates": "$aux.prv_candidates",
-                "prv_nondetections": "$aux.prv_nondetections",
-                "fp_hists": "$aux.fp_hists",
-                "survey_matches": {
-                    "lsst": {
-                        "$cond": {
-                            "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
-                            "then": {
-                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
-                                "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
-                                "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
-                                "ra": { "$add": [
-                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
-                                    180
-                                ]},
-                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
-                            },
-                            "else": null
-                        }
-                    }
-                }
-            }
-        },
-    ]
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -666,7 +606,7 @@ impl FilterWorker for ZtfFilterWorker {
         }
 
         Ok(ZtfFilterWorker {
-            alert_pipeline: create_ztf_alert_pipeline(),
+            alert_pipeline: create_ztf_alert_pipeline(true),
             alert_collection,
             alert_cutout_collection,
             input_queue,
