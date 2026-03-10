@@ -150,8 +150,20 @@ pub async fn build_lsst_alerts(
         .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))?;
 
     if candid_to_cutouts.len() != alerts.len() {
+        let mut missing_cutouts_candids: Vec<&i64> = alerts
+            .iter()
+            .filter(|a| !candid_to_cutouts.contains_key(&a.candid))
+            .map(|a| &a.candid)
+            .collect();
+        missing_cutouts_candids.sort();
+        warn!(
+            "Only fetched cutouts for {} alerts from {} candids. Missing cutouts for candids: {:?}",
+            candid_to_cutouts.len(),
+            alerts.len(),
+            missing_cutouts_candids
+        );
         return Err(FilterWorkerError::MissingCutoutsBatch(
-            alerts.len() - candid_to_cutouts.len(),
+            missing_cutouts_candids.len(),
         ));
     }
 
