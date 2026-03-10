@@ -9,6 +9,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -220,6 +221,8 @@ const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
     "/babamul/signup",
     "/babamul/activate",
     "/babamul/auth",
+    "/babamul/forgot-password",
+    "/babamul/reset-password",
     "/babamul/surveys/lsst/schemas",
     "/babamul/surveys/ztf/schemas",
     "/babamul/docs",
@@ -270,7 +273,6 @@ pub async fn babamul_auth_middleware(
             // Check if this is a personal access token (PAT)
             if token.starts_with("bbml_") {
                 // Handle PAT authentication
-                use sha2::{Digest, Sha256};
 
                 // Validate token length to prevent slicing panics.
                 // Expected format: "bbml_" (5 chars) + 36-char secret = 41 chars total.

@@ -37,7 +37,11 @@ pub struct ZtfAlertPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
 }
 
@@ -60,7 +64,11 @@ pub struct ZtfForcedPhotometry {
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
     pub procstatus: Option<String>,
 }
@@ -81,7 +89,7 @@ pub struct ZtfPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    pub snr: Option<f64>,
+    pub snr_psf: Option<f64>,
     pub programid: i32,
 }
 
@@ -98,7 +106,7 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr: phot.snr,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -143,7 +151,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr: phot.snr,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -219,7 +227,7 @@ impl ZtfPhotometry {
         // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
         // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
         // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
-        match (self.snr, self.magpsf, self.sigmapsf) {
+        match (self.snr_psf, self.magpsf, self.sigmapsf) {
             (Some(snr), Some(mag), Some(sig)) => match min_snr {
                 Some(thresh) if snr.abs() < thresh => None,
                 _ => Some(PhotometryMag {
