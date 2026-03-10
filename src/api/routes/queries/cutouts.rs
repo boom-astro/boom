@@ -86,11 +86,6 @@ pub async fn get_cutouts(
         if let Some(band) = &query.band {
             filter.insert("candidate.band", band.to_string());
         }
-        if survey == Survey::Ztf {
-            // for ZTF, we also want to filter by programid 1 (public alerts) to avoid returning cutouts for private alerts
-            filter.insert("candidate.programid", 1);
-        }
-        println!("Filter for alert query: {:?}", filter);
         let candid = match alert_collection
             .find_one(filter)
             .projection(doc! { "_id": 1 })
