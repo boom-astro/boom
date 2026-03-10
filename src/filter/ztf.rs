@@ -1,11 +1,12 @@
-use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
+use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{
-    create_ztf_alert_pipeline, fetch_alert_cutouts, fetch_alerts, ZtfAlertForEnrichment,
+    deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve, fetch_alert_cutouts,
+    fetch_alerts, ZtfAlertClassifications, ZtfPhotometry, ZtfSurveyMatches,
 };
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
@@ -13,8 +14,8 @@ use crate::filter::{
     validate_filter_pipeline, Alert, Classification, FilterError, FilterResults, FilterWorker,
     FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
-use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
-use crate::utils::{enums::Survey, lightcurves::ZTF_ZP, o11y::logging::as_error};
+use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
+use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 /// For a filter running on another survey (e.g., LSST), determine if we need to
 /// fetch ZTF auxiliary data (prv_candidates, fp_hists) based on the fields
@@ -127,35 +128,11 @@ pub fn insert_ztf_aux_pipeline_if_needed(
     }
 }
 
-/// Builds ZTF Alert objects from the provided filter results and alert collection.
-///
-/// # Arguments
-/// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
-/// * `alert_collection` - The MongoDB collection containing ZTF alert documents.
-///
-/// # Returns
-/// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
-#[instrument(skip_all, err)]
-pub async fn build_ztf_alerts(
-    alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
-    alert_collection: &mongodb::Collection<Document>,
-) -> Result<Vec<Alert>, FilterWorkerError> {
-    let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
-    let pipeline = vec![
+pub fn create_ztf_alert_pipeline() -> Vec<Document> {
+    vec![
         doc! {
             "$match": {
-                "_id": { "$in": &candids }
-            }
-        },
-        doc! {
-            "$project": {
-                "objectId": 1,
-                "jd": "$candidate.jd",
-                "ra": "$candidate.ra",
-                "dec": "$candidate.dec",
-                "rb": "$candidate.rb",
-                "drb": "$candidate.drb",
-                "classifications": 1,
+                "_id": {"$in": []}
             }
         },
         doc! {
@@ -167,208 +144,65 @@ pub async fn build_ztf_alerts(
             }
         },
         doc! {
+            "$unwind": {
+                "path": "$aux",
+                "preserveNullAndEmptyArrays": false
+            }
+        },
+        doc! {
             "$lookup": {
-                "from": "ZTF_alerts_cutouts",
-                "localField": "_id",
+                "from": "LSST_alerts_aux",
+                "localField": "aux.aliases.LSST.0",
                 "foreignField": "_id",
-                "as": "cutouts"
+                "as": "lsst_aux"
             }
         },
         doc! {
             "$project": {
                 "objectId": 1,
-                "jd": 1,
-                "ra": 1,
-                "dec": 1,
-                "prv_candidates": get_array_element("aux.prv_candidates"),
-                "prv_nondetections": get_array_element("aux.prv_nondetections"),
-                "fp_hists": get_array_element("aux.fp_hists"),
-                "cutoutScience": get_array_element("cutouts.cutoutScience"),
-                "cutoutTemplate": get_array_element("cutouts.cutoutTemplate"),
-                "cutoutDifference": get_array_element("cutouts.cutoutDifference"),
+                "candidate": 1,
                 "classifications": 1,
-            }
-        },
-    ];
-
-    // Execute the aggregation pipeline
-    let mut cursor = alert_collection.aggregate(pipeline).await?;
-
-    let mut alerts_output = Vec::new();
-    while let Some(alert_document) = cursor.next().await {
-        let alert_document = alert_document?;
-        let candid = alert_document.get_i64("_id")?;
-        let object_id = alert_document.get_str("objectId")?.to_string();
-        let jd = alert_document.get_f64("jd")?;
-        let ra = alert_document.get_f64("ra")?;
-        let dec = alert_document.get_f64("dec")?;
-        let cutout_science = alert_document.get_binary_generic("cutoutScience")?.to_vec();
-        let cutout_template = alert_document
-            .get_binary_generic("cutoutTemplate")?
-            .to_vec();
-        let cutout_difference = alert_document
-            .get_binary_generic("cutoutDifference")?
-            .to_vec();
-
-        // let's create the array of photometry (non-forced phot only for now)
-        let mut photometry = Vec::new();
-        for doc in alert_document.get_array("prv_candidates")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?; // in nJy
-            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
-            let band = doc.get_str("band")?.to_string();
-            let programid = doc.get_i32("programid")?;
-            let ra = doc.get_f64("ra").ok(); // optional, might not be present
-            let dec = doc.get_f64("dec").ok(); // optional, might not be present
-
-            photometry.push(Photometry {
-                jd,
-                flux: Some(flux),
-                flux_err,
-                band: format!("ztf{}", band),
-                origin: Origin::Alert,
-                programid,
-                survey: Survey::Ztf,
-                ra,
-                dec,
-            });
-        }
-
-        // next we do the non detections
-        for doc in alert_document.get_array("prv_nondetections")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux_err = doc.get_f64("psfFluxErr")?;
-            let band = doc.get_str("band")?.to_string();
-            let programid = doc.get_i32("programid")?;
-
-            photometry.push(Photometry {
-                jd,
-                flux: None, // for non-detections, flux is None
-                flux_err,
-                band: format!("ztf{}", band),
-                origin: Origin::Alert,
-                programid,
-                survey: Survey::Ztf,
-                ra: None,
-                dec: None,
-            });
-        }
-
-        for doc in alert_document.get_array("fp_hists")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-
-            // we only want forced photometry with procstatus == "0"
-            if doc.get_str("procstatus")? != "0" {
-                continue;
-            }
-            let jd = doc.get_f64("jd")?;
-            let magzpsci = doc.get_f64("magzpsci")?;
-            // TODO: read from psfFlux once that is moved to a fixed ZP in the database
-            //       (instead of doing the conversion here in code)
-            let flux = doc.get_f64("forcediffimflux").ok();
-            let flux_err = doc.get_f64("forcediffimfluxunc")?;
-            let band = doc.get_str("band")?.to_string();
-            let programid = doc.get_i32("programid")?;
-
-            // TODO: remove this conversion once we read flux and flux_err from the database with a fixed ZP
-            let zp_scaling_factor = 10f64.powf((ZTF_ZP as f64 - magzpsci) / 2.5);
-            let flux = if flux != Some(-99999.0) && flux.map_or(false, |f| !f.is_nan()) {
-                flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
-            } else {
-                None
-            };
-            let flux_err = if flux_err != -99999.0 && !flux_err.is_nan() {
-                flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
-            } else {
-                return Err(FilterWorkerError::MissingFluxPSF);
-            };
-
-            photometry.push(Photometry {
-                jd,
-                flux,
-                flux_err,
-                band: format!("ztf{}", band),
-                origin: Origin::ForcedPhot,
-                programid,
-                survey: Survey::Ztf,
-                ra: None,
-                dec: None,
-            });
-        }
-
-        // sort the photometry by jd ascending
-        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
-
-        // last but not least, we need to get the classifications
-        let mut classifications = Vec::new();
-        // classifications in the alert is a document with classifier names as keys and the scores as values
-        // we need to convert it to a vec of Classification structs
-        if let Some(classifications_doc) = alert_document.get_document("classifications").ok() {
-            for (key, value) in classifications_doc.iter() {
-                if let Some(score) = value.as_f64() {
-                    classifications.push(Classification {
-                        classifier: key.to_string(),
-                        score,
-                    });
+                "prv_candidates": "$aux.prv_candidates",
+                "prv_nondetections": "$aux.prv_nondetections",
+                "fp_hists": "$aux.fp_hists",
+                "survey_matches": {
+                    "lsst": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
+                            "then": {
+                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    }
                 }
             }
-        }
+        },
+    ]
+}
 
-        // add the rb and drb to the classifications if present
-        if let Some(rb) = alert_document.get_f64("rb").ok() {
-            classifications.push(Classification {
-                classifier: "rb".to_string(),
-                score: rb,
-            });
-        }
-        if let Some(drb) = alert_document.get_f64("drb").ok() {
-            classifications.push(Classification {
-                classifier: "drb".to_string(),
-                score: drb,
-            });
-        }
-
-        let alert = Alert {
-            candid,
-            object_id,
-            jd,
-            ra,
-            dec,
-            filters: alerts_with_filter_results
-                .get(&candid)
-                .cloned()
-                .unwrap_or_else(Vec::new),
-            classifications,
-            photometry,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
-            survey: Survey::Ztf,
-            survey_matches: SurveyMatches {
-                ztf: None,
-                lsst: None,
-            },
-        };
-
-        alerts_output.push(alert);
-    }
-
-    if candids.len() != alerts_output.len() {
-        return Err(FilterWorkerError::AlertNotFound);
-    }
-
-    Ok(alerts_output)
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ZtfAlertEnriched {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub classifications: Option<ZtfAlertClassifications>,
+    #[serde(deserialize_with = "deserialize_ztf_alert_lightcurve")]
+    pub prv_candidates: Vec<ZtfPhotometry>,
+    #[serde(deserialize_with = "deserialize_ztf_alert_lightcurve")]
+    pub prv_nondetections: Vec<ZtfPhotometry>,
+    #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
+    pub fp_hists: Vec<ZtfPhotometry>,
+    pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
 /// Builds ZTF Alert objects from the provided filter results and alert collection.
@@ -380,19 +214,17 @@ pub async fn build_ztf_alerts(
 /// # Returns
 /// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
-pub async fn build_ztf_alerts_v2(
+pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
+    alert_pipeline: &Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
     alert_cutout_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
 
-    let alert_pipeline = create_ztf_alert_pipeline();
-
-    let alerts: Vec<ZtfAlertForEnrichment> =
-        fetch_alerts(&candids, &alert_pipeline, alert_collection)
-            .await
-            .unwrap();
+    let alerts: Vec<ZtfAlertEnriched> = fetch_alerts(&candids, &alert_pipeline, alert_collection)
+        .await
+        .unwrap();
 
     if alerts.len() != candids.len() {
         warn!(
@@ -426,13 +258,60 @@ pub async fn build_ztf_alerts_v2(
         if let Some(rb) = alert.candidate.candidate.rb {
             classifications.push(Classification {
                 classifier: "rb".to_string(),
-                score: rb as f64,
+                score: rb,
+                distance_arcsec: None,
             });
         }
         if let Some(drb) = alert.candidate.candidate.drb {
             classifications.push(Classification {
                 classifier: "drb".to_string(),
-                score: drb as f64,
+                score: drb,
+                distance_arcsec: None,
+            });
+        }
+        if let (Some(sgscore), Some(distpsnr1)) = (
+            alert.candidate.candidate.sgscore1,
+            alert.candidate.candidate.distpsnr1,
+        ) {
+            classifications.push(Classification {
+                classifier: "sgscore1".to_string(),
+                score: sgscore,
+                distance_arcsec: Some(distpsnr1),
+            });
+        }
+
+        if let Some(alert_classifications) = alert.classifications {
+            // ACAI (h,n,o,v,b)
+            classifications.push(Classification {
+                classifier: "acai_h".to_string(),
+                score: alert_classifications.acai_h,
+                distance_arcsec: None,
+            });
+            classifications.push(Classification {
+                classifier: "acai_n".to_string(),
+                score: alert_classifications.acai_n,
+                distance_arcsec: None,
+            });
+            classifications.push(Classification {
+                classifier: "acai_o".to_string(),
+                score: alert_classifications.acai_o,
+                distance_arcsec: None,
+            });
+            classifications.push(Classification {
+                classifier: "acai_v".to_string(),
+                score: alert_classifications.acai_v,
+                distance_arcsec: None,
+            });
+            classifications.push(Classification {
+                classifier: "acai_b".to_string(),
+                score: alert_classifications.acai_b,
+                distance_arcsec: None,
+            });
+            // BTSbot
+            classifications.push(Classification {
+                classifier: "btsbot".to_string(),
+                score: alert_classifications.btsbot,
+                distance_arcsec: None,
             });
         }
 
@@ -515,6 +394,8 @@ pub async fn build_ztf_alerts_v2(
                     dec: None,
                 });
             }
+
+            lsst_photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
             survey_matches.lsst = Some(SurveyMatch {
                 object_id: lsst_match.object_id.clone(),
@@ -734,6 +615,7 @@ pub async fn build_ztf_filter_pipeline(
 }
 
 pub struct ZtfFilterWorker {
+    alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
     input_queue: String,
@@ -782,6 +664,7 @@ impl FilterWorker for ZtfFilterWorker {
         }
 
         Ok(ZtfFilterWorker {
+            alert_pipeline: create_ztf_alert_pipeline(),
             alert_collection,
             alert_cutout_collection,
             input_queue,
@@ -883,8 +766,9 @@ impl FilterWorker for ZtfFilterWorker {
                 }
             }
 
-            let alerts = build_ztf_alerts_v2(
+            let alerts = build_ztf_alerts(
                 &results_map,
+                &self.alert_pipeline,
                 &self.alert_collection,
                 &self.alert_cutout_collection,
             )

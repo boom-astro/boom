@@ -10,7 +10,7 @@ pub use base::{
     LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches, SURVEYS_REQUIRING_PERMISSIONS,
 };
 use base::{parse_programid_candid_tuple, update_aliases_index_multiple, Classification};
-pub use lsst::{build_lsst_alerts, build_lsst_filter_pipeline, LsstFilterWorker};
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed};
-pub use ztf::{build_ztf_alerts, build_ztf_filter_pipeline, ZtfFilterWorker};
+pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
 use ztf::{build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed};
+pub use ztf::{build_ztf_filter_pipeline, ZtfFilterWorker};

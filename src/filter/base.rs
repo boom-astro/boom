@@ -190,7 +190,8 @@ pub struct Photometry {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Classification {
     pub classifier: String,
-    pub score: f64,
+    pub score: f32,
+    pub distance_arcsec: Option<f32>,
 }
 
 #[serdavro]
