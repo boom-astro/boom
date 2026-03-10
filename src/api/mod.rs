@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod catalogs;
+pub mod cutouts;
 pub mod db;
 pub mod docs;
 pub mod email;

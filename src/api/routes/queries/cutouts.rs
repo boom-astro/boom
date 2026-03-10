@@ -1,37 +1,10 @@
+use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
 use crate::api::models::response;
 use crate::utils::enums::Survey;
 use crate::{alert::AlertCutout, utils::lightcurves::Band};
 use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use mongodb::{bson::doc, Collection, Database};
-use utoipa::ToSchema;
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema, Clone)]
-enum WhichCutouts {
-    #[serde(alias = "first")]
-    First,
-    #[serde(alias = "last")]
-    Last,
-    #[serde(alias = "brightest")]
-    Brightest,
-    #[serde(alias = "faintest")]
-    Faintest,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-struct AlertCandidOnly {
-    #[serde(rename = "_id")]
-    candid: i64,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-struct CutoutQuery {
-    candid: Option<i64>,
-    #[serde(rename = "objectId")]
-    object_id: Option<String>,
-    which: Option<WhichCutouts>,
-    band: Option<Band>,
-}
 
 #[utoipa::path(
     get,
