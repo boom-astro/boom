@@ -123,7 +123,7 @@ pub async fn build_lsst_alerts(
     let alerts: Vec<LsstAlertForEnrichment> =
         fetch_alerts(&candids, &alert_pipeline, alert_collection)
             .await
-            .unwrap();
+            .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
 
     if alerts.len() != candids.len() {
         warn!(
@@ -138,7 +138,7 @@ pub async fn build_lsst_alerts(
 
     let mut candid_to_cutouts = fetch_alert_cutouts(&candids, &alert_cutout_collection)
         .await
-        .unwrap();
+        .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))?;
 
     if candid_to_cutouts.len() != alerts.len() {
         warn!(
@@ -151,7 +151,9 @@ pub async fn build_lsst_alerts(
     let mut alerts_output = Vec::new();
     for alert in alerts {
         let candid = alert.candid;
-        let cutouts = candid_to_cutouts.remove(&candid).unwrap();
+        let cutouts = candid_to_cutouts
+            .remove(&candid)
+            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let mut classifications = Vec::new();
         if let Some(rb) = alert.candidate.dia_source.reliability {

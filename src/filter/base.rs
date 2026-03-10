@@ -793,6 +793,12 @@ pub enum FilterWorkerError {
     KafkaConfigMissing(Survey),
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
+    #[error("missing cutouts for candid {0}")]
+    MissingCutouts(i64),
+    #[error("failed to fetch cutouts: {0}")]
+    FetchCutoutsError(String),
+    #[error("failed to fetch alerts: {0}")]
+    FetchAlertsError(String),
 }
 
 #[async_trait::async_trait]

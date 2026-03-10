@@ -514,6 +514,9 @@ async fn test_filter_ztf_alert() {
     // the 5 ACAI scores, the BTSBot score, rb, drb, sgscore = 9 values in total
     assert_eq!(classifications.len(), 9);
 
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Ztf);
+
     // verify cutouts are non-empty
     assert!(
         !alert.cutout_science.is_empty(),
@@ -591,6 +594,9 @@ async fn test_filter_ztf_alert_with_lsst_match() {
     assert_eq!(lsst_match.object_id, lsst_object_id);
     // LSST test data has 1 prv_candidate and 0 fp_hists → 1 photometry point.
     assert_eq!(lsst_match.photometry.len(), 1);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Ztf);
 
     // verify cutouts are non-empty
     assert!(

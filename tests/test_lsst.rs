@@ -221,6 +221,9 @@ async fn test_filter_lsst_alert() {
     // only the alert's reliability score for now
     assert_eq!(classifications.len(), 1);
 
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Lsst);
+
     // verify cutouts are non-empty
     assert!(
         !alert.cutout_science.is_empty(),
@@ -286,6 +289,9 @@ async fn test_filter_lsst_alert_with_ztf_match() {
     assert_eq!(ztf_match.object_id, ztf_object_id);
     // ZTF test data has 8 prv_candidates + 3 prv_nondetections + 10 fp_hists = 21 photometry points.
     assert_eq!(ztf_match.photometry.len(), 21);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Lsst);
 
     // verify cutouts are non-empty
     assert!(
