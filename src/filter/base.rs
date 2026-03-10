@@ -137,7 +137,7 @@ pub struct Classification {
 pub struct FilterResults {
     pub filter_id: String,
     pub filter_name: String,
-    pub passed_at: f64, // timestamp in seconds
+    pub passed_at: f64, // UNIX timestamp in milliseconds
     pub annotations: String,
 }
 
@@ -795,6 +795,8 @@ pub enum FilterWorkerError {
     MissingFluxPSF,
     #[error("missing cutouts for candid {0}")]
     MissingCutouts(i64),
+    #[error("missing cutouts for {0} alerts")]
+    MissingCutoutsBatch(usize),
     #[error("failed to fetch cutouts: {0}")]
     FetchCutoutsError(String),
     #[error("failed to fetch alerts: {0}")]

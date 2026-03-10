@@ -149,7 +149,10 @@ pub struct ZtfAlertEnriched {
 ///
 /// # Arguments
 /// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
+/// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
 /// * `alert_collection` - The MongoDB collection containing ZTF alert documents.
+/// * `alert_cutout_collection` - The MongoDB collection containing ZTF alert cutout documents.
+
 ///
 /// # Returns
 /// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
@@ -161,20 +164,27 @@ pub async fn build_ztf_alerts(
     alert_cutout_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
+    if candids.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let alerts: Vec<ZtfAlertEnriched> = fetch_alerts(&candids, &alert_pipeline, alert_collection)
         .await
         .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
 
     if alerts.len() != candids.len() {
+        let nb_total = candids.len();
+        let mut missing_candids: Vec<&i64> = candids
+            .iter()
+            .filter(|c| !alerts.iter().any(|a| a.candid == **c))
+            .collect();
+        missing_candids.sort();
         warn!(
-            "only {} alerts fetched from {} candids",
+            "Only fetched {} alerts from {} candids. Missing candids: {:?}",
             alerts.len(),
-            candids.len()
+            nb_total,
+            missing_candids
         );
-    }
-    if alerts.is_empty() {
-        return Ok(vec![]);
     }
 
     let mut candid_to_cutouts = fetch_alert_cutouts(&candids, &alert_cutout_collection)
@@ -182,11 +192,9 @@ pub async fn build_ztf_alerts(
         .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))?;
 
     if candid_to_cutouts.len() != alerts.len() {
-        warn!(
-            "only {} cutouts fetched from {} candids",
-            candid_to_cutouts.len(),
-            alerts.len()
-        );
+        return Err(FilterWorkerError::MissingCutoutsBatch(
+            alerts.len() - candid_to_cutouts.len(),
+        ));
     }
 
     let mut alerts_output = Vec::new();
