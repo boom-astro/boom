@@ -10,7 +10,7 @@ use crate::{
 
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::{serde_avro_bytes, Writer};
+use apache_avro::{serde_avro_bytes, DeflateSettings, Writer};
 use apache_avro::{AvroSchema, Schema};
 use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
@@ -196,7 +196,11 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
+    let mut writer = Writer::with_codec(
+        schema,
+        Vec::new(),
+        apache_avro::Codec::Deflate(DeflateSettings::default()),
+    );
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
