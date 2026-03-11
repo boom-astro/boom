@@ -1,15 +1,15 @@
 use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
 use crate::api::models::response;
-use crate::api::routes::babamul::BabamulUser;
 use crate::utils::enums::Survey;
 use crate::{alert::AlertCutout, utils::lightcurves::Band};
 use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use mongodb::{bson::doc, Collection, Database};
 
+/// Get alert image cutouts
 #[utoipa::path(
     get,
-    path = "/babamul/surveys/{survey}/cutouts",
+    path = "/surveys/{survey}/cutouts",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
         ("candid" = Option<i64>, Query, description = "Candid of the alert to retrieve cutouts for"),
@@ -28,17 +28,9 @@ use mongodb::{bson::doc, Collection, Database};
 pub async fn get_cutouts(
     path: web::Path<Survey>,
     query: web::Query<CutoutQuery>,
-    current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
 ) -> HttpResponse {
-    let _current_user = match current_user {
-        Some(user) => user,
-        None => {
-            return HttpResponse::Unauthorized().body("Unauthorized");
-        }
-    };
     let survey = path.into_inner();
-
     let cutout_collection: Collection<AlertCutout> =
         db.collection(&format!("{}_alerts_cutouts", survey));
 
@@ -94,10 +86,6 @@ pub async fn get_cutouts(
         let mut filter = doc! { "objectId": object_id };
         if let Some(band) = &query.band {
             filter.insert("candidate.band", band.to_string());
-        }
-        if survey == Survey::Ztf {
-            // for ZTF, we also want to filter by programid 1 (public alerts) to avoid returning cutouts for private alerts
-            filter.insert("candidate.programid", 1);
         }
         let candid = match alert_collection
             .find_one(filter)
