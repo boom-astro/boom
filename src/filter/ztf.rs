@@ -277,8 +277,6 @@ pub async fn build_ztf_alerts(
             });
         }
 
-        // TODO, get classifications from the alert document
-
         let mut photometry = Vec::new();
         for doc in alert.prv_candidates.iter() {
             photometry.push(Photometry {
