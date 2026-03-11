@@ -103,7 +103,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalog_sample)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
-                .service(routes::queries::get_cutouts)
+                .service(routes::surveys::get_cutouts)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)

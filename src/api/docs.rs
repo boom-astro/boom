@@ -72,7 +72,7 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::count::post_estimated_count_query,
         routes::queries::find::post_find_query,
         routes::queries::cone_search::post_cone_search_query,
-        routes::queries::cutouts::get_cutouts,
+        routes::surveys::cutouts::get_cutouts,
         routes::queries::pipeline::post_pipeline_query
     ),
     security(

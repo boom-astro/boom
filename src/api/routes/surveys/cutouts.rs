@@ -6,9 +6,10 @@ use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use mongodb::{bson::doc, Collection, Database};
 
+/// Get alert image cutouts
 #[utoipa::path(
     get,
-    path = "/queries/{survey}/cutouts",
+    path = "/surveys/{survey}/cutouts",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
         ("candid" = Option<i64>, Query, description = "Candid of the alert to retrieve cutouts for"),
@@ -23,7 +24,7 @@ use mongodb::{bson::doc, Collection, Database};
     ),
     tags=["Surveys"]
 )]
-#[get("/queries/{survey}/cutouts")]
+#[get("/surveys/{survey}/cutouts")]
 pub async fn get_cutouts(
     path: web::Path<Survey>,
     query: web::Query<CutoutQuery>,
