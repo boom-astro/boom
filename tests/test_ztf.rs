@@ -511,9 +511,108 @@ async fn test_filter_ztf_alert() {
     assert_eq!(filter_passed.annotations, "{\"mag_now\":14.91}");
 
     let classifications = &alert.classifications;
-    assert_eq!(classifications.len(), 6);
+    // the 5 ACAI scores, the BTSBot score, rb, drb, sgscore = 9 values in total
+    assert_eq!(classifications.len(), 9);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Ztf);
+
+    // verify cutouts are non-empty
+    assert!(
+        !alert.cutout_science.is_empty(),
+        "cutout_science should not be empty"
+    );
+    assert!(
+        !alert.cutout_template.is_empty(),
+        "cutout_template should not be empty"
+    );
+    assert!(
+        !alert.cutout_difference.is_empty(),
+        "cutout_difference should not be empty"
+    );
 
     // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert_with_lsst_match() {
+    // Place the ZTF alert within the LSST observable dec range so cross-survey
+    // matching is attempted.
+    let ztf_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Ztf).dec(LSST_DEC_RANGE.1 - 10.0);
+
+    let (candid, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
+
+    // Insert an LSST alert close enough to the ZTF alert to trigger an alias.
+    let mut lsst_worker = lsst_alert_worker().await;
+    let (_, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+    lsst_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
+    // Process the ZTF alert – it should pick up the LSST alias.
+    let mut alert_worker = ztf_alert_worker().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    // Enrich the ZTF alert to satisfy the filter's prv_candidates requirement.
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let enrichment_output = enrichment_worker.process_alerts(&[candid]).await.unwrap();
+    assert_eq!(enrichment_output.len(), 1);
+    let candid_programid_str = &enrichment_output[0];
+
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[candid_programid_str.clone()])
+        .await;
+
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    assert!(result.is_ok(), "Filter failed: {:?}", result.err());
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, candid);
+    assert_eq!(alert.object_id, object_id);
+
+    // The LSST survey match must be populated.
+    let lsst_match = alert
+        .survey_matches
+        .lsst
+        .as_ref()
+        .expect("survey_matches.lsst should be Some when an LSST alias exists");
+    assert_eq!(lsst_match.object_id, lsst_object_id);
+    // LSST test data has 1 prv_candidate and 0 fp_hists → 1 photometry point.
+    assert_eq!(lsst_match.photometry.len(), 1);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Ztf);
+
+    // verify cutouts are non-empty
+    assert!(
+        !alert.cutout_science.is_empty(),
+        "cutout_science should not be empty"
+    );
+    assert!(
+        !alert.cutout_template.is_empty(),
+        "cutout_template should not be empty"
+    );
+    assert!(
+        !alert.cutout_difference.is_empty(),
+        "cutout_difference should not be empty"
+    );
+
+    // verify the alert serialises cleanly to Avro
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 }
