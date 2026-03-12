@@ -343,10 +343,11 @@ pub fn associate_host(
             candidate.posterior *= scale;
         }
     }
-    let best_host = candidates
-        .iter()
-        .cloned()
-        .max_by(|a, b| a.posterior.partial_cmp(&b.posterior).unwrap_or(std::cmp::Ordering::Equal));
+    let best_host = candidates.iter().cloned().max_by(|a, b| {
+        a.posterior
+            .partial_cmp(&b.posterior)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     HostGalaxyAssociation {
         best_host,
@@ -394,9 +395,7 @@ mod tests {
         assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::NAN, 0.0, 0.05).is_none());
         assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, 0.0, f64::NAN, 0.05).is_none());
         assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::NAN, f64::NAN, 0.05).is_none());
-        assert!(
-            tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::INFINITY, 0.0, 0.05).is_none()
-        );
+        assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::INFINITY, 0.0, 0.05).is_none());
         assert!(
             tractor_shape_to_ellipse(180.0, -23.0, 2.0, 0.0, f64::NEG_INFINITY, 0.05).is_none()
         );
@@ -569,7 +568,8 @@ mod tests {
             .collect();
 
         let result = associate_host(180.0, 0.0, &galaxies, &config);
-        let total: f64 = result.candidates.iter().map(|c| c.posterior).sum::<f64>() + result.p_host_none;
+        let total: f64 =
+            result.candidates.iter().map(|c| c.posterior).sum::<f64>() + result.p_host_none;
         assert!(
             (total - 1.0).abs() < 1e-10,
             "Posteriors + p_host_none should sum to 1.0, got {}",
