@@ -323,9 +323,19 @@ pub fn associate_host(
     // Compute Bayesian posteriors
     compute_posteriors(&mut candidates);
 
-    // Compute p_host_none = 1 - sum(posteriors)
-    let p_host_none: f64 = 1.0 - candidates.iter().map(|c| c.posterior).sum::<f64>();
+    // Compute p_host_none = 1 - sum(posteriors), with clamping and renormalization
+    let sum_posteriors: f64 = candidates.iter().map(|c| c.posterior).sum();
+    let mut p_host_none: f64 = 1.0 - sum_posteriors;
+    // Clamp into [0, 1] to guard against floating-point rounding errors
+    p_host_none = p_host_none.clamp(0.0, 1.0);
 
+    // Renormalize candidate posteriors so that they sum to 1 - p_host_none
+    if sum_posteriors > 0.0 {
+        let scale = (1.0 - p_host_none) / sum_posteriors;
+        for candidate in candidates.iter_mut() {
+            candidate.posterior *= scale;
+        }
+    }
     let best_host = candidates
         .iter()
         .cloned()
