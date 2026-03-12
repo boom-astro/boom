@@ -610,6 +610,20 @@ impl Default for SchemaCache {
     }
 }
 
+#[cfg(test)]
+impl SchemaCache {
+    /// Overwrite the cached start index with an arbitrary value to simulate a
+    /// schema-cache corruption for testing the fallback path.
+    pub fn set_cached_start_idx(&mut self, idx: usize) {
+        self.cached_start_idx = Some(idx);
+    }
+
+    /// Return the currently cached start index (for assertions in tests).
+    pub fn get_cached_start_idx(&self) -> Option<usize> {
+        self.cached_start_idx
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AlertCutout {
     #[serde(rename = "_id")]
