@@ -8,6 +8,7 @@ pub use base::{
     fetch_alert_cutouts, fetch_alerts, run_enrichment_worker, EnrichmentWorker,
     EnrichmentWorkerError,
 };
+pub use crate::utils::host::{HostCandidate, HostGalaxyAssociation, HostGalaxyConfig};
 pub use decam::DecamEnrichmentWorker;
 pub use lsst::{
     LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker, LsstMatch, LsstPhotometry,

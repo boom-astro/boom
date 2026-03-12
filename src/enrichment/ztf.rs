@@ -2,6 +2,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
+use crate::utils::host::{self, HostGalaxyConfig};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
     PhotometryMag, ZTF_ZP,
@@ -19,6 +20,7 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
 use tracing::{instrument, trace, warn};
 
 #[serdavro]
@@ -273,6 +275,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "prv_candidates": "$aux.prv_candidates",
                 "prv_nondetections": "$aux.prv_nondetections",
                 "fp_hists": "$aux.fp_hists",
+                "cross_matches": "$aux.cross_matches",
                 "survey_matches": {
                     "lsst": {
                         "$cond": {
@@ -332,6 +335,7 @@ pub struct ZtfAlertForEnrichment {
     pub prv_nondetections: Vec<ZtfPhotometry>,
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
+    pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -371,6 +375,7 @@ pub struct ZtfEnrichmentWorker {
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
     babamul: Option<Babamul>,
+    host_galaxy_config: HostGalaxyConfig,
 }
 
 #[async_trait::async_trait]
@@ -403,6 +408,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None
         };
 
+        let host_galaxy_config = config.host_galaxy.clone();
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -417,6 +424,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_b_model,
             btsbot_model,
             babamul,
+            host_galaxy_config,
         })
     }
 
@@ -508,18 +516,37 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 None
             };
 
-            let update_alert_document = if let Some(classifications) = classifications {
-                doc! { "$set": {
-                    "classifications": mongify(&classifications),
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }}
+            // Host galaxy association
+            let host_galaxy = if self.host_galaxy_config.enabled {
+                let galaxy_docs = alert
+                    .cross_matches
+                    .as_ref()
+                    .and_then(|xm| xm.get(&self.host_galaxy_config.catalog))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let association = host::associate_host(
+                    alert.candidate.candidate.ra,
+                    alert.candidate.candidate.dec,
+                    galaxy_docs,
+                    &self.host_galaxy_config,
+                );
+                Some(association)
             } else {
-                doc! { "$set": {
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }}
+                None
             };
+
+            let mut set_doc = doc! {
+                "properties": mongify(&properties),
+                "updated_at": now,
+            };
+            if let Some(ref classifications) = classifications {
+                set_doc.insert("classifications", mongify(classifications));
+            }
+            if let Some(ref hg) = host_galaxy {
+                set_doc.insert("host_galaxy", mongify(hg));
+            }
+
+            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()

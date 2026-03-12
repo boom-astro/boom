@@ -65,6 +65,15 @@ workers:
       n_workers: 0
     filter:
       n_workers: 1
+host_galaxy:
+  enabled: true
+  catalog: LS_DR10
+  max_dlr: 5.0
+  min_axis_arcsec: 0.05
+  max_candidates: 10
+  exclude_star_like: true
+  star_type_value: PSF
+
 crossmatch:
   ztf:
     - catalog: PS1_DR1
@@ -129,6 +138,19 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: LS_DR10
+      radius: 60.0 # 60 arcseconds
+      use_distance: false
+      max_results: 20
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        type: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        z: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0 # 30 arcseconds
@@ -163,4 +185,17 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: LS_DR10
+      radius: 60.0 # 60 arcseconds
+      use_distance: false
+      max_results: 20
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        type: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        z: 1
   decam: []

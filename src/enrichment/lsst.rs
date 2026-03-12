@@ -6,6 +6,7 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::{self, HostGalaxyConfig};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
@@ -210,6 +211,7 @@ pub struct LsstEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
+    host_galaxy_config: HostGalaxyConfig,
 }
 
 #[async_trait::async_trait]
@@ -260,6 +262,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             None
         };
 
+        let host_galaxy_config = config.host_galaxy.clone();
+
         Ok(LsstEnrichmentWorker {
             input_queue,
             output_queue,
@@ -267,6 +271,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
+            host_galaxy_config,
         })
     }
 
@@ -314,12 +319,34 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let properties = self.get_alert_properties(&alert).await?;
 
-            let update_alert_document = doc! {
-                "$set": {
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }
+            // Host galaxy association
+            let host_galaxy = if self.host_galaxy_config.enabled {
+                let galaxy_docs = alert
+                    .cross_matches
+                    .as_ref()
+                    .and_then(|xm| xm.get(&self.host_galaxy_config.catalog))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let association = host::associate_host(
+                    alert.candidate.dia_source.ra,
+                    alert.candidate.dia_source.dec,
+                    galaxy_docs,
+                    &self.host_galaxy_config,
+                );
+                Some(association)
+            } else {
+                None
             };
+
+            let mut set_doc = doc! {
+                "properties": mongify(&properties),
+                "updated_at": now,
+            };
+            if let Some(ref hg) = host_galaxy {
+                set_doc.insert("host_galaxy", mongify(hg));
+            }
+
+            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
