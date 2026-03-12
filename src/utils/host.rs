@@ -151,7 +151,9 @@ pub fn compute_dlr(transient_ra: f64, transient_dec: f64, galaxy: &GalaxyEllipse
     let dec_g_rad = galaxy.dec.to_radians();
 
     // Tangent-plane offsets in arcsec
-    let dx = (transient_ra - galaxy.ra) * dec_g_rad.cos() * 3600.0;
+    // Wrap RA difference into [-180°, 180°] to handle the 0°/360° RA boundary correctly.
+    let delta_ra_deg = (transient_ra - galaxy.ra + 540.0).rem_euclid(360.0) - 180.0;
+    let dx = delta_ra_deg * dec_g_rad.cos() * 3600.0;
     let dy = (transient_dec - galaxy.dec) * 3600.0;
 
     let separation_arcsec = (dx * dx + dy * dy).sqrt();
