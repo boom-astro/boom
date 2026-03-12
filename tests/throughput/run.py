@@ -23,23 +23,41 @@ parser = argparse.ArgumentParser(description="Benchmark BOOM")
 parser.add_argument(
     "--n-alert-workers",
     type=int,
-    default=3,
+    default=6,
     help="Number of alert workers to use for benchmarking.",
 )
 parser.add_argument(
     "--n-enrichment-workers",
     type=int,
-    default=6,
+    default=3,
     help="Number of machine learning workers to use for benchmarking.",
 )
 parser.add_argument(
     "--n-filter-workers",
     type=int,
-    default=1,
+    default=2,
     help="Number of filter workers to use for benchmarking.",
 )
+parser.add_argument(
+    "--keep-up",
+    action="store_true",
+    help="Whether to keep the BOOM services up after the benchmark completes.",
+    default=False,
+)
+parser.add_argument(
+    "--boom-repo-dir",
+    help="Path to the BOOM repo directory.",
+    default=".",
+)
+parser.add_argument(
+    "--timeout",
+    type=int,
+    default=300,
+    help="Number of seconds to wait before considering the benchmark a failure.",
+)
 args = parser.parse_args()
-with open("config.yaml", "r") as f:
+
+with open(os.path.join(args.boom_repo_dir, "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
 config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
 config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
@@ -54,11 +72,18 @@ config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
 config["babamul"]["enabled"] = True
-with open("tests/throughput/config.yaml", "w") as f:
+with open(
+    os.path.join(args.boom_repo_dir, "tests", "throughput", "config.yaml"), "w"
+) as f:
     yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 # Reformat filter for insertion into database
-with open("tests/throughput/cats150.pipeline.json", "r") as f:
+with open(
+    os.path.join(
+        args.boom_repo_dir, "tests", "throughput", "cats150.pipeline.json"
+    ),
+    "r",
+) as f:
     cats150 = json.load(f)
 
 now_jd = Time.now().jd
@@ -67,9 +92,7 @@ for_insert = {
     "name": "cats150-replaced-in-mongo-init-script",
     "survey": "ZTF",
     "user_id": "benchmarking",
-    "permissions": {
-        "ZTF": [1, 2, 3]
-    },
+    "permissions": {"ZTF": [1, 2, 3]},
     "active": True,
     "active_fid": "first",
     "fv": [
@@ -82,7 +105,12 @@ for_insert = {
     "created_at": now_jd,
     "updated_at": now_jd,
 }
-with open("tests/throughput/cats150.filter.json", "w") as f:
+with open(
+    os.path.join(
+        args.boom_repo_dir, "tests", "throughput", "cats150.filter.json"
+    ),
+    "w",
+) as f:
     json.dump(for_insert, f)
 
 logs_dir = os.path.join(
@@ -96,7 +124,16 @@ logs_dir = os.path.join(
 )
 
 # Now run the benchmark
-subprocess.run(["bash", "tests/throughput/_run.sh", logs_dir], check=True)
+os.environ["BOOM_REPO_ROOT"] = os.path.abspath(args.boom_repo_dir)
+os.environ["TIMEOUT_SECS"] = str(args.timeout)
+cmd = [
+    "bash",
+    os.path.join(args.boom_repo_dir, "tests", "throughput", "_run.sh"),
+    logs_dir,
+]
+if args.keep_up:
+    cmd.append("--keep-up")
+subprocess.run(cmd, check=True)
 
 # Now analyze the logs and raise an error if we're too slow
 boom_config = (
