@@ -118,6 +118,9 @@ pub fn tractor_shape_to_ellipse(
     if shape_r <= 0.0 || !shape_r.is_finite() {
         return None;
     }
+    if !shape_e1.is_finite() || !shape_e2.is_finite() {
+        return None;
+    }
 
     let e = (shape_e1 * shape_e1 + shape_e2 * shape_e2).sqrt();
     // Clamp eccentricity to avoid division by zero or negative axis ratio
@@ -128,6 +131,10 @@ pub fn tractor_shape_to_ellipse(
 
     let a = shape_r;
     let b = (a * q).max(min_b);
+
+    if !q.is_finite() || q <= 0.0 || !a.is_finite() || a <= 0.0 || !b.is_finite() || b <= 0.0 {
+        return None;
+    }
 
     Some(GalaxyEllipse {
         ra,
@@ -379,6 +386,20 @@ mod tests {
         assert!(tractor_shape_to_ellipse(180.0, -23.0, 0.0, 0.0, 0.0, 0.05).is_none());
         assert!(tractor_shape_to_ellipse(180.0, -23.0, -1.0, 0.0, 0.0, 0.05).is_none());
         assert!(tractor_shape_to_ellipse(180.0, -23.0, f64::NAN, 0.0, 0.0, 0.05).is_none());
+    }
+
+    #[test]
+    fn test_tractor_shape_non_finite_ellipticity() {
+        // NaN shape_e1 or shape_e2 must return None (not propagate NaN into DLR/posteriors)
+        assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::NAN, 0.0, 0.05).is_none());
+        assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, 0.0, f64::NAN, 0.05).is_none());
+        assert!(tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::NAN, f64::NAN, 0.05).is_none());
+        assert!(
+            tractor_shape_to_ellipse(180.0, -23.0, 2.0, f64::INFINITY, 0.0, 0.05).is_none()
+        );
+        assert!(
+            tractor_shape_to_ellipse(180.0, -23.0, 2.0, 0.0, f64::NEG_INFINITY, 0.05).is_none()
+        );
     }
 
     #[test]
