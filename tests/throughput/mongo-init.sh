@@ -58,7 +58,7 @@ for i in $(seq 1 $N_FILTERS); do
     fi
 done
 
-# Now we load the ZTF_alerts_aux table with the history for all the objects detected on 2025-03-11,
+# Now we load the ZTF_alerts_aux table with the history for all the objects detected on 2025-03-11
 echo "Loading ZTF_alerts_aux collection from archive into $DB_NAME"
 mongorestore --uri="mongodb://mongoadmin:mongoadminsecret@mongo:27017/?authSource=admin" \
     --gzip \
