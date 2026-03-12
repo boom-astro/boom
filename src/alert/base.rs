@@ -496,10 +496,8 @@ impl SchemaRegistry {
         }
 
         // Finally, resolve all references to get the full - independent - canonical schema
-        let (schema, schemas) = apache_avro::schema::Schema::parse_str_with_list(
-            &schema_str,
-            schema_strs.iter().map(|s| s.as_str()),
-        )?;
+        let (schema, schemas) =
+            Schema::parse_str_with_list(&schema_str, schema_strs.iter().map(|s| s.as_str()))?;
         let canonical_schema_str = schema.independent_canonical_form(&schemas)?;
         let schema = Schema::parse_str(&canonical_schema_str).inspect_err(as_error!(
             "failed to parse resolved alert schema from github"
@@ -582,10 +580,8 @@ impl SchemaCache {
                 let (schema, startidx) =
                     get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
 
-                // try deserializing again with the schemaless approach
-                // Reader::new expects the full Avro container (header included),
-                // not the raw datum bytes, so pass the whole slice here.
-                let reader = apache_avro::Reader::new(avro_bytes)?;
+                // Retry deserializing by using apache_avro::Reader with the schemaless approach
+                let reader = Reader::new(&avro_bytes[..])?;
 
                 let value = reader
                     .into_iter()
