@@ -52,10 +52,8 @@ jobs:
         run: |
           mkdir -p ./data/alerts
           uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
-      - name: Download auxiliary ZTF alerts from Google Drive
-        run: |
-          mkdir -p ./data/alerts
-          uvx gdown https://drive.google.com/uc?id=1CFAxQdwYUl89G39HsbGNe6XkKHFJu5rg -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+      - name: Download auxiliary ZTF alerts from Caltech Box
+        run: wget https://caltech.box.com/s/wmn819epobycnjam9fhnc9u8vy5lufro -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
         run: |
           uv run tests/throughput/run.py --timeout 600
