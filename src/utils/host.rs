@@ -306,7 +306,7 @@ pub fn associate_host(
     }
 
     // Sort by DLR (ascending)
-    candidates.sort_by(|a, b| a.dlr.partial_cmp(&b.dlr).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| a.dlr.total_cmp(&b.dlr));
 
     // Assign ranks
     for (i, candidate) in candidates.iter_mut().enumerate() {
