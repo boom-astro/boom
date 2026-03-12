@@ -5,5 +5,5 @@
 services:
   producer:
     volumes:
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
       # Remove the alerts volume mount - alerts will stay in container
