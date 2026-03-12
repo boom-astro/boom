@@ -227,7 +227,7 @@ pub fn associate_host(
     config: &HostGalaxyConfig,
 ) -> HostGalaxyAssociation {
     let n_candidates_searched = galaxy_docs.len() as u32;
-    let search_radius_arcsec = 0.0; // Set by the crossmatch config, not here
+    let search_radius_arcsec = f64::NAN; // Unknown here; configured by the crossmatch, not in this function
 
     let mut candidates: Vec<HostCandidate> = Vec::new();
 
