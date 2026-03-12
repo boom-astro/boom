@@ -1951,6 +1951,7 @@ mod tests {
                 })
                 .collect::<std::collections::HashMap<_, _>>(),
             ),
+            host_galaxy: None,
         };
 
         aux_collection
@@ -2052,6 +2053,7 @@ mod tests {
                     })
                     .collect::<std::collections::HashMap<_, _>>(),
                 ),
+                host_galaxy: None,
             },
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj002_{}", unique_suffix),
@@ -2082,6 +2084,7 @@ mod tests {
                     })
                     .collect::<std::collections::HashMap<_, _>>(),
                 ),
+                host_galaxy: None,
             },
         ];
 
@@ -2191,6 +2194,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             },
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj002_{}", unique_suffix),
@@ -2202,6 +2206,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             },
         ];
 
