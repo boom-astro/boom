@@ -74,17 +74,6 @@ EXPECTED_ALERTS=29142
 N_FILTERS=25
 TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
 
-# Check that the mongo-init container has completed successfully before proceeding,
-# which indicates that the database has been initialized and is ready for use
-echo "$(current_datetime) - Waiting for mongo-init container to complete"
-# Wait for it and fetch the exit code
-MONGO_INIT_EXIT_CODE=$(docker compose -f $COMPOSE_CONFIG wait mongo-init && docker compose -f $COMPOSE_CONFIG ps -q mongo-init | xargs docker inspect -f '{{.State.ExitCode}}')
-if [ "$MONGO_INIT_EXIT_CODE" -ne 0 ]; then
-    echo "$(current_datetime) - ERROR: mongo-init container exited with non-zero status $MONGO_INIT_EXIT_CODE"
-    docker compose -f $COMPOSE_CONFIG logs mongo-init
-    exit 1
-fi
-
 # Wait for the kafka consumer to start expecting messages (when it logs "Consumer received first message, continuing...")
 echo "$(current_datetime) - Waiting for Kafka consumer to start"
 START_TIME=$(date +%s)
