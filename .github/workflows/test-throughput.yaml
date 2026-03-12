@@ -58,7 +58,7 @@ jobs:
           uvx gdown https://drive.google.com/file/d/1CFAxQdwYUl89G39HsbGNe6XkKHFJu5rg -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
         run: |
-          uv run tests/throughput/run.py
+          uv run tests/throughput/run.py --timeout 600
       - name: Upload logs (including wall time) as artifact
         if: always()
         uses: actions/upload-artifact@v4
