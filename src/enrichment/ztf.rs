@@ -2,7 +2,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
-use crate::utils::host::{self, HostGalaxyConfig};
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
     PhotometryMag, ZTF_ZP,
@@ -276,6 +276,7 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 "prv_nondetections": "$aux.prv_nondetections",
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "lsst": {
                         "$cond": {
@@ -336,6 +337,7 @@ pub struct ZtfAlertForEnrichment {
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -345,6 +347,7 @@ pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
+    pub hosted: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -375,7 +378,6 @@ pub struct ZtfEnrichmentWorker {
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
     babamul: Option<Babamul>,
-    host_galaxy_config: HostGalaxyConfig,
 }
 
 #[async_trait::async_trait]
@@ -408,8 +410,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None
         };
 
-        let host_galaxy_config = config.host_galaxy.clone();
-
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -424,7 +424,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_b_model,
             btsbot_model,
             babamul,
-            host_galaxy_config,
         })
     }
 
@@ -516,37 +515,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 None
             };
 
-            // Host galaxy association
-            let host_galaxy = if self.host_galaxy_config.enabled {
-                let galaxy_docs = alert
-                    .cross_matches
-                    .as_ref()
-                    .and_then(|xm| xm.get(&self.host_galaxy_config.catalog))
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let association = host::associate_host(
-                    alert.candidate.candidate.ra,
-                    alert.candidate.candidate.dec,
-                    galaxy_docs,
-                    &self.host_galaxy_config,
-                );
-                Some(association)
+            let update_alert_document = if let Some(classifications) = classifications {
+                doc! { "$set": {
+                    "classifications": mongify(&classifications),
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }}
             } else {
-                None
+                doc! { "$set": {
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }}
             };
-
-            let mut set_doc = doc! {
-                "properties": mongify(&properties),
-                "updated_at": now,
-            };
-            if let Some(ref classifications) = classifications {
-                set_doc.insert("classifications", mongify(classifications));
-            }
-            if let Some(ref hg) = host_galaxy {
-                set_doc.insert("host_galaxy", mongify(hg));
-            }
-
-            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -679,11 +659,20 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
+        // Derive hosted boolean from object-level host galaxy association
+        let hosted = alert
+            .host_galaxy
+            .as_ref()
+            .and_then(|hg| hg.best_host.as_ref())
+            .map(|best| best.dlr < 5.0)
+            .unwrap_or(false);
+
         Ok((
             ZtfAlertProperties {
                 rock: is_rock,
                 star: is_star,
                 near_brightstar: is_near_brightstar,
+                hosted,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),

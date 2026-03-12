@@ -6,7 +6,7 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
-use crate::utils::host::{self, HostGalaxyConfig};
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
@@ -135,6 +135,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "ztf": {
                         "$cond": {
@@ -190,6 +191,7 @@ pub struct LsstAlertForEnrichment {
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
@@ -200,6 +202,7 @@ pub struct LsstAlertProperties {
     pub stationary: bool,
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
+    pub hosted: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
 }
@@ -211,7 +214,6 @@ pub struct LsstEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
-    host_galaxy_config: HostGalaxyConfig,
 }
 
 #[async_trait::async_trait]
@@ -262,8 +264,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             None
         };
 
-        let host_galaxy_config = config.host_galaxy.clone();
-
         Ok(LsstEnrichmentWorker {
             input_queue,
             output_queue,
@@ -271,7 +271,6 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
-            host_galaxy_config,
         })
     }
 
@@ -319,34 +318,12 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let properties = self.get_alert_properties(&alert).await?;
 
-            // Host galaxy association
-            let host_galaxy = if self.host_galaxy_config.enabled {
-                let galaxy_docs = alert
-                    .cross_matches
-                    .as_ref()
-                    .and_then(|xm| xm.get(&self.host_galaxy_config.catalog))
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let association = host::associate_host(
-                    alert.candidate.dia_source.ra,
-                    alert.candidate.dia_source.dec,
-                    galaxy_docs,
-                    &self.host_galaxy_config,
-                );
-                Some(association)
-            } else {
-                None
+            let update_alert_document = doc! {
+                "$set": {
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }
             };
-
-            let mut set_doc = doc! {
-                "properties": mongify(&properties),
-                "updated_at": now,
-            };
-            if let Some(ref hg) = host_galaxy {
-                set_doc.insert("host_galaxy", mongify(hg));
-            }
-
-            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -489,10 +466,19 @@ impl LsstEnrichmentWorker {
             photstats.clone()
         };
 
+        // Derive hosted boolean from object-level host galaxy association
+        let hosted = alert
+            .host_galaxy
+            .as_ref()
+            .and_then(|hg| hg.best_host.as_ref())
+            .map(|best| best.dlr < 5.0)
+            .unwrap_or(false);
+
         Ok(LsstAlertProperties {
             rock: is_rock,
             star: is_star,
             near_brightstar: is_near_brightstar,
+            hosted,
             stationary,
             photstats,
             multisurvey_photstats,

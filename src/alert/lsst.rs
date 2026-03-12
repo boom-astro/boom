@@ -10,6 +10,7 @@ use crate::{
     utils::{
         db::{mongify, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation},
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -847,6 +848,7 @@ pub struct LsstObject {
     pub fp_hists: Vec<LsstForcedPhot>,
     pub is_sso: bool,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -871,6 +873,7 @@ pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: host::HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
@@ -978,6 +981,8 @@ impl AlertWorker for LsstAlertWorker {
         let decam_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&decam::ALERT_AUX_COLLECTION);
 
+        let host_galaxy_config = config.host_galaxy.clone();
+
         let worker = LsstAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             schema_registry: SchemaRegistry::new(
@@ -986,6 +991,7 @@ impl AlertWorker for LsstAlertWorker {
                 Some(github_fallback_url.to_string()),
             ),
             xmatch_configs,
+            host_galaxy_config,
             db,
             alert_collection,
             alert_aux_collection,
@@ -1061,12 +1067,34 @@ impl AlertWorker for LsstAlertWorker {
 
         if !alert_aux_exists {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+
+            // Compute host galaxy association from galaxy catalog cross-matches
+            let host_galaxy = if self.host_galaxy_config.enabled {
+                let galaxy_docs: Vec<serde_json::Value> = xmatches
+                    .get(&self.host_galaxy_config.catalog)
+                    .map(|docs| {
+                        docs.iter()
+                            .filter_map(|d| serde_json::to_value(d).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(host::associate_host(
+                    ra,
+                    dec,
+                    &galaxy_docs,
+                    &self.host_galaxy_config,
+                ))
+            } else {
+                None
+            };
+
             let obj = LsstObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 fp_hists,
                 is_sso: ss_object_id.is_some(),
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
