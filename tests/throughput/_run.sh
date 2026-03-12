@@ -65,6 +65,7 @@ mkdir -p $LOGS_DIR
 docker compose -f $COMPOSE_CONFIG logs producer > $LOGS_DIR/producer.log &
 docker compose -f $COMPOSE_CONFIG logs consumer -f > $LOGS_DIR/consumer.log &
 docker compose -f $COMPOSE_CONFIG logs scheduler -f > $LOGS_DIR/scheduler.log &
+docker compose -f $COMPOSE_CONFIG logs mongo-init -f > $LOGS_DIR/mongo-init.log &
 # Also log stats from containers for later analysis
 docker compose -f $COMPOSE_CONFIG stats consumer --format json > $LOGS_DIR/consumer.stats.log &
 docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/scheduler.stats.log &
@@ -72,6 +73,17 @@ docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/sche
 EXPECTED_ALERTS=29142
 N_FILTERS=25
 TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
+
+# Check that the mongo-init container has completed successfully before proceeding,
+# which indicates that the database has been initialized and is ready for use
+echo "$(current_datetime) - Waiting for mongo-init container to complete"
+# Wait for it and fetch the exit code
+MONGO_INIT_EXIT_CODE=$(docker compose -f $COMPOSE_CONFIG wait mongo-init && docker compose -f $COMPOSE_CONFIG ps -q mongo-init | xargs docker inspect -f '{{.State.ExitCode}}')
+if [ "$MONGO_INIT_EXIT_CODE" -ne 0 ]; then
+    echo "$(current_datetime) - ERROR: mongo-init container exited with non-zero status $MONGO_INIT_EXIT_CODE"
+    docker compose -f $COMPOSE_CONFIG logs mongo-init
+    exit 1
+fi
 
 # Wait for the kafka consumer to start expecting messages (when it logs "Consumer received first message, continuing...")
 echo "$(current_datetime) - Waiting for Kafka consumer to start"
@@ -81,7 +93,6 @@ while ! docker compose -f $COMPOSE_CONFIG logs consumer | grep -q "Consumer rece
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for Kafka consumer to start"
-        docker compose -f $COMPOSE_CONFIG down
         exit 1
     fi
     sleep 1
@@ -105,7 +116,6 @@ while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDoc
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for alerts to be ingested"
-        docker compose -f $COMPOSE_CONFIG down
         exit 1
     fi
     sleep 1
@@ -122,7 +132,6 @@ while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDoc
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for alerts to be classified"
-        docker compose -f $COMPOSE_CONFIG down
         exit 1
     fi
     sleep 1
@@ -143,7 +152,6 @@ while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for filters to run on all alerts"
-        docker compose -f $COMPOSE_CONFIG down
         exit 1
     fi
     sleep 1
