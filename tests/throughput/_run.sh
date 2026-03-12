@@ -58,7 +58,11 @@ mongo_count() {
 docker compose -f $COMPOSE_CONFIG down
 
 # Spin up BOOM services with Docker Compose
-docker compose -f $COMPOSE_CONFIG up --build -d
+if ! docker compose -f $COMPOSE_CONFIG up --build -d; then
+    echo "$(current_datetime) - ERROR: Failed to start Docker Compose services"
+    docker compose -f $COMPOSE_CONFIG logs mongo-init || true
+    exit 1
+fi
 
 # Send the logs to file so we can analyze later
 mkdir -p $LOGS_DIR
@@ -78,6 +82,16 @@ TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
 echo "$(current_datetime) - Waiting for Kafka consumer to start"
 START_TIME=$(date +%s)
 while ! docker compose -f $COMPOSE_CONFIG logs consumer | grep -q "Consumer received first message, continuing..."; do
+    MONGO_INIT_CONTAINER_ID=$(docker compose -f $COMPOSE_CONFIG ps -aq mongo-init | tail -n 1)
+    if [ -n "$MONGO_INIT_CONTAINER_ID" ]; then
+        MONGO_INIT_EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$MONGO_INIT_CONTAINER_ID" 2>/dev/null || true)
+        if [[ "$MONGO_INIT_EXIT_CODE" =~ ^[0-9]+$ ]] && [ "$MONGO_INIT_EXIT_CODE" -ne 0 ]; then
+            echo "$(current_datetime) - ERROR: mongo-init did not complete successfully (exit $MONGO_INIT_EXIT_CODE)"
+            docker compose -f $COMPOSE_CONFIG logs mongo-init || true
+            exit 1
+        fi
+    fi
+
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
@@ -155,7 +169,7 @@ python $BOOM_REPO_ROOT/tests/throughput/read-kafka-output.py
 
 # Check to see if any of our containers have exited with a non-zero status,
 # which would indicate an error
-EXIT_CODE=$(docker compose -f $COMPOSE_CONFIG ps -q | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
+EXIT_CODE=$(docker compose -f $COMPOSE_CONFIG ps -aq | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
 if [ -n "$EXIT_CODE" ]; then
     echo "$(current_datetime) - ERROR: One or more containers exited with a non-zero status"
     exit 1
