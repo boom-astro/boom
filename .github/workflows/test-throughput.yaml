@@ -55,7 +55,7 @@ jobs:
       - name: Download auxiliary ZTF alerts from Google Drive
         run: |
           mkdir -p ./data/alerts
-          uvx gdown https://drive.google.com/uc?id=126uLk7xah2EpJR741ziPO-cxQ43nZUoL -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+          uvx gdown https://drive.google.com/file/d/1CFAxQdwYUl89G39HsbGNe6XkKHFJu5rg -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
         run: |
           uv run tests/throughput/run.py
