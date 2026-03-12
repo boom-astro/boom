@@ -324,7 +324,10 @@ pub fn associate_host(
     // Compute p_host_none = 1 - sum(posteriors)
     let p_host_none: f64 = 1.0 - candidates.iter().map(|c| c.posterior).sum::<f64>();
 
-    let best_host = candidates.first().cloned();
+    let best_host = candidates
+        .iter()
+        .cloned()
+        .max_by(|a, b| a.posterior.partial_cmp(&b.posterior).unwrap_or(std::cmp::Ordering::Equal));
 
     HostGalaxyAssociation {
         best_host,
