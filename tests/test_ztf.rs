@@ -424,7 +424,7 @@ async fn test_filter_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     // then run the enrichment worker to get the classifications
-    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None, None)
         .await
         .unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
