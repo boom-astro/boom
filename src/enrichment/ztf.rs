@@ -784,7 +784,10 @@ impl ZtfEnrichmentWorker {
                     flat
                 }
                 Err(e) => {
-                    warn!("Failed to prepare triplet for candid {}: {}", item.candid, e);
+                    warn!(
+                        "Failed to prepare triplet for candid {}: {}",
+                        item.candid, e
+                    );
                     request_ids.push(None);
                     continue;
                 }
@@ -833,7 +836,10 @@ impl ZtfEnrichmentWorker {
                     request_ids.push(Some(request_id));
                 }
                 Err(e) => {
-                    warn!("Failed to serialize GPU request for candid {}: {}", item.candid, e);
+                    warn!(
+                        "Failed to serialize GPU request for candid {}: {}",
+                        item.candid, e
+                    );
                     request_ids.push(None);
                 }
             }
@@ -841,9 +847,10 @@ impl ZtfEnrichmentWorker {
 
         // Push all requests to the GPU queue
         if !gpu_requests.is_empty() {
-            let _: usize = con.lpush(gpu_queue, &gpu_requests).await.map_err(|e| {
-                EnrichmentWorkerError::Redis(e)
-            })?;
+            let _: usize = con
+                .lpush(gpu_queue, &gpu_requests)
+                .await
+                .map_err(|e| EnrichmentWorkerError::Redis(e))?;
         }
 
         // Poll for results with timeout
@@ -1123,7 +1130,10 @@ mod tests {
         let nnondet = meta[19];
         assert!((ndethist - 10.0).abs() < 1e-6);
         assert!((ncovhist - 50.0).abs() < 1e-6);
-        assert!((nnondet - 40.0).abs() < 1e-6, "nnondet = ncovhist - ndethist");
+        assert!(
+            (nnondet - 40.0).abs() < 1e-6,
+            "nnondet = ncovhist - ndethist"
+        );
 
         // age = first_jd - last_jd = 2459000 - 2459030 = -30
         let age = meta[13];
@@ -1173,7 +1183,10 @@ mod tests {
         // sgscore1: ACAI position 11, BTSBot position 0
         assert!((acai[11] - btsbot[0]).abs() < 1e-6, "sgscore1 should match");
         // distpsnr1: ACAI position 12, BTSBot position 1
-        assert!((acai[12] - btsbot[1]).abs() < 1e-6, "distpsnr1 should match");
+        assert!(
+            (acai[12] - btsbot[1]).abs() < 1e-6,
+            "distpsnr1 should match"
+        );
         // drb: ACAI position 0, BTSBot position 17
         assert!((acai[0] - btsbot[17]).abs() < 1e-6, "drb should match");
     }

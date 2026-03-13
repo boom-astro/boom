@@ -113,8 +113,7 @@ fn measure_serde_overhead(n: usize) -> (std::time::Duration, usize) {
 #[ignore]
 fn bench_inference_cpu_vs_batched() {
     // Default to CPU; set USE_GPU=true externally to test GPU path
-    let use_gpu = std::env::var("USE_GPU")
-        .unwrap_or_else(|_| "false".to_string());
+    let use_gpu = std::env::var("USE_GPU").unwrap_or_else(|_| "false".to_string());
     println!("\nUSE_GPU={}", use_gpu);
 
     println!("Loading models...");
@@ -125,8 +124,10 @@ fn bench_inference_cpu_vs_batched() {
     models.run_one_at_a_time(10);
     models.run_batched(10);
 
-    println!("\n{:>8} {:>14} {:>14} {:>10} {:>14}",
-        "batch", "one-at-a-time", "batched", "speedup", "serde overhead");
+    println!(
+        "\n{:>8} {:>14} {:>14} {:>10} {:>14}",
+        "batch", "one-at-a-time", "batched", "speedup", "serde overhead"
+    );
     println!("{}", "-".repeat(70));
 
     for &n in &[1, 10, 50, 100, 250, 500, 1000] {
@@ -161,8 +162,12 @@ fn bench_inference_cpu_vs_batched() {
     }
 
     println!("\nNotes:");
-    println!("  - 'one-at-a-time': 6 models × N sequential predict(batch=1) calls (current CPU path)");
+    println!(
+        "  - 'one-at-a-time': 6 models × N sequential predict(batch=1) calls (current CPU path)"
+    );
     println!("  - 'batched': 6 models × 1 predict(batch=N) call (GPU worker path)");
-    println!("  - 'serde overhead': JSON serialize+deserialize N requests (additional GPU path cost)");
+    println!(
+        "  - 'serde overhead': JSON serialize+deserialize N requests (additional GPU path cost)"
+    );
     println!("  - USE_GPU={use_gpu}. Set USE_GPU=true to test GPU execution.");
 }

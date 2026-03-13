@@ -613,7 +613,8 @@ mod tests {
 
     #[test]
     fn test_gpu_config_deserialize_enabled_single_gpu() {
-        let json = r#"{"enabled": true, "device_ids": [0], "batch_size": 512, "batch_timeout_ms": 50}"#;
+        let json =
+            r#"{"enabled": true, "device_ids": [0], "batch_size": 512, "batch_timeout_ms": 50}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
         assert_eq!(config.device_ids, vec![0]);

@@ -53,7 +53,9 @@ static GPU_ACTIVE: LazyLock<UpDownCounter<i64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .i64_up_down_counter("gpu_worker.active")
         .with_unit("{batch}")
-        .with_description("Number of inference batches currently being processed by the GPU worker.")
+        .with_description(
+            "Number of inference batches currently being processed by the GPU worker.",
+        )
         .build()
 });
 
@@ -150,9 +152,18 @@ impl GpuWorkerState {
         }
 
         // Build batched input tensors
-        let acai_metadata: Vec<f32> = requests.iter().flat_map(|r| r.acai_metadata.iter().copied()).collect();
-        let btsbot_metadata: Vec<f32> = requests.iter().flat_map(|r| r.btsbot_metadata.iter().copied()).collect();
-        let triplet_flat: Vec<f32> = requests.iter().flat_map(|r| r.triplet.iter().copied()).collect();
+        let acai_metadata: Vec<f32> = requests
+            .iter()
+            .flat_map(|r| r.acai_metadata.iter().copied())
+            .collect();
+        let btsbot_metadata: Vec<f32> = requests
+            .iter()
+            .flat_map(|r| r.btsbot_metadata.iter().copied())
+            .collect();
+        let triplet_flat: Vec<f32> = requests
+            .iter()
+            .flat_map(|r| r.triplet.iter().copied())
+            .collect();
 
         let acai_meta_arr = Array::from_shape_vec((n, 25), acai_metadata)
             .map_err(|e| ModelError::NdarrayShape(e))?;
@@ -276,13 +287,20 @@ pub async fn run_gpu_worker(
                     match serde_json::to_string(resp) {
                         Ok(json) => {
                             let _: Result<(), _> = redis::pipe()
-                                .cmd("SET").arg(&key).arg(&json)
-                                .cmd("EXPIRE").arg(&key).arg(result_ttl_secs)
+                                .cmd("SET")
+                                .arg(&key)
+                                .arg(&json)
+                                .cmd("EXPIRE")
+                                .arg(&key)
+                                .arg(result_ttl_secs)
                                 .query_async(&mut con)
                                 .await;
                         }
                         Err(e) => {
-                            error!(candid = req.candid, "failed to serialize GPU response: {}", e);
+                            error!(
+                                candid = req.candid,
+                                "failed to serialize GPU response: {}", e
+                            );
                         }
                     }
                 }
@@ -372,7 +390,7 @@ mod tests {
         let mut triplet = vec![0.0f32; 63 * 63 * 3];
         // Set a recognizable pattern: pixel (10, 20), channels 0/1/2
         let idx = (10 * 63 + 20) * 3;
-        triplet[idx] = 0.11;     // science
+        triplet[idx] = 0.11; // science
         triplet[idx + 1] = 0.22; // template
         triplet[idx + 2] = 0.33; // difference
 
