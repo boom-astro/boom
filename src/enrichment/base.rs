@@ -2,6 +2,7 @@ use crate::{
     alert::AlertCutout,
     conf::{self, AppConfig},
     enrichment::models::{ModelError, SharedModels},
+    gpu::GpuPool,
     utils::{
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
@@ -93,6 +94,7 @@ pub trait EnrichmentWorker {
     async fn new(
         config_path: &str,
         shared_models: Option<Arc<SharedModels>>,
+        gpu_pool: Option<Arc<GpuPool>>,
     ) -> Result<Self, EnrichmentWorkerError>
     where
         Self: Sized;
@@ -198,9 +200,10 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     config_path: &str,
     worker_id: Uuid,
     shared_models: Option<Arc<SharedModels>>,
+    gpu_pool: Option<Arc<GpuPool>>,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
-    let mut enrichment_worker = T::new(config_path, shared_models).await?;
+    let mut enrichment_worker = T::new(config_path, shared_models, gpu_pool).await?;
 
     let config = AppConfig::from_path(config_path)?;
     let mut con = config.build_redis().await?;

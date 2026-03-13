@@ -20,6 +20,9 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+lightcurve_fitting:
+  nonparametric: false  # GP fitting (rise/decay timescales, peak mag, etc.)
+  parametric: false     # PSO + SVI model fitting (Bazin, Villar, TDE, etc.)
 gpu:
   enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.

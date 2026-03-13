@@ -1,6 +1,7 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
     enrichment::models::SharedModelPool,
+    gpu::GpuPool,
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -97,11 +98,25 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         None
     };
 
+    // Create GPU pool for lightcurve fitting when GPU is enabled and any
+    // fitting stage is turned on. The pool is shared across all enrichment
+    // workers and serialises access per device via internal mutexes.
+    let lc_fitting = &config.lightcurve_fitting;
+    let gpu_pool = if config.gpu.enabled && (lc_fitting.nonparametric || lc_fitting.parametric) {
+        Some(
+            GpuPool::new(&config.gpu.device_ids)
+                .expect("failed to initialise GPU pool for lightcurve fitting"),
+        )
+    } else {
+        None
+    };
+
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
         args.survey.clone(),
         config_path.clone(),
+        None,
         None,
     );
     let enrichment_pool = ThreadPool::new(
@@ -110,12 +125,14 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         args.survey.clone(),
         config_path.clone(),
         shared_model_pool,
+        gpu_pool,
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
         args.survey.clone(),
         config_path.clone(),
+        None,
         None,
     );
 

@@ -1,10 +1,12 @@
-use crate::conf::AppConfig;
+use crate::conf::{AppConfig, LightcurveFittingConfig};
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
+#[cfg(feature = "cuda")]
+use crate::utils::lightcurves::run_fitting_gpu_batch;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag, ZTF_ZP,
+    analyze_photometry, photometry_to_lc_arrays, prepare_photometry, AllBandsProperties, Band,
+    PerBandProperties, PhotometryMag, ZTF_ZP,
 };
 use crate::{
     alert::ZtfCandidate,
@@ -20,6 +22,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{instrument, trace, warn};
 
 #[serdavro]
@@ -382,6 +385,8 @@ struct AlertWork {
     all_bands_properties: AllBandsProperties,
     cutouts: crate::alert::AlertCutout,
     alert: ZtfAlertForEnrichment,
+    lightcurve: Vec<PhotometryMag>,
+    fitting_result: Option<lightcurve_fitting::LightcurveFittingResult>,
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -394,14 +399,18 @@ pub struct ZtfEnrichmentWorker {
     /// Shared ONNX models (loaded once, shared across all enrichment workers via Arc).
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
+    lc_fitting_config: LightcurveFittingConfig,
+    #[allow(dead_code)] // used only with cuda feature
+    gpu_pool: Option<Arc<crate::gpu::GpuPool>>,
 }
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for ZtfEnrichmentWorker {
-    #[instrument(skip(shared_models), err)]
+    #[instrument(skip(shared_models, gpu_pool), err)]
     async fn new(
         config_path: &str,
         shared_models: Option<Arc<SharedModels>>,
+        gpu_pool: Option<Arc<crate::gpu::GpuPool>>,
     ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
@@ -427,6 +436,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None => Some(SharedModels::load(None)?),
         };
 
+        let lc_fitting_config = config.lightcurve_fitting.clone();
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -436,6 +447,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
             babamul,
+            lc_fitting_config,
+            gpu_pool,
         })
     }
 
@@ -489,7 +502,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-            let (properties, all_bands_properties, programid, _lightcurve) =
+            let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
             work_items.push(AlertWork {
                 candid,
@@ -498,7 +511,36 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 all_bands_properties,
                 cutouts,
                 alert,
+                lightcurve,
+                fitting_result: None,
             });
+        }
+
+        // Run lightcurve fitting if enabled
+        if self.lc_fitting_config.nonparametric || self.lc_fitting_config.parametric {
+            let do_np = self.lc_fitting_config.nonparametric;
+            let do_param = self.lc_fitting_config.parametric;
+
+            #[cfg(feature = "cuda")]
+            let use_gpu = self.gpu_pool.is_some();
+            #[cfg(not(feature = "cuda"))]
+            let use_gpu = false;
+
+            if use_gpu {
+                #[cfg(feature = "cuda")]
+                {
+                    let gpu_pool = self.gpu_pool.as_ref().unwrap().clone();
+                    let lightcurves: Vec<Vec<PhotometryMag>> =
+                        work_items.iter().map(|w| w.lightcurve.clone()).collect();
+                    let results =
+                        run_fitting_gpu_batch(&lightcurves, do_np, do_param, gpu_pool).await;
+                    for (item, result) in work_items.iter_mut().zip(results) {
+                        item.fitting_result = result;
+                    }
+                }
+            } else {
+                self.run_fitting_cpu(&mut work_items, do_np, do_param).await;
+            }
         }
 
         // Run ML classification using shared models
@@ -510,18 +552,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             };
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
-            let update_alert_document = if let Some(ref cls) = classifications {
-                doc! { "$set": {
-                    "classifications": mongify(cls),
-                    "properties": mongify(&item.properties),
-                    "updated_at": now,
-                }}
-            } else {
-                doc! { "$set": {
-                    "properties": mongify(&item.properties),
-                    "updated_at": now,
-                }}
+            let mut set_doc = doc! {
+                "properties": mongify(&item.properties),
+                "updated_at": now,
             };
+            if let Some(ref cls) = classifications {
+                set_doc.insert("classifications", mongify(cls));
+            }
+            if let Some(ref fitting) = item.fitting_result {
+                set_doc.insert("lightcurve_fitting", mongify(fitting));
+            }
+            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -553,6 +594,64 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 }
 
 impl ZtfEnrichmentWorker {
+    /// CPU per-alert fitting fallback (no GPU or cuda feature disabled).
+    async fn run_fitting_cpu(&self, work_items: &mut [AlertWork], do_np: bool, do_param: bool) {
+        for item in work_items.iter_mut() {
+            let lc = item.lightcurve.clone();
+            let result = tokio::time::timeout(
+                Duration::from_secs(60),
+                tokio::task::spawn_blocking(move || {
+                    let (times, mags, mag_errs, bands) = photometry_to_lc_arrays(&lc);
+                    let mag_bands =
+                        lightcurve_fitting::build_mag_bands(&times, &mags, &mag_errs, &bands);
+
+                    let (nonparametric, trained_gps) = if do_np {
+                        lightcurve_fitting::fit_nonparametric(&mag_bands)
+                    } else {
+                        (vec![], std::collections::HashMap::new())
+                    };
+
+                    let thermal = if do_np {
+                        lightcurve_fitting::fit_thermal(&mag_bands, Some(&trained_gps))
+                    } else {
+                        None
+                    };
+
+                    let parametric = if do_param {
+                        let flux_bands =
+                            lightcurve_fitting::build_flux_bands(&times, &mags, &mag_errs, &bands);
+                        lightcurve_fitting::fit_parametric(
+                            &flux_bands,
+                            false,
+                            lightcurve_fitting::UncertaintyMethod::Svi,
+                        )
+                    } else {
+                        vec![]
+                    };
+
+                    lightcurve_fitting::LightcurveFittingResult {
+                        nonparametric,
+                        parametric,
+                        thermal,
+                    }
+                }),
+            )
+            .await;
+
+            item.fitting_result = match result {
+                Ok(Ok(r)) => Some(r),
+                Ok(Err(e)) => {
+                    warn!("LC fitting panicked for candid {}: {e}", item.candid);
+                    None
+                }
+                Err(_) => {
+                    warn!("LC fitting timed out for candid {}", item.candid);
+                    None
+                }
+            };
+        }
+    }
+
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertForEnrichment,

@@ -439,6 +439,23 @@ fn default_gpu_device_ids() -> Vec<i32> {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct LightcurveFittingConfig {
+    #[serde(default)]
+    pub nonparametric: bool,
+    #[serde(default)]
+    pub parametric: bool,
+}
+
+impl Default for LightcurveFittingConfig {
+    fn default() -> Self {
+        Self {
+            nonparametric: false,
+            parametric: false,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct SurveyWorkerConfig {
     pub command_interval: u64,
     pub alert: WorkerConfig,
@@ -461,6 +478,8 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub lightcurve_fitting: LightcurveFittingConfig,
 }
 
 impl AppConfig {

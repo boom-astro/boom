@@ -106,6 +106,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
     async fn new(
         config_path: &str,
         _shared_models: Option<std::sync::Arc<crate::enrichment::models::SharedModels>>,
+        _gpu_pool: Option<std::sync::Arc<crate::gpu::GpuPool>>,
     ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
