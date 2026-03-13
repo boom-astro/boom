@@ -307,7 +307,7 @@ async fn test_enrich_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None, None)
         .await
         .unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
