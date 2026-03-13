@@ -586,7 +586,9 @@ mod tests {
                 .await;
         let status = alert_worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
-        let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None).await.unwrap();
+        let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
         let result = enrichment_worker.process_alerts(&[candid]).await;
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
         // Query with cone search and magnitude filters
@@ -649,7 +651,9 @@ mod tests {
             .await;
         let status = alert_worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
-        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None).await.unwrap();
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
         let result = enrichment_worker.process_alerts(&[candid]).await;
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
         // Query with cone search and magnitude filters
@@ -698,7 +702,9 @@ mod tests {
             AlertRandomizer::new_randomized(Survey::Lsst).get().await;
         let status = alert_worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
-        let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None).await.unwrap();
+        let mut enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
         let result = enrichment_worker.process_alerts(&[candid]).await;
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
@@ -769,7 +775,9 @@ mod tests {
             AlertRandomizer::new_randomized(Survey::Ztf).get().await;
         let status = alert_worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
-        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None).await.unwrap();
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
         let result = enrichment_worker.process_alerts(&[candid]).await;
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
