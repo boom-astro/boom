@@ -1,8 +1,8 @@
 use crate::{
     alert::{
         base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
-            SchemaRegistry,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
+            ProcessAlertStatus, SchemaRegistry,
         },
         decam, ztf,
     },
@@ -23,8 +23,8 @@ use hifitime::Epoch;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
-use tracing::instrument;
+use std::collections::{HashMap, HashSet};
+use tracing::{instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "LSST";
@@ -874,9 +874,17 @@ pub struct LsstAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
+    alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
 }
 
 impl LsstAlertWorker {
@@ -907,8 +915,149 @@ impl LsstAlertWorker {
             decam: decam_matches,
         })
     }
+
+    async fn get_existing_aux(
+        &self,
+        object_id: String,
+    ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
+        let result = self
+            .alert_aux_collection_update
+            .find_one(doc! { "_id": &object_id })
+            .projection(doc! { "prv_candidates.jd": 1, "fp_hists.jd": 1, "version": 1 })
+            .await
+            .inspect_err(as_error!())?;
+        Ok(result)
+    }
+
+    #[instrument(skip(self, prv_candidates, existing_prv_candidates,), err)]
+    async fn prepare_prv_candidates_update(
+        self: &mut Self,
+        prv_candidates: &Vec<LsstPrvCandidate>,
+        existing_prv_candidates: &Vec<LightcurveJdOnly>,
+    ) -> Result<(Vec<Document>, bool), AlertError> {
+        // if there is no new data, no update needed
+        if prv_candidates.is_empty() {
+            return Ok((vec![], false));
+        }
+
+        // if there is no existing data, we can just append without sorting
+        if existing_prv_candidates.is_empty() {
+            let new_prv_candidates_docs: Vec<Document> =
+                prv_candidates.iter().map(|pc| mongify(pc)).collect();
+            return Ok((new_prv_candidates_docs, false));
+        }
+
+        let min_new_jd_prv_candidate = prv_candidates
+            .iter()
+            .map(|pc| pc.jd)
+            .fold(f64::INFINITY, f64::min);
+        let (existing_prv_candidate_jds, max_existing_jd_prv_candidate) = existing_prv_candidates
+            .iter()
+            .fold((HashSet::new(), None::<f64>), |(mut set, max_jd), pc| {
+                set.insert(pc.jd.to_bits());
+                let max_jd = match max_jd {
+                    Some(jd) => Some(jd.max(pc.jd)),
+                    None => Some(pc.jd),
+                };
+                (set, max_jd)
+            });
+
+        // if all new data is newer than existing data, we can just append without sorting
+        if min_new_jd_prv_candidate > max_existing_jd_prv_candidate.unwrap() {
+            let new_prv_candidates_docs: Vec<Document> =
+                prv_candidates.iter().map(|pc| mongify(pc)).collect();
+            return Ok((new_prv_candidates_docs, false));
+        }
+
+        // we filter out points from the "new" data that are already in the existing data (deduplication)
+        // and at the same time find the minimum jd of the new post-deduplication data, to check if we can skip sorting
+        let (new_prv_candidates_docs, min_new_jd_prv_candidate) =
+            prv_candidates
+                .iter()
+                .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
+                    let min_jd = min_jd.min(pc.jd);
+                    if !existing_prv_candidate_jds.contains(&pc.jd.to_bits()) {
+                        let min_jd = min_jd.min(pc.jd);
+                        docs.push(mongify(pc));
+                        (docs, min_jd)
+                    } else {
+                        (docs, min_jd)
+                    }
+                });
+
+        // if all the deduplicated new data is newer than existing data, we can just append without sorting
+        if min_new_jd_prv_candidate > max_existing_jd_prv_candidate.unwrap() {
+            return Ok((new_prv_candidates_docs, false));
+        }
+
+        // else, we need to do the full update with sorting
+        Ok((new_prv_candidates_docs, true))
+    }
+
+    async fn prepare_fp_hists_update(
+        self: &mut Self,
+        fp_hists: &Vec<LsstForcedPhot>,
+        existing_fp_hists: &Vec<LightcurveJdOnly>,
+    ) -> Result<(Vec<Document>, bool), AlertError> {
+        // if there is no new data, no update needed
+        if fp_hists.is_empty() {
+            return Ok((vec![], false));
+        }
+
+        // if there is no existing data, we can just append without sorting
+        if existing_fp_hists.is_empty() {
+            let new_fp_hists_docs: Vec<Document> = fp_hists.iter().map(|pc| mongify(pc)).collect();
+            return Ok((new_fp_hists_docs, false));
+        }
+
+        let min_new_jd_fp_hist = fp_hists
+            .iter()
+            .map(|pc| pc.jd)
+            .fold(f64::INFINITY, f64::min);
+        let (existing_fp_hist_jds, max_existing_jd_fp_hist) = existing_fp_hists.iter().fold(
+            (HashSet::new(), None::<f64>),
+            |(mut set, max_jd), pc| {
+                set.insert(pc.jd.to_bits());
+                let max_jd = match max_jd {
+                    Some(jd) => Some(jd.max(pc.jd)),
+                    None => Some(pc.jd),
+                };
+                (set, max_jd)
+            },
+        );
+
+        // if all new data is newer than existing data, we can just append without sorting
+        if min_new_jd_fp_hist > max_existing_jd_fp_hist.unwrap() {
+            let new_fp_hists_docs: Vec<Document> = fp_hists.iter().map(|pc| mongify(pc)).collect();
+            return Ok((new_fp_hists_docs, false));
+        }
+
+        // we filter out points from the "new" data that are already in the existing data (deduplication)
+        // and at the same time find the minimum jd of the new post-deduplication data, to check if we can skip sorting
+        let (new_fp_hists_docs, min_new_jd_fp_hist) =
+            fp_hists
+                .iter()
+                .fold((vec![], f64::INFINITY), |(mut docs, min_jd), pc| {
+                    if !existing_fp_hist_jds.contains(&pc.jd.to_bits()) {
+                        docs.push(mongify(pc));
+                        let min_jd = min_jd.min(pc.jd);
+                        (docs, min_jd)
+                    } else {
+                        (docs, min_jd)
+                    }
+                });
+
+        // if all the deduplicated new data is newer than existing data, we can just append without sorting
+        if min_new_jd_fp_hist > max_existing_jd_fp_hist.unwrap() {
+            return Ok((new_fp_hists_docs, false));
+        }
+
+        // else, we need to do the full update with sorting
+        Ok((new_fp_hists_docs, true))
+    }
+
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
-    async fn update_aux(
+    async fn update_aux_fallback(
         self: &mut Self,
         object_id: &str,
         prv_candidates: &Vec<LsstPrvCandidate>,
@@ -927,6 +1076,88 @@ impl LsstAlertWorker {
         self.alert_aux_collection
             .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
+        Ok(())
+    }
+
+    #[instrument(
+        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
+        err
+    )]
+    async fn update_aux(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates: &Vec<LsstPrvCandidate>,
+        fp_hists: &Vec<LsstForcedPhot>,
+        survey_matches: &Option<LsstAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        let current_version = existing_alert_aux.version;
+        let (new_prv_candidates_docs, need_sort_prv_candidates) = self
+            .prepare_prv_candidates_update(prv_candidates, &existing_alert_aux.prv_candidates)
+            .await?;
+        let (new_fp_hists_docs, need_sort_fp_hists) = self
+            .prepare_fp_hists_update(fp_hists, &existing_alert_aux.fp_hists)
+            .await?;
+
+        let mut push_updates = Document::new();
+        if !new_prv_candidates_docs.is_empty() {
+            if need_sort_prv_candidates {
+                push_updates.insert(
+                    "prv_candidates",
+                    doc! { "$each": new_prv_candidates_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert("prv_candidates", doc! { "$each": new_prv_candidates_docs });
+            }
+        }
+        if !new_fp_hists_docs.is_empty() {
+            if need_sort_fp_hists {
+                push_updates.insert(
+                    "fp_hists",
+                    doc! { "$each": new_fp_hists_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert("fp_hists", doc! { "$each": new_fp_hists_docs });
+            }
+        }
+
+        let update_doc = if push_updates.is_empty() {
+            doc! {
+                "$set": {
+                    "aliases": mongify(survey_matches),
+                    "updated_at": now,
+                    "version": current_version.unwrap_or(0) + 1,
+                }
+            }
+        } else {
+            doc! {
+                "$push": push_updates,
+                "$set": {
+                    "aliases": mongify(survey_matches),
+                    "updated_at": now,
+                    "version": current_version.unwrap_or(0) + 1,
+                }
+            }
+        };
+        let find_doc = if let Some(version) = current_version {
+            doc! { "_id": object_id, "version": version }
+        } else {
+            doc! { "_id": object_id, "version": { "$exists": false } }
+        };
+        let update_result = self
+            .alert_aux_collection
+            .update_one(find_doc, update_doc)
+            .await?;
+        if update_result.matched_count == 0 {
+            warn!(
+                "Concurrent modification detected for object_id {}. Using DB-only update.",
+                object_id
+            );
+            return self
+                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                .await;
+        }
         Ok(())
     }
 }
@@ -970,6 +1201,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
@@ -989,6 +1221,7 @@ impl AlertWorker for LsstAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
+            alert_aux_collection_update,
             alert_cutout_collection,
             ztf_alert_aux_collection,
             decam_alert_aux_collection,
@@ -1029,9 +1262,9 @@ impl AlertWorker for LsstAlertWorker {
         let dec = candidate.dia_source.dec;
 
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
-        let fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
+        let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
-        let status = self
+        let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
                 avro_alert.cutout_science,
@@ -1042,16 +1275,17 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+        if let ProcessAlertStatus::Exists(_) = cutout_status {
+            return Ok(cutout_status);
         }
 
-        let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
-            .await
-            .inspect_err(as_error!())?;
+        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
         prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
+
+        // let's make sure all 2 arrays are sorted by jd ascending
+        prv_candidates.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
+        fp_hists.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -1059,7 +1293,7 @@ impl AlertWorker for LsstAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        if !alert_aux_exists {
+        if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
             let obj = LsstObject {
                 object_id: object_id.clone(),
@@ -1080,6 +1314,7 @@ impl AlertWorker for LsstAlertWorker {
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
+                    &existing_alert_aux.unwrap(),
                 )
                 .await
                 .inspect_err(as_error!())?;
@@ -1087,9 +1322,16 @@ impl AlertWorker for LsstAlertWorker {
                 result.inspect_err(as_error!())?;
             }
         } else {
-            self.update_aux(&object_id, &prv_candidates, &fp_hists, &survey_matches, now)
-                .await
-                .inspect_err(as_error!())?;
+            self.update_aux(
+                &object_id,
+                &prv_candidates,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing_alert_aux.unwrap(),
+            )
+            .await
+            .inspect_err(as_error!())?;
         }
 
         let alert = LsstAlert {
