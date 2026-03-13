@@ -419,7 +419,7 @@ pub struct GpuConfig {
     pub enabled: bool,
     /// CUDA device IDs available for GPU work. Default: [0].
     /// ONNX models are loaded on the first device. Additional devices are
-    /// available for the GPU pool (future lightcurve fitting).
+    /// available for the GPU pool used by lightcurve fitting and other GPU tasks.
     /// Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
     #[serde(default = "default_gpu_device_ids")]
     pub device_ids: Vec<i32>,
