@@ -84,17 +84,15 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .instrument(info_span!("sigint handler")),
     );
 
-    // Load ONNX models once at startup, shared across all enrichment workers.
-    // If gpu.enabled, one model set is loaded per configured CUDA device and
-    // workers are assigned to devices via round-robin. Otherwise, a single
-    // CPU model set is shared by all workers.
-    let shared_model_pool = if matches!(args.survey, Survey::Ztf) {
-        let device_ids: &[i32] = if config.gpu.enabled {
-            &config.gpu.device_ids
-        } else {
-            &[]
-        };
-        Some(SharedModelPool::load(device_ids).expect("failed to load ONNX models"))
+    // Load ONNX models at startup. When GPUs are enabled, create a pool of
+    // shared model sets (one per device) to conserve VRAM — workers round-robin
+    // across devices. When GPUs are disabled, pass None so each worker loads
+    // its own private models on CPU (zero mutex contention).
+    let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+        Some(
+            SharedModelPool::load(&config.gpu.device_ids)
+                .expect("failed to load ONNX models on GPU"),
+        )
     } else {
         None
     };
