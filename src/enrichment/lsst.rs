@@ -1,13 +1,16 @@
 use crate::alert::LsstCandidate;
-use crate::conf::AppConfig;
+use crate::conf::{AppConfig, LightcurveFittingConfig};
 use crate::enrichment::{
     babamul::{Babamul, BabamulLsstAlert},
     fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+#[cfg(feature = "cuda")]
+use crate::utils::lightcurves::run_fitting_gpu_batch;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
+    analyze_photometry, photometry_to_lc_arrays, prepare_photometry, Band, PerBandProperties,
+    PhotometryMag,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -19,7 +22,8 @@ use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tracing::{error, instrument, warn};
 
 pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
@@ -210,6 +214,9 @@ pub struct LsstEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     babamul: Option<Babamul>,
+    lc_fitting_config: LightcurveFittingConfig,
+    #[allow(dead_code)] // used only with cuda feature
+    gpu_pool: Option<Arc<crate::gpu::GpuPool>>,
 }
 
 #[async_trait::async_trait]
@@ -218,6 +225,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
     async fn new(
         config_path: &str,
         _shared_models: Option<std::sync::Arc<crate::enrichment::models::SharedModels>>,
+        gpu_pool: Option<Arc<crate::gpu::GpuPool>>,
     ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db = config.build_db().await?;
@@ -263,6 +271,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             None
         };
 
+        let lc_fitting_config = config.lightcurve_fitting.clone();
+
         Ok(LsstEnrichmentWorker {
             input_queue,
             output_queue,
@@ -270,6 +280,8 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
+            lc_fitting_config,
+            gpu_pool,
         })
     }
 
@@ -303,42 +315,145 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
-        // we keep it very simple for now, let's run on 1 alert at a time
-        // we will move to batch processing later
+        // First pass: compute properties and collect lightcurves
+        struct LsstWorkItem {
+            candid: i64,
+            properties: LsstAlertProperties,
+            lightcurve: Vec<PhotometryMag>,
+            alert: LsstAlertForEnrichment,
+            fitting_result: Option<lightcurve_fitting::LightcurveFittingResult>,
+        }
+
+        let mut work_items: Vec<LsstWorkItem> = Vec::with_capacity(alerts.len());
+        for alert in alerts {
+            let candid = alert.candid;
+            let (properties, lightcurve) = self.get_alert_properties(&alert).await?;
+            work_items.push(LsstWorkItem {
+                candid,
+                properties,
+                lightcurve,
+                alert,
+                fitting_result: None,
+            });
+        }
+
+        // Run lightcurve fitting if enabled
+        let do_fitting = self.lc_fitting_config.nonparametric || self.lc_fitting_config.parametric;
+        if do_fitting {
+            let do_np = self.lc_fitting_config.nonparametric;
+            let do_param = self.lc_fitting_config.parametric;
+
+            #[cfg(feature = "cuda")]
+            let use_gpu = self.gpu_pool.is_some();
+            #[cfg(not(feature = "cuda"))]
+            let use_gpu = false;
+
+            if use_gpu {
+                #[cfg(feature = "cuda")]
+                {
+                    let gpu_pool = self.gpu_pool.as_ref().unwrap().clone();
+                    let lightcurves: Vec<Vec<PhotometryMag>> =
+                        work_items.iter().map(|w| w.lightcurve.clone()).collect();
+                    let results =
+                        run_fitting_gpu_batch(&lightcurves, do_np, do_param, gpu_pool).await;
+                    for (item, result) in work_items.iter_mut().zip(results) {
+                        item.fitting_result = result;
+                    }
+                }
+            } else {
+                // CPU per-alert fallback
+                for item in work_items.iter_mut() {
+                    let lc = item.lightcurve.clone();
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(60),
+                        tokio::task::spawn_blocking(move || {
+                            let (times, mags, mag_errs, bands) = photometry_to_lc_arrays(&lc);
+                            let mag_bands = lightcurve_fitting::build_mag_bands(
+                                &times, &mags, &mag_errs, &bands,
+                            );
+
+                            let (nonparametric, trained_gps) = if do_np {
+                                lightcurve_fitting::fit_nonparametric(&mag_bands)
+                            } else {
+                                (vec![], std::collections::HashMap::new())
+                            };
+
+                            let thermal = if do_np {
+                                lightcurve_fitting::fit_thermal(&mag_bands, Some(&trained_gps))
+                            } else {
+                                None
+                            };
+
+                            let parametric = if do_param {
+                                let flux_bands = lightcurve_fitting::build_flux_bands(
+                                    &times, &mags, &mag_errs, &bands,
+                                );
+                                lightcurve_fitting::fit_parametric(
+                                    &flux_bands,
+                                    false,
+                                    lightcurve_fitting::UncertaintyMethod::Svi,
+                                )
+                            } else {
+                                vec![]
+                            };
+
+                            lightcurve_fitting::LightcurveFittingResult {
+                                nonparametric,
+                                parametric,
+                                thermal,
+                            }
+                        }),
+                    )
+                    .await;
+
+                    item.fitting_result = match result {
+                        Ok(Ok(r)) => Some(r),
+                        Ok(Err(e)) => {
+                            warn!("LC fitting panicked for candid {}: {e}", item.candid);
+                            None
+                        }
+                        Err(_) => {
+                            warn!("LC fitting timed out for candid {}", item.candid);
+                            None
+                        }
+                    };
+                }
+            }
+        }
+
+        // Second pass: build MongoDB updates
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<(
             BabamulLsstAlert,
             std::collections::HashMap<String, Vec<serde_json::Value>>,
         )> = Vec::new();
-        for alert in alerts {
-            let candid = alert.candid;
 
-            // Compute numerical and boolean features from lightcurve and candidate analysis
-            let properties = self.get_alert_properties(&alert).await?;
-
-            let update_alert_document = doc! {
-                "$set": {
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }
+        for item in work_items {
+            let mut set_doc = doc! {
+                "properties": mongify(&item.properties),
+                "updated_at": now,
             };
+            if let Some(ref fitting) = item.fitting_result {
+                set_doc.insert("lightcurve_fitting", mongify(fitting));
+            }
+            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(doc! {"_id": candid})
+                    .filter(doc! {"_id": item.candid})
                     .update(update_alert_document)
                     .build(),
             );
 
             updates.push(update);
-            processed_alerts.push(format!("{}", candid));
+            processed_alerts.push(format!("{}", item.candid));
 
             // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
                 let (enriched_alert, cross_matches) =
-                    BabamulLsstAlert::from_alert_and_properties(alert, properties);
+                    BabamulLsstAlert::from_alert_and_properties(item.alert, item.properties);
                 enriched_alerts.push((enriched_alert, cross_matches));
             }
         }
@@ -363,7 +478,7 @@ impl LsstEnrichmentWorker {
     pub async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
-    ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
+    ) -> Result<(LsstAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
 
@@ -465,13 +580,16 @@ impl LsstEnrichmentWorker {
             photstats.clone()
         };
 
-        Ok(LsstAlertProperties {
-            rock: is_rock,
-            star: is_star,
-            near_brightstar: is_near_brightstar,
-            stationary,
-            photstats,
-            multisurvey_photstats,
-        })
+        Ok((
+            LsstAlertProperties {
+                rock: is_rock,
+                star: is_star,
+                near_brightstar: is_near_brightstar,
+                stationary,
+                photstats,
+                multisurvey_photstats,
+            },
+            lightcurve,
+        ))
     }
 }
