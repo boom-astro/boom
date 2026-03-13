@@ -410,6 +410,40 @@ pub struct WorkerConfig {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct GpuConfig {
+    /// Whether GPU acceleration is enabled. When true, a dedicated GPU worker
+    /// handles all GPU compute (ONNX inference + lightcurve fitting) and
+    /// enrichment workers become CPU-only. When false, enrichment workers
+    /// run inference inline on CPU.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum batch size for GPU inference (number of alerts batched together).
+    #[serde(default = "default_gpu_batch_size")]
+    pub batch_size: usize,
+    /// Timeout in milliseconds to wait for a full batch before processing a partial one.
+    #[serde(default = "default_gpu_batch_timeout_ms")]
+    pub batch_timeout_ms: u64,
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        GpuConfig {
+            enabled: false,
+            batch_size: default_gpu_batch_size(),
+            batch_timeout_ms: default_gpu_batch_timeout_ms(),
+        }
+    }
+}
+
+fn default_gpu_batch_size() -> usize {
+    256
+}
+
+fn default_gpu_batch_timeout_ms() -> u64 {
+    100
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct SurveyWorkerConfig {
     pub command_interval: u64,
     pub alert: WorkerConfig,
@@ -430,6 +464,8 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
+    #[serde(default)]
+    pub gpu: GpuConfig,
 }
 
 impl AppConfig {

@@ -42,6 +42,7 @@ pub enum WorkerType {
     Alert,
     Enrichment,
     Filter,
+    Gpu,
 }
 
 impl Copy for WorkerType {}
@@ -55,6 +56,7 @@ impl fmt::Display for WorkerType {
             }
             WorkerType::Filter => enum_str = "Filter",
             WorkerType::Enrichment => enum_str = "Enrichment",
+            WorkerType::Gpu => enum_str = "Gpu",
         }
         write!(f, "{}", enum_str)
     }

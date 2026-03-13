@@ -2,6 +2,7 @@ use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
     enrichment::{run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker},
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
+    gpu::run_gpu_worker,
     utils::{
         enums::Survey,
         o11y::logging::{as_error, INFO},
@@ -251,6 +252,18 @@ impl Worker {
                         .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
+            WorkerType::Gpu => {
+                let survey_str = survey_name.to_string().to_uppercase();
+                thread::spawn(move || {
+                    let tid = std::thread::current().id();
+                    span!(INFO, "gpu worker", ?tid, ?survey_name).in_scope(|| {
+                        info!("starting GPU worker");
+                        debug!(?config_path);
+                        run_gpu_worker(receiver, &config_path, id, &survey_str)
+                            .unwrap_or_else(as_error!("gpu worker failed"));
+                    })
+                })
+            }
         };
 
         Worker {

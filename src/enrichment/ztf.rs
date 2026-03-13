@@ -1,6 +1,9 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
+use crate::gpu::{
+    gpu_inference_queue_name, gpu_result_key, GpuInferenceRequest, GpuInferenceResponse,
+};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
@@ -18,6 +21,7 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use redis::AsyncCommands;
 use serde::{Deserialize, Deserializer};
 use tracing::{instrument, trace, warn};
 
@@ -373,6 +377,27 @@ pub struct ZtfAlertClassifications {
     pub btsbot: f32,
 }
 
+/// Per-alert intermediate data used during enrichment processing.
+struct AlertWork {
+    candid: i64,
+    programid: i32,
+    properties: ZtfAlertProperties,
+    all_bands_properties: AllBandsProperties,
+    cutouts: crate::alert::AlertCutout,
+    alert: ZtfAlertForEnrichment,
+}
+
+/// Holds ONNX models when running in CPU-inline mode (gpu.enabled = false).
+/// When gpu.enabled = true, models are owned by the GPU worker instead.
+struct InlineModels {
+    acai_h: AcaiModel,
+    acai_n: AcaiModel,
+    acai_v: AcaiModel,
+    acai_o: AcaiModel,
+    acai_b: AcaiModel,
+    btsbot: BtsBotModel,
+}
+
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -380,12 +405,12 @@ pub struct ZtfEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
-    acai_h_model: AcaiModel,
-    acai_n_model: AcaiModel,
-    acai_v_model: AcaiModel,
-    acai_o_model: AcaiModel,
-    acai_b_model: AcaiModel,
-    btsbot_model: BtsBotModel,
+    /// None when gpu.enabled = true (GPU worker owns models).
+    models: Option<InlineModels>,
+    /// Redis connection for GPU inference requests (only used when gpu.enabled).
+    redis_con: Option<redis::aio::MultiplexedConnection>,
+    /// GPU inference queue name (only used when gpu.enabled).
+    gpu_queue: Option<String>,
     babamul: Option<Babamul>,
 }
 
@@ -402,15 +427,24 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
-        // we load the ACAI models (same architecture, same input/output)
-        let acai_h_model = AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?;
-        let acai_n_model = AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?;
-        let acai_v_model = AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?;
-        let acai_o_model = AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?;
-        let acai_b_model = AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?;
-
-        // we load the btsbot model (different architecture, and input/output then ACAI)
-        let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
+        // When GPU mode is enabled, models are owned by the GPU worker.
+        // The enrichment worker only needs a Redis connection to push requests.
+        let (models, redis_con, gpu_queue) = if config.gpu.enabled {
+            let con = config.build_redis().await?;
+            let queue = gpu_inference_queue_name("ZTF");
+            (None, Some(con), Some(queue))
+        } else {
+            // CPU-inline mode: load ONNX models in this worker
+            let models = InlineModels {
+                acai_h: AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
+                acai_n: AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?,
+                acai_v: AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
+                acai_o: AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
+                acai_b: AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
+                btsbot: BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?,
+            };
+            (Some(models), None, None)
+        };
 
         // Detect if Babamul is enabled from the config
         let babamul: Option<Babamul> = if config.babamul.enabled {
@@ -426,12 +460,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_collection,
             alert_cutout_collection,
             alert_pipeline: create_ztf_alert_pipeline(false),
-            acai_h_model,
-            acai_n_model,
-            acai_v_model,
-            acai_o_model,
-            acai_b_model,
-            btsbot_model,
+            models,
+            redis_con,
+            gpu_queue,
             babamul,
         })
     }
@@ -476,63 +507,53 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
-        // we keep it very simple for now, let's run on 1 alert at a time
-        // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
+
+        let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-
-            // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alert).await?;
+            work_items.push(AlertWork {
+                candid,
+                programid,
+                properties,
+                all_bands_properties,
+                cutouts,
+                alert,
+            });
+        }
 
-            // Now, prepare inputs for ML models and run inference
-            // (we skip ML inference if features cannot be computed, e.g. missing required features)
-            let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
-            let btsbot_metadata_result = self
-                .btsbot_model
-                .get_metadata(&[&alert], &[all_bands_properties.clone()]);
-
-            let classifications = if let (Ok(metadata), Ok(btsbot_metadata)) =
-                (metadata_result, btsbot_metadata_result)
-            {
-                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
-                Some(ZtfAlertClassifications {
-                    acai_h: acai_h_scores[0],
-                    acai_n: acai_n_scores[0],
-                    acai_v: acai_v_scores[0],
-                    acai_o: acai_o_scores[0],
-                    acai_b: acai_b_scores[0],
-                    btsbot: btsbot_scores[0],
-                })
+        // Determine classifications: GPU-deferred or CPU-inline
+        let classifications_list: Vec<Option<ZtfAlertClassifications>> =
+            if self.redis_con.is_some() && self.gpu_queue.is_some() {
+                // GPU path: push inference requests and poll for results
+                let con = self.redis_con.as_mut().unwrap();
+                let gpu_queue = self.gpu_queue.as_ref().unwrap();
+                Self::classify_via_gpu(&work_items, con, gpu_queue).await?
+            } else if let Some(ref mut models) = self.models {
+                // CPU-inline path: run inference directly
+                Self::classify_inline(models, &work_items)?
             } else {
-                warn!(
-                    "Skipping ML inference for candid {} due to missing features",
-                    candid
-                );
-                None
+                // No models and no GPU — skip classification
+                vec![None; work_items.len()]
             };
 
-            let update_alert_document = if let Some(classifications) = classifications {
+        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
+            let update_alert_document = if let Some(ref cls) = classifications {
                 doc! { "$set": {
-                    "classifications": mongify(&classifications),
-                    "properties": mongify(&properties),
+                    "classifications": mongify(cls),
+                    "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
-                    "properties": mongify(&properties),
+                    "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
             };
@@ -540,17 +561,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(doc! {"_id": candid})
+                    .filter(doc! {"_id": item.candid})
                     .update(update_alert_document)
                     .build(),
             );
 
             updates.push(update);
-            processed_alerts.push(format!("{},{}", programid, candid));
+            processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = BabamulZtfAlert::from_alert_and_properties(alert, properties);
+                let enriched_alert =
+                    BabamulZtfAlert::from_alert_and_properties(item.alert, item.properties);
                 enriched_alerts.push(enriched_alert);
             }
         }
@@ -681,5 +702,275 @@ impl ZtfEnrichmentWorker {
             programid,
             lightcurve,
         ))
+    }
+
+    /// CPU-inline classification: run ONNX models directly in this worker thread.
+    fn classify_inline(
+        models: &mut InlineModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        let mut results = Vec::with_capacity(work_items.len());
+        for item in work_items {
+            let triplet = models.acai_h.get_triplet(&[&item.cutouts])?;
+            let metadata_result = models.acai_h.get_metadata(&[&item.alert]);
+            let btsbot_metadata_result = models
+                .btsbot
+                .get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
+
+            let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = models.acai_h.predict(&metadata, &triplet)?;
+                let acai_n_scores = models.acai_n.predict(&metadata, &triplet)?;
+                let acai_v_scores = models.acai_v.predict(&metadata, &triplet)?;
+                let acai_o_scores = models.acai_o.predict(&metadata, &triplet)?;
+                let acai_b_scores = models.acai_b.predict(&metadata, &triplet)?;
+                let btsbot_scores = models.btsbot.predict(&btsbot_metadata, &triplet)?;
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    item.candid
+                );
+                None
+            };
+            results.push(cls);
+        }
+        Ok(results)
+    }
+
+    /// GPU-deferred classification: push inference requests to the GPU worker
+    /// via Redis, then poll for results.
+    async fn classify_via_gpu(
+        work_items: &[AlertWork],
+        con: &mut redis::aio::MultiplexedConnection,
+        gpu_queue: &str,
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        // We need a temporary AcaiModel just for get_metadata/get_triplet (CPU-only operations).
+        // These are lightweight — they don't load ONNX. We use a dummy to access the trait methods.
+        // Actually, get_triplet and get_metadata are on the Model trait impl, not the Session.
+        // For the GPU path, we pre-extract features and triplets here, then send them.
+        //
+        // Since get_triplet and get_metadata need a Model instance, and we don't have one
+        // in GPU mode, we compute the features manually. The triplet preparation uses
+        // prepare_triplet from utils::fits which doesn't need a model.
+
+        use crate::utils::fits::prepare_triplet;
+
+        let mut request_ids: Vec<Option<String>> = Vec::with_capacity(work_items.len());
+        let mut gpu_requests: Vec<String> = Vec::new();
+
+        for item in work_items {
+            // Prepare triplet (CPU operation, no model needed)
+            let triplet_result = prepare_triplet(&item.cutouts);
+            let triplet_flat = match triplet_result {
+                Ok((sci, tmpl, diff)) => {
+                    let mut flat = Vec::with_capacity(63 * 63 * 3);
+                    // Interleave as [row][col][channel] matching the model's expected layout
+                    for row in 0..63 {
+                        for col in 0..63 {
+                            flat.push(sci[row * 63 + col]);
+                            flat.push(tmpl[row * 63 + col]);
+                            flat.push(diff[row * 63 + col]);
+                        }
+                    }
+                    flat
+                }
+                Err(e) => {
+                    warn!("Failed to prepare triplet for candid {}: {}", item.candid, e);
+                    request_ids.push(None);
+                    continue;
+                }
+            };
+
+            // Extract ACAI metadata (25 features)
+            let candidate = &item.alert.candidate.candidate;
+            let acai_metadata = match Self::extract_acai_metadata(candidate) {
+                Some(m) => m,
+                None => {
+                    warn!(
+                        "Skipping GPU inference for candid {} due to missing ACAI features",
+                        item.candid
+                    );
+                    request_ids.push(None);
+                    continue;
+                }
+            };
+
+            // Extract BTSBot metadata (25 features)
+            let btsbot_metadata =
+                match Self::extract_btsbot_metadata(candidate, &item.all_bands_properties) {
+                    Some(m) => m,
+                    None => {
+                        warn!(
+                            "Skipping GPU inference for candid {} due to missing BTSBot features",
+                            item.candid
+                        );
+                        request_ids.push(None);
+                        continue;
+                    }
+                };
+
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let req = GpuInferenceRequest {
+                request_id: request_id.clone(),
+                candid: item.candid,
+                acai_metadata,
+                btsbot_metadata,
+                triplet: triplet_flat,
+            };
+
+            match serde_json::to_string(&req) {
+                Ok(json) => {
+                    gpu_requests.push(json);
+                    request_ids.push(Some(request_id));
+                }
+                Err(e) => {
+                    warn!("Failed to serialize GPU request for candid {}: {}", item.candid, e);
+                    request_ids.push(None);
+                }
+            }
+        }
+
+        // Push all requests to the GPU queue
+        if !gpu_requests.is_empty() {
+            let _: usize = con.lpush(gpu_queue, &gpu_requests).await.map_err(|e| {
+                EnrichmentWorkerError::Redis(e)
+            })?;
+        }
+
+        // Poll for results with timeout
+        let poll_interval = std::time::Duration::from_millis(10);
+        let max_wait = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+
+        let mut results: Vec<Option<ZtfAlertClassifications>> = vec![None; work_items.len()];
+        let mut pending: Vec<(usize, String)> = request_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, rid)| rid.as_ref().map(|r| (i, r.clone())))
+            .collect();
+
+        while !pending.is_empty() && start.elapsed() < max_wait {
+            let mut still_pending = Vec::new();
+            for (idx, rid) in pending {
+                let key = gpu_result_key(&rid);
+                let result: Option<String> = con.get(&key).await.unwrap_or(None);
+                if let Some(json) = result {
+                    // Clean up the result key
+                    let _: Result<(), _> = con.del::<&str, ()>(&key).await;
+                    match serde_json::from_str::<GpuInferenceResponse>(&json) {
+                        Ok(resp) => {
+                            results[idx] = Some(ZtfAlertClassifications {
+                                acai_h: resp.acai_h,
+                                acai_n: resp.acai_n,
+                                acai_v: resp.acai_v,
+                                acai_o: resp.acai_o,
+                                acai_b: resp.acai_b,
+                                btsbot: resp.btsbot,
+                            });
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse GPU result for request {}: {}", rid, e);
+                        }
+                    }
+                } else {
+                    still_pending.push((idx, rid));
+                }
+            }
+            pending = still_pending;
+            if !pending.is_empty() {
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+
+        if !pending.is_empty() {
+            warn!(
+                "{} GPU inference requests timed out after {:?}",
+                pending.len(),
+                max_wait
+            );
+        }
+
+        Ok(results)
+    }
+
+    /// Extract 25 ACAI metadata features from a candidate. Returns None if any required field is missing.
+    fn extract_acai_metadata(candidate: &crate::alert::Candidate) -> Option<Vec<f32>> {
+        Some(vec![
+            candidate.drb? as f32,
+            candidate.diffmaglim? as f32,
+            candidate.ra as f32,
+            candidate.dec as f32,
+            candidate.magpsf,
+            candidate.sigmapsf,
+            candidate.chipsf? as f32,
+            candidate.fwhm? as f32,
+            candidate.sky? as f32,
+            candidate.chinr? as f32,
+            candidate.sharpnr? as f32,
+            candidate.sgscore1? as f32,
+            candidate.distpsnr1? as f32,
+            candidate.sgscore2? as f32,
+            candidate.distpsnr2? as f32,
+            candidate.sgscore3? as f32,
+            candidate.distpsnr3? as f32,
+            candidate.ndethist as f32,
+            candidate.ncovhist as f32,
+            candidate.scorr? as f32,
+            candidate.nmtchps as f32,
+            candidate.clrcoeff? as f32,
+            candidate.clrcounc? as f32,
+            candidate.neargaia? as f32,
+            candidate.neargaiabright? as f32,
+        ])
+    }
+
+    /// Extract 25 BTSBot metadata features. Returns None if any required field is missing.
+    fn extract_btsbot_metadata(
+        candidate: &crate::alert::Candidate,
+        all_bands: &AllBandsProperties,
+    ) -> Option<Vec<f32>> {
+        let ndethist = candidate.ndethist as f32;
+        let ncovhist = candidate.ncovhist as f32;
+        let nnondet = ncovhist - ndethist;
+        let days_since_peak = (all_bands.last_jd - all_bands.peak_jd) as f32;
+        let days_to_peak = (all_bands.peak_jd - all_bands.first_jd) as f32;
+        let age = (all_bands.first_jd - all_bands.last_jd) as f32;
+
+        Some(vec![
+            candidate.sgscore1? as f32,
+            candidate.distpsnr1? as f32,
+            candidate.sgscore2? as f32,
+            candidate.distpsnr2? as f32,
+            candidate.fwhm? as f32,
+            candidate.magpsf as f32,
+            candidate.sigmapsf,
+            candidate.chipsf? as f32,
+            candidate.ra as f32,
+            candidate.dec as f32,
+            candidate.diffmaglim? as f32,
+            ndethist,
+            candidate.nmtchps as f32,
+            age,
+            days_since_peak,
+            days_to_peak,
+            all_bands.peak_mag as f32,
+            candidate.drb? as f32,
+            ncovhist,
+            nnondet,
+            candidate.chinr? as f32,
+            candidate.sharpnr? as f32,
+            candidate.scorr? as f32,
+            candidate.sky? as f32,
+            all_bands.faintest_mag as f32,
+        ])
     }
 }

@@ -98,9 +98,25 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        args.survey,
-        config_path,
+        args.survey.clone(),
+        config_path.clone(),
     );
+
+    // Spawn a single GPU worker if gpu.enabled is set in the config.
+    // This worker owns all ONNX models on the GPU and processes batched
+    // inference requests from enrichment workers via Redis.
+    let gpu_pool = if config.gpu.enabled {
+        info!("GPU acceleration enabled — spawning GPU worker");
+        Some(ThreadPool::new(
+            WorkerType::Gpu,
+            1, // exactly one GPU worker to avoid CUDA context contention
+            args.survey,
+            config_path,
+        ))
+    } else {
+        info!("GPU acceleration disabled — enrichment workers will run inference inline");
+        None
+    };
 
     // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
     let mut shutdown_rx = shutdown_rx;
@@ -110,10 +126,15 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                 break;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                let gpu_status = match &gpu_pool {
+                    Some(pool) => format!("{}/{}", pool.live_worker_count(), pool.total_worker_count()),
+                    None => "disabled".to_string(),
+                };
                 info!(
                     alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
                     enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),
                     filter = %format!("{}/{}", filter_pool.live_worker_count(), filter_pool.total_worker_count()),
+                    gpu = %gpu_status,
                     "heartbeat: workers running"
                 );
             }
@@ -125,6 +146,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);
+    drop(gpu_pool);
     if let Err(error) = meter_provider.shutdown() {
         log_error!(WARN, error, "failed to shut down the meter provider");
     }
