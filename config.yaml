@@ -22,9 +22,11 @@ babamul:
   retention_days: 3
 gpu:
   enabled: false # Set to true to use dedicated GPU worker(s) for ONNX inference.
-  # When enabled, GPU workers own all ONNX models and enrichment workers become
-  # CPU-only, pushing inference requests via Redis. When disabled, enrichment
-  # workers run inference inline (current behavior).
+  # When enabled, dedicated GPU workers own all ONNX models and enrichment workers
+  # push inference requests via Redis instead of running them inline.
+  # When disabled, enrichment workers run inference inline. Whether inline inference
+  # uses GPU or CPU is controlled by the USE_GPU environment variable (default "true"),
+  # so inline mode may still use GPU / create CUDA contexts on GPU-capable hosts.
   device_ids: [0] # CUDA devices to use. One worker per device. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
   batch_size: 256 # Max alerts to batch per GPU worker
   batch_timeout_ms: 100 # Timeout (ms) before processing a partial batch
