@@ -196,17 +196,21 @@ pub fn gpu_result_key(request_id: &str) -> String {
 }
 
 /// Main entry point for the GPU worker thread. Analogous to `run_enrichment_worker`.
+///
+/// Each GPU worker is pinned to a specific CUDA `device_id`. Multiple workers
+/// (one per device) all pop from the same Redis queue, so load is distributed
+/// across GPUs automatically.
 #[tokio::main]
-#[instrument(skip_all, err)]
+#[instrument(skip_all, err, fields(device_id))]
 pub async fn run_gpu_worker(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
     survey: &str,
+    device_id: i32,
 ) -> Result<(), GpuWorkerError> {
     let config = AppConfig::from_path(config_path)?;
     let gpu_config = &config.gpu;
-    let device_id = gpu_config.device_id;
     let batch_size = gpu_config.batch_size;
     let batch_timeout = std::time::Duration::from_millis(gpu_config.batch_timeout_ms);
 

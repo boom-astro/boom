@@ -147,6 +147,18 @@ impl ThreadPool {
             self.worker_type,
             self.survey_name.clone(),
             self.config_path.clone(),
+            None,
+        ));
+    }
+
+    /// Add a GPU worker pinned to a specific CUDA device
+    #[instrument(skip(self))]
+    pub fn add_gpu_worker(&mut self, device_id: i32) {
+        self.workers.push(Worker::new(
+            WorkerType::Gpu,
+            self.survey_name.clone(),
+            self.config_path.clone(),
+            Some(device_id),
         ));
     }
 
@@ -194,7 +206,12 @@ impl Worker {
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
     #[instrument]
-    fn new(worker_type: WorkerType, survey_name: Survey, config_path: String) -> Worker {
+    fn new(
+        worker_type: WorkerType,
+        survey_name: Survey,
+        config_path: String,
+        gpu_device_id: Option<i32>,
+    ) -> Worker {
         let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(1);
         let handle = match worker_type {
@@ -254,12 +271,13 @@ impl Worker {
             }),
             WorkerType::Gpu => {
                 let survey_str = survey_name.to_string().to_uppercase();
+                let device_id = gpu_device_id.unwrap_or(0);
                 thread::spawn(move || {
                     let tid = std::thread::current().id();
-                    span!(INFO, "gpu worker", ?tid, ?survey_name).in_scope(|| {
-                        info!("starting GPU worker");
+                    span!(INFO, "gpu worker", ?tid, ?survey_name, device_id).in_scope(|| {
+                        info!(device_id, "starting GPU worker");
                         debug!(?config_path);
-                        run_gpu_worker(receiver, &config_path, id, &survey_str)
+                        run_gpu_worker(receiver, &config_path, id, &survey_str, device_id)
                             .unwrap_or_else(as_error!("gpu worker failed"));
                     })
                 })

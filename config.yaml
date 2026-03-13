@@ -21,12 +21,12 @@ babamul:
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
 gpu:
-  enabled: false # Set to true to use a dedicated GPU worker for ONNX inference.
-  # When enabled, one GPU worker owns all ONNX models (ACAI, BTSBot) and
-  # enrichment workers become CPU-only, pushing inference requests via Redis.
-  # When disabled (default), enrichment workers run inference inline.
-  device_id: 0 # CUDA device ID (for multi-GPU nodes, e.g. 0, 1, 2...)
-  batch_size: 256 # Max alerts to batch for GPU inference
+  enabled: false # Set to true to use dedicated GPU worker(s) for ONNX inference.
+  # When enabled, GPU workers own all ONNX models and enrichment workers become
+  # CPU-only, pushing inference requests via Redis. When disabled, enrichment
+  # workers run inference inline (current behavior).
+  device_ids: [0] # CUDA devices to use. One worker per device. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  batch_size: 256 # Max alerts to batch per GPU worker
   batch_timeout_ms: 100 # Timeout (ms) before processing a partial batch
 redis:
   host: localhost

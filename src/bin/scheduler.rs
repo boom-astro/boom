@@ -102,17 +102,26 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         config_path.clone(),
     );
 
-    // Spawn a single GPU worker if gpu.enabled is set in the config.
-    // This worker owns all ONNX models on the GPU and processes batched
-    // inference requests from enrichment workers via Redis.
+    // Spawn one GPU worker per configured device. Each worker loads all ONNX
+    // models onto its assigned CUDA device. All workers pop from the same Redis
+    // queue, so inference requests are load-balanced across GPUs automatically.
     let gpu_pool = if config.gpu.enabled {
-        info!("GPU acceleration enabled — spawning GPU worker");
-        Some(ThreadPool::new(
+        let device_ids = &config.gpu.device_ids;
+        info!(
+            ?device_ids,
+            "GPU acceleration enabled — spawning {} GPU worker(s)",
+            device_ids.len()
+        );
+        let mut pool = ThreadPool::new(
             WorkerType::Gpu,
-            1, // exactly one GPU worker to avoid CUDA context contention
+            0, // start empty, add one worker per device below
             args.survey,
             config_path,
-        ))
+        );
+        for &device_id in device_ids {
+            pool.add_gpu_worker(device_id);
+        }
+        Some(pool)
     } else {
         info!("GPU acceleration disabled — enrichment workers will run inference inline");
         None
