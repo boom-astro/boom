@@ -974,3 +974,273 @@ impl ZtfEnrichmentWorker {
         ])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alert::Candidate;
+    use crate::utils::lightcurves::{AllBandsProperties, Band};
+
+    /// Build a Candidate with all optional fields populated.
+    fn make_full_candidate() -> Candidate {
+        Candidate {
+            jd: 2459000.5,
+            ra: 180.0,
+            dec: -30.0,
+            magpsf: 18.5,
+            sigmapsf: 0.1,
+            ndethist: 10,
+            ncovhist: 50,
+            nmtchps: 5,
+            drb: Some(0.95),
+            diffmaglim: Some(20.5),
+            chipsf: Some(1.2),
+            fwhm: Some(2.1),
+            sky: Some(21.0),
+            chinr: Some(0.8),
+            sharpnr: Some(0.05),
+            sgscore1: Some(0.1),
+            distpsnr1: Some(3.5),
+            sgscore2: Some(0.2),
+            distpsnr2: Some(5.0),
+            sgscore3: Some(0.3),
+            distpsnr3: Some(7.0),
+            scorr: Some(15.0),
+            clrcoeff: Some(0.01),
+            clrcounc: Some(0.002),
+            neargaia: Some(1.5),
+            neargaiabright: Some(10.0),
+            ..Default::default()
+        }
+    }
+
+    fn make_all_bands_properties() -> AllBandsProperties {
+        AllBandsProperties {
+            peak_jd: 2459010.0,
+            peak_mag: 17.0,
+            peak_mag_err: 0.05,
+            peak_band: Band::G,
+            faintest_jd: 2459020.0,
+            faintest_mag: 21.0,
+            faintest_mag_err: 0.3,
+            faintest_band: Band::R,
+            first_jd: 2459000.0,
+            last_jd: 2459030.0,
+        }
+    }
+
+    // ── ACAI metadata extraction ────────────────────────────────────
+
+    #[test]
+    fn test_extract_acai_metadata_full_candidate() {
+        let c = make_full_candidate();
+        let meta = ZtfEnrichmentWorker::extract_acai_metadata(&c);
+        assert!(meta.is_some());
+        let meta = meta.unwrap();
+        assert_eq!(meta.len(), 25, "ACAI expects exactly 25 features");
+
+        // Spot-check known positions
+        assert!((meta[0] - 0.95).abs() < 1e-6, "drb");
+        assert!((meta[1] - 20.5).abs() < 1e-6, "diffmaglim");
+        assert!((meta[2] - 180.0).abs() < 1e-3, "ra");
+        assert!((meta[3] - (-30.0)).abs() < 1e-3, "dec");
+        assert!((meta[4] - 18.5).abs() < 1e-3, "magpsf");
+        assert!((meta[5] - 0.1).abs() < 1e-3, "sigmapsf");
+    }
+
+    #[test]
+    fn test_extract_acai_metadata_missing_drb_returns_none() {
+        let mut c = make_full_candidate();
+        c.drb = None;
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    #[test]
+    fn test_extract_acai_metadata_missing_fwhm_returns_none() {
+        let mut c = make_full_candidate();
+        c.fwhm = None;
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    #[test]
+    fn test_extract_acai_metadata_missing_sgscore1_returns_none() {
+        let mut c = make_full_candidate();
+        c.sgscore1 = None;
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    #[test]
+    fn test_extract_acai_metadata_missing_scorr_returns_none() {
+        let mut c = make_full_candidate();
+        c.scorr = None;
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    #[test]
+    fn test_extract_acai_metadata_missing_neargaia_returns_none() {
+        let mut c = make_full_candidate();
+        c.neargaia = None;
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    #[test]
+    fn test_extract_acai_metadata_missing_clrcoeff_returns_none() {
+        let mut c = make_full_candidate();
+        c.clrcoeff = None;
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    // ── BTSBot metadata extraction ──────────────────────────────────
+
+    #[test]
+    fn test_extract_btsbot_metadata_full_candidate() {
+        let c = make_full_candidate();
+        let ab = make_all_bands_properties();
+        let meta = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab);
+        assert!(meta.is_some());
+        let meta = meta.unwrap();
+        assert_eq!(meta.len(), 25, "BTSBot expects exactly 25 features");
+
+        // Spot-check: sgscore1 is first
+        assert!((meta[0] - 0.1).abs() < 1e-6, "sgscore1");
+        // distpsnr1
+        assert!((meta[1] - 3.5).abs() < 1e-6, "distpsnr1");
+        // peak_mag (position 16)
+        assert!((meta[16] - 17.0).abs() < 1e-3, "peak_mag");
+        // faintest_mag (position 24)
+        assert!((meta[24] - 21.0).abs() < 1e-3, "faintest_mag");
+    }
+
+    #[test]
+    fn test_extract_btsbot_metadata_derived_features() {
+        let c = make_full_candidate();
+        let ab = make_all_bands_properties();
+        let meta = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).unwrap();
+
+        // ndethist = 10, ncovhist = 50
+        let ndethist = meta[11];
+        let ncovhist = meta[18];
+        let nnondet = meta[19];
+        assert!((ndethist - 10.0).abs() < 1e-6);
+        assert!((ncovhist - 50.0).abs() < 1e-6);
+        assert!((nnondet - 40.0).abs() < 1e-6, "nnondet = ncovhist - ndethist");
+
+        // age = first_jd - last_jd = 2459000 - 2459030 = -30
+        let age = meta[13];
+        assert!((age - (-30.0)).abs() < 1e-3, "age");
+
+        // days_since_peak = last_jd - peak_jd = 2459030 - 2459010 = 20
+        let days_since_peak = meta[14];
+        assert!((days_since_peak - 20.0).abs() < 1e-3, "days_since_peak");
+
+        // days_to_peak = peak_jd - first_jd = 2459010 - 2459000 = 10
+        let days_to_peak = meta[15];
+        assert!((days_to_peak - 10.0).abs() < 1e-3, "days_to_peak");
+    }
+
+    #[test]
+    fn test_extract_btsbot_metadata_missing_drb_returns_none() {
+        let mut c = make_full_candidate();
+        c.drb = None;
+        let ab = make_all_bands_properties();
+        assert!(ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).is_none());
+    }
+
+    #[test]
+    fn test_extract_btsbot_metadata_missing_sgscore1_returns_none() {
+        let mut c = make_full_candidate();
+        c.sgscore1 = None;
+        let ab = make_all_bands_properties();
+        assert!(ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).is_none());
+    }
+
+    // ── Feature order consistency between ACAI and BTSBot ───────────
+
+    #[test]
+    fn test_acai_and_btsbot_share_consistent_candidate_values() {
+        // Both extractors should read the same Candidate fields consistently.
+        // For fields that appear in both (e.g., sgscore1, magpsf), verify they
+        // produce the same float value from the same Candidate.
+        let c = make_full_candidate();
+        let ab = make_all_bands_properties();
+        let acai = ZtfEnrichmentWorker::extract_acai_metadata(&c).unwrap();
+        let btsbot = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).unwrap();
+
+        // magpsf: ACAI position 4, BTSBot position 5
+        assert!((acai[4] - btsbot[5]).abs() < 1e-6, "magpsf should match");
+        // sigmapsf: ACAI position 5, BTSBot position 6
+        assert!((acai[5] - btsbot[6]).abs() < 1e-6, "sigmapsf should match");
+        // sgscore1: ACAI position 11, BTSBot position 0
+        assert!((acai[11] - btsbot[0]).abs() < 1e-6, "sgscore1 should match");
+        // distpsnr1: ACAI position 12, BTSBot position 1
+        assert!((acai[12] - btsbot[1]).abs() < 1e-6, "distpsnr1 should match");
+        // drb: ACAI position 0, BTSBot position 17
+        assert!((acai[0] - btsbot[17]).abs() < 1e-6, "drb should match");
+    }
+
+    // ── Default Candidate (all optional fields None) ────────────────
+
+    #[test]
+    fn test_extract_acai_metadata_default_candidate_returns_none() {
+        // A default Candidate has all Option fields as None
+        let c = Candidate::default();
+        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
+    }
+
+    #[test]
+    fn test_extract_btsbot_metadata_default_candidate_returns_none() {
+        let c = Candidate::default();
+        let ab = make_all_bands_properties();
+        assert!(ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).is_none());
+    }
+
+    // ── GPU request construction from metadata ──────────────────────
+
+    #[test]
+    fn test_gpu_request_from_extracted_metadata() {
+        use crate::gpu::{GpuInferenceRequest, GpuInferenceResponse};
+
+        let c = make_full_candidate();
+        let ab = make_all_bands_properties();
+        let acai_meta = ZtfEnrichmentWorker::extract_acai_metadata(&c).unwrap();
+        let btsbot_meta = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).unwrap();
+
+        let req = GpuInferenceRequest {
+            request_id: "test-1".to_string(),
+            candid: 12345,
+            acai_metadata: acai_meta.clone(),
+            btsbot_metadata: btsbot_meta.clone(),
+            triplet: vec![0.0; 63 * 63 * 3],
+        };
+
+        // Roundtrip through JSON (same path as Redis queue)
+        let json = serde_json::to_string(&req).unwrap();
+        let rt: GpuInferenceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.acai_metadata.len(), 25);
+        assert_eq!(rt.btsbot_metadata.len(), 25);
+        assert_eq!(rt.triplet.len(), 63 * 63 * 3);
+
+        // Simulate GPU response and convert to classifications
+        let resp = GpuInferenceResponse {
+            candid: 12345,
+            acai_h: 0.91,
+            acai_n: 0.82,
+            acai_v: 0.73,
+            acai_o: 0.64,
+            acai_b: 0.55,
+            btsbot: 0.46,
+        };
+
+        let cls = ZtfAlertClassifications {
+            acai_h: resp.acai_h,
+            acai_n: resp.acai_n,
+            acai_v: resp.acai_v,
+            acai_o: resp.acai_o,
+            acai_b: resp.acai_b,
+            btsbot: resp.btsbot,
+        };
+
+        assert!((cls.acai_h - 0.91).abs() < 1e-6);
+        assert!((cls.btsbot - 0.46).abs() < 1e-6);
+    }
+}

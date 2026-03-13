@@ -575,3 +575,45 @@ pub async fn get_test_db() -> Database {
     let config = AppConfig::from_test_config().expect("Failed to load test config");
     config.build_db().await.unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gpu_config_defaults() {
+        let config = GpuConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.batch_size, 256);
+        assert_eq!(config.batch_timeout_ms, 100);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_empty() {
+        // When gpu section is missing entirely, defaults apply
+        let json = "{}";
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.batch_size, 256);
+        assert_eq!(config.batch_timeout_ms, 100);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_enabled() {
+        let json = r#"{"enabled": true, "batch_size": 512, "batch_timeout_ms": 50}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.batch_size, 512);
+        assert_eq!(config.batch_timeout_ms, 50);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_partial() {
+        // Only enabled set, batch_size and timeout use defaults
+        let json = r#"{"enabled": true}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.batch_size, 256);
+        assert_eq!(config.batch_timeout_ms, 100);
+    }
+}

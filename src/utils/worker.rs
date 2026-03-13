@@ -90,3 +90,50 @@ pub(crate) fn should_terminate(receiver: &mut Receiver<WorkerCmd>) -> bool {
         Err(TryRecvError::Empty) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_type_display() {
+        assert_eq!(format!("{}", WorkerType::Alert), "Alert");
+        assert_eq!(format!("{}", WorkerType::Enrichment), "Enrichment");
+        assert_eq!(format!("{}", WorkerType::Filter), "Filter");
+        assert_eq!(format!("{}", WorkerType::Gpu), "Gpu");
+    }
+
+    #[test]
+    fn test_worker_type_clone_copy() {
+        let wt = WorkerType::Gpu;
+        let wt2 = wt; // Copy
+        let wt3 = wt.clone(); // Clone
+        assert_eq!(format!("{}", wt2), "Gpu");
+        assert_eq!(format!("{}", wt3), "Gpu");
+    }
+
+    #[test]
+    fn test_worker_cmd_display() {
+        assert_eq!(format!("{}", WorkerCmd::TERM), "TERM");
+    }
+
+    #[tokio::test]
+    async fn test_should_terminate_on_term_signal() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(WorkerCmd::TERM).await.unwrap();
+        assert!(should_terminate(&mut rx));
+    }
+
+    #[tokio::test]
+    async fn test_should_terminate_empty_channel() {
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<WorkerCmd>(1);
+        assert!(!should_terminate(&mut rx));
+    }
+
+    #[tokio::test]
+    async fn test_should_terminate_disconnected() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WorkerCmd>(1);
+        drop(tx); // disconnect sender
+        assert!(should_terminate(&mut rx));
+    }
+}
