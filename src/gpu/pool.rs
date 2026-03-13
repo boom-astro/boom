@@ -125,7 +125,16 @@ impl GpuPool {
 
         // Increment before locking so other threads see the contention
         best.active_count.fetch_add(1, Ordering::Relaxed);
-        let guard = best.context.lock().unwrap();
+        let guard = match best.context.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!(
+                    "GpuPool: device {} mutex poisoned, recovering lock",
+                    best.device_id
+                );
+                poisoned.into_inner()
+            }
+        };
 
         DeviceGuard {
             context: guard,
