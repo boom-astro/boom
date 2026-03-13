@@ -1,7 +1,7 @@
 use crate::{
     alert::AlertCutout,
     conf::{self, AppConfig},
-    enrichment::models::ModelError,
+    enrichment::models::{ModelError, SharedModels},
     utils::{
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-use std::{num::NonZero, sync::LazyLock};
+use std::{num::NonZero, sync::Arc, sync::LazyLock};
 
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -90,7 +90,10 @@ pub enum EnrichmentWorkerError {
 
 #[async_trait::async_trait]
 pub trait EnrichmentWorker {
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError>
+    async fn new(
+        config_path: &str,
+        shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError>
     where
         Self: Sized;
     fn input_queue_name(&self) -> String;
@@ -194,9 +197,10 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
+    shared_models: Option<Arc<SharedModels>>,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
-    let mut enrichment_worker = T::new(config_path).await?;
+    let mut enrichment_worker = T::new(config_path, shared_models).await?;
 
     let config = AppConfig::from_path(config_path)?;
     let mut con = config.build_redis().await?;

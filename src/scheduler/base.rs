@@ -1,8 +1,9 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
-    enrichment::{run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker},
+    enrichment::{
+        models::SharedModels, run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker,
+    },
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
-    gpu::run_gpu_worker,
     utils::{
         enums::Survey,
         o11y::logging::{as_error, INFO},
@@ -10,6 +11,7 @@ use crate::{
     },
 };
 
+use std::sync::Arc;
 use std::thread;
 
 use tokio::sync::mpsc;
@@ -66,6 +68,7 @@ pub struct ThreadPool {
     survey_name: Survey,
     config_path: String,
     workers: Vec<Worker>,
+    shared_models: Option<Arc<SharedModels>>,
 }
 
 /// Threadpool
@@ -78,12 +81,13 @@ impl ThreadPool {
     /// size: number of workers initially inside of threadpool
     /// survey_name: source stream. e.g. 'ztf'
     /// config_path: path to config file
-    #[instrument(skip(config_path))]
+    #[instrument(skip(config_path, shared_models))]
     pub fn new(
         worker_type: WorkerType,
         size: usize,
         survey_name: Survey,
         config_path: String,
+        shared_models: Option<Arc<SharedModels>>,
     ) -> Self {
         debug!(?config_path);
         let mut thread_pool = ThreadPool {
@@ -91,6 +95,7 @@ impl ThreadPool {
             survey_name,
             config_path,
             workers: Vec::new(),
+            shared_models,
         };
         for _ in 0..size {
             thread_pool.add_worker();
@@ -147,18 +152,7 @@ impl ThreadPool {
             self.worker_type,
             self.survey_name.clone(),
             self.config_path.clone(),
-            None,
-        ));
-    }
-
-    /// Add a GPU worker pinned to a specific CUDA device
-    #[instrument(skip(self))]
-    pub fn add_gpu_worker(&mut self, device_id: i32) {
-        self.workers.push(Worker::new(
-            WorkerType::Gpu,
-            self.survey_name.clone(),
-            self.config_path.clone(),
-            Some(device_id),
+            self.shared_models.clone(),
         ));
     }
 
@@ -205,12 +199,12 @@ impl Worker {
     /// receiver: receiver by which the owning threadpool communicates with the worker
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
-    #[instrument]
+    #[instrument(skip(shared_models))]
     fn new(
         worker_type: WorkerType,
         survey_name: Survey,
         config_path: String,
-        gpu_device_id: Option<i32>,
+        shared_models: Option<Arc<SharedModels>>,
     ) -> Worker {
         let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(1);
@@ -265,23 +259,10 @@ impl Worker {
                             return;
                         }
                     };
-                    run(receiver, &config_path, id)
+                    run(receiver, &config_path, id, shared_models)
                         .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
-            WorkerType::Gpu => {
-                let survey_str = survey_name.to_string().to_uppercase();
-                let device_id = gpu_device_id.unwrap_or(0);
-                thread::spawn(move || {
-                    let tid = std::thread::current().id();
-                    span!(INFO, "gpu worker", ?tid, ?survey_name, device_id).in_scope(|| {
-                        info!(device_id, "starting GPU worker");
-                        debug!(?config_path);
-                        run_gpu_worker(receiver, &config_path, id, &survey_str, device_id)
-                            .unwrap_or_else(as_error!("gpu worker failed"));
-                    })
-                })
-            }
         };
 
         Worker {

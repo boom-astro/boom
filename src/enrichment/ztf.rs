@@ -1,9 +1,6 @@
 use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
-use crate::gpu::{
-    gpu_inference_queue_name, gpu_result_key, GpuInferenceRequest, GpuInferenceResponse,
-};
 use crate::utils::db::mongify;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
@@ -13,7 +10,7 @@ use crate::{
     alert::ZtfCandidate,
     enrichment::{
         fetch_alert_cutouts, fetch_alerts,
-        models::{AcaiModel, BtsBotModel, Model},
+        models::{Model, SharedModels},
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
@@ -21,8 +18,8 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use redis::AsyncCommands;
 use serde::{Deserialize, Deserializer};
+use std::sync::Arc;
 use tracing::{instrument, trace, warn};
 
 #[serdavro]
@@ -387,17 +384,6 @@ struct AlertWork {
     alert: ZtfAlertForEnrichment,
 }
 
-/// Holds ONNX models when running in CPU-inline mode (gpu.enabled = false).
-/// When gpu.enabled = true, models are owned by the GPU worker instead.
-struct InlineModels {
-    acai_h: AcaiModel,
-    acai_n: AcaiModel,
-    acai_v: AcaiModel,
-    acai_o: AcaiModel,
-    acai_b: AcaiModel,
-    btsbot: BtsBotModel,
-}
-
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -405,19 +391,18 @@ pub struct ZtfEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
-    /// None when gpu.enabled = true (GPU worker owns models).
-    models: Option<InlineModels>,
-    /// Redis connection for GPU inference requests (only used when gpu.enabled).
-    redis_con: Option<redis::aio::MultiplexedConnection>,
-    /// GPU inference queue name (only used when gpu.enabled).
-    gpu_queue: Option<String>,
+    /// Shared ONNX models (loaded once, shared across all enrichment workers via Arc).
+    models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
 }
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for ZtfEnrichmentWorker {
-    #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
+    #[instrument(skip(shared_models), err)]
+    async fn new(
+        config_path: &str,
+        shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
@@ -426,25 +411,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
-
-        // When GPU mode is enabled, models are owned by the GPU worker.
-        // The enrichment worker only needs a Redis connection to push requests.
-        let (models, redis_con, gpu_queue) = if config.gpu.enabled {
-            let con = config.build_redis().await?;
-            let queue = gpu_inference_queue_name("ZTF");
-            (None, Some(con), Some(queue))
-        } else {
-            // CPU-inline mode: load ONNX models in this worker
-            let models = InlineModels {
-                acai_h: AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
-                acai_n: AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?,
-                acai_v: AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
-                acai_o: AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
-                acai_b: AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
-                btsbot: BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?,
-            };
-            (Some(models), None, None)
-        };
 
         // Detect if Babamul is enabled from the config
         let babamul: Option<Babamul> = if config.babamul.enabled {
@@ -460,9 +426,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_collection,
             alert_cutout_collection,
             alert_pipeline: create_ztf_alert_pipeline(false),
-            models,
-            redis_con,
-            gpu_queue,
+            models: shared_models,
             babamul,
         })
     }
@@ -529,18 +493,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             });
         }
 
-        // Determine classifications: GPU-deferred or CPU-inline
+        // Run ML classification using shared models
         let classifications_list: Vec<Option<ZtfAlertClassifications>> =
-            if self.redis_con.is_some() && self.gpu_queue.is_some() {
-                // GPU path: push inference requests and poll for results
-                let con = self.redis_con.as_mut().unwrap();
-                let gpu_queue = self.gpu_queue.as_ref().unwrap();
-                Self::classify_via_gpu(&work_items, con, gpu_queue).await?
-            } else if let Some(ref mut models) = self.models {
-                // CPU-inline path: run inference directly
-                Self::classify_inline(models, &work_items)?
+            if let Some(ref models) = self.models {
+                Self::classify(&models, &work_items)?
             } else {
-                // No models and no GPU — skip classification
                 vec![None; work_items.len()]
             };
 
@@ -704,28 +661,39 @@ impl ZtfEnrichmentWorker {
         ))
     }
 
-    /// CPU-inline classification: run ONNX models directly in this worker thread.
-    fn classify_inline(
-        models: &mut InlineModels,
+    /// Run ONNX classification using shared models.
+    /// Each model is locked individually to minimize contention.
+    fn classify(
+        models: &SharedModels,
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         let mut results = Vec::with_capacity(work_items.len());
         for item in work_items {
-            let triplet = models.acai_h.get_triplet(&[&item.cutouts])?;
-            let metadata_result = models.acai_h.get_metadata(&[&item.alert]);
+            // get_triplet and get_metadata only need &self (no lock needed)
+            let acai_h = models.acai_h.lock().unwrap();
+            let triplet = acai_h.get_triplet(&[&item.cutouts])?;
+            let metadata_result = acai_h.get_metadata(&[&item.alert]);
+            drop(acai_h);
+
             let btsbot_metadata_result = models
                 .btsbot
+                .lock()
+                .unwrap()
                 .get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
 
             let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
                 (metadata_result, btsbot_metadata_result)
             {
-                let acai_h_scores = models.acai_h.predict(&metadata, &triplet)?;
-                let acai_n_scores = models.acai_n.predict(&metadata, &triplet)?;
-                let acai_v_scores = models.acai_v.predict(&metadata, &triplet)?;
-                let acai_o_scores = models.acai_o.predict(&metadata, &triplet)?;
-                let acai_b_scores = models.acai_b.predict(&metadata, &triplet)?;
-                let btsbot_scores = models.btsbot.predict(&btsbot_metadata, &triplet)?;
+                let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+                let btsbot_scores = models
+                    .btsbot
+                    .lock()
+                    .unwrap()
+                    .predict(&btsbot_metadata, &triplet)?;
                 Some(ZtfAlertClassifications {
                     acai_h: acai_h_scores[0],
                     acai_n: acai_n_scores[0],
@@ -744,528 +712,5 @@ impl ZtfEnrichmentWorker {
             results.push(cls);
         }
         Ok(results)
-    }
-
-    /// GPU-deferred classification: push inference requests to the GPU worker
-    /// via Redis, then poll for results.
-    async fn classify_via_gpu(
-        work_items: &[AlertWork],
-        con: &mut redis::aio::MultiplexedConnection,
-        gpu_queue: &str,
-    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
-        // We need a temporary AcaiModel just for get_metadata/get_triplet (CPU-only operations).
-        // These are lightweight — they don't load ONNX. We use a dummy to access the trait methods.
-        // Actually, get_triplet and get_metadata are on the Model trait impl, not the Session.
-        // For the GPU path, we pre-extract features and triplets here, then send them.
-        //
-        // Since get_triplet and get_metadata need a Model instance, and we don't have one
-        // in GPU mode, we compute the features manually. The triplet preparation uses
-        // prepare_triplet from utils::fits which doesn't need a model.
-
-        use crate::utils::fits::prepare_triplet;
-
-        let mut request_ids: Vec<Option<String>> = Vec::with_capacity(work_items.len());
-        let mut gpu_requests: Vec<String> = Vec::new();
-
-        for item in work_items {
-            // Prepare triplet (CPU operation, no model needed)
-            let triplet_result = prepare_triplet(&item.cutouts);
-            let triplet_flat = match triplet_result {
-                Ok((sci, tmpl, diff)) => {
-                    let mut flat = Vec::with_capacity(63 * 63 * 3);
-                    // Interleave as [row][col][channel] matching the model's expected layout
-                    for row in 0..63 {
-                        for col in 0..63 {
-                            flat.push(sci[row * 63 + col]);
-                            flat.push(tmpl[row * 63 + col]);
-                            flat.push(diff[row * 63 + col]);
-                        }
-                    }
-                    flat
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to prepare triplet for candid {}: {}",
-                        item.candid, e
-                    );
-                    request_ids.push(None);
-                    continue;
-                }
-            };
-
-            // Extract ACAI metadata (25 features)
-            let candidate = &item.alert.candidate.candidate;
-            let acai_metadata = match Self::extract_acai_metadata(candidate) {
-                Some(m) => m,
-                None => {
-                    warn!(
-                        "Skipping GPU inference for candid {} due to missing ACAI features",
-                        item.candid
-                    );
-                    request_ids.push(None);
-                    continue;
-                }
-            };
-
-            // Extract BTSBot metadata (25 features)
-            let btsbot_metadata =
-                match Self::extract_btsbot_metadata(candidate, &item.all_bands_properties) {
-                    Some(m) => m,
-                    None => {
-                        warn!(
-                            "Skipping GPU inference for candid {} due to missing BTSBot features",
-                            item.candid
-                        );
-                        request_ids.push(None);
-                        continue;
-                    }
-                };
-
-            let request_id = uuid::Uuid::new_v4().to_string();
-            let req = GpuInferenceRequest {
-                request_id: request_id.clone(),
-                candid: item.candid,
-                acai_metadata,
-                btsbot_metadata,
-                triplet: triplet_flat,
-            };
-
-            match serde_json::to_string(&req) {
-                Ok(json) => {
-                    gpu_requests.push(json);
-                    request_ids.push(Some(request_id));
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to serialize GPU request for candid {}: {}",
-                        item.candid, e
-                    );
-                    request_ids.push(None);
-                }
-            }
-        }
-
-        // Push all requests to the GPU queue
-        if !gpu_requests.is_empty() {
-            let _: usize = con
-                .lpush(gpu_queue, &gpu_requests)
-                .await
-                .map_err(|e| EnrichmentWorkerError::Redis(e))?;
-        }
-
-        // Poll for results with timeout
-        let poll_interval = std::time::Duration::from_millis(10);
-        let max_wait = std::time::Duration::from_secs(30);
-        let start = std::time::Instant::now();
-
-        let mut results: Vec<Option<ZtfAlertClassifications>> = vec![None; work_items.len()];
-        let mut pending: Vec<(usize, String)> = request_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(i, rid)| rid.as_ref().map(|r| (i, r.clone())))
-            .collect();
-
-        while !pending.is_empty() && start.elapsed() < max_wait {
-            // Use MGET to fetch all pending results in a single round-trip
-            let keys: Vec<String> = pending.iter().map(|(_, rid)| gpu_result_key(rid)).collect();
-            let values: Vec<Option<String>> = con
-                .mget(&keys)
-                .await
-                .map_err(EnrichmentWorkerError::Redis)?;
-
-            let mut still_pending = Vec::new();
-            let mut keys_to_delete: Vec<String> = Vec::new();
-
-            for ((idx, rid), value) in pending.into_iter().zip(values) {
-                if let Some(json) = value {
-                    keys_to_delete.push(gpu_result_key(&rid));
-                    match serde_json::from_str::<GpuInferenceResponse>(&json) {
-                        Ok(resp) => {
-                            results[idx] = Some(ZtfAlertClassifications {
-                                acai_h: resp.acai_h,
-                                acai_n: resp.acai_n,
-                                acai_v: resp.acai_v,
-                                acai_o: resp.acai_o,
-                                acai_b: resp.acai_b,
-                                btsbot: resp.btsbot,
-                            });
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse GPU result for request {}: {}", rid, e);
-                        }
-                    }
-                } else {
-                    still_pending.push((idx, rid));
-                }
-            }
-
-            // Batch-delete completed result keys
-            if !keys_to_delete.is_empty() {
-                let _: Result<(), _> = con.del::<&[String], ()>(&keys_to_delete).await;
-            }
-
-            pending = still_pending;
-            if !pending.is_empty() {
-                tokio::time::sleep(poll_interval).await;
-            }
-        }
-
-        if !pending.is_empty() {
-            warn!(
-                "{} GPU inference requests timed out after {:?}",
-                pending.len(),
-                max_wait
-            );
-        }
-
-        Ok(results)
-    }
-
-    /// Extract 25 ACAI metadata features from a candidate. Returns None if any required field is missing.
-    fn extract_acai_metadata(candidate: &crate::alert::Candidate) -> Option<Vec<f32>> {
-        Some(vec![
-            candidate.drb? as f32,
-            candidate.diffmaglim? as f32,
-            candidate.ra as f32,
-            candidate.dec as f32,
-            candidate.magpsf,
-            candidate.sigmapsf,
-            candidate.chipsf? as f32,
-            candidate.fwhm? as f32,
-            candidate.sky? as f32,
-            candidate.chinr? as f32,
-            candidate.sharpnr? as f32,
-            candidate.sgscore1? as f32,
-            candidate.distpsnr1? as f32,
-            candidate.sgscore2? as f32,
-            candidate.distpsnr2? as f32,
-            candidate.sgscore3? as f32,
-            candidate.distpsnr3? as f32,
-            candidate.ndethist as f32,
-            candidate.ncovhist as f32,
-            candidate.scorr? as f32,
-            candidate.nmtchps as f32,
-            candidate.clrcoeff? as f32,
-            candidate.clrcounc? as f32,
-            candidate.neargaia? as f32,
-            candidate.neargaiabright? as f32,
-        ])
-    }
-
-    /// Extract 25 BTSBot metadata features. Returns None if any required field is missing.
-    fn extract_btsbot_metadata(
-        candidate: &crate::alert::Candidate,
-        all_bands: &AllBandsProperties,
-    ) -> Option<Vec<f32>> {
-        let ndethist = candidate.ndethist as f32;
-        let ncovhist = candidate.ncovhist as f32;
-        let nnondet = ncovhist - ndethist;
-        let days_since_peak = (all_bands.last_jd - all_bands.peak_jd) as f32;
-        let days_to_peak = (all_bands.peak_jd - all_bands.first_jd) as f32;
-        let age = (all_bands.first_jd - all_bands.last_jd) as f32;
-
-        Some(vec![
-            candidate.sgscore1? as f32,
-            candidate.distpsnr1? as f32,
-            candidate.sgscore2? as f32,
-            candidate.distpsnr2? as f32,
-            candidate.fwhm? as f32,
-            candidate.magpsf as f32,
-            candidate.sigmapsf,
-            candidate.chipsf? as f32,
-            candidate.ra as f32,
-            candidate.dec as f32,
-            candidate.diffmaglim? as f32,
-            ndethist,
-            candidate.nmtchps as f32,
-            age,
-            days_since_peak,
-            days_to_peak,
-            all_bands.peak_mag as f32,
-            candidate.drb? as f32,
-            ncovhist,
-            nnondet,
-            candidate.chinr? as f32,
-            candidate.sharpnr? as f32,
-            candidate.scorr? as f32,
-            candidate.sky? as f32,
-            all_bands.faintest_mag as f32,
-        ])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::alert::Candidate;
-    use crate::utils::lightcurves::{AllBandsProperties, Band};
-
-    /// Build a Candidate with all optional fields populated.
-    fn make_full_candidate() -> Candidate {
-        Candidate {
-            jd: 2459000.5,
-            ra: 180.0,
-            dec: -30.0,
-            magpsf: 18.5,
-            sigmapsf: 0.1,
-            ndethist: 10,
-            ncovhist: 50,
-            nmtchps: 5,
-            drb: Some(0.95),
-            diffmaglim: Some(20.5),
-            chipsf: Some(1.2),
-            fwhm: Some(2.1),
-            sky: Some(21.0),
-            chinr: Some(0.8),
-            sharpnr: Some(0.05),
-            sgscore1: Some(0.1),
-            distpsnr1: Some(3.5),
-            sgscore2: Some(0.2),
-            distpsnr2: Some(5.0),
-            sgscore3: Some(0.3),
-            distpsnr3: Some(7.0),
-            scorr: Some(15.0),
-            clrcoeff: Some(0.01),
-            clrcounc: Some(0.002),
-            neargaia: Some(1.5),
-            neargaiabright: Some(10.0),
-            ..Default::default()
-        }
-    }
-
-    fn make_all_bands_properties() -> AllBandsProperties {
-        AllBandsProperties {
-            peak_jd: 2459010.0,
-            peak_mag: 17.0,
-            peak_mag_err: 0.05,
-            peak_band: Band::G,
-            faintest_jd: 2459020.0,
-            faintest_mag: 21.0,
-            faintest_mag_err: 0.3,
-            faintest_band: Band::R,
-            first_jd: 2459000.0,
-            last_jd: 2459030.0,
-        }
-    }
-
-    // ── ACAI metadata extraction ────────────────────────────────────
-
-    #[test]
-    fn test_extract_acai_metadata_full_candidate() {
-        let c = make_full_candidate();
-        let meta = ZtfEnrichmentWorker::extract_acai_metadata(&c);
-        assert!(meta.is_some());
-        let meta = meta.unwrap();
-        assert_eq!(meta.len(), 25, "ACAI expects exactly 25 features");
-
-        // Spot-check known positions
-        assert!((meta[0] - 0.95).abs() < 1e-6, "drb");
-        assert!((meta[1] - 20.5).abs() < 1e-6, "diffmaglim");
-        assert!((meta[2] - 180.0).abs() < 1e-3, "ra");
-        assert!((meta[3] - (-30.0)).abs() < 1e-3, "dec");
-        assert!((meta[4] - 18.5).abs() < 1e-3, "magpsf");
-        assert!((meta[5] - 0.1).abs() < 1e-3, "sigmapsf");
-    }
-
-    #[test]
-    fn test_extract_acai_metadata_missing_drb_returns_none() {
-        let mut c = make_full_candidate();
-        c.drb = None;
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    #[test]
-    fn test_extract_acai_metadata_missing_fwhm_returns_none() {
-        let mut c = make_full_candidate();
-        c.fwhm = None;
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    #[test]
-    fn test_extract_acai_metadata_missing_sgscore1_returns_none() {
-        let mut c = make_full_candidate();
-        c.sgscore1 = None;
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    #[test]
-    fn test_extract_acai_metadata_missing_scorr_returns_none() {
-        let mut c = make_full_candidate();
-        c.scorr = None;
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    #[test]
-    fn test_extract_acai_metadata_missing_neargaia_returns_none() {
-        let mut c = make_full_candidate();
-        c.neargaia = None;
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    #[test]
-    fn test_extract_acai_metadata_missing_clrcoeff_returns_none() {
-        let mut c = make_full_candidate();
-        c.clrcoeff = None;
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    // ── BTSBot metadata extraction ──────────────────────────────────
-
-    #[test]
-    fn test_extract_btsbot_metadata_full_candidate() {
-        let c = make_full_candidate();
-        let ab = make_all_bands_properties();
-        let meta = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab);
-        assert!(meta.is_some());
-        let meta = meta.unwrap();
-        assert_eq!(meta.len(), 25, "BTSBot expects exactly 25 features");
-
-        // Spot-check: sgscore1 is first
-        assert!((meta[0] - 0.1).abs() < 1e-6, "sgscore1");
-        // distpsnr1
-        assert!((meta[1] - 3.5).abs() < 1e-6, "distpsnr1");
-        // peak_mag (position 16)
-        assert!((meta[16] - 17.0).abs() < 1e-3, "peak_mag");
-        // faintest_mag (position 24)
-        assert!((meta[24] - 21.0).abs() < 1e-3, "faintest_mag");
-    }
-
-    #[test]
-    fn test_extract_btsbot_metadata_derived_features() {
-        let c = make_full_candidate();
-        let ab = make_all_bands_properties();
-        let meta = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).unwrap();
-
-        // ndethist = 10, ncovhist = 50
-        let ndethist = meta[11];
-        let ncovhist = meta[18];
-        let nnondet = meta[19];
-        assert!((ndethist - 10.0).abs() < 1e-6);
-        assert!((ncovhist - 50.0).abs() < 1e-6);
-        assert!(
-            (nnondet - 40.0).abs() < 1e-6,
-            "nnondet = ncovhist - ndethist"
-        );
-
-        // age = first_jd - last_jd = 2459000 - 2459030 = -30
-        let age = meta[13];
-        assert!((age - (-30.0)).abs() < 1e-3, "age");
-
-        // days_since_peak = last_jd - peak_jd = 2459030 - 2459010 = 20
-        let days_since_peak = meta[14];
-        assert!((days_since_peak - 20.0).abs() < 1e-3, "days_since_peak");
-
-        // days_to_peak = peak_jd - first_jd = 2459010 - 2459000 = 10
-        let days_to_peak = meta[15];
-        assert!((days_to_peak - 10.0).abs() < 1e-3, "days_to_peak");
-    }
-
-    #[test]
-    fn test_extract_btsbot_metadata_missing_drb_returns_none() {
-        let mut c = make_full_candidate();
-        c.drb = None;
-        let ab = make_all_bands_properties();
-        assert!(ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).is_none());
-    }
-
-    #[test]
-    fn test_extract_btsbot_metadata_missing_sgscore1_returns_none() {
-        let mut c = make_full_candidate();
-        c.sgscore1 = None;
-        let ab = make_all_bands_properties();
-        assert!(ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).is_none());
-    }
-
-    // ── Feature order consistency between ACAI and BTSBot ───────────
-
-    #[test]
-    fn test_acai_and_btsbot_share_consistent_candidate_values() {
-        // Both extractors should read the same Candidate fields consistently.
-        // For fields that appear in both (e.g., sgscore1, magpsf), verify they
-        // produce the same float value from the same Candidate.
-        let c = make_full_candidate();
-        let ab = make_all_bands_properties();
-        let acai = ZtfEnrichmentWorker::extract_acai_metadata(&c).unwrap();
-        let btsbot = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).unwrap();
-
-        // magpsf: ACAI position 4, BTSBot position 5
-        assert!((acai[4] - btsbot[5]).abs() < 1e-6, "magpsf should match");
-        // sigmapsf: ACAI position 5, BTSBot position 6
-        assert!((acai[5] - btsbot[6]).abs() < 1e-6, "sigmapsf should match");
-        // sgscore1: ACAI position 11, BTSBot position 0
-        assert!((acai[11] - btsbot[0]).abs() < 1e-6, "sgscore1 should match");
-        // distpsnr1: ACAI position 12, BTSBot position 1
-        assert!(
-            (acai[12] - btsbot[1]).abs() < 1e-6,
-            "distpsnr1 should match"
-        );
-        // drb: ACAI position 0, BTSBot position 17
-        assert!((acai[0] - btsbot[17]).abs() < 1e-6, "drb should match");
-    }
-
-    // ── Default Candidate (all optional fields None) ────────────────
-
-    #[test]
-    fn test_extract_acai_metadata_default_candidate_returns_none() {
-        // A default Candidate has all Option fields as None
-        let c = Candidate::default();
-        assert!(ZtfEnrichmentWorker::extract_acai_metadata(&c).is_none());
-    }
-
-    #[test]
-    fn test_extract_btsbot_metadata_default_candidate_returns_none() {
-        let c = Candidate::default();
-        let ab = make_all_bands_properties();
-        assert!(ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).is_none());
-    }
-
-    // ── GPU request construction from metadata ──────────────────────
-
-    #[test]
-    fn test_gpu_request_from_extracted_metadata() {
-        use crate::gpu::{GpuInferenceRequest, GpuInferenceResponse};
-
-        let c = make_full_candidate();
-        let ab = make_all_bands_properties();
-        let acai_meta = ZtfEnrichmentWorker::extract_acai_metadata(&c).unwrap();
-        let btsbot_meta = ZtfEnrichmentWorker::extract_btsbot_metadata(&c, &ab).unwrap();
-
-        let req = GpuInferenceRequest {
-            request_id: "test-1".to_string(),
-            candid: 12345,
-            acai_metadata: acai_meta.clone(),
-            btsbot_metadata: btsbot_meta.clone(),
-            triplet: vec![0.0; 63 * 63 * 3],
-        };
-
-        // Roundtrip through JSON (same path as Redis queue)
-        let json = serde_json::to_string(&req).unwrap();
-        let rt: GpuInferenceRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(rt.acai_metadata.len(), 25);
-        assert_eq!(rt.btsbot_metadata.len(), 25);
-        assert_eq!(rt.triplet.len(), 63 * 63 * 3);
-
-        // Simulate GPU response and convert to classifications
-        let resp = GpuInferenceResponse {
-            candid: 12345,
-            acai_h: 0.91,
-            acai_n: 0.82,
-            acai_v: 0.73,
-            acai_o: 0.64,
-            acai_b: 0.55,
-            btsbot: 0.46,
-        };
-
-        let cls = ZtfAlertClassifications {
-            acai_h: resp.acai_h,
-            acai_n: resp.acai_n,
-            acai_v: resp.acai_v,
-            acai_o: resp.acai_o,
-            acai_b: resp.acai_b,
-            btsbot: resp.btsbot,
-        };
-
-        assert!((cls.acai_h - 0.91).abs() < 1e-6);
-        assert!((cls.btsbot - 0.46).abs() < 1e-6);
     }
 }

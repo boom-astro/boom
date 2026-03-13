@@ -1,5 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
+    enrichment::models::SharedModels,
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -83,49 +84,43 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .instrument(info_span!("sigint handler")),
     );
 
+    // Load ONNX models once, shared across all enrichment workers via Arc.
+    // If gpu.enabled, models are loaded on the first configured CUDA device.
+    let shared_models = if matches!(args.survey, Survey::Ztf) {
+        let device_id = if config.gpu.enabled {
+            let id = config.gpu.device_ids.first().copied().unwrap_or(0);
+            info!(device_id = id, "loading ONNX models on GPU");
+            Some(id)
+        } else {
+            info!("loading ONNX models on CPU");
+            None
+        };
+        Some(SharedModels::load(device_id).expect("failed to load ONNX models"))
+    } else {
+        None
+    };
+
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
         args.survey.clone(),
         config_path.clone(),
+        None,
     );
     let enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
         n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
+        shared_models,
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
         args.survey.clone(),
         config_path.clone(),
+        None,
     );
-
-    // Spawn one GPU worker per configured device. Each worker loads all ONNX
-    // models onto its assigned CUDA device. All workers pop from the same Redis
-    // queue, so inference requests are load-balanced across GPUs automatically.
-    let gpu_pool = if config.gpu.enabled {
-        let device_ids = &config.gpu.device_ids;
-        info!(
-            ?device_ids,
-            "GPU acceleration enabled — spawning {} GPU worker(s)",
-            device_ids.len()
-        );
-        let mut pool = ThreadPool::new(
-            WorkerType::Gpu,
-            0, // start empty, add one worker per device below
-            args.survey,
-            config_path,
-        );
-        for &device_id in device_ids {
-            pool.add_gpu_worker(device_id);
-        }
-        Some(pool)
-    } else {
-        info!("GPU acceleration disabled — enrichment workers will run inference inline");
-        None
-    };
 
     // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
     let mut shutdown_rx = shutdown_rx;
@@ -135,15 +130,10 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                 break;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                let gpu_status = match &gpu_pool {
-                    Some(pool) => format!("{}/{}", pool.live_worker_count(), pool.total_worker_count()),
-                    None => "disabled".to_string(),
-                };
                 info!(
                     alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
                     enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),
                     filter = %format!("{}/{}", filter_pool.live_worker_count(), filter_pool.total_worker_count()),
-                    gpu = %gpu_status,
                     "heartbeat: workers running"
                 );
             }
@@ -155,7 +145,6 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);
-    drop(gpu_pool);
     if let Err(error) = meter_provider.shutdown() {
         log_error!(WARN, error, "failed to shut down the meter provider");
     }

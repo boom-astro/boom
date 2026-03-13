@@ -42,22 +42,17 @@ pub enum WorkerType {
     Alert,
     Enrichment,
     Filter,
-    Gpu,
 }
 
 impl Copy for WorkerType {}
 
 impl fmt::Display for WorkerType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let enum_str;
-        match self {
-            WorkerType::Alert => {
-                enum_str = "Alert";
-            }
-            WorkerType::Filter => enum_str = "Filter",
-            WorkerType::Enrichment => enum_str = "Enrichment",
-            WorkerType::Gpu => enum_str = "Gpu",
-        }
+        let enum_str = match self {
+            WorkerType::Alert => "Alert",
+            WorkerType::Filter => "Filter",
+            WorkerType::Enrichment => "Enrichment",
+        };
         write!(f, "{}", enum_str)
     }
 }
@@ -100,16 +95,15 @@ mod tests {
         assert_eq!(format!("{}", WorkerType::Alert), "Alert");
         assert_eq!(format!("{}", WorkerType::Enrichment), "Enrichment");
         assert_eq!(format!("{}", WorkerType::Filter), "Filter");
-        assert_eq!(format!("{}", WorkerType::Gpu), "Gpu");
     }
 
     #[test]
     fn test_worker_type_clone_copy() {
-        let wt = WorkerType::Gpu;
+        let wt = WorkerType::Enrichment;
         let wt2 = wt; // Copy
         let wt3 = wt.clone(); // Clone
-        assert_eq!(format!("{}", wt2), "Gpu");
-        assert_eq!(format!("{}", wt3), "Gpu");
+        assert_eq!(format!("{}", wt2), "Enrichment");
+        assert_eq!(format!("{}", wt3), "Enrichment");
     }
 
     #[test]
