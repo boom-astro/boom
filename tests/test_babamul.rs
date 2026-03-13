@@ -239,7 +239,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     let ss_object_id = if is_rock { Some(555555_i64) } else { None };
     dia_source.ss_object_id = ss_object_id;
 
-    let enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+    let enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None, None)
         .await
         .unwrap();
 
