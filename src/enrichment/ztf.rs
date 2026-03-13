@@ -530,8 +530,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 #[cfg(feature = "cuda")]
                 {
                     let gpu_pool = self.gpu_pool.as_ref().unwrap().clone();
-                    let lightcurves: Vec<Vec<PhotometryMag>> =
-                        work_items.iter().map(|w| w.lightcurve.clone()).collect();
+                    let lightcurves: Vec<Vec<PhotometryMag>> = work_items
+                        .iter_mut()
+                        .map(|w| std::mem::take(&mut w.lightcurve))
+                        .collect();
                     let results =
                         run_fitting_gpu_batch(&lightcurves, do_np, do_param, gpu_pool).await;
                     for (item, result) in work_items.iter_mut().zip(results) {
