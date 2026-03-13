@@ -10,7 +10,7 @@ use crate::{
     alert::ZtfCandidate,
     enrichment::{
         fetch_alert_cutouts, fetch_alerts,
-        models::{AcaiModel, BtsBotModel, Model},
+        models::{Model, SharedModels},
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
@@ -19,6 +19,7 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
+use std::sync::Arc;
 use tracing::{instrument, trace, warn};
 
 #[serdavro]
@@ -373,6 +374,16 @@ pub struct ZtfAlertClassifications {
     pub btsbot: f32,
 }
 
+/// Per-alert intermediate data used during enrichment processing.
+struct AlertWork {
+    candid: i64,
+    programid: i32,
+    properties: ZtfAlertProperties,
+    all_bands_properties: AllBandsProperties,
+    cutouts: crate::alert::AlertCutout,
+    alert: ZtfAlertForEnrichment,
+}
+
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
@@ -380,19 +391,18 @@ pub struct ZtfEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
-    acai_h_model: AcaiModel,
-    acai_n_model: AcaiModel,
-    acai_v_model: AcaiModel,
-    acai_o_model: AcaiModel,
-    acai_b_model: AcaiModel,
-    btsbot_model: BtsBotModel,
+    /// Shared ONNX models (loaded once, shared across all enrichment workers via Arc).
+    models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
 }
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for ZtfEnrichmentWorker {
-    #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
+    #[instrument(skip(shared_models), err)]
+    async fn new(
+        config_path: &str,
+        shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
@@ -402,21 +412,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
-        // we load the ACAI models (same architecture, same input/output)
-        let acai_h_model = AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?;
-        let acai_n_model = AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?;
-        let acai_v_model = AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?;
-        let acai_o_model = AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?;
-        let acai_b_model = AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?;
-
-        // we load the btsbot model (different architecture, and input/output then ACAI)
-        let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
-
         // Detect if Babamul is enabled from the config
         let babamul: Option<Babamul> = if config.babamul.enabled {
             Some(Babamul::new(&config))
         } else {
             None
+        };
+
+        // Use shared models if provided (GPU path), otherwise load per-worker
+        // models on CPU. Per-worker models avoid mutex contention when multiple
+        // enrichment workers run in parallel on CPU.
+        let models = match shared_models {
+            Some(m) => Some(m),
+            None => Some(SharedModels::load(None)?),
         };
 
         Ok(ZtfEnrichmentWorker {
@@ -426,12 +434,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_collection,
             alert_cutout_collection,
             alert_pipeline: create_ztf_alert_pipeline(false),
-            acai_h_model,
-            acai_n_model,
-            acai_v_model,
-            acai_o_model,
-            acai_b_model,
-            btsbot_model,
+            models,
             babamul,
         })
     }
@@ -476,63 +479,46 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
-        // we keep it very simple for now, let's run on 1 alert at a time
-        // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
+
+        let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-
-            // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alert).await?;
+            work_items.push(AlertWork {
+                candid,
+                programid,
+                properties,
+                all_bands_properties,
+                cutouts,
+                alert,
+            });
+        }
 
-            // Now, prepare inputs for ML models and run inference
-            // (we skip ML inference if features cannot be computed, e.g. missing required features)
-            let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
-            let btsbot_metadata_result = self
-                .btsbot_model
-                .get_metadata(&[&alert], &[all_bands_properties.clone()]);
-
-            let classifications = if let (Ok(metadata), Ok(btsbot_metadata)) =
-                (metadata_result, btsbot_metadata_result)
-            {
-                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
-                Some(ZtfAlertClassifications {
-                    acai_h: acai_h_scores[0],
-                    acai_n: acai_n_scores[0],
-                    acai_v: acai_v_scores[0],
-                    acai_o: acai_o_scores[0],
-                    acai_b: acai_b_scores[0],
-                    btsbot: btsbot_scores[0],
-                })
+        // Run ML classification using shared models
+        let classifications_list: Vec<Option<ZtfAlertClassifications>> =
+            if let Some(ref models) = self.models {
+                Self::classify(&models, &work_items)?
             } else {
-                warn!(
-                    "Skipping ML inference for candid {} due to missing features",
-                    candid
-                );
-                None
+                vec![None; work_items.len()]
             };
 
-            let update_alert_document = if let Some(classifications) = classifications {
+        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
+            let update_alert_document = if let Some(ref cls) = classifications {
                 doc! { "$set": {
-                    "classifications": mongify(&classifications),
-                    "properties": mongify(&properties),
+                    "classifications": mongify(cls),
+                    "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
-                    "properties": mongify(&properties),
+                    "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
             };
@@ -540,17 +526,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(doc! {"_id": candid})
+                    .filter(doc! {"_id": item.candid})
                     .update(update_alert_document)
                     .build(),
             );
 
             updates.push(update);
-            processed_alerts.push(format!("{},{}", programid, candid));
+            processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = BabamulZtfAlert::from_alert_and_properties(alert, properties);
+                let enriched_alert =
+                    BabamulZtfAlert::from_alert_and_properties(item.alert, item.properties);
                 enriched_alerts.push(enriched_alert);
             }
         }
@@ -681,5 +667,58 @@ impl ZtfEnrichmentWorker {
             programid,
             lightcurve,
         ))
+    }
+
+    /// Run ONNX classification using shared models.
+    /// Each model is locked individually to minimize contention.
+    fn classify(
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        let mut results = Vec::with_capacity(work_items.len());
+        for item in work_items {
+            // get_triplet and get_metadata only need &self (no lock needed)
+            let acai_h = models.acai_h.lock().unwrap();
+            let triplet = acai_h.get_triplet(&[&item.cutouts])?;
+            let metadata_result = acai_h.get_metadata(&[&item.alert]);
+            drop(acai_h);
+
+            let btsbot_metadata_result = models
+                .btsbot
+                .lock()
+                .unwrap()
+                .get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
+
+            let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+                let btsbot_scores = models
+                    .btsbot
+                    .lock()
+                    .unwrap()
+                    .predict(&btsbot_metadata, &triplet)?;
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    item.candid
+                );
+                None
+            };
+            results.push(cls);
+        }
+        Ok(results)
     }
 }

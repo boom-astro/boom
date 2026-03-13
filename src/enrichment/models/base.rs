@@ -23,7 +23,15 @@ pub enum ModelError {
     MissingFeature(&'static str),
 }
 
+/// Load an ONNX model, optionally on a specific CUDA device.
+///
+/// GPU usage is controlled by the `USE_GPU` environment variable (default: `"true"`).
+/// When `device_id` is `Some(id)`, that CUDA device is used; otherwise device 0.
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
+    load_model_on_device(path, None)
+}
+
+pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
     let use_gpu = env::var("USE_GPU")
@@ -34,9 +42,12 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     if use_gpu {
         // if CUDA or Apple's CoreML aren't available,
         // it will fall back to CPU execution provider
+        let dev = device_id.unwrap_or(0);
         builder = builder.with_execution_providers([
             #[cfg(target_os = "linux")]
-            ort::execution_providers::CUDAExecutionProvider::default().build(),
+            ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(dev)
+                .build(),
             #[cfg(target_os = "macos")]
             ort::execution_providers::CoreMLExecutionProvider::default().build(),
         ])?;

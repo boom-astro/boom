@@ -1,5 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
+    enrichment::models::SharedModelPool,
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -83,23 +84,39 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .instrument(info_span!("sigint handler")),
     );
 
+    // Load ONNX models at startup. When GPUs are enabled, create a pool of
+    // shared model sets (one per device) to conserve VRAM — workers round-robin
+    // across devices. When GPUs are disabled, pass None so each worker loads
+    // its own private models on CPU (zero mutex contention).
+    let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+        Some(
+            SharedModelPool::load(&config.gpu.device_ids)
+                .expect("failed to load ONNX models on GPU"),
+        )
+    } else {
+        None
+    };
+
     let alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
         args.survey.clone(),
         config_path.clone(),
+        None,
     );
     let enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
         n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
+        shared_model_pool,
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        args.survey,
-        config_path,
+        args.survey.clone(),
+        config_path.clone(),
+        None,
     );
 
     // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
