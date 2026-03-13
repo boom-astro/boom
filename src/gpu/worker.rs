@@ -151,25 +151,74 @@ impl GpuWorkerState {
             return Ok(vec![]);
         }
 
-        // Build batched input tensors
-        let acai_metadata: Vec<f32> = requests
-            .iter()
-            .flat_map(|r| r.acai_metadata.iter().copied())
-            .collect();
-        let btsbot_metadata: Vec<f32> = requests
-            .iter()
-            .flat_map(|r| r.btsbot_metadata.iter().copied())
-            .collect();
-        let triplet_flat: Vec<f32> = requests
-            .iter()
-            .flat_map(|r| r.triplet.iter().copied())
-            .collect();
+        // Build batched input tensors, validating and normalizing per-request lengths
+        const ACAI_META_LEN: usize = 25;
+        const BTSBOT_META_LEN: usize = 25;
+        const TRIPLET_SIDE: usize = 63;
+        const TRIPLET_CHANNELS: usize = 3;
+        const TRIPLET_LEN: usize = TRIPLET_SIDE * TRIPLET_SIDE * TRIPLET_CHANNELS;
 
-        let acai_meta_arr = Array::from_shape_vec((n, 25), acai_metadata)
+        let mut acai_metadata: Vec<f32> = Vec::with_capacity(n * ACAI_META_LEN);
+        let mut btsbot_metadata: Vec<f32> = Vec::with_capacity(n * BTSBOT_META_LEN);
+        let mut triplet_flat: Vec<f32> = Vec::with_capacity(n * TRIPLET_LEN);
+
+        for (idx, r) in requests.iter().enumerate() {
+            // Normalize ACAI metadata
+            if r.acai_metadata.len() != ACAI_META_LEN {
+                warn!(
+                    request_index = idx,
+                    actual_len = r.acai_metadata.len(),
+                    expected_len = ACAI_META_LEN,
+                    "GpuWorker: received acai_metadata with unexpected length; truncating/padding"
+                );
+            }
+            for i in 0..ACAI_META_LEN {
+                let value = r
+                    .acai_metadata
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0.0);
+                acai_metadata.push(value);
+            }
+
+            // Normalize BTSBot metadata
+            if r.btsbot_metadata.len() != BTSBOT_META_LEN {
+                warn!(
+                    request_index = idx,
+                    actual_len = r.btsbot_metadata.len(),
+                    expected_len = BTSBOT_META_LEN,
+                    "GpuWorker: received btsbot_metadata with unexpected length; truncating/padding"
+                );
+            }
+            for i in 0..BTSBOT_META_LEN {
+                let value = r
+                    .btsbot_metadata
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0.0);
+                btsbot_metadata.push(value);
+            }
+
+            // Normalize triplet image tensor
+            if r.triplet.len() != TRIPLET_LEN {
+                warn!(
+                    request_index = idx,
+                    actual_len = r.triplet.len(),
+                    expected_len = TRIPLET_LEN,
+                    "GpuWorker: received triplet with unexpected length; truncating/padding"
+                );
+            }
+            for i in 0..TRIPLET_LEN {
+                let value = r.triplet.get(i).copied().unwrap_or(0.0);
+                triplet_flat.push(value);
+            }
+        }
+
+        let acai_meta_arr = Array::from_shape_vec((n, ACAI_META_LEN), acai_metadata)
             .map_err(|e| ModelError::NdarrayShape(e))?;
-        let btsbot_meta_arr = Array::from_shape_vec((n, 25), btsbot_metadata)
+        let btsbot_meta_arr = Array::from_shape_vec((n, BTSBOT_META_LEN), btsbot_metadata)
             .map_err(|e| ModelError::NdarrayShape(e))?;
-        let triplet_arr = Array::from_shape_vec((n, 63, 63, 3), triplet_flat)
+        let triplet_arr = Array::from_shape_vec((n, TRIPLET_SIDE, TRIPLET_SIDE, TRIPLET_CHANNELS), triplet_flat)
             .map_err(|e| ModelError::NdarrayShape(e))?;
 
         // Run each model on the full batch
