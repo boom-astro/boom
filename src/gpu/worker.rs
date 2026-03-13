@@ -173,11 +173,7 @@ impl GpuWorkerState {
                 );
             }
             for i in 0..ACAI_META_LEN {
-                let value = r
-                    .acai_metadata
-                    .get(i)
-                    .copied()
-                    .unwrap_or(0.0);
+                let value = r.acai_metadata.get(i).copied().unwrap_or(0.0);
                 acai_metadata.push(value);
             }
 
@@ -191,11 +187,7 @@ impl GpuWorkerState {
                 );
             }
             for i in 0..BTSBOT_META_LEN {
-                let value = r
-                    .btsbot_metadata
-                    .get(i)
-                    .copied()
-                    .unwrap_or(0.0);
+                let value = r.btsbot_metadata.get(i).copied().unwrap_or(0.0);
                 btsbot_metadata.push(value);
             }
 
@@ -218,8 +210,11 @@ impl GpuWorkerState {
             .map_err(|e| ModelError::NdarrayShape(e))?;
         let btsbot_meta_arr = Array::from_shape_vec((n, BTSBOT_META_LEN), btsbot_metadata)
             .map_err(|e| ModelError::NdarrayShape(e))?;
-        let triplet_arr = Array::from_shape_vec((n, TRIPLET_SIDE, TRIPLET_SIDE, TRIPLET_CHANNELS), triplet_flat)
-            .map_err(|e| ModelError::NdarrayShape(e))?;
+        let triplet_arr = Array::from_shape_vec(
+            (n, TRIPLET_SIDE, TRIPLET_SIDE, TRIPLET_CHANNELS),
+            triplet_flat,
+        )
+        .map_err(|e| ModelError::NdarrayShape(e))?;
 
         // Run each model on the full batch
         let acai_h_scores = self.acai_h.predict(&acai_meta_arr, &triplet_arr)?;
@@ -338,26 +333,16 @@ pub async fn run_gpu_worker(
         // Run batched inference
         match state.run_batch(&requests) {
             Ok(responses) => {
-                // Write each response to its per-request Redis key with TTL
+                // Write all responses in a single Redis pipeline (SET+EXPIRE per key)
+                let mut pipe = redis::pipe();
+                let mut n_serialized = 0usize;
                 for (req, resp) in requests.iter().zip(responses.iter()) {
                     let key = gpu_result_key(&req.request_id);
                     match serde_json::to_string(resp) {
                         Ok(json) => {
-                            if let Err(e) = redis::pipe()
-                                .cmd("SET")
-                                .arg(&key)
-                                .arg(&json)
-                                .cmd("EXPIRE")
-                                .arg(&key)
-                                .arg(result_ttl_secs)
-                                .query_async(&mut con)
-                                .await
-                            {
-                                error!(
-                                    candid = req.candid,
-                                    "failed to write GPU response to Redis: {}", e
-                                );
-                            }
+                            pipe.cmd("SET").arg(&key).arg(&json).ignore();
+                            pipe.cmd("EXPIRE").arg(&key).arg(result_ttl_secs).ignore();
+                            n_serialized += 1;
                         }
                         Err(e) => {
                             error!(
@@ -365,6 +350,11 @@ pub async fn run_gpu_worker(
                                 "failed to serialize GPU response: {}", e
                             );
                         }
+                    }
+                }
+                if n_serialized > 0 {
+                    if let Err(e) = pipe.query_async::<redis::Value>(&mut con).await {
+                        error!("failed to write GPU responses to Redis: {}", e);
                     }
                 }
                 GPU_BATCH_PROCESSED.add(1, &ok_attrs);

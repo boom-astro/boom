@@ -866,16 +866,19 @@ impl ZtfEnrichmentWorker {
             .collect();
 
         while !pending.is_empty() && start.elapsed() < max_wait {
+            // Use MGET to fetch all pending results in a single round-trip
+            let keys: Vec<String> = pending.iter().map(|(_, rid)| gpu_result_key(rid)).collect();
+            let values: Vec<Option<String>> = con
+                .mget(&keys)
+                .await
+                .map_err(EnrichmentWorkerError::Redis)?;
+
             let mut still_pending = Vec::new();
-            for (idx, rid) in pending {
-                let key = gpu_result_key(&rid);
-                let result: Option<String> = con
-                    .get(&key)
-                    .await
-                    .map_err(EnrichmentWorkerError::Redis)?;
-                if let Some(json) = result {
-                    // Clean up the result key
-                    let _: Result<(), _> = con.del::<&str, ()>(&key).await;
+            let mut keys_to_delete: Vec<String> = Vec::new();
+
+            for ((idx, rid), value) in pending.into_iter().zip(values) {
+                if let Some(json) = value {
+                    keys_to_delete.push(gpu_result_key(&rid));
                     match serde_json::from_str::<GpuInferenceResponse>(&json) {
                         Ok(resp) => {
                             results[idx] = Some(ZtfAlertClassifications {
@@ -895,6 +898,12 @@ impl ZtfEnrichmentWorker {
                     still_pending.push((idx, rid));
                 }
             }
+
+            // Batch-delete completed result keys
+            if !keys_to_delete.is_empty() {
+                let _: Result<(), _> = con.del::<&[String], ()>(&keys_to_delete).await;
+            }
+
             pending = still_pending;
             if !pending.is_empty() {
                 tokio::time::sleep(poll_interval).await;
