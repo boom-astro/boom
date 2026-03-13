@@ -411,25 +411,18 @@ pub struct WorkerConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct GpuConfig {
-    /// Whether dedicated GPU workers are enabled. When true, dedicated GPU workers
-    /// handle all GPU compute (ONNX inference + lightcurve fitting) and enrichment
-    /// workers offload their GPU workloads to them. When false, enrichment workers
-    /// run inference inline in-process; whether this uses CPU or GPU is determined
-    /// by the underlying model/runtime configuration (e.g., USE_GPU).
+    /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
+    /// Models are loaded once at startup and shared across all enrichment workers
+    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU (the USE_GPU
+    /// env var is still respected by the ORT session builder).
     #[serde(default)]
     pub enabled: bool,
-    /// CUDA device IDs to use. One GPU worker is spawned per device.
-    /// Default: [0]. Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
-    /// All workers share the same Redis inference queue, so load is
-    /// distributed automatically.
+    /// CUDA device IDs available for GPU work. Default: [0].
+    /// ONNX models are loaded on the first device. Additional devices are
+    /// available for the GPU pool (future lightcurve fitting).
+    /// Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
     #[serde(default = "default_gpu_device_ids")]
     pub device_ids: Vec<i32>,
-    /// Maximum batch size for GPU inference (number of alerts batched together).
-    #[serde(default = "default_gpu_batch_size")]
-    pub batch_size: usize,
-    /// Timeout in milliseconds to wait for a full batch before processing a partial one.
-    #[serde(default = "default_gpu_batch_timeout_ms")]
-    pub batch_timeout_ms: u64,
 }
 
 impl Default for GpuConfig {
@@ -437,22 +430,12 @@ impl Default for GpuConfig {
         GpuConfig {
             enabled: false,
             device_ids: default_gpu_device_ids(),
-            batch_size: default_gpu_batch_size(),
-            batch_timeout_ms: default_gpu_batch_timeout_ms(),
         }
     }
 }
 
 fn default_gpu_device_ids() -> Vec<i32> {
     vec![0]
-}
-
-fn default_gpu_batch_size() -> usize {
-    256
-}
-
-fn default_gpu_batch_timeout_ms() -> u64 {
-    100
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -597,30 +580,22 @@ mod tests {
         let config = GpuConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.device_ids, vec![0]);
-        assert_eq!(config.batch_size, 256);
-        assert_eq!(config.batch_timeout_ms, 100);
     }
 
     #[test]
     fn test_gpu_config_deserialize_empty() {
-        // When gpu section is missing entirely, defaults apply
         let json = "{}";
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(!config.enabled);
         assert_eq!(config.device_ids, vec![0]);
-        assert_eq!(config.batch_size, 256);
-        assert_eq!(config.batch_timeout_ms, 100);
     }
 
     #[test]
     fn test_gpu_config_deserialize_enabled_single_gpu() {
-        let json =
-            r#"{"enabled": true, "device_ids": [0], "batch_size": 512, "batch_timeout_ms": 50}"#;
+        let json = r#"{"enabled": true, "device_ids": [0]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
         assert_eq!(config.device_ids, vec![0]);
-        assert_eq!(config.batch_size, 512);
-        assert_eq!(config.batch_timeout_ms, 50);
     }
 
     #[test]
@@ -629,25 +604,18 @@ mod tests {
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
         assert_eq!(config.device_ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        // defaults for batch params
-        assert_eq!(config.batch_size, 256);
-        assert_eq!(config.batch_timeout_ms, 100);
     }
 
     #[test]
     fn test_gpu_config_deserialize_partial() {
-        // Only enabled set, device_ids/batch_size/timeout use defaults
         let json = r#"{"enabled": true}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
         assert_eq!(config.device_ids, vec![0]);
-        assert_eq!(config.batch_size, 256);
-        assert_eq!(config.batch_timeout_ms, 100);
     }
 
     #[test]
     fn test_gpu_config_deserialize_subset_of_devices() {
-        // Use only GPUs 2 and 5 on an 8-GPU node
         let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.device_ids, vec![2, 5]);

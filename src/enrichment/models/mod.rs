@@ -6,6 +6,7 @@ pub use acai::AcaiModel;
 pub use base::{load_model, load_model_on_device, Model, ModelError};
 pub use btsbot::BtsBotModel;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -72,5 +73,67 @@ impl SharedModels {
         };
         info!("all ONNX models loaded successfully");
         Ok(Arc::new(models))
+    }
+}
+
+/// Pool of model sets across multiple GPU devices (or a single CPU set).
+///
+/// Each device gets its own complete set of ONNX models. Workers are assigned
+/// a model set via round-robin so that mutex contention is spread across devices.
+/// With N devices and M workers, each device serves at most ceil(M/N) workers.
+pub struct SharedModelPool {
+    model_sets: Vec<Arc<SharedModels>>,
+    next: AtomicUsize,
+}
+
+impl std::fmt::Debug for SharedModelPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedModelPool")
+            .field("n_devices", &self.model_sets.len())
+            .finish()
+    }
+}
+
+impl SharedModelPool {
+    /// Load models on all specified CUDA devices (one full model set per device).
+    /// If `device_ids` is empty, loads a single CPU model set.
+    pub fn load(device_ids: &[i32]) -> Result<Arc<Self>, ModelError> {
+        let model_sets = if device_ids.is_empty() {
+            info!("loading ONNX models on CPU");
+            vec![SharedModels::load(None)?]
+        } else {
+            let mut sets = Vec::with_capacity(device_ids.len());
+            for &id in device_ids {
+                info!(device_id = id, "loading ONNX models on GPU device");
+                sets.push(SharedModels::load(Some(id))?);
+            }
+            info!(
+                n_devices = sets.len(),
+                "all GPU model sets loaded successfully"
+            );
+            sets
+        };
+
+        Ok(Arc::new(Self {
+            model_sets,
+            next: AtomicUsize::new(0),
+        }))
+    }
+
+    /// Get the next model set via round-robin. Call this once per worker at
+    /// init time to assign each worker a device.
+    pub fn next_model_set(&self) -> Arc<SharedModels> {
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.model_sets.len();
+        Arc::clone(&self.model_sets[idx])
+    }
+
+    /// Number of device-specific model sets in the pool.
+    pub fn len(&self) -> usize {
+        self.model_sets.len()
+    }
+
+    /// Returns true if the pool has no model sets (should never happen after construction).
+    pub fn is_empty(&self) -> bool {
+        self.model_sets.is_empty()
     }
 }

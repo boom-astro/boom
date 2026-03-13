@@ -1,6 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
-    enrichment::models::SharedModels,
+    enrichment::models::SharedModelPool,
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -84,18 +84,17 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .instrument(info_span!("sigint handler")),
     );
 
-    // Load ONNX models once, shared across all enrichment workers via Arc.
-    // If gpu.enabled, models are loaded on the first configured CUDA device.
-    let shared_models = if matches!(args.survey, Survey::Ztf) {
-        let device_id = if config.gpu.enabled {
-            let id = config.gpu.device_ids.first().copied().unwrap_or(0);
-            info!(device_id = id, "loading ONNX models on GPU");
-            Some(id)
+    // Load ONNX models once at startup, shared across all enrichment workers.
+    // If gpu.enabled, one model set is loaded per configured CUDA device and
+    // workers are assigned to devices via round-robin. Otherwise, a single
+    // CPU model set is shared by all workers.
+    let shared_model_pool = if matches!(args.survey, Survey::Ztf) {
+        let device_ids: &[i32] = if config.gpu.enabled {
+            &config.gpu.device_ids
         } else {
-            info!("loading ONNX models on CPU");
-            None
+            &[]
         };
-        Some(SharedModels::load(device_id).expect("failed to load ONNX models"))
+        Some(SharedModelPool::load(device_ids).expect("failed to load ONNX models"))
     } else {
         None
     };
@@ -112,7 +111,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
-        shared_models,
+        shared_model_pool,
     );
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,

@@ -239,7 +239,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
     let ss_object_id = if is_rock { Some(555555_i64) } else { None };
     dia_source.ss_object_id = ss_object_id;
 
-    let enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let enrichment_worker = LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None).await.unwrap();
 
     let candidate = LsstCandidate {
         dia_source,
@@ -1261,7 +1261,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         .expect("Failed to insert LSST aux");
 
     // Create enrichment worker and process alert
-    let mut enrichment_worker = boom::enrichment::LsstEnrichmentWorker::new(TEST_CONFIG_FILE)
+    let mut enrichment_worker = boom::enrichment::LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None)
         .await
         .expect("Failed to create enrichment worker");
 
@@ -1507,7 +1507,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         .expect("Failed to update ZTF aux with aliases");
 
     // Create enrichment worker and process alert
-    let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE)
+    let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
         .await
         .expect("Failed to create enrichment worker");
 

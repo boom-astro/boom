@@ -21,15 +21,12 @@ babamul:
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
 gpu:
-  enabled: false # Set to true to use dedicated GPU worker(s) for ONNX inference.
-  # When enabled, dedicated GPU workers own all ONNX models and enrichment workers
-  # push inference requests via Redis instead of running them inline.
-  # When disabled, enrichment workers run inference inline. Whether inline inference
-  # uses GPU or CPU is controlled by the USE_GPU environment variable (default "true"),
-  # so inline mode may still use GPU / create CUDA contexts on GPU-capable hosts.
-  device_ids: [0] # CUDA devices to use. One worker per device. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
-  batch_size: 256 # Max alerts to batch per GPU worker
-  batch_timeout_ms: 100 # Timeout (ms) before processing a partial batch
+  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  # Models are loaded once at startup and shared across all enrichment workers.
+  # When false, models are loaded on CPU (USE_GPU env var is still respected).
+  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  # ONNX models are loaded on the first device. Additional devices are available
+  # for the GPU pool (future lightcurve fitting).
 redis:
   host: localhost
   port: 6379

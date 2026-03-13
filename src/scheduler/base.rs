@@ -1,7 +1,8 @@
 use crate::{
     alert::{run_alert_worker, DecamAlertWorker, LsstAlertWorker, ZtfAlertWorker},
     enrichment::{
-        models::SharedModels, run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker,
+        models::{SharedModelPool, SharedModels},
+        run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker,
     },
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     utils::{
@@ -68,7 +69,7 @@ pub struct ThreadPool {
     survey_name: Survey,
     config_path: String,
     workers: Vec<Worker>,
-    shared_models: Option<Arc<SharedModels>>,
+    shared_model_pool: Option<Arc<SharedModelPool>>,
 }
 
 /// Threadpool
@@ -81,13 +82,13 @@ impl ThreadPool {
     /// size: number of workers initially inside of threadpool
     /// survey_name: source stream. e.g. 'ztf'
     /// config_path: path to config file
-    #[instrument(skip(config_path, shared_models))]
+    #[instrument(skip(config_path, shared_model_pool))]
     pub fn new(
         worker_type: WorkerType,
         size: usize,
         survey_name: Survey,
         config_path: String,
-        shared_models: Option<Arc<SharedModels>>,
+        shared_model_pool: Option<Arc<SharedModelPool>>,
     ) -> Self {
         debug!(?config_path);
         let mut thread_pool = ThreadPool {
@@ -95,7 +96,7 @@ impl ThreadPool {
             survey_name,
             config_path,
             workers: Vec::new(),
-            shared_models,
+            shared_model_pool,
         };
         for _ in 0..size {
             thread_pool.add_worker();
@@ -148,11 +149,17 @@ impl ThreadPool {
     /// Add a new worker to the thread pool
     #[instrument(skip(self))]
     fn add_worker(&mut self) {
+        // Round-robin: each worker gets the next model set from the pool,
+        // spreading mutex contention across GPU devices.
+        let shared_models = self
+            .shared_model_pool
+            .as_ref()
+            .map(|pool| pool.next_model_set());
         self.workers.push(Worker::new(
             self.worker_type,
             self.survey_name.clone(),
             self.config_path.clone(),
-            self.shared_models.clone(),
+            shared_models,
         ));
     }
 

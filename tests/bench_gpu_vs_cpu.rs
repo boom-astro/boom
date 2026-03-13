@@ -46,7 +46,7 @@ impl AllModels {
     }
 
     /// Sequential path: run 6 models one alert at a time (batch_size=1).
-    fn run_one_at_a_time(&self, n: usize) -> std::time::Duration {
+    fn run_one_at_a_time(&mut self, n: usize) -> std::time::Duration {
         let acai_meta = make_random_metadata(1, 25);
         let btsbot_meta = make_random_metadata(1, 25);
         let triplet = make_random_triplets(1);
@@ -64,7 +64,7 @@ impl AllModels {
     }
 
     /// Batched path: run 6 models on the full batch at once.
-    fn run_batched(&self, n: usize) -> std::time::Duration {
+    fn run_batched(&mut self, n: usize) -> std::time::Duration {
         let acai_meta = make_random_metadata(n, 25);
         let btsbot_meta = make_random_metadata(n, 25);
         let triplet = make_random_triplets(n);
@@ -87,7 +87,7 @@ fn bench_inference_cpu_vs_batched() {
     println!("\nUSE_GPU={}", use_gpu);
 
     println!("Loading models...");
-    let models = AllModels::load();
+    let mut models = AllModels::load();
 
     // Warmup
     println!("Warming up...");
