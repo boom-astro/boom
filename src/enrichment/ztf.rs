@@ -869,7 +869,10 @@ impl ZtfEnrichmentWorker {
             let mut still_pending = Vec::new();
             for (idx, rid) in pending {
                 let key = gpu_result_key(&rid);
-                let result: Option<String> = con.get(&key).await.unwrap_or(None);
+                let result: Option<String> = con
+                    .get(&key)
+                    .await
+                    .map_err(EnrichmentWorkerError::Redis)?;
                 if let Some(json) = result {
                     // Clean up the result key
                     let _: Result<(), _> = con.del::<&str, ()>(&key).await;
