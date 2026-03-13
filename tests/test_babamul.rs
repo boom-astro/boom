@@ -282,7 +282,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         survey_matches: survey_matches.clone(),
     };
 
-    let properties = enrichment_worker
+    let (properties, _lightcurve) = enrichment_worker
         .get_alert_properties(&lsst_alert_for_enrichment)
         .await
         .unwrap();
@@ -1263,9 +1263,10 @@ async fn test_babamul_lsst_with_ztf_match() {
         .expect("Failed to insert LSST aux");
 
     // Create enrichment worker and process alert
-    let mut enrichment_worker = boom::enrichment::LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None)
-        .await
-        .expect("Failed to create enrichment worker");
+    let mut enrichment_worker =
+        boom::enrichment::LsstEnrichmentWorker::new(TEST_CONFIG_FILE, None, None)
+            .await
+            .expect("Failed to create enrichment worker");
 
     let processed = enrichment_worker
         .process_alerts(&[lsst_alert_id])
@@ -1509,9 +1510,10 @@ async fn test_babamul_ztf_with_lsst_match() {
         .expect("Failed to update ZTF aux with aliases");
 
     // Create enrichment worker and process alert
-    let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
-        .await
-        .expect("Failed to create enrichment worker");
+    let mut enrichment_worker =
+        boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None, None)
+            .await
+            .expect("Failed to create enrichment worker");
 
     let processed = enrichment_worker
         .process_alerts(&[ztf_candid])

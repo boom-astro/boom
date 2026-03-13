@@ -567,7 +567,7 @@ async fn test_filter_ztf_alert_with_lsst_match() {
     alert_worker.process_alert(&bytes_content).await.unwrap();
 
     // Enrich the ZTF alert to satisfy the filter's prv_candidates requirement.
-    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None, None)
         .await
         .unwrap();
     let enrichment_output = enrichment_worker.process_alerts(&[candid]).await.unwrap();
