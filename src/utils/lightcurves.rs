@@ -122,8 +122,8 @@ pub async fn run_fitting_gpu_batch(
         all_flux_bands.push(flux_bands);
     }
 
-    let mag_bands_clone = all_mag_bands.clone();
-    let flux_bands_clone = all_flux_bands.clone();
+    let mag_bands_clone = all_mag_bands;
+    let flux_bands_clone = all_flux_bands;
 
     let result = tokio::time::timeout(
         Duration::from_secs(120),
