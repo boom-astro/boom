@@ -1509,9 +1509,14 @@ async fn test_babamul_ztf_with_lsst_match() {
         .expect("Failed to update ZTF aux with aliases");
 
     // Create enrichment worker and process alert
-    let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
-        .await
-        .expect("Failed to create enrichment worker");
+    let mut enrichment_worker = boom::enrichment::ZtfEnrichmentWorker::new(
+        TEST_CONFIG_FILE,
+        Some(
+            boom::enrichment::models::SharedModels::load(None).expect("failed to load ONNX models"),
+        ),
+    )
+    .await
+    .expect("Failed to create enrichment worker");
 
     let processed = enrichment_worker
         .process_alerts(&[ztf_candid])
