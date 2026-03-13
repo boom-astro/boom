@@ -419,6 +419,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None
         };
 
+        // Use shared models if provided (GPU path), otherwise load per-worker
+        // models on CPU. Per-worker models avoid mutex contention when multiple
+        // enrichment workers run in parallel on CPU.
+        let models = match shared_models {
+            Some(m) => Some(m),
+            None => Some(SharedModels::load(None)?),
+        };
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -426,7 +434,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_collection,
             alert_cutout_collection,
             alert_pipeline: create_ztf_alert_pipeline(false),
-            models: shared_models,
+            models,
             babamul,
         })
     }
