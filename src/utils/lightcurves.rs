@@ -308,13 +308,15 @@ pub async fn run_fitting_gpu_batch(
     .await;
 
     match result {
-        Ok(Ok((np_results, thermals, parametrics))) => (0..n_sources)
-            .map(|i| {
-                let (nonparametric, _) = &np_results[i];
+        Ok(Ok((np_results, thermals, parametrics))) => np_results
+            .into_iter()
+            .zip(thermals)
+            .zip(parametrics)
+            .map(|(((nonparametric, _trained_gps), thermal), parametric)| {
                 Some(lightcurve_fitting::LightcurveFittingResult {
-                    nonparametric: nonparametric.clone(),
-                    parametric: parametrics[i].clone(),
-                    thermal: thermals[i].clone(),
+                    nonparametric,
+                    parametric,
+                    thermal,
                 })
             })
             .collect(),
