@@ -251,10 +251,18 @@ pub async fn run_gpu_worker(
         }
 
         // Pop up to batch_size requests from the queue
-        let raw_requests: Vec<String> = con
+        let raw_requests: Vec<String> = match con
             .rpop::<&str, Vec<String>>(&queue, NonZero::new(batch_size))
             .await
-            .unwrap_or_default();
+        {
+            Ok(requests) => requests,
+            Err(err) => {
+                error!(%queue, error = ?err, "failed to pop requests from Redis queue");
+                tokio::time::sleep(batch_timeout).await;
+                command_check_countdown = 0;
+                continue;
+            }
+        };
 
         if raw_requests.is_empty() {
             tokio::time::sleep(batch_timeout).await;
