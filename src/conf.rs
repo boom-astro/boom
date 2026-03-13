@@ -411,10 +411,11 @@ pub struct WorkerConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct GpuConfig {
-    /// Whether GPU acceleration is enabled. When true, dedicated GPU workers
-    /// handle all GPU compute (ONNX inference + lightcurve fitting) and
-    /// enrichment workers become CPU-only. When false, enrichment workers
-    /// run inference inline on CPU.
+    /// Whether dedicated GPU workers are enabled. When true, dedicated GPU workers
+    /// handle all GPU compute (ONNX inference + lightcurve fitting) and enrichment
+    /// workers offload their GPU workloads to them. When false, enrichment workers
+    /// run inference inline in-process; whether this uses CPU or GPU is determined
+    /// by the underlying model/runtime configuration (e.g., USE_GPU).
     #[serde(default)]
     pub enabled: bool,
     /// CUDA device IDs to use. One GPU worker is spawned per device.
