@@ -10,8 +10,9 @@ use crate::{
 
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::Schema;
-use apache_avro::{serde_avro_bytes, Writer};
+use apache_avro::{serde_avro_bytes, DeflateSettings, Writer};
+use apache_avro::{AvroSchema, Schema};
+use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use opentelemetry::{
@@ -58,68 +59,6 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
 
-// This is the schema of the avro object that we will send to kafka
-// that includes the alert data and filter results
-const ALERT_SCHEMA: &str = r#"
-{
-    "type": "record",
-    "name": "Alert",
-    "fields": [
-        {"name": "candid", "type": "long"},
-        {"name": "objectId", "type": "string"},
-        {"name": "jd", "type": "double"},
-        {"name": "ra", "type": "double"},
-        {"name": "dec", "type": "double"},
-        {"name":"survey","type":{"type":"enum","name":"Survey","symbols":["ZTF","LSST","DECAM"]}},
-        {"name": "filters", "type": {
-            "type": "array",
-            "items": {
-                "type": "record",
-                "name": "FilterResults",
-                "fields": [
-                    {"name": "filter_id", "type": "string"},
-                    {"name": "filter_name", "type": "string"},
-                    {"name": "passed_at", "type": "double"},
-                    {"name": "annotations", "type": "string"}
-                ]
-            }
-        }},
-        {"name": "classifications", "type": {
-            "type": "array",
-            "items": {
-                "type": "record",
-                "name": "Classification",
-                "fields": [
-                    {"name": "classifier", "type": "string"},
-                    {"name": "score", "type": "double"}
-                ]
-            }
-        }},
-        {"name": "photometry", "type": {
-            "type": "array",
-            "items": {
-                "type": "record",
-                "name": "Photometry",
-                "fields": [
-                    {"name": "jd", "type": "double"},
-                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
-                    {"name": "flux_err",  "type":"double", "doc": "in nJy; fixed zeropoints: 23.9 (ZTF), 31.4 (LSST = 8.9 AB + 22.5 nJy offset)"},
-                    {"name":"band","type":"string"},
-                    {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
-                    {"name":"programid","type":"int"},
-                    {"name":"survey","type": "Survey"},
-                    {"name":"ra","type":["null","double"]},
-                    {"name":"dec","type":["null","double"]}
-                ]
-            }
-        }},
-        {"name":"cutoutScience","type":{"type":"bytes"}},
-        {"name":"cutoutTemplate","type":{"type":"bytes"}},
-        {"name":"cutoutDifference","type":{"type":"bytes"}}
-    ]
-}
-"#;
-
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
     #[error("value access error from bson")]
@@ -164,12 +103,14 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     None
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Origin {
     Alert,
     ForcedPhot,
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
@@ -183,20 +124,41 @@ pub struct Photometry {
     pub dec: Option<f64>,
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Classification {
     pub classifier: String,
-    pub score: f64,
+    pub score: f32,
+    pub distance_arcsec: Option<f32>,
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResults {
     pub filter_id: String,
     pub filter_name: String,
-    pub passed_at: f64, // timestamp in seconds
+    pub passed_at: f64, // UNIX timestamp in milliseconds
     pub annotations: String,
 }
 
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct SurveyMatch {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub photometry: Vec<Photometry>,
+}
+
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct SurveyMatches {
+    pub ztf: Option<SurveyMatch>,
+    pub lsst: Option<SurveyMatch>,
+}
+
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Alert {
     pub candid: i64,
@@ -215,6 +177,7 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
+    pub survey_matches: SurveyMatches,
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
@@ -225,7 +188,7 @@ pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
 }
 
 pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
-    load_schema(ALERT_SCHEMA)
+    Ok(Alert::get_schema())
 }
 
 #[instrument(skip_all, err)]
@@ -233,7 +196,11 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
+    let mut writer = Writer::with_codec(
+        schema,
+        Vec::new(),
+        apache_avro::Codec::Deflate(DeflateSettings::default()),
+    );
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
@@ -830,6 +797,14 @@ pub enum FilterWorkerError {
     KafkaConfigMissing(Survey),
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
+    #[error("missing cutouts for candid {0}")]
+    MissingCutouts(i64),
+    #[error("missing cutouts for {0} alerts")]
+    MissingCutoutsBatch(usize),
+    #[error("failed to fetch cutouts: {0}")]
+    FetchCutoutsError(String),
+    #[error("failed to fetch alerts: {0}")]
+    FetchAlertsError(String),
 }
 
 #[async_trait::async_trait]
@@ -1027,6 +1002,10 @@ mod tests {
             cutout_science: vec![],
             cutout_template: vec![],
             cutout_difference: vec![],
+            survey_matches: SurveyMatches {
+                ztf: None,
+                lsst: None,
+            },
         };
         let schema = load_alert_schema().unwrap();
         let avro_bytes = to_avro_bytes(&alert, &schema);
@@ -1059,6 +1038,10 @@ mod tests {
             cutout_science: vec![],
             cutout_template: vec![],
             cutout_difference: vec![],
+            survey_matches: SurveyMatches {
+                ztf: None,
+                lsst: None,
+            },
         };
         let schema = load_alert_schema().unwrap();
         // generate a random topic name
