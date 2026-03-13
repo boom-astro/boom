@@ -112,8 +112,8 @@ fn measure_serde_overhead(n: usize) -> (std::time::Duration, usize) {
 #[test]
 #[ignore]
 fn bench_inference_cpu_vs_batched() {
-    // Default to CPU; set USE_GPU=true externally to test GPU path
-    let use_gpu = std::env::var("USE_GPU").unwrap_or_else(|_| "false".to_string());
+    // Note: model loading defaults to USE_GPU=true (GPU/CoreML if available).
+    let use_gpu = std::env::var("USE_GPU").unwrap_or_else(|_| "true".to_string());
     println!("\nUSE_GPU={}", use_gpu);
 
     println!("Loading models...");
@@ -169,5 +169,7 @@ fn bench_inference_cpu_vs_batched() {
     println!(
         "  - 'serde overhead': JSON serialize+deserialize N requests (additional GPU path cost)"
     );
-    println!("  - USE_GPU={use_gpu}. Set USE_GPU=true to test GPU execution.");
+    println!(
+        "  - USE_GPU={use_gpu}. Model loading defaults to USE_GPU=true; set USE_GPU=false to force CPU-only execution."
+    );
 }
