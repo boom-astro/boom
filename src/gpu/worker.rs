@@ -127,15 +127,15 @@ struct GpuWorkerState {
 }
 
 impl GpuWorkerState {
-    fn new() -> Result<Self, GpuWorkerError> {
-        info!("loading ONNX models onto GPU");
+    fn new(device_id: i32) -> Result<Self, GpuWorkerError> {
+        info!(device_id, "loading ONNX models onto GPU");
         Ok(Self {
-            acai_h: AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
-            acai_n: AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?,
-            acai_v: AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
-            acai_o: AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
-            acai_b: AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
-            btsbot: BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?,
+            acai_h: AcaiModel::new_on_device("data/models/acai_h.d1_dnn_20201130.onnx", device_id)?,
+            acai_n: AcaiModel::new_on_device("data/models/acai_n.d1_dnn_20201130.onnx", device_id)?,
+            acai_v: AcaiModel::new_on_device("data/models/acai_v.d1_dnn_20201130.onnx", device_id)?,
+            acai_o: AcaiModel::new_on_device("data/models/acai_o.d1_dnn_20201130.onnx", device_id)?,
+            acai_b: AcaiModel::new_on_device("data/models/acai_b.d1_dnn_20201130.onnx", device_id)?,
+            btsbot: BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", device_id)?,
         })
     }
 
@@ -206,11 +206,12 @@ pub async fn run_gpu_worker(
 ) -> Result<(), GpuWorkerError> {
     let config = AppConfig::from_path(config_path)?;
     let gpu_config = &config.gpu;
+    let device_id = gpu_config.device_id;
     let batch_size = gpu_config.batch_size;
     let batch_timeout = std::time::Duration::from_millis(gpu_config.batch_timeout_ms);
 
     let mut con = config.build_redis().await?;
-    let mut state = GpuWorkerState::new()?;
+    let mut state = GpuWorkerState::new(device_id)?;
 
     let queue = gpu_inference_queue_name(survey);
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());

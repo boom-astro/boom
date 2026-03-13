@@ -417,6 +417,10 @@ pub struct GpuConfig {
     /// run inference inline on CPU.
     #[serde(default)]
     pub enabled: bool,
+    /// CUDA device ID to use (default 0). Passed to ONNX Runtime's
+    /// CUDAExecutionProvider. Only relevant when a GPU is available.
+    #[serde(default)]
+    pub device_id: i32,
     /// Maximum batch size for GPU inference (number of alerts batched together).
     #[serde(default = "default_gpu_batch_size")]
     pub batch_size: usize,
@@ -429,6 +433,7 @@ impl Default for GpuConfig {
     fn default() -> Self {
         GpuConfig {
             enabled: false,
+            device_id: 0,
             batch_size: default_gpu_batch_size(),
             batch_timeout_ms: default_gpu_batch_timeout_ms(),
         }
@@ -584,6 +589,7 @@ mod tests {
     fn test_gpu_config_defaults() {
         let config = GpuConfig::default();
         assert!(!config.enabled);
+        assert_eq!(config.device_id, 0);
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.batch_timeout_ms, 100);
     }
@@ -594,26 +600,37 @@ mod tests {
         let json = "{}";
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(!config.enabled);
+        assert_eq!(config.device_id, 0);
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.batch_timeout_ms, 100);
     }
 
     #[test]
     fn test_gpu_config_deserialize_enabled() {
-        let json = r#"{"enabled": true, "batch_size": 512, "batch_timeout_ms": 50}"#;
+        let json = r#"{"enabled": true, "device_id": 1, "batch_size": 512, "batch_timeout_ms": 50}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
+        assert_eq!(config.device_id, 1);
         assert_eq!(config.batch_size, 512);
         assert_eq!(config.batch_timeout_ms, 50);
     }
 
     #[test]
     fn test_gpu_config_deserialize_partial() {
-        // Only enabled set, batch_size and timeout use defaults
+        // Only enabled set, device_id/batch_size/timeout use defaults
         let json = r#"{"enabled": true}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
+        assert_eq!(config.device_id, 0);
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.batch_timeout_ms, 100);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_device_id_only() {
+        let json = r#"{"device_id": 3}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.device_id, 3);
     }
 }
