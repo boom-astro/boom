@@ -294,7 +294,7 @@ pub async fn run_gpu_worker(
                     let key = gpu_result_key(&req.request_id);
                     match serde_json::to_string(resp) {
                         Ok(json) => {
-                            let _: Result<(), _> = redis::pipe()
+                            if let Err(e) = redis::pipe()
                                 .cmd("SET")
                                 .arg(&key)
                                 .arg(&json)
@@ -302,7 +302,13 @@ pub async fn run_gpu_worker(
                                 .arg(&key)
                                 .arg(result_ttl_secs)
                                 .query_async(&mut con)
-                                .await;
+                                .await
+                            {
+                                error!(
+                                    candid = req.candid,
+                                    "failed to write GPU response to Redis: {}", e
+                                );
+                            }
                         }
                         Err(e) => {
                             error!(
