@@ -1197,7 +1197,7 @@ mod tests {
         let t0 = 2459000.0;
         for i in 0..30 {
             let t = t0 + (i as f64) * 2.0; // every 2 days
-            // Simple Gaussian-ish shape in magnitude: brightest (lowest mag) at peak
+                                           // Simple Gaussian-ish shape in magnitude: brightest (lowest mag) at peak
             let phase = (t - t0 - 30.0) / 10.0;
             let mag_g = 20.0 - 2.0 * (-0.5 * phase * phase).exp();
             let mag_r = 19.5 - 1.8 * (-0.5 * phase * phase).exp();
@@ -1237,8 +1237,17 @@ mod tests {
                 "unexpected band: {}",
                 result.band
             );
-            assert!(result.peak_mag.is_some(), "peak_mag missing for {}", result.band);
-            assert!(result.n_obs == 30, "expected 30 obs for {}, got {}", result.band, result.n_obs);
+            assert!(
+                result.peak_mag.is_some(),
+                "peak_mag missing for {}",
+                result.band
+            );
+            assert!(
+                result.n_obs == 30,
+                "expected 30 obs for {}, got {}",
+                result.band,
+                result.n_obs
+            );
         }
 
         // Thermal fitting with trained GPs
@@ -1276,7 +1285,10 @@ mod tests {
         );
 
         // Should get at least one parametric result for g band
-        assert!(!param_results.is_empty(), "parametric fitting returned no results");
+        assert!(
+            !param_results.is_empty(),
+            "parametric fitting returned no results"
+        );
         assert_eq!(param_results[0].band, "g");
     }
 
@@ -1374,8 +1386,7 @@ mod tests {
         }
 
         // Run GPU batch with both nonparametric and parametric
-        let results =
-            run_fitting_gpu_batch(&lightcurves, true, true, gpu_pool).await;
+        let results = run_fitting_gpu_batch(&lightcurves, true, true, gpu_pool).await;
 
         assert_eq!(results.len(), 10, "should get one result per source");
 
@@ -1396,7 +1407,11 @@ mod tests {
                     "source {i}: unexpected band {}",
                     np.band
                 );
-                assert!(np.peak_mag.is_some(), "source {i}: {}: no peak_mag", np.band);
+                assert!(
+                    np.peak_mag.is_some(),
+                    "source {i}: {}: no peak_mag",
+                    np.band
+                );
             }
 
             // Parametric: should have results for at least one band
