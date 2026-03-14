@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to manage Boom using Apptainer.
-# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore | log | show
+# $1 = action: build | start | stop | restart | health | benchmark | filters | backup | restore | log | error | show
 
 BOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # Retrieves the boom directory
 SCRIPTS_DIR="$BOOM_DIR/apptainer/scripts"
@@ -54,8 +54,8 @@ stop_service() {
 
 if [ "$1" != "build" ] && [ "$1" != "start" ] && [ "$1" != "stop" ] && [ "$1" != "restart" ] \
   && [ "$1" != "health" ] && [ "$1" != "benchmark" ] && [ "$1" != "filters" ] \
-  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ] && [ "$1" != "show" ]; then
-  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|log|show} [args...]"
+  && [ "$1" != "backup" ] && [ "$1" != "restore" ] && [ "$1" != "log" ] && [ "$1" != "error" ] && [ "$1" != "show" ]; then
+  echo "Usage: $0 {build|start|stop|restart|health|benchmark|filters|backup|restore|error|show} [args...]"
   exit 1
 fi
 
@@ -271,6 +271,22 @@ if [ "$1" == "log" ]; then
     tail -f "$log_file"
   fi
 
+  exit 0
+fi
+
+# -----------------------------
+# Display log error
+# -----------------------------
+if [ "$1" == "error" ]; then
+  for survey in lsst ztf; do
+     log_file="$LOGS_DIR/${survey}_scheduler.log"
+     if [ -f "$log_file" ]; then
+       echo -e "${BLUE}Displaying $survey scheduler ERROR and WARN log...${END}"
+       grep -E "ERROR|WARN" "$log_file"
+     else
+       echo -e "${YELLOW}WARNING${END}: Log file for $survey scheduler not found at $log_file"
+     fi
+  done
   exit 0
 fi
 
