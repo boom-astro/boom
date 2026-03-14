@@ -37,8 +37,11 @@ pub struct ZtfAlertPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
 }
 
@@ -61,8 +64,11 @@ pub struct ZtfForcedPhotometry {
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
     pub procstatus: Option<String>,
 }
@@ -83,7 +89,6 @@ pub struct ZtfPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
     pub programid: i32,
 }
@@ -101,7 +106,7 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr_psf: phot.snr_psf,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -146,7 +151,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr_psf: phot.snr_psf,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -237,8 +242,8 @@ impl ZtfPhotometry {
     }
 }
 
-pub fn create_ztf_alert_pipeline() -> Vec<Document> {
-    vec![
+pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document> {
+    let mut pipeline = vec![
         doc! {
             "$match": {
                 "_id": {"$in": []}
@@ -293,7 +298,18 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 }
             }
         },
-    ]
+    ];
+
+    if include_classifications {
+        // we want to add classifications: 1 in the final project stage only
+        if let Some(project_stage) = pipeline.last_mut() {
+            if let Some(project_doc) = project_stage.get_document_mut("$project").ok() {
+                project_doc.insert("classifications", 1);
+            }
+        }
+    }
+
+    pipeline
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
@@ -422,7 +438,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             client,
             alert_collection,
             alert_cutout_collection,
-            alert_pipeline: create_ztf_alert_pipeline(),
+            alert_pipeline: create_ztf_alert_pipeline(false),
             acai_h_model,
             acai_n_model,
             acai_v_model,

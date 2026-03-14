@@ -1,6 +1,8 @@
+use apache_avro_macros::serdavro;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[serdavro]
 #[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Survey {
