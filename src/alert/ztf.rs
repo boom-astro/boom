@@ -1,7 +1,7 @@
 use crate::{
     alert::{
         base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
-        decam, lsst, AlertCutout, LightcurveJdOnly,
+        decam, lsst, sanitize_timeseries, AlertCutout, LightcurveJdOnly, TimeSeries,
     },
     conf::{self, AppConfig},
     utils::{
@@ -121,6 +121,12 @@ pub struct ZtfPrvCandidate {
     pub ap_flux_err: Option<f32>,
     pub snr_ap: Option<f32>,
     pub band: Band,
+}
+
+impl TimeSeries for ZtfPrvCandidate {
+    fn time(&self) -> f64 {
+        self.prv_candidate.jd
+    }
 }
 
 impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
@@ -322,6 +328,12 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             snr_psf,
             band,
         })
+    }
+}
+
+impl TimeSeries for ZtfForcedPhot {
+    fn time(&self) -> f64 {
+        self.fp_hist.jd
     }
 }
 
@@ -636,7 +648,8 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, AvroSchema, ToSchema, Default)]
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Default)]
 pub struct ZtfAliases {
     #[serde(rename = "LSST")]
     pub lsst: Vec<String>,
@@ -735,9 +748,8 @@ impl ZtfAlertWorker {
         Ok(result)
     }
 
-    #[instrument(skip(self, prv_candidates, existing_prv_candidates,), err)]
-    async fn prepare_prv_candidates_update(
-        self: &mut Self,
+    #[instrument(skip(prv_candidates, existing_prv_candidates), err)]
+    fn prepare_prv_candidates_update(
         prv_candidates: &Vec<ZtfPrvCandidate>,
         existing_prv_candidates: &Vec<LightcurveJdOnly>,
     ) -> Result<(Vec<Document>, bool), AlertError> {
@@ -800,8 +812,8 @@ impl ZtfAlertWorker {
         Ok((new_prv_candidates_docs, true))
     }
 
-    async fn prepare_fp_hists_update(
-        self: &mut Self,
+    #[instrument(skip(fp_hists, existing_fp_hists), err)]
+    fn prepare_fp_hists_update(
         fp_hists: &Vec<ZtfForcedPhot>,
         existing_fp_hists: &Vec<LightcurveJdOnly>,
     ) -> Result<(Vec<Document>, bool), AlertError> {
@@ -916,15 +928,18 @@ impl ZtfAlertWorker {
         existing_alert_aux: &AlertAuxForUpdate,
     ) -> Result<(), AlertError> {
         let current_version = existing_alert_aux.version;
-        let (new_prv_candidates_docs, need_sort_prv_candidates) = self
-            .prepare_prv_candidates_update(prv_candidates, &existing_alert_aux.prv_candidates)
-            .await?;
-        let (new_prv_nondetections_docs, need_sort_prv_nondetections) = self
-            .prepare_prv_candidates_update(prv_nondetections, &existing_alert_aux.prv_nondetections)
-            .await?;
-        let (new_fp_hists_docs, need_sort_fp_hists) = self
-            .prepare_fp_hists_update(fp_hists, &existing_alert_aux.fp_hists)
-            .await?;
+        let (new_prv_candidates_docs, need_sort_prv_candidates) =
+            ZtfAlertWorker::prepare_prv_candidates_update(
+                prv_candidates,
+                &existing_alert_aux.prv_candidates,
+            )?;
+        let (new_prv_nondetections_docs, need_sort_prv_nondetections) =
+            ZtfAlertWorker::prepare_prv_candidates_update(
+                prv_nondetections,
+                &existing_alert_aux.prv_nondetections,
+            )?;
+        let (new_fp_hists_docs, need_sort_fp_hists) =
+            ZtfAlertWorker::prepare_fp_hists_update(fp_hists, &existing_alert_aux.fp_hists)?;
 
         let mut push_updates = Document::new();
         if !new_prv_candidates_docs.is_empty() {
@@ -1020,9 +1035,16 @@ impl ZtfAlertWorker {
         ) = prv_candidates
             .into_iter()
             .partition(|p| p.prv_candidate.magpsf.is_some());
-        // use the from candidate to create a PrvCandidate and add to new_prv_candidates
-        new_prv_candidates.push(ZtfPrvCandidate::try_from(candidate).unwrap());
 
+        // the prv_candidates from the alert is alerts that pre-date the current candidate, and that may or may not include it
+        // so instead of looping over all the candidates, since they are sorted, we can just check if the last
+        // one has the same jd as the current candidate, and if not, we add the current candidate to the list
+        if new_prv_candidates
+            .last()
+            .map_or(true, |pc| pc.prv_candidate.jd < candidate.candidate.jd)
+        {
+            new_prv_candidates.push(ZtfPrvCandidate::try_from(candidate).unwrap());
+        }
         (new_prv_candidates, prv_nondetections)
     }
 }
@@ -1098,7 +1120,7 @@ impl AlertWorker for ZtfAlertWorker {
         let ra = avro_alert.candidate.candidate.ra;
         let dec = avro_alert.candidate.candidate.dec;
 
-        let prv_candidates = match avro_alert.prv_candidates.take() {
+        let mut prv_candidates = match avro_alert.prv_candidates.take() {
             Some(candidates) => candidates,
             None => Vec::new(),
         };
@@ -1106,6 +1128,10 @@ impl AlertWorker for ZtfAlertWorker {
             Some(hists) => hists,
             None => Vec::new(),
         };
+
+        // Sort and deduplicate time series data by jd
+        sanitize_timeseries(&mut prv_candidates);
+        sanitize_timeseries(&mut fp_hists);
 
         let candidate: ZtfCandidate = avro_alert.candidate;
 
@@ -1127,28 +1153,8 @@ impl AlertWorker for ZtfAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
-        let (mut prv_candidates, mut prv_nondetections) =
+        let (prv_candidates, prv_nondetections) =
             self.format_prv_candidates(prv_candidates, &candidate);
-
-        // let's make sure all 3 arrays are sorted by jd ascending
-        prv_candidates.sort_by(|a, b| {
-            a.prv_candidate
-                .jd
-                .partial_cmp(&b.prv_candidate.jd)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        prv_nondetections.sort_by(|a, b| {
-            a.prv_candidate
-                .jd
-                .partial_cmp(&b.prv_candidate.jd)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        fp_hists.sort_by(|a, b| {
-            a.fp_hist
-                .jd
-                .partial_cmp(&b.fp_hist.jd)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)

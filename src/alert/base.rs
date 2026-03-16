@@ -672,6 +672,16 @@ where
     binary.serialize(serializer)
 }
 
+pub trait TimeSeries {
+    fn time(&self) -> f64;
+}
+
+// In-place sort+dedup, by timestamp
+pub fn sanitize_timeseries(timeseries: &mut Vec<impl TimeSeries>) {
+    timeseries.sort_by(|a, b| a.time().partial_cmp(&b.time()).unwrap());
+    timeseries.dedup_by(|a, b| a.time() == b.time());
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum AlertWorkerError {
     #[error("failed to load config")]

@@ -4,7 +4,7 @@ use crate::{
             AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
             ProcessAlertStatus, SchemaRegistry,
         },
-        decam, ztf,
+        decam, sanitize_timeseries, ztf, TimeSeries,
     },
     conf::{self, AppConfig, BoomConfigError},
     utils::{
@@ -456,6 +456,12 @@ impl TryFrom<LsstCandidate> for LsstPrvCandidate {
     }
 }
 
+impl TimeSeries for LsstPrvCandidate {
+    fn time(&self) -> f64 {
+        self.jd
+    }
+}
+
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
@@ -752,7 +758,13 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
     }
 }
 
-/// Rubin Avro alert schema v7.3
+impl TimeSeries for LsstForcedPhot {
+    fn time(&self) -> f64 {
+        self.jd
+    }
+}
+
+/// Rubin Avro alert schema v10.0 (minus SSO metadata, which we do not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
@@ -929,9 +941,8 @@ impl LsstAlertWorker {
         Ok(result)
     }
 
-    #[instrument(skip(self, prv_candidates, existing_prv_candidates,), err)]
-    async fn prepare_prv_candidates_update(
-        self: &mut Self,
+    #[instrument(skip(prv_candidates, existing_prv_candidates), err)]
+    fn prepare_prv_candidates_update(
         prv_candidates: &Vec<LsstPrvCandidate>,
         existing_prv_candidates: &Vec<LightcurveJdOnly>,
     ) -> Result<(Vec<Document>, bool), AlertError> {
@@ -994,8 +1005,8 @@ impl LsstAlertWorker {
         Ok((new_prv_candidates_docs, true))
     }
 
-    async fn prepare_fp_hists_update(
-        self: &mut Self,
+    #[instrument(skip(fp_hists, existing_fp_hists), err)]
+    fn prepare_fp_hists_update(
         fp_hists: &Vec<LsstForcedPhot>,
         existing_fp_hists: &Vec<LightcurveJdOnly>,
     ) -> Result<(Vec<Document>, bool), AlertError> {
@@ -1071,6 +1082,9 @@ impl LsstAlertWorker {
                 "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
+                // we still want to increment the version even in the fallback,
+                // to prevent concurrency issues between a fallback update and a normal update from another thread
+                "version": doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
             }
         }];
         self.alert_aux_collection
@@ -1093,12 +1107,13 @@ impl LsstAlertWorker {
         existing_alert_aux: &AlertAuxForUpdate,
     ) -> Result<(), AlertError> {
         let current_version = existing_alert_aux.version;
-        let (new_prv_candidates_docs, need_sort_prv_candidates) = self
-            .prepare_prv_candidates_update(prv_candidates, &existing_alert_aux.prv_candidates)
-            .await?;
-        let (new_fp_hists_docs, need_sort_fp_hists) = self
-            .prepare_fp_hists_update(fp_hists, &existing_alert_aux.fp_hists)
-            .await?;
+        let (new_prv_candidates_docs, need_sort_prv_candidates) =
+            LsstAlertWorker::prepare_prv_candidates_update(
+                prv_candidates,
+                &existing_alert_aux.prv_candidates,
+            )?;
+        let (new_fp_hists_docs, need_sort_fp_hists) =
+            LsstAlertWorker::prepare_fp_hists_update(fp_hists, &existing_alert_aux.fp_hists)?;
 
         let mut push_updates = Document::new();
         if !new_prv_candidates_docs.is_empty() {
@@ -1264,6 +1279,10 @@ impl AlertWorker for LsstAlertWorker {
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
         let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
+        // Sort and deduplicate time series data by jd
+        sanitize_timeseries(&mut prv_candidates);
+        sanitize_timeseries(&mut fp_hists);
+
         let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
@@ -1281,11 +1300,13 @@ impl AlertWorker for LsstAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
-        prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
-
-        // let's make sure all 2 arrays are sorted by jd ascending
-        prv_candidates.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
-        fp_hists.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
+        // Add the current candidate as the last point in the prv_candidates, if it's not already there
+        if prv_candidates
+            .last()
+            .map_or(true, |pc| pc.jd < candidate.jd)
+        {
+            prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
+        }
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
