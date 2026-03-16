@@ -30,6 +30,7 @@ if [ -z "${BOOM_REPO_ROOT:-}" ]; then
 fi
 
 COMPOSE_CONFIG="$BOOM_REPO_ROOT/tests/throughput/compose.yaml"
+BG_PIDS=()
 
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
 if [ "$LOW_STORAGE" = "true" ]; then
@@ -43,6 +44,15 @@ LOGS_DIR=${POSITIONAL_ARGS[0]:-logs/boom}
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
+
+cleanup() {
+    if [ ${#BG_PIDS[@]} -gt 0 ]; then
+        kill "${BG_PIDS[@]}" 2>/dev/null || true
+        wait "${BG_PIDS[@]}" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
 
 # Run a MongoDB count query and return a clean integer string.
 mongo_count() {
@@ -67,12 +77,18 @@ fi
 # Send the logs to file so we can analyze later
 mkdir -p $LOGS_DIR
 docker compose -f $COMPOSE_CONFIG logs producer > $LOGS_DIR/producer.log &
+BG_PIDS+=($!)
 docker compose -f $COMPOSE_CONFIG logs consumer -f > $LOGS_DIR/consumer.log &
+BG_PIDS+=($!)
 docker compose -f $COMPOSE_CONFIG logs scheduler -f > $LOGS_DIR/scheduler.log &
+BG_PIDS+=($!)
 docker compose -f $COMPOSE_CONFIG logs mongo-init -f > $LOGS_DIR/mongo-init.log &
+BG_PIDS+=($!)
 # Also log stats from containers for later analysis
 docker compose -f $COMPOSE_CONFIG stats consumer --format json > $LOGS_DIR/consumer.stats.log &
+BG_PIDS+=($!)
 docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/scheduler.stats.log &
+BG_PIDS+=($!)
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
