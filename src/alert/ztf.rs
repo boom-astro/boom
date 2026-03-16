@@ -699,8 +699,11 @@ pub struct ZtfAlertWorker {
 
 #[derive(Deserialize, Serialize)]
 struct AlertAuxForUpdate {
+    #[serde(default)]
     pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
     pub prv_nondetections: Vec<LightcurveJdOnly>,
+    #[serde(default)]
     pub fp_hists: Vec<LightcurveJdOnly>,
     pub version: Option<i32>,
 }
