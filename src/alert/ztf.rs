@@ -1033,23 +1033,24 @@ impl AlertWorker for ZtfAlertWorker {
         let ra = avro_alert.candidate.candidate.ra;
         let dec = avro_alert.candidate.candidate.dec;
 
-        let prv_candidates = match avro_alert.prv_candidates.take() {
-            Some(candidates) => candidates,
-            None => Vec::new(),
-        };
-        let (mut prv_candidates, mut prv_nondetections) = self.split_prv_candidates(prv_candidates);
+        let candidate: ZtfCandidate = avro_alert.candidate;
 
-        let mut fp_hists = match avro_alert.fp_hists.take() {
-            Some(hists) => hists,
-            None => Vec::new(),
-        };
+        let prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
+        let (mut prv_candidates, mut prv_nondetections) = self.split_prv_candidates(prv_candidates);
+        let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
+
+        // Add the current candidate as the last point in the prv_candidates, if it's not already there (based on jd)
+        if !prv_candidates
+            .iter()
+            .any(|pc| pc.prv_candidate.jd == candidate.candidate.jd)
+        {
+            prv_candidates.push(ZtfPrvCandidate::try_from(&candidate)?);
+        }
 
         // Sort and deduplicate time series data by jd
         ZtfPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         ZtfPrvCandidate::sanitize_timeseries(&mut prv_nondetections);
         ZtfForcedPhot::sanitize_timeseries(&mut fp_hists);
-
-        let candidate: ZtfCandidate = avro_alert.candidate;
 
         // add the cutouts, skip processing if the cutouts already exist
         let cutout_status = self
@@ -1065,14 +1066,6 @@ impl AlertWorker for ZtfAlertWorker {
 
         if let ProcessAlertStatus::Exists(_) = cutout_status {
             return Ok(cutout_status);
-        }
-
-        // Add the current candidate as the last point in the prv_candidates, if it's not already there
-        if prv_candidates
-            .last()
-            .map_or(true, |pc| pc.prv_candidate.jd < candidate.candidate.jd)
-        {
-            prv_candidates.push(ZtfPrvCandidate::try_from(&candidate)?);
         }
 
         let survey_matches = Some(

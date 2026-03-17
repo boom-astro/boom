@@ -1176,6 +1176,11 @@ impl AlertWorker for LsstAlertWorker {
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
         let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
+        // Add the current candidate as the last point in the prv_candidates, if it's not already there (based on jd)
+        if !prv_candidates.iter().any(|pc| pc.jd == candidate.jd) {
+            prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
+        }
+
         // Sort and deduplicate time series data by jd
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
@@ -1193,14 +1198,6 @@ impl AlertWorker for LsstAlertWorker {
 
         if let ProcessAlertStatus::Exists(_) = cutout_status {
             return Ok(cutout_status);
-        }
-
-        // Add the current candidate as the last point in the prv_candidates, if it's not already there
-        if prv_candidates
-            .last()
-            .map_or(true, |pc| pc.jd < candidate.jd)
-        {
-            prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
         }
 
         let survey_matches = Some(
