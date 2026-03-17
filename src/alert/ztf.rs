@@ -684,6 +684,17 @@ pub struct ZtfAlert {
     pub updated_at: f64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    #[serde(default)]
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub prv_nondetections: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
+}
+
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
@@ -695,17 +706,6 @@ pub struct ZtfAlertWorker {
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct AlertAuxForUpdate {
-    #[serde(default)]
-    pub prv_candidates: Vec<LightcurveJdOnly>,
-    #[serde(default)]
-    pub prv_nondetections: Vec<LightcurveJdOnly>,
-    #[serde(default)]
-    pub fp_hists: Vec<LightcurveJdOnly>,
-    pub version: Option<i32>,
 }
 
 impl ZtfAlertWorker {

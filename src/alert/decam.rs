@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use crate::{
     alert::{
         base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
+            ProcessAlertStatus, SchemaCache,
         },
-        lsst, ztf,
+        lsst, ztf, TimeSeries,
     },
     conf::{self, AppConfig},
     utils::{
@@ -21,7 +22,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
 pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
@@ -88,6 +89,12 @@ impl TryFrom<Candidate> for DecamCandidate {
     }
 }
 
+impl TimeSeries for DecamCandidate {
+    fn time(&self) -> f64 {
+        self.jd
+    }
+}
+
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<DecamCandidate, D::Error>
 where
     D: Deserializer<'de>,
@@ -125,6 +132,12 @@ impl TryFrom<FpHist> for DecamForcedPhot {
             jd: fp_hist.mjd + 2400000.5,
             fp_hist,
         })
+    }
+}
+
+impl TimeSeries for DecamForcedPhot {
+    fn time(&self) -> f64 {
+        self.jd
     }
 }
 
@@ -182,12 +195,22 @@ pub struct DecamAlert {
     pub updated_at: f64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    #[serde(default)]
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
+}
+
 pub struct DecamAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
+    alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
@@ -221,8 +244,22 @@ impl DecamAlertWorker {
             lsst: lsst_matches,
         })
     }
+
+    async fn get_existing_aux(
+        &self,
+        object_id: String,
+    ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
+        let result = self
+            .alert_aux_collection_update
+            .find_one(doc! { "_id": &object_id })
+            .projection(doc! { "prv_candidates.jd": 1, "fp_hists.jd": 1, "version": 1 })
+            .await
+            .inspect_err(as_error!())?;
+        Ok(result)
+    }
+
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
-    async fn update_aux(
+    async fn update_aux_fallback(
         self: &mut Self,
         object_id: &str,
         prv_candidates: &Vec<DecamCandidate>,
@@ -236,11 +273,120 @@ impl DecamAlertWorker {
                 "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
                 "aliases": mongify(survey_matches),
                 "updated_at": now,
+                // we still want to increment the version even in the fallback,
+                // to prevent concurrency issues between a fallback update and a normal update from another thread
+                "version": doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
             }
         }];
         self.alert_aux_collection
             .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
+        Ok(())
+    }
+
+    #[instrument(
+        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
+        err
+    )]
+    async fn update_aux(
+        self: &mut Self,
+        object_id: &str,
+        prv_candidates: &Vec<DecamCandidate>,
+        fp_hists: &Vec<DecamForcedPhot>,
+        survey_matches: &Option<DecamAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        let current_version = existing_alert_aux.version;
+
+        let Ok((new_prv_candidates_docs, need_sort_prv_candidates)) =
+            DecamCandidate::prepare_timeseries_update(
+                prv_candidates,
+                &existing_alert_aux.prv_candidates,
+                "prv_candidates",
+            )
+        else {
+            return self
+                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                .await;
+        };
+
+        let Ok((new_fp_hists_docs, need_sort_fp_hists)) =
+            DecamForcedPhot::prepare_timeseries_update(
+                fp_hists,
+                &existing_alert_aux.fp_hists,
+                "fp_hists",
+            )
+        else {
+            return self
+                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                .await;
+        };
+
+        let mut push_updates = Document::new();
+        if !new_prv_candidates_docs.is_empty() {
+            if need_sort_prv_candidates {
+                push_updates.insert(
+                    "prv_candidates",
+                    doc! { "$each": new_prv_candidates_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert("prv_candidates", doc! { "$each": new_prv_candidates_docs });
+            }
+        }
+        if !new_fp_hists_docs.is_empty() {
+            if need_sort_fp_hists {
+                push_updates.insert(
+                    "fp_hists",
+                    doc! { "$each": new_fp_hists_docs, "$sort": { "jd": 1 } },
+                );
+            } else {
+                push_updates.insert("fp_hists", doc! { "$each": new_fp_hists_docs });
+            }
+        }
+
+        let update_doc = if push_updates.is_empty() {
+            doc! {
+                "$set": {
+                    "aliases": mongify(survey_matches),
+                    "updated_at": now,
+                    "version": current_version.unwrap_or(0) + 1,
+                }
+            }
+        } else {
+            doc! {
+                "$push": push_updates,
+                "$set": {
+                    "aliases": mongify(survey_matches),
+                    "updated_at": now,
+                    "version": current_version.unwrap_or(0) + 1,
+                }
+            }
+        };
+        let find_doc = if let Some(version) = current_version {
+            doc! { "_id": object_id, "version": version }
+        } else {
+            doc! {
+                 "_id": object_id,
+                 "$or": [
+                     doc! { "version": { "$exists": false } },
+                     doc! { "version": mongodb::bson::Bson::Null },
+                 ]
+            }
+        };
+        let update_result = self
+            .alert_aux_collection
+            .update_one(find_doc, update_doc)
+            .await?;
+        if update_result.matched_count == 0 {
+            warn!(
+                "Concurrent modification detected for object_id {}. Using DB-only update.",
+                object_id
+            );
+            return self
+                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                .await;
+        }
         Ok(())
     }
 }
@@ -263,6 +409,7 @@ impl AlertWorker for DecamAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
@@ -277,6 +424,7 @@ impl AlertWorker for DecamAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
+            alert_aux_collection_update,
             alert_cutout_collection,
             ztf_alert_aux_collection,
             lsst_alert_aux_collection,
@@ -313,9 +461,12 @@ impl AlertWorker for DecamAlertWorker {
         let dec = avro_alert.candidate.candidate.dec;
 
         let prv_candidates = vec![avro_alert.candidate.clone()];
-        let fp_hists = avro_alert.fp_hists;
+        let mut fp_hists = avro_alert.fp_hists;
 
-        let status = self
+        // Sort and deduplicate time series data by jd
+        DecamForcedPhot::sanitize_timeseries(&mut fp_hists);
+
+        let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
                 avro_alert.cutout_science,
@@ -326,14 +477,11 @@ impl AlertWorker for DecamAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+        if let ProcessAlertStatus::Exists(_) = cutout_status {
+            return Ok(cutout_status);
         }
 
-        let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
-            .await
-            .inspect_err(as_error!())?;
+        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -341,7 +489,7 @@ impl AlertWorker for DecamAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        if !alert_aux_exists {
+        if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
             let obj = DecamObject {
                 object_id: object_id.clone(),
@@ -355,7 +503,12 @@ impl AlertWorker for DecamAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                self.update_aux(
+                // use the race-condition free fallback update
+                warn!(
+                    "Alert aux document for object_id {} already exists. Using fallback update.",
+                    object_id
+                );
+                self.update_aux_fallback(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.fp_hists,
@@ -368,9 +521,16 @@ impl AlertWorker for DecamAlertWorker {
                 result.inspect_err(as_error!())?;
             }
         } else {
-            self.update_aux(&object_id, &prv_candidates, &fp_hists, &survey_matches, now)
-                .await
-                .inspect_err(as_error!())?;
+            self.update_aux(
+                &object_id,
+                &prv_candidates,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing_alert_aux.unwrap(),
+            )
+            .await
+            .inspect_err(as_error!())?;
         }
 
         let alert = DecamAlert {

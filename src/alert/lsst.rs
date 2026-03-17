@@ -879,6 +879,15 @@ pub struct LsstAlert {
     pub updated_at: f64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    #[serde(default)]
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
+}
+
 pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
@@ -890,15 +899,6 @@ pub struct LsstAlertWorker {
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct AlertAuxForUpdate {
-    #[serde(default)]
-    pub prv_candidates: Vec<LightcurveJdOnly>,
-    #[serde(default)]
-    pub fp_hists: Vec<LightcurveJdOnly>,
-    pub version: Option<i32>,
 }
 
 impl LsstAlertWorker {
