@@ -556,8 +556,99 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{decam_alert_worker, AlertRandomizer},
+        testing::{decam_alert_worker, drop_alert_from_collections, AlertRandomizer},
     };
+
+    struct DecamPrvLightcurveGen {
+        template: DecamCandidate,
+    }
+
+    impl DecamPrvLightcurveGen {
+        fn new(template: DecamCandidate) -> Self {
+            Self { template }
+        }
+
+        fn at_jd(&self, jd: f64) -> DecamCandidate {
+            let mut candidate = self.template.clone();
+            candidate.jd = jd;
+            candidate.candidate.mjd = jd - 2400000.5;
+            candidate
+        }
+    }
+
+    struct DecamFpLightcurveGen {
+        template: DecamForcedPhot,
+    }
+
+    impl DecamFpLightcurveGen {
+        fn new(template: DecamForcedPhot) -> Self {
+            Self { template }
+        }
+
+        fn at_jd(&self, jd: f64) -> DecamForcedPhot {
+            let mut fp = self.template.clone();
+            fp.jd = jd;
+            fp.fp_hist.mjd = jd - 2400000.5;
+            fp
+        }
+    }
+
+    fn assert_strictly_increasing_unique(points: &[LightcurveJdOnly]) {
+        assert!(points.iter().all(|point| point.jd.is_finite()));
+        assert!(points.windows(2).all(|window| window[0].jd < window[1].jd));
+    }
+
+    async fn seed_decam_alert(worker: &mut DecamAlertWorker) -> (i64, String, Vec<u8>) {
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Decam).get().await;
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        (candid, object_id, bytes_content)
+    }
+
+    async fn load_aux(worker: &DecamAlertWorker, object_id: &str) -> AlertAuxForUpdate {
+        worker
+            .get_existing_aux(object_id.to_string())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn set_aux_fields(worker: &DecamAlertWorker, object_id: &str, set_doc: Document) {
+        worker
+            .alert_aux_collection
+            .update_one(doc! { "_id": object_id }, doc! { "$set": set_doc })
+            .await
+            .unwrap();
+    }
+
+    async fn apply_update(
+        worker: &mut DecamAlertWorker,
+        object_id: &str,
+        prv_candidates: Vec<DecamCandidate>,
+        fp_hists: Vec<DecamForcedPhot>,
+        survey_matches: &Option<DecamAliases>,
+        existing_aux: &AlertAuxForUpdate,
+    ) {
+        worker
+            .update_aux(
+                object_id,
+                &prv_candidates,
+                &fp_hists,
+                survey_matches,
+                Time::now().to_jd(),
+                existing_aux,
+            )
+            .await
+            .unwrap();
+    }
+
+    fn empty_aliases() -> DecamAliases {
+        DecamAliases {
+            ztf: vec![],
+            lsst: vec![],
+        }
+    }
 
     #[tokio::test]
     async fn test_decam_alert_from_avro_bytes() {
@@ -592,5 +683,260 @@ mod tests {
         assert_eq!(alert.cutout_science.clone().len(), 54561);
         assert_eq!(alert.cutout_template.clone().len(), 49810);
         assert_eq!(alert.cutout_difference.clone().len(), 54569);
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_branches_and_fallback() {
+        let mut worker = decam_alert_worker().await;
+
+        let (candid, object_id, bytes_content) = seed_decam_alert(&mut worker).await;
+
+        let parsed_alert: DecamRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content)
+            .unwrap();
+        let candidate_template = parsed_alert.candidate;
+        let fp_template = parsed_alert
+            .fp_hists
+            .first()
+            .cloned()
+            .expect("test data should include at least one DECAM forced photometry point");
+
+        let prv_gen = DecamPrvLightcurveGen::new(candidate_template);
+        let fp_gen = DecamFpLightcurveGen::new(fp_template);
+        let survey_matches = Some(empty_aliases());
+
+        // Branch: empty push updates => update uses $set only.
+        let existing_before = load_aux(&worker, &object_id).await;
+        let prv_len_before = existing_before.prv_candidates.len();
+        let fp_len_before = existing_before.fp_hists.len();
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![],
+            vec![],
+            &survey_matches,
+            &existing_before,
+        )
+        .await;
+
+        let after_empty = load_aux(&worker, &object_id).await;
+        assert_eq!(after_empty.prv_candidates.len(), prv_len_before);
+        assert_eq!(after_empty.fp_hists.len(), fp_len_before);
+        assert_eq!(
+            after_empty.version,
+            Some(existing_before.version.unwrap_or(0) + 1)
+        );
+
+        // Branch: append-only updates without sort.
+        let append_prv_jd = after_empty.prv_candidates.last().unwrap().jd + 100.0;
+        let append_fp_jd = after_empty.fp_hists.last().unwrap().jd + 100.0;
+
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![prv_gen.at_jd(append_prv_jd)],
+            vec![fp_gen.at_jd(append_fp_jd)],
+            &survey_matches,
+            &after_empty,
+        )
+        .await;
+
+        let after_append = load_aux(&worker, &object_id).await;
+        assert_eq!(after_append.prv_candidates.len(), prv_len_before + 1);
+        assert_eq!(after_append.fp_hists.len(), fp_len_before + 1);
+        assert!((after_append.prv_candidates.last().unwrap().jd - append_prv_jd).abs() < 1e-9);
+        assert!((after_append.fp_hists.last().unwrap().jd - append_fp_jd).abs() < 1e-9);
+
+        // Branch: overlap requires full update with sort.
+        let sort_prv_jd = after_append.prv_candidates.first().unwrap().jd - 50.0;
+        let sort_fp_jd = after_append.fp_hists.first().unwrap().jd - 50.0;
+
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![prv_gen.at_jd(sort_prv_jd)],
+            vec![fp_gen.at_jd(sort_fp_jd)],
+            &survey_matches,
+            &after_append,
+        )
+        .await;
+
+        let after_sort = load_aux(&worker, &object_id).await;
+        assert_eq!(after_sort.prv_candidates.len(), prv_len_before + 2);
+        assert_eq!(after_sort.fp_hists.len(), fp_len_before + 2);
+        assert!(after_sort
+            .prv_candidates
+            .windows(2)
+            .all(|window| window[0].jd < window[1].jd));
+        assert!(after_sort
+            .fp_hists
+            .windows(2)
+            .all(|window| window[0].jd < window[1].jd));
+
+        // Branch: optimistic-lock miss triggers fallback update.
+        let stale_aux = load_aux(&worker, &object_id).await;
+        let fresh_aux = load_aux(&worker, &object_id).await;
+
+        let concurrent_prv_jd = after_sort.prv_candidates.last().unwrap().jd + 10.0;
+        let concurrent_fp_jd = after_sort.fp_hists.last().unwrap().jd + 10.0;
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![prv_gen.at_jd(concurrent_prv_jd)],
+            vec![fp_gen.at_jd(concurrent_fp_jd)],
+            &survey_matches,
+            &fresh_aux,
+        )
+        .await;
+
+        let fallback_prv_jd = concurrent_prv_jd + 1.0;
+        let fallback_fp_jd = concurrent_fp_jd + 1.0;
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![prv_gen.at_jd(fallback_prv_jd)],
+            vec![fp_gen.at_jd(fallback_fp_jd)],
+            &survey_matches,
+            &stale_aux,
+        )
+        .await;
+
+        let after_fallback = load_aux(&worker, &object_id).await;
+        assert!(after_fallback
+            .prv_candidates
+            .iter()
+            .any(|point| (point.jd - fallback_prv_jd).abs() < 1e-9));
+        assert!(after_fallback
+            .fp_hists
+            .iter()
+            .any(|point| (point.jd - fallback_fp_jd).abs() < 1e-9));
+        assert_eq!(
+            after_fallback.version,
+            Some(stale_aux.version.unwrap_or(0) + 2)
+        );
+
+        drop_alert_from_collections(candid, "DECAM").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_repairs_corrupted_existing_lightcurves() {
+        let mut worker = decam_alert_worker().await;
+
+        let (candid, object_id, _bytes_content) = seed_decam_alert(&mut worker).await;
+
+        set_aux_fields(
+            &worker,
+            &object_id,
+            doc! {
+                "prv_candidates": vec![
+                    doc! { "jd": 2.0 },
+                    doc! { "jd": 1.0 },
+                    doc! { "jd": 1.0 },
+                ],
+                "fp_hists": vec![
+                    doc! { "jd": 3.0 },
+                    doc! { "jd": 2.0 },
+                    doc! { "jd": 2.0 },
+                ],
+            },
+        )
+        .await;
+
+        let corrupted = load_aux(&worker, &object_id).await;
+        let version_before = corrupted.version.unwrap_or(0);
+
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![],
+            vec![],
+            &Some(empty_aliases()),
+            &corrupted,
+        )
+        .await;
+
+        let repaired = load_aux(&worker, &object_id).await;
+        assert_strictly_increasing_unique(&repaired.prv_candidates);
+        assert_strictly_increasing_unique(&repaired.fp_hists);
+        assert_eq!(
+            repaired
+                .prv_candidates
+                .iter()
+                .map(|point| point.jd)
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.0]
+        );
+        assert_eq!(
+            repaired
+                .fp_hists
+                .iter()
+                .map(|point| point.jd)
+                .collect::<Vec<_>>(),
+            vec![2.0, 3.0]
+        );
+        assert_eq!(repaired.version, Some(version_before + 1));
+
+        drop_alert_from_collections(candid, "DECAM").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_existing_aux_fails_on_malformed_jd_type() {
+        let mut worker = decam_alert_worker().await;
+
+        let (candid, object_id, _bytes_content) = seed_decam_alert(&mut worker).await;
+
+        set_aux_fields(
+            &worker,
+            &object_id,
+            doc! {
+                "prv_candidates": vec![doc! { "jd": "not-a-number" }],
+            },
+        )
+        .await;
+
+        let result = worker.get_existing_aux(object_id.clone()).await;
+        assert!(matches!(result, Err(AlertError::Mongodb(_))));
+
+        drop_alert_from_collections(candid, "DECAM").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_with_non_finite_existing_jd_hits_failure_mode() {
+        let mut worker = decam_alert_worker().await;
+
+        let (candid, object_id, _bytes_content) = seed_decam_alert(&mut worker).await;
+
+        set_aux_fields(
+            &worker,
+            &object_id,
+            doc! {
+                "prv_candidates": vec![doc! { "jd": f64::NAN }],
+            },
+        )
+        .await;
+
+        let corrupted = load_aux(&worker, &object_id).await;
+        let version_before = corrupted.version.unwrap_or(0);
+
+        apply_update(
+            &mut worker,
+            &object_id,
+            vec![],
+            vec![],
+            &Some(empty_aliases()),
+            &corrupted,
+        )
+        .await;
+
+        let after = load_aux(&worker, &object_id).await;
+        assert_eq!(after.version, Some(version_before + 1));
+        assert!(LightcurveJdOnly::validate_strictly_increasing(
+            &after.prv_candidates,
+            "prv_candidates"
+        )
+        .is_err());
+
+        drop_alert_from_collections(candid, "DECAM").await.unwrap();
     }
 }
