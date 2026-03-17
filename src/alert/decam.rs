@@ -247,11 +247,11 @@ impl DecamAlertWorker {
 
     async fn get_existing_aux(
         &self,
-        object_id: String,
+        object_id: &str,
     ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
         let result = self
             .alert_aux_collection_update
-            .find_one(doc! { "_id": &object_id })
+            .find_one(doc! { "_id": object_id })
             .projection(doc! { "prv_candidates.jd": 1, "fp_hists.jd": 1, "version": 1 })
             .await
             .inspect_err(as_error!())?;
@@ -487,7 +487,7 @@ impl AlertWorker for DecamAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
 
         if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
@@ -607,11 +607,7 @@ mod tests {
     }
 
     async fn load_aux(worker: &DecamAlertWorker, object_id: &str) -> AlertAuxForUpdate {
-        worker
-            .get_existing_aux(object_id.to_string())
-            .await
-            .unwrap()
-            .unwrap()
+        worker.get_existing_aux(object_id).await.unwrap().unwrap()
     }
 
     async fn set_aux_fields(worker: &DecamAlertWorker, object_id: &str, set_doc: Document) {
@@ -895,7 +891,7 @@ mod tests {
         )
         .await;
 
-        let result = worker.get_existing_aux(object_id.clone()).await;
+        let result = worker.get_existing_aux(&object_id).await;
         assert!(matches!(result, Err(AlertError::Mongodb(_))));
 
         drop_alert_from_collections(candid, "DECAM").await.unwrap();
