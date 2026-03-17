@@ -1102,17 +1102,18 @@ impl AlertWorker for ZtfAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                warn!("Alert aux document for object_id {} already exists. This can happen when multiple alerts with the same object_id are processed concurrently. Attempting to update the existing document.", object_id);
-                let existing_alert_aux: Option<AlertAuxForUpdate> =
-                    self.get_existing_aux(object_id.clone()).await?;
-                self.update_aux(
+                // use the race-condition free fallback update
+                warn!(
+                    "Alert aux document for object_id {} already exists. Using fallback update.",
+                    object_id
+                );
+                self.update_aux_fallback(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.prv_nondetections,
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
-                    &existing_alert_aux.unwrap(),
                 )
                 .await
                 .inspect_err(as_error!())?;

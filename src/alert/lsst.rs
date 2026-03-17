@@ -1226,13 +1226,17 @@ impl AlertWorker for LsstAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                self.update_aux(
+                // use the race-condition free fallback update
+                warn!(
+                    "Alert aux document for object_id {} already exists. Using fallback update.",
+                    object_id
+                );
+                self.update_aux_fallback(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
-                    &existing_alert_aux.unwrap(),
                 )
                 .await
                 .inspect_err(as_error!())?;
