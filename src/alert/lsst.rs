@@ -1049,7 +1049,13 @@ impl LsstAlertWorker {
         let find_doc = if let Some(version) = current_version {
             doc! { "_id": object_id, "version": version }
         } else {
-            doc! { "_id": object_id, "version": { "$exists": false } }
+            doc! {
+                 "_id": object_id,
+                 "$or": [
+                     doc! { "version": { "$exists": false } },
+                     doc! { "version": mongodb::bson::Bson::Null },
+                 ]
+            }
         };
         let update_result = self
             .alert_aux_collection
