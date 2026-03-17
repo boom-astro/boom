@@ -963,9 +963,15 @@ impl LsstAlertWorker {
                 "version": doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
             }
         }];
-        self.alert_aux_collection
+        let update_result = self
+            .alert_aux_collection
             .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
+        if update_result.matched_count == 0 {
+            return Err(AlertError::AlertAuxFallbackUpdateFailed(
+                object_id.to_string(),
+            ));
+        }
         Ok(())
     }
 

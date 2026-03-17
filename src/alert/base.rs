@@ -240,6 +240,8 @@ pub enum AlertError {
     MissingDiffmaglim,
     #[error("invalid timeseries input: {0}")]
     InvalidTimeseriesInput(String),
+    #[error("failed to run fallback aux update (no match with existing aux for {0})")]
+    AlertAuxFallbackUpdateFailed(String),
 }
 
 #[derive(Debug, PartialEq)]
