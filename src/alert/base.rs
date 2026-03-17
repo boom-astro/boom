@@ -925,6 +925,37 @@ mod timeseries_tests {
     }
 
     #[test]
+    fn prepare_timeseries_update_corrupted_existing_with_empty_new_data_returns_error() {
+        // Validation now runs before the new_data is_empty fast path, so corrupted existing
+        // data triggers an error even with no new data — this causes the caller to fall back
+        // to the DB-side repair that self-heals the existing series.
+        let corrupted_dups = existing(&[1.0, 1.0, 2.0]);
+        let corrupted_unsorted = existing(&[3.0, 1.0, 2.0]);
+
+        assert!(matches!(
+            TestPoint::prepare_timeseries_update(&[], &corrupted_dups, "test_series"),
+            Err(AlertError::InvalidTimeseriesInput(_))
+        ));
+        assert!(matches!(
+            TestPoint::prepare_timeseries_update(&[], &corrupted_unsorted, "test_series"),
+            Err(AlertError::InvalidTimeseriesInput(_))
+        ));
+    }
+
+    #[test]
+    fn prepare_timeseries_update_corrupted_existing_with_valid_new_data_returns_error() {
+        // Corrupted existing data must also be rejected when new data is present,
+        // ensuring the merge logic never operates on a corrupt baseline.
+        let new_data = vec![point(10.0, 1), point(11.0, 2)];
+        let corrupted = existing(&[5.0, 3.0, 6.0]);
+
+        assert!(matches!(
+            TestPoint::prepare_timeseries_update(&new_data, &corrupted, "test_series"),
+            Err(AlertError::InvalidTimeseriesInput(_))
+        ));
+    }
+
+    #[test]
     fn prepare_timeseries_update_existing_empty_appends_without_sort() {
         let new_data = vec![point(10.0, 1), point(11.0, 2)];
 
