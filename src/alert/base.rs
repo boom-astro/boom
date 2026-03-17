@@ -746,25 +746,6 @@ pub trait TimeSeries {
     where
         Self: Sized + serde::Serialize,
     {
-        if new_data.is_empty() {
-            return Ok((vec![], false));
-        }
-
-        // Fast-path assumes sorted+deduplicated input from upstream sanitize.
-        // Validate this precondition in O(n) to fail fast if upstream breaks.
-        Self::validate_strictly_increasing(new_data, series_name).inspect_err(|error| {
-            warn!(
-                ?error,
-                "prepare_timeseries_update rejected new {} input", series_name
-            );
-        })?;
-
-        // if there is no existing data, we can just append without sorting
-        if existing_data.is_empty() {
-            let docs = new_data.iter().map(|item| mongify(item)).collect();
-            return Ok((docs, false));
-        }
-
         // Validate existing data is also strictly increasing, to ensure the correctness of the merge logic below.
         LightcurveJdOnly::validate_strictly_increasing(existing_data, series_name).inspect_err(
             |error| {
@@ -774,6 +755,25 @@ pub trait TimeSeries {
                 );
             },
         )?;
+
+        // Validate new data is strictly increasing, which allows for optimizations in the merge logic below.
+        Self::validate_strictly_increasing(new_data, series_name).inspect_err(|error| {
+            warn!(
+                ?error,
+                "prepare_timeseries_update rejected new {} input", series_name
+            );
+        })?;
+
+        if new_data.is_empty() {
+            // No new data, so no update needed. Unless existing data can't be validated
+            return Ok((vec![], false));
+        }
+
+        // if there is no existing data, we can just append without sorting
+        if existing_data.is_empty() {
+            let docs = new_data.iter().map(|item| mongify(item)).collect();
+            return Ok((docs, false));
+        }
 
         // After strict validation above, new_data is non-empty and strictly increasing.
         let min_new_jd = new_data[0].time();
