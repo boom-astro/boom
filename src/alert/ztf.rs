@@ -1440,6 +1440,43 @@ mod tests {
         assert_eq!(avro_alert.cutout_difference.len(), 14878);
     }
 
+    #[tokio::test]
+    async fn test_process_alert_includes_current_candidate_in_prv_candidates() {
+        let mut worker = ztf_alert_worker().await;
+
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+
+        let parsed_alert: ZtfRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content)
+            .unwrap();
+        let current_candid = parsed_alert.candid;
+        let current_jd = parsed_alert.candidate.candidate.jd;
+
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .unwrap()
+            .expect("alert aux should exist after processing");
+
+        assert!(
+            aux.prv_candidates.iter().any(|pc| {
+                pc.prv_candidate.candid == Some(current_candid)
+                    && (pc.prv_candidate.jd - current_jd).abs() < 1e-9
+            }),
+            "current candidate (candid={}, jd={}) should be present in prv_candidates",
+            current_candid,
+            current_jd
+        );
+
+        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+    }
+
     /// Verify that SchemaCache falls back to the Reader-based path when the
     /// cached start index is corrupted.
     ///
