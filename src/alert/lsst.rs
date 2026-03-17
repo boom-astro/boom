@@ -1195,8 +1195,6 @@ impl AlertWorker for LsstAlertWorker {
             return Ok(cutout_status);
         }
 
-        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
-
         // Add the current candidate as the last point in the prv_candidates, if it's not already there
         if prv_candidates
             .last()
@@ -1210,6 +1208,8 @@ impl AlertWorker for LsstAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+
+        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
         if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;

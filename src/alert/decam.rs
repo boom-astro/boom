@@ -481,13 +481,13 @@ impl AlertWorker for DecamAlertWorker {
             return Ok(cutout_status);
         }
 
-        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
-
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
                 .await
                 .inspect_err(as_error!())?,
         );
+
+        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
         if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;

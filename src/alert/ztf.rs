@@ -948,28 +948,16 @@ impl ZtfAlertWorker {
     }
 
     #[instrument(skip_all)]
-    fn format_prv_candidates(
+    fn split_prv_candidates(
         &self,
         prv_candidates: Vec<ZtfPrvCandidate>,
-        candidate: &ZtfCandidate,
     ) -> (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) {
         // we split the prv_candidates into detections and non-detections
-        let (mut new_prv_candidates, prv_nondetections): (
-            Vec<ZtfPrvCandidate>,
-            Vec<ZtfPrvCandidate>,
-        ) = prv_candidates
-            .into_iter()
-            .partition(|p| p.prv_candidate.magpsf.is_some());
+        let (new_prv_candidates, prv_nondetections): (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) =
+            prv_candidates
+                .into_iter()
+                .partition(|p| p.prv_candidate.magpsf.is_some());
 
-        // the prv_candidates from the alert is alerts that pre-date the current candidate, and that may or may not include it
-        // so instead of looping over all the candidates, since they are sorted, we can just check if the last
-        // one has the same jd as the current candidate, and if not, we add the current candidate to the list
-        if new_prv_candidates
-            .last()
-            .map_or(true, |pc| pc.prv_candidate.jd < candidate.candidate.jd)
-        {
-            new_prv_candidates.push(ZtfPrvCandidate::try_from(candidate).unwrap());
-        }
         (new_prv_candidates, prv_nondetections)
     }
 }
@@ -1045,10 +1033,12 @@ impl AlertWorker for ZtfAlertWorker {
         let ra = avro_alert.candidate.candidate.ra;
         let dec = avro_alert.candidate.candidate.dec;
 
-        let mut prv_candidates = match avro_alert.prv_candidates.take() {
+        let prv_candidates = match avro_alert.prv_candidates.take() {
             Some(candidates) => candidates,
             None => Vec::new(),
         };
+        let (mut prv_candidates, mut prv_nondetections) = self.split_prv_candidates(prv_candidates);
+
         let mut fp_hists = match avro_alert.fp_hists.take() {
             Some(hists) => hists,
             None => Vec::new(),
@@ -1056,6 +1046,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         // Sort and deduplicate time series data by jd
         ZtfPrvCandidate::sanitize_timeseries(&mut prv_candidates);
+        ZtfPrvCandidate::sanitize_timeseries(&mut prv_nondetections);
         ZtfForcedPhot::sanitize_timeseries(&mut fp_hists);
 
         let candidate: ZtfCandidate = avro_alert.candidate;
@@ -1076,16 +1067,21 @@ impl AlertWorker for ZtfAlertWorker {
             return Ok(cutout_status);
         }
 
-        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
-
-        let (prv_candidates, prv_nondetections) =
-            self.format_prv_candidates(prv_candidates, &candidate);
+        // Add the current candidate as the last point in the prv_candidates, if it's not already there
+        if prv_candidates
+            .last()
+            .map_or(true, |pc| pc.prv_candidate.jd < candidate.candidate.jd)
+        {
+            prv_candidates.push(ZtfPrvCandidate::try_from(&candidate)?);
+        }
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
                 .await
                 .inspect_err(as_error!())?,
         );
+
+        let existing_alert_aux = self.get_existing_aux(object_id.clone()).await?;
 
         if existing_alert_aux.is_none() {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
@@ -1502,8 +1498,7 @@ mod tests {
         let mut parsed_fp_hists = parsed_alert.fp_hists.take().unwrap_or_default();
         ZtfPrvCandidate::sanitize_timeseries(&mut parsed_prv_candidates);
         ZtfForcedPhot::sanitize_timeseries(&mut parsed_fp_hists);
-        let (detections, nondetections) =
-            worker.format_prv_candidates(parsed_prv_candidates, &parsed_alert.candidate);
+        let (detections, nondetections) = worker.split_prv_candidates(parsed_prv_candidates);
 
         let detection_template = detections
             .first()
