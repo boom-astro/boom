@@ -238,8 +238,6 @@ pub enum AlertError {
     UnknownFid(i32),
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
-    #[error("concurrent modification detected")]
-    ConcurrentModification,
     #[error("invalid timeseries input: {0}")]
     InvalidTimeseriesInput(String),
 }
