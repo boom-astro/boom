@@ -788,8 +788,12 @@ pub trait TimeSeries {
             return Ok((docs, false));
         }
 
-        let mut existing_jds = HashSet::with_capacity(existing_data.len());
-        for item in existing_data {
+        // Existing data is strictly increasing, so only jds >= min_new_jd can collide
+        // with any new point. Skip older points to reduce hash-set size and work.
+        let overlap_start = existing_data.partition_point(|item| item.jd < min_new_jd);
+        let relevant_existing = &existing_data[overlap_start..];
+        let mut existing_jds = HashSet::with_capacity(relevant_existing.len());
+        for item in relevant_existing {
             existing_jds.insert(to_bits_normalized(item.jd));
         }
 
