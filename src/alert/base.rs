@@ -675,6 +675,17 @@ where
     binary.serialize(serializer)
 }
 
+fn to_bits_normalized(jd: f64) -> u64 {
+    let mut bits = jd.to_bits();
+    // Normalize -0.0 and NaN to ensure consistent hashing and deduplication
+    if jd == 0.0 {
+        bits = 0.0f64.to_bits(); // Normalize -0.0 to 0.0
+    } else if jd.is_nan() {
+        bits = f64::NAN.to_bits(); // Normalize all NaNs to a single representation
+    }
+    bits
+}
+
 pub trait TimeSeries {
     fn time(&self) -> f64;
 
@@ -723,7 +734,7 @@ pub trait TimeSeries {
     where
         Self: Sized,
     {
-        timeseries.sort_by(|a, b| a.time().partial_cmp(&b.time()).unwrap());
+        timeseries.sort_by(|a, b| a.time().total_cmp(&b.time()));
         timeseries.dedup_by(|a, b| a.time() == b.time());
     }
 
@@ -779,7 +790,7 @@ pub trait TimeSeries {
 
         let mut existing_jds = HashSet::with_capacity(existing_data.len());
         for item in existing_data {
-            existing_jds.insert(item.jd.to_bits());
+            existing_jds.insert(to_bits_normalized(item.jd));
         }
 
         // filter out points already present in existing data (deduplication)
@@ -788,7 +799,7 @@ pub trait TimeSeries {
         let mut min_new_jd_deduped = f64::INFINITY;
         for item in new_data {
             let jd = item.time();
-            if !existing_jds.contains(&jd.to_bits()) {
+            if !existing_jds.contains(&to_bits_normalized(jd)) {
                 docs.push(mongify(item));
                 if jd < min_new_jd_deduped {
                     min_new_jd_deduped = jd;
