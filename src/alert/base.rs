@@ -741,7 +741,12 @@ pub trait TimeSeries {
 
         // Fast-path assumes sorted+deduplicated input from upstream sanitize.
         // Validate this precondition in O(n) to fail fast if upstream breaks.
-        Self::validate_strictly_increasing(new_data, series_name)?;
+        Self::validate_strictly_increasing(new_data, series_name).inspect_err(|error| {
+            warn!(
+                ?error,
+                "prepare_timeseries_update rejected new {} input", series_name
+            );
+        })?;
 
         // if there is no existing data, we can just append without sorting
         if existing_data.is_empty() {
@@ -749,45 +754,50 @@ pub trait TimeSeries {
             return Ok((docs, false));
         }
 
-        let min_new_jd = new_data
-            .iter()
-            .map(|item| item.time())
-            .fold(f64::INFINITY, f64::min);
-        let (existing_jds, max_existing_jd) =
-            existing_data
-                .iter()
-                .fold((HashSet::new(), None::<f64>), |(mut set, max_jd), item| {
-                    set.insert(item.jd.to_bits());
-                    let max_jd = match max_jd {
-                        Some(jd) => Some(jd.max(item.jd)),
-                        None => Some(item.jd),
-                    };
-                    (set, max_jd)
-                });
+        // Validate existing data is also strictly increasing, to ensure the correctness of the merge logic below.
+        LightcurveJdOnly::validate_strictly_increasing(existing_data, series_name).inspect_err(
+            |error| {
+                warn!(
+                    ?error,
+                    "prepare_timeseries_update rejected existing {} input", series_name
+                );
+            },
+        )?;
+
+        // After strict validation above, new_data is non-empty and strictly increasing.
+        let min_new_jd = new_data[0].time();
+
+        // Existing series is validated (upstream) as strictly increasing by callers,
+        // so the last element is the maximum jd.
+        let max_existing_jd = existing_data[existing_data.len() - 1].jd;
 
         // if all new data is newer than existing data, we can just append without sorting
-        if min_new_jd > max_existing_jd.unwrap() {
+        if min_new_jd > max_existing_jd {
             let docs = new_data.iter().map(|item| mongify(item)).collect();
             return Ok((docs, false));
         }
 
+        let mut existing_jds = HashSet::with_capacity(existing_data.len());
+        for item in existing_data {
+            existing_jds.insert(item.jd.to_bits());
+        }
+
         // filter out points already present in existing data (deduplication)
         // and track the minimum jd of the post-deduplication data to check if sorting can be skipped
-        let (docs, min_new_jd_deduped) =
-            new_data
-                .iter()
-                .fold((vec![], f64::INFINITY), |(mut docs, min_jd), item| {
-                    let jd = item.time();
-                    if !existing_jds.contains(&jd.to_bits()) {
-                        docs.push(mongify(item));
-                        (docs, min_jd.min(jd))
-                    } else {
-                        (docs, min_jd)
-                    }
-                });
+        let mut docs = Vec::with_capacity(new_data.len());
+        let mut min_new_jd_deduped = f64::INFINITY;
+        for item in new_data {
+            let jd = item.time();
+            if !existing_jds.contains(&jd.to_bits()) {
+                docs.push(mongify(item));
+                if jd < min_new_jd_deduped {
+                    min_new_jd_deduped = jd;
+                }
+            }
+        }
 
         // if all the deduplicated new data is newer than existing data, we can just append without sorting
-        if min_new_jd_deduped > max_existing_jd.unwrap() {
+        if min_new_jd_deduped > max_existing_jd {
             return Ok((docs, false));
         }
 

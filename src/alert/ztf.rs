@@ -803,26 +803,15 @@ impl ZtfAlertWorker {
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
     ) -> Result<(), AlertError> {
-        if LightcurveJdOnly::validate_strictly_increasing(
-            &existing_alert_aux.prv_candidates,
-            "prv_candidates",
-        )
-        .is_err()
-            || LightcurveJdOnly::validate_strictly_increasing(
-                &existing_alert_aux.prv_nondetections,
-                "prv_nondetections",
+        let current_version = existing_alert_aux.version;
+
+        let Ok((new_prv_candidates_docs, need_sort_prv_candidates)) =
+            ZtfPrvCandidate::prepare_timeseries_update(
+                prv_candidates,
+                &existing_alert_aux.prv_candidates,
+                "prv_candidates",
             )
-            .is_err()
-            || LightcurveJdOnly::validate_strictly_increasing(
-                &existing_alert_aux.fp_hists,
-                "fp_hists",
-            )
-            .is_err()
-        {
-            warn!(
-                "Existing lightcurve state is not strictly increasing for object_id {}. Using DB-only update.",
-                object_id
-            );
+        else {
             return self
                 .update_aux_fallback(
                     object_id,
@@ -833,26 +822,43 @@ impl ZtfAlertWorker {
                     now,
                 )
                 .await;
-        }
+        };
 
-        let current_version = existing_alert_aux.version;
-        let (new_prv_candidates_docs, need_sort_prv_candidates) =
-            ZtfPrvCandidate::prepare_timeseries_update(
-                prv_candidates,
-                &existing_alert_aux.prv_candidates,
-                "prv_candidates",
-            )?;
-        let (new_prv_nondetections_docs, need_sort_prv_nondetections) =
+        let Ok((new_prv_nondetections_docs, need_sort_prv_nondetections)) =
             ZtfPrvCandidate::prepare_timeseries_update(
                 prv_nondetections,
                 &existing_alert_aux.prv_nondetections,
                 "prv_nondetections",
-            )?;
-        let (new_fp_hists_docs, need_sort_fp_hists) = ZtfForcedPhot::prepare_timeseries_update(
+            )
+        else {
+            return self
+                .update_aux_fallback(
+                    object_id,
+                    prv_candidates,
+                    prv_nondetections,
+                    fp_hists,
+                    survey_matches,
+                    now,
+                )
+                .await;
+        };
+
+        let Ok((new_fp_hists_docs, need_sort_fp_hists)) = ZtfForcedPhot::prepare_timeseries_update(
             fp_hists,
             &existing_alert_aux.fp_hists,
             "fp_hists",
-        )?;
+        ) else {
+            return self
+                .update_aux_fallback(
+                    object_id,
+                    prv_candidates,
+                    prv_nondetections,
+                    fp_hists,
+                    survey_matches,
+                    now,
+                )
+                .await;
+        };
 
         let mut push_updates = Document::new();
         if !new_prv_candidates_docs.is_empty() {

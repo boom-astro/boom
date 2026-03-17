@@ -982,38 +982,29 @@ impl LsstAlertWorker {
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
     ) -> Result<(), AlertError> {
-        if LightcurveJdOnly::validate_strictly_increasing(
-            &existing_alert_aux.prv_candidates,
-            "prv_candidates",
-        )
-        .is_err()
-            || LightcurveJdOnly::validate_strictly_increasing(
-                &existing_alert_aux.fp_hists,
-                "fp_hists",
-            )
-            .is_err()
-        {
-            warn!(
-                "Existing lightcurve state is not strictly increasing for object_id {}. Using DB-only update.",
-                object_id
-            );
-            return self
-                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
-                .await;
-        }
-
         let current_version = existing_alert_aux.version;
-        let (new_prv_candidates_docs, need_sort_prv_candidates) =
+
+        let Ok((new_prv_candidates_docs, need_sort_prv_candidates)) =
             LsstPrvCandidate::prepare_timeseries_update(
                 prv_candidates,
                 &existing_alert_aux.prv_candidates,
                 "prv_candidates",
-            )?;
-        let (new_fp_hists_docs, need_sort_fp_hists) = LsstForcedPhot::prepare_timeseries_update(
+            )
+        else {
+            return self
+                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                .await;
+        };
+
+        let Ok((new_fp_hists_docs, need_sort_fp_hists)) = LsstForcedPhot::prepare_timeseries_update(
             fp_hists,
             &existing_alert_aux.fp_hists,
             "fp_hists",
-        )?;
+        ) else {
+            return self
+                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                .await;
+        };
 
         let mut push_updates = Document::new();
         if !new_prv_candidates_docs.is_empty() {
