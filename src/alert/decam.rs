@@ -267,13 +267,12 @@ impl DecamAlertWorker {
         survey_matches: &Option<DecamAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let lc_set_update = doc! {
-            "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
-            "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
-        };
         Self::db_only_aux_update(
             object_id,
-            lc_set_update,
+            doc! {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
+            },
             survey_matches,
             now,
             &self.alert_aux_collection,
