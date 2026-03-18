@@ -2,6 +2,8 @@ volumes:
   mongodb:
   valkey:
   kafka_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   boom:
@@ -296,8 +298,11 @@ services:
     command:
       - --web.enable-otlp-receiver # [^2]
       - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
     volumes:
       - ./config/prometheus.yaml:/etc/prometheus/prometheus.yaml
+      - prometheus_data:/prometheus
     expose:
       - "9090"
     networks:
@@ -319,6 +324,37 @@ services:
       # Basic auth middleware
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-prometheus-auth.basicauth.users=${PROMETHEUS_USER:?PROMETHEUS_USER must be set}:${PROMETHEUS_HASHED_PASSWORD:?PROMETHEUS_HASHED_PASSWORD must be set}
       - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.middlewares=${STACK_NAME?Variable not set}-prometheus-auth
+    restart: always
+  grafana:
+    image: grafana/grafana:11.5.2
+    command:
+      - --homepath=/usr/share/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: ${GRAFANA_USERS_ALLOW_SIGN_UP:-false}
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_AUTH_ANONYMOUS_ENABLED:-false}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    expose:
+      - "3000"
+    networks:
+      - boom
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      - traefik.http.services.${STACK_NAME?Variable not set}-grafana.loadbalancer.server.port=3000
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-http.rule=Host(`grafana.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-http.entrypoints=http
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.rule=Host(`grafana.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.entrypoints=https
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.tls=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.tls.certresolver=le
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-http.middlewares=https-redirect
     restart: always
 
 # [^1]:

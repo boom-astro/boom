@@ -24,6 +24,11 @@ scheduler ztf
 Now, visit the Prometheus UI at <http://localhost:9090> where you can query the
 metrics emitted by boom, as demonstrated in the following examples:
 
+Grafana is also available at <http://localhost:3000> with a pre-provisioned
+Prometheus datasource and a starter dashboard (`BOOM Overview`). By default,
+credentials are `admin`/`admin`, but this can be overridden with
+`GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD`.
+
 * [Kakfa consumer][kafka-consumer-queries]
 * [Alert workers][alert-worker-queries]
 * [Enrichment workers][enrichment-worker-queries]
@@ -266,7 +271,7 @@ service:  # 5
     transmitting telemetry in batches (see
     <https://github.com/open-telemetry/opentelemetry-collector/blob/main/processor/batchprocessor/README.md>).
     `batch` is available as part of the core image.
-    
+
     For context, the Collector uses "processors" to do things with the collected
     data before export (such as batching it up). OpenTelemetry has a short list
     of recommended processors (see
