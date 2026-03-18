@@ -31,12 +31,12 @@ if [ -z "${BOOM_REPO_ROOT:-}" ]; then
     exit 1
 fi
 
-COMPOSE_CONFIG="$BOOM_REPO_ROOT/tests/throughput/compose.yaml"
+COMPOSE_CONFIG=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.yaml")
 BG_PIDS=()
 
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
 if [ "${LOW_STORAGE:-}" = "true" ]; then
-    COMPOSE_CONFIG="$COMPOSE_CONFIG -f $BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml"
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml")
 fi
 
 # Logs folder is the optional positional argument to the script
@@ -61,36 +61,36 @@ trap cleanup EXIT INT TERM
 mongo_count() {
     local query="$1"
     local raw
-    raw=$(docker compose -f "$COMPOSE_CONFIG" exec -T mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "$query")
+    raw=$(docker compose "${COMPOSE_CONFIG[@]}" exec -T mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "$query")
     raw=$(printf '%s\n' "$raw" | tail -n 1 | tr -d '\r')
     raw=$(printf '%s' "$raw" | tr -cd '0-9')
     echo "${raw:-0}"
 }
 
 # Remove any existing containers
-docker compose -f "$COMPOSE_CONFIG" down
+docker compose "${COMPOSE_CONFIG[@]}" down
 
 # Spin up BOOM services with Docker Compose
-if ! docker compose -f "$COMPOSE_CONFIG" up --build -d; then
+if ! docker compose "${COMPOSE_CONFIG[@]}" up --build -d; then
     echo "$(current_datetime) - ERROR: Failed to start Docker Compose services"
-    docker compose -f "$COMPOSE_CONFIG" logs mongo-init || true
+    docker compose "${COMPOSE_CONFIG[@]}" logs mongo-init || true
     exit 1
 fi
 
 # Send the logs to file so we can analyze later
 mkdir -p "$LOGS_DIR"
-docker compose -f "$COMPOSE_CONFIG" logs -f producer > "$LOGS_DIR/producer.log" &
+docker compose "${COMPOSE_CONFIG[@]}" logs -f producer > "$LOGS_DIR/producer.log" &
 BG_PIDS+=($!)
-docker compose -f "$COMPOSE_CONFIG" logs -f consumer > "$LOGS_DIR/consumer.log" &
+docker compose "${COMPOSE_CONFIG[@]}" logs -f consumer > "$LOGS_DIR/consumer.log" &
 BG_PIDS+=($!)
-docker compose -f "$COMPOSE_CONFIG" logs -f scheduler > "$LOGS_DIR/scheduler.log" &
+docker compose "${COMPOSE_CONFIG[@]}" logs -f scheduler > "$LOGS_DIR/scheduler.log" &
 BG_PIDS+=($!)
-docker compose -f "$COMPOSE_CONFIG" logs -f mongo-init > "$LOGS_DIR/mongo-init.log" &
+docker compose "${COMPOSE_CONFIG[@]}" logs -f mongo-init > "$LOGS_DIR/mongo-init.log" &
 BG_PIDS+=($!)
 # Also log stats from containers for later analysis
-docker compose -f "$COMPOSE_CONFIG" stats consumer --format json > "$LOGS_DIR/consumer.stats.log" &
+docker compose "${COMPOSE_CONFIG[@]}" stats consumer --format json > "$LOGS_DIR/consumer.stats.log" &
 BG_PIDS+=($!)
-docker compose -f "$COMPOSE_CONFIG" stats scheduler --format json > "$LOGS_DIR/scheduler.stats.log" &
+docker compose "${COMPOSE_CONFIG[@]}" stats scheduler --format json > "$LOGS_DIR/scheduler.stats.log" &
 BG_PIDS+=($!)
 
 EXPECTED_ALERTS=29142
@@ -100,13 +100,13 @@ TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
 # Wait for the kafka consumer to start expecting messages (when it logs "Consumer received first message, continuing...")
 echo "$(current_datetime) - Waiting for Kafka consumer to start"
 START_TIME=$(date +%s)
-while ! docker compose -f "$COMPOSE_CONFIG" logs consumer | grep -q "Consumer received first message, continuing..."; do
-    MONGO_INIT_CONTAINER_ID=$(docker compose -f "$COMPOSE_CONFIG" ps -aq mongo-init | tail -n 1)
+while ! docker compose "${COMPOSE_CONFIG[@]}" logs consumer | grep -q "Consumer received first message, continuing..."; do
+    MONGO_INIT_CONTAINER_ID=$(docker compose "${COMPOSE_CONFIG[@]}" ps -aq mongo-init | tail -n 1)
     if [ -n "$MONGO_INIT_CONTAINER_ID" ]; then
         MONGO_INIT_EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$MONGO_INIT_CONTAINER_ID" 2>/dev/null || true)
         if [[ "$MONGO_INIT_EXIT_CODE" =~ ^[0-9]+$ ]] && [ "$MONGO_INIT_EXIT_CODE" -ne 0 ]; then
             echo "$(current_datetime) - ERROR: mongo-init did not complete successfully (exit $MONGO_INIT_EXIT_CODE)"
-            docker compose -f "$COMPOSE_CONFIG" logs mongo-init || true
+            docker compose "${COMPOSE_CONFIG[@]}" logs mongo-init || true
             exit 1
         fi
     fi
@@ -167,7 +167,7 @@ echo "$(current_datetime) - Waiting for filters to run on all alerts"
 START_TIME=$(date +%s)
 PASSED_ALERTS=0
 while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
-    PASSED_ALERTS=$(docker compose -f "$COMPOSE_CONFIG" logs scheduler | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
+    PASSED_ALERTS=$(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
     PASSED_ALERTS=${PASSED_ALERTS:-0}
     PASSED_ALERTS=$((PASSED_ALERTS / N_FILTERS))
     CURRENT_TIME=$(date +%s)
@@ -188,7 +188,7 @@ python $BOOM_REPO_ROOT/tests/throughput/read-kafka-output.py
 
 # Check to see if any of our containers have exited with a non-zero status,
 # which would indicate an error
-EXIT_CODE=$(docker compose -f "$COMPOSE_CONFIG" ps -aq | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
+EXIT_CODE=$(docker compose "${COMPOSE_CONFIG[@]}" ps -aq | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
 if [ -n "$EXIT_CODE" ]; then
     echo "$(current_datetime) - ERROR: One or more containers exited with a non-zero status"
     exit 1
@@ -197,7 +197,7 @@ fi
 # Shut down the BOOM services if --keep-up was not specified and no errors were detected
 if [ "$KEEP_UP" = false ]; then
     echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
-    docker compose -f "$COMPOSE_CONFIG" down
+    docker compose "${COMPOSE_CONFIG[@]}" down
 fi
 
 echo "$(current_datetime) - All tasks completed successfully"
