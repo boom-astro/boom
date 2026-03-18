@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use crate::{
     alert::{
         base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
+            ProcessAlertStatus, SchemaCache,
         },
-        lsst, ztf,
+        lsst, ztf, TimeSeries,
     },
     conf::{self, AppConfig},
     utils::{
-        db::{mongify, update_timeseries_op},
+        db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::Band,
         o11y::logging::as_error,
@@ -21,7 +22,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
 pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
@@ -88,6 +89,12 @@ impl TryFrom<Candidate> for DecamCandidate {
     }
 }
 
+impl TimeSeries for DecamCandidate {
+    fn time(&self) -> f64 {
+        self.jd
+    }
+}
+
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<DecamCandidate, D::Error>
 where
     D: Deserializer<'de>,
@@ -125,6 +132,12 @@ impl TryFrom<FpHist> for DecamForcedPhot {
             jd: fp_hist.mjd + 2400000.5,
             fp_hist,
         })
+    }
+}
+
+impl TimeSeries for DecamForcedPhot {
+    fn time(&self) -> f64 {
+        self.jd
     }
 }
 
@@ -182,12 +195,22 @@ pub struct DecamAlert {
     pub updated_at: f64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    #[serde(default)]
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
+}
+
 pub struct DecamAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
+    alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
@@ -221,27 +244,112 @@ impl DecamAlertWorker {
             lsst: lsst_matches,
         })
     }
+
+    async fn get_existing_aux(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
+        let result = self
+            .alert_aux_collection_update
+            .find_one(doc! { "_id": object_id })
+            .projection(doc! { "prv_candidates.jd": 1, "fp_hists.jd": 1, "version": 1 })
+            .await
+            .inspect_err(as_error!())?;
+        Ok(result)
+    }
+
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
-    async fn update_aux(
-        self: &mut Self,
+    async fn update_aux_fallback(
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<DecamCandidate>,
         fp_hists: &Vec<DecamForcedPhot>,
         survey_matches: &Option<DecamAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
-            "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "aliases": mongify(survey_matches),
-                "updated_at": now,
+        Self::db_only_aux_update(
+            object_id,
+            doc! {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
+            },
+            survey_matches,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
+    }
+
+    #[instrument(
+        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
+        err
+    )]
+    async fn update_aux_inner(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<DecamCandidate>,
+        fp_hists: &Vec<DecamForcedPhot>,
+        survey_matches: &Option<DecamAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        let current_version = existing_alert_aux.version;
+
+        let prepared_prv_candidates = DecamCandidate::prepare_timeseries_update(
+            prv_candidates,
+            &existing_alert_aux.prv_candidates,
+            "prv_candidates",
+        )?;
+
+        let prepared_fp_hists = DecamForcedPhot::prepare_timeseries_update(
+            fp_hists,
+            &existing_alert_aux.fp_hists,
+            "fp_hists",
+        )?;
+
+        let mut push_updates = Document::new();
+        Self::add_to_push_aux_update(&mut push_updates, "prv_candidates", prepared_prv_candidates);
+        Self::add_to_push_aux_update(&mut push_updates, "fp_hists", prepared_fp_hists);
+
+        Self::finalize_aux_update(
+            object_id,
+            push_updates,
+            survey_matches,
+            current_version,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
+    }
+
+    async fn update_aux(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<DecamCandidate>,
+        fp_hists: &Vec<DecamForcedPhot>,
+        survey_matches: &Option<DecamAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        match self
+            .update_aux_inner(
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                now,
+                existing_alert_aux,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                // if we get a concurrent modification error or an error preparing the lightcurves update,
+                // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                    .await
             }
-        }];
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
-            .await?;
-        Ok(())
+        }
     }
 }
 
@@ -263,6 +371,7 @@ impl AlertWorker for DecamAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
@@ -277,6 +386,7 @@ impl AlertWorker for DecamAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
+            alert_aux_collection_update,
             alert_cutout_collection,
             ztf_alert_aux_collection,
             lsst_alert_aux_collection,
@@ -297,10 +407,7 @@ impl AlertWorker for DecamAlertWorker {
         format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let avro_alert: DecamRawAvroAlert = self
             .schema_cache
@@ -313,9 +420,12 @@ impl AlertWorker for DecamAlertWorker {
         let dec = avro_alert.candidate.candidate.dec;
 
         let prv_candidates = vec![avro_alert.candidate.clone()];
-        let fp_hists = avro_alert.fp_hists;
+        let mut fp_hists = avro_alert.fp_hists;
 
-        let status = self
+        // Sort and deduplicate time series data by jd
+        DecamForcedPhot::sanitize_timeseries(&mut fp_hists);
+
+        let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
                 avro_alert.cutout_science,
@@ -326,14 +436,9 @@ impl AlertWorker for DecamAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+        if let ProcessAlertStatus::Exists(_) = cutout_status {
+            return Ok(cutout_status);
         }
-
-        let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
-            .await
-            .inspect_err(as_error!())?;
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -341,7 +446,20 @@ impl AlertWorker for DecamAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        if !alert_aux_exists {
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                &object_id,
+                &prv_candidates,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
             let obj = DecamObject {
                 object_id: object_id.clone(),
@@ -355,7 +473,12 @@ impl AlertWorker for DecamAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                self.update_aux(
+                // use the race-condition free fallback update
+                warn!(
+                    "Alert aux document for object_id {} already exists. Using fallback update.",
+                    object_id
+                );
+                self.update_aux_fallback(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.fp_hists,
@@ -367,10 +490,6 @@ impl AlertWorker for DecamAlertWorker {
             } else {
                 result.inspect_err(as_error!())?;
             }
-        } else {
-            self.update_aux(&object_id, &prv_candidates, &fp_hists, &survey_matches, now)
-                .await
-                .inspect_err(as_error!())?;
         }
 
         let alert = DecamAlert {
@@ -396,8 +515,199 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{decam_alert_worker, AlertRandomizer},
+        testing::{
+            assert_update_aux_branches_and_fallback, decam_alert_worker,
+            drop_alert_from_collections, AlertRandomizer, AuxBranchSnapshot,
+            AuxUpdateBranchTestAdapter,
+        },
     };
+
+    struct DecamPrvLightcurveGen {
+        template: DecamCandidate,
+    }
+
+    impl DecamPrvLightcurveGen {
+        fn new(template: DecamCandidate) -> Self {
+            Self { template }
+        }
+
+        fn at_jd(&self, jd: f64) -> DecamCandidate {
+            let mut candidate = self.template.clone();
+            candidate.jd = jd;
+            candidate.candidate.mjd = jd - 2400000.5;
+            candidate
+        }
+    }
+
+    struct DecamFpLightcurveGen {
+        template: DecamForcedPhot,
+    }
+
+    impl DecamFpLightcurveGen {
+        fn new(template: DecamForcedPhot) -> Self {
+            Self { template }
+        }
+
+        fn at_jd(&self, jd: f64) -> DecamForcedPhot {
+            let mut fp = self.template.clone();
+            fp.jd = jd;
+            fp.fp_hist.mjd = jd - 2400000.5;
+            fp
+        }
+    }
+
+    async fn seed_decam_alert(worker: &mut DecamAlertWorker) -> (i64, String, Vec<u8>) {
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Decam).get().await;
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        (candid, object_id, bytes_content)
+    }
+
+    async fn load_aux(worker: &DecamAlertWorker, object_id: &str) -> AlertAuxForUpdate {
+        worker.get_existing_aux(object_id).await.unwrap().unwrap()
+    }
+
+    async fn set_aux_fields(worker: &DecamAlertWorker, object_id: &str, set_doc: Document) {
+        worker
+            .alert_aux_collection
+            .update_one(doc! { "_id": object_id }, doc! { "$set": set_doc })
+            .await
+            .unwrap();
+    }
+
+    async fn apply_update(
+        worker: &mut DecamAlertWorker,
+        object_id: &str,
+        prv_candidates: Vec<DecamCandidate>,
+        fp_hists: Vec<DecamForcedPhot>,
+        survey_matches: &Option<DecamAliases>,
+        existing_aux: &AlertAuxForUpdate,
+    ) {
+        worker
+            .update_aux(
+                object_id,
+                &prv_candidates,
+                &fp_hists,
+                survey_matches,
+                Time::now().to_jd(),
+                existing_aux,
+            )
+            .await
+            .unwrap();
+    }
+
+    struct DecamAuxBranchAdapter {
+        prv_gen: DecamPrvLightcurveGen,
+        fp_gen: DecamFpLightcurveGen,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for DecamAuxBranchAdapter {
+        type Worker = DecamAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<DecamAliases>;
+        type Updates = (Vec<DecamCandidate>, Vec<DecamForcedPhot>);
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![
+                    existing_aux.prv_candidates.clone(),
+                    existing_aux.fp_hists.clone(),
+                ],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(empty_aliases())
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            (vec![], vec![])
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 2);
+            (
+                vec![self.prv_gen.at_jd(jds[0])],
+                vec![self.fp_gen.at_jd(jds[1])],
+            )
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 1.0 },
+                        doc! { "jd": 1.0 },
+                    ],
+                    "fp_hists": vec![
+                        doc! { "jd": 3.0 },
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 2.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0], vec![2.0, 3.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": f64::NAN },
+                        doc! { "jd": 1.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0], vec![2.0, 3.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            let (prv_candidates, fp_hists) = updates;
+            apply_update(
+                worker,
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                existing_aux,
+            )
+            .await;
+        }
+    }
+
+    fn empty_aliases() -> DecamAliases {
+        DecamAliases {
+            ztf: vec![],
+            lsst: vec![],
+        }
+    }
 
     #[tokio::test]
     async fn test_decam_alert_from_avro_bytes() {
@@ -432,5 +742,30 @@ mod tests {
         assert_eq!(alert.cutout_science.clone().len(), 54561);
         assert_eq!(alert.cutout_template.clone().len(), 49810);
         assert_eq!(alert.cutout_difference.clone().len(), 54569);
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_branches_and_fallback() {
+        let mut worker = decam_alert_worker().await;
+
+        let (candid, object_id, bytes_content) = seed_decam_alert(&mut worker).await;
+
+        let parsed_alert: DecamRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content)
+            .unwrap();
+        let mut adapter =
+            DecamAuxBranchAdapter {
+                prv_gen: DecamPrvLightcurveGen::new(parsed_alert.candidate),
+                fp_gen: DecamFpLightcurveGen::new(
+                    parsed_alert.fp_hists.first().cloned().expect(
+                        "test data should include at least one DECAM forced photometry point",
+                    ),
+                ),
+            };
+
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
+
+        drop_alert_from_collections(candid, "DECAM").await.unwrap();
     }
 }
