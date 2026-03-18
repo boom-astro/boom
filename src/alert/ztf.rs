@@ -778,19 +778,19 @@ impl ZtfAlertWorker {
         survey_matches: &Option<ZtfAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
-            "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "aliases": mongify(survey_matches),
-                "updated_at": now,
-                // we still want to increment the version even in the fallback,
-                // to prevent concurrency issues between a fallback update and a normal update from another thread
-                "version": doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
-            }
-        }];
-        Self::db_only_aux_update(object_id, update_pipeline, &self.alert_aux_collection).await
+        let lc_set_update = doc! {
+            "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+            "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+            "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+        };
+        Self::db_only_aux_update(
+            object_id,
+            lc_set_update,
+            survey_matches,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
     }
 
     #[instrument(

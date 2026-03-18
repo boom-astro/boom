@@ -1177,14 +1177,26 @@ pub trait AlertWorker {
         Ok(matches)
     }
 
-    async fn db_only_aux_update<T>(
+    async fn db_only_aux_update<T, K>(
         object_id: &str,
-        update_pipeline: Vec<Document>,
-        alert_aux_collection: &mongodb::Collection<T>,
+        mut lc_set_update: Document,
+        survey_matches: T,
+        now: f64,
+        alert_aux_collection: &mongodb::Collection<K>,
     ) -> Result<(), AlertError>
     where
-        T: Serialize + Unpin + Send + Sync,
+        T: Serialize + Send + Sync,
+        K: Serialize + Unpin + Send + Sync,
     {
+        lc_set_update.insert("aliases", mongify(&survey_matches));
+        lc_set_update.insert("updated_at", now);
+        lc_set_update.insert(
+            "version",
+            doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
+        );
+
+        let update_pipeline = vec![doc! { "$set": lc_set_update }];
+
         let update_result = alert_aux_collection
             .update_one(doc! { "_id": object_id }, update_pipeline)
             .await?;
