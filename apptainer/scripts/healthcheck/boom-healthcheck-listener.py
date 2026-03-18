@@ -42,5 +42,5 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(message.encode())
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", 5555), HealthHandler)
+    server = HTTPServer(("0.0.0.0", 5554), HealthHandler)  # type: ignore[arg-type]
     server.serve_forever()

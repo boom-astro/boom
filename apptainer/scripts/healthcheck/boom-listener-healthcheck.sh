@@ -13,7 +13,7 @@ RED="\e[31m"
 END="\e[0m"
 
 NB_RETRIES=${1:-}
-URL=${2:-http://localhost:5555/health}
+URL=${2:-http://localhost:5554/health}
 
 cpt=0
 until timeout 3 curl -fs "$URL" >/dev/null 2>&1; do
