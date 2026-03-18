@@ -55,8 +55,11 @@ jobs:
       - name: Download auxiliary ZTF alerts from Caltech Box
         run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
-        run: |
-          uv run tests/throughput/run.py --timeout 600
+        run: uv run tests/throughput/run.py
+          --timeout 600
+          --n-alert-workers=2
+          --n-enrichment-workers=4
+          --n-filter-workers=1
       - name: Upload logs (including wall time) as artifact
         if: always()
         uses: actions/upload-artifact@v4
