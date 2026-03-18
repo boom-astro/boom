@@ -876,7 +876,7 @@ impl ZtfAlertWorker {
             .await
         {
             Ok(_) => Ok(()),
-            Err(AlertError::ConcurrentAuxUpdate(_)) => {
+            Err(_) => {
                 // if we get a concurrent modification error or an error preparing the lightcurves update,
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 self.update_aux_fallback(
@@ -889,7 +889,6 @@ impl ZtfAlertWorker {
                 )
                 .await
             }
-            Err(e) => Err(e),
         }
     }
 }
