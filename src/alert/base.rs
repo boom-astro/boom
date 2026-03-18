@@ -866,7 +866,13 @@ mod timeseries_tests {
 
     #[test]
     fn sanitize_timeseries_sorts_and_deduplicates() {
-        let mut data = vec![point(3.0, 1), point(1.0, 2), point(2.0, 3), point(2.0, 4)];
+        let mut data = vec![
+            point(3.0, 1),
+            point(f64::NAN, 2),
+            point(1.0, 2),
+            point(2.0, 3),
+            point(2.0, 4),
+        ];
 
         TestPoint::sanitize_timeseries(&mut data);
 
