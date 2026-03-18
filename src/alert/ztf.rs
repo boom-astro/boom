@@ -1124,9 +1124,7 @@ mod tests {
         }
     }
 
-    async fn seed_ztf_alert(
-        worker: &mut ZtfAlertWorker,
-    ) -> (i64, String, ZtfRawAvroAlert, Vec<u8>) {
+    async fn seed_ztf_alert(worker: &mut ZtfAlertWorker) -> (i64, String, ZtfRawAvroAlert) {
         let (candid, object_id, _ra, _dec, bytes_content) =
             AlertRandomizer::new_randomized(Survey::Ztf).get().await;
 
@@ -1137,7 +1135,7 @@ mod tests {
 
         let status = worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
-        (candid, object_id, parsed_alert, bytes_content)
+        (candid, object_id, parsed_alert)
     }
 
     async fn load_aux(worker: &ZtfAlertWorker, object_id: &str) -> AlertAuxForUpdate {
@@ -1485,11 +1483,8 @@ mod tests {
     async fn test_process_alert_includes_current_candidate_in_prv_candidates() {
         let mut worker = ztf_alert_worker().await;
 
-        let (candid, object_id, parsed_alert, bytes_content) = seed_ztf_alert(&mut worker).await;
+        let (candid, object_id, parsed_alert) = seed_ztf_alert(&mut worker).await;
         let jd = parsed_alert.candidate.candidate.jd;
-
-        let status = worker.process_alert(&bytes_content).await.unwrap();
-        assert_eq!(status, ProcessAlertStatus::Added(candid));
 
         let aux = worker
             .alert_aux_collection
@@ -1558,7 +1553,7 @@ mod tests {
     async fn test_update_aux_branches_and_fallback() {
         let mut worker = ztf_alert_worker().await;
 
-        let (candid, object_id, mut parsed_alert, _) = seed_ztf_alert(&mut worker).await;
+        let (candid, object_id, mut parsed_alert) = seed_ztf_alert(&mut worker).await;
 
         let mut parsed_prv_candidates = parsed_alert.prv_candidates.take().unwrap_or_default();
         let mut parsed_fp_hists = parsed_alert.fp_hists.take().unwrap_or_default();
