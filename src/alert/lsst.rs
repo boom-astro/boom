@@ -8,7 +8,7 @@ use crate::{
     },
     conf::{self, AppConfig, BoomConfigError},
     utils::{
-        db::{mongify, update_timeseries_op},
+        db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
         o11y::logging::as_error,
@@ -953,8 +953,8 @@ impl LsstAlertWorker {
         now: f64,
     ) -> Result<(), AlertError> {
         let lc_set_update = doc! {
-            "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-            "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
+            "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+            "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
         };
         Self::db_only_aux_update(
             object_id,

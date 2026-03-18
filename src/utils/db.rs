@@ -36,6 +36,11 @@ pub fn mongify<T: Serialize>(value: &T) -> Document {
 }
 
 #[instrument(skip_all)]
+pub fn mongify_vec<T: Serialize>(value: &Vec<T>) -> Vec<Document> {
+    value.iter().map(|v| mongify(v)).collect()
+}
+
+#[instrument(skip_all)]
 pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     return mongodb::bson::Binary {
         subtype: mongodb::bson::spec::BinarySubtype::Generic,
