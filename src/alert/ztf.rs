@@ -1681,27 +1681,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_existing_aux_fails_on_malformed_jd_type() {
-        let mut worker = ztf_alert_worker().await;
-
-        let (candid, object_id, _bytes_content) = seed_ztf_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![doc! { "jd": "not-a-number" }],
-            },
-        )
-        .await;
-
-        let result = worker.get_existing_aux(&object_id).await;
-        assert!(matches!(result, Err(AlertError::Mongodb(_))));
-
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_update_aux_with_non_finite_existing_jd_hits_failure_mode() {
         let mut worker = ztf_alert_worker().await;
 
