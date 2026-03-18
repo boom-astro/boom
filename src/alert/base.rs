@@ -68,7 +68,7 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct LightcurveJdOnly {
     pub jd: f64,
 }

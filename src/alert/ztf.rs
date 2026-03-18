@@ -1074,7 +1074,10 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{drop_alert_from_collections, ztf_alert_worker, AlertRandomizer},
+        testing::{
+            assert_update_aux_branches_and_fallback, drop_alert_from_collections, ztf_alert_worker,
+            AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
+        },
     };
 
     struct ZtfPrvLightcurveGen {
@@ -1121,17 +1124,20 @@ mod tests {
         }
     }
 
-    fn assert_strictly_increasing_unique(points: &[LightcurveJdOnly]) {
-        assert!(points.iter().all(|point| point.jd.is_finite()));
-        assert!(points.windows(2).all(|window| window[0].jd < window[1].jd));
-    }
-
-    async fn seed_ztf_alert(worker: &mut ZtfAlertWorker) -> (i64, String, Vec<u8>) {
+    async fn seed_ztf_alert(
+        worker: &mut ZtfAlertWorker,
+    ) -> (i64, String, ZtfRawAvroAlert, Vec<u8>) {
         let (candid, object_id, _ra, _dec, bytes_content) =
             AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+
+        let parsed_alert: ZtfRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content)
+            .unwrap();
+
         let status = worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
-        (candid, object_id, bytes_content)
+        (candid, object_id, parsed_alert, bytes_content)
     }
 
     async fn load_aux(worker: &ZtfAlertWorker, object_id: &str) -> AlertAuxForUpdate {
@@ -1167,6 +1173,124 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    struct ZtfAuxBranchAdapter {
+        det_gen: ZtfPrvLightcurveGen,
+        nondet_gen: ZtfPrvLightcurveGen,
+        fp_gen: ZtfFpLightcurveGen,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for ZtfAuxBranchAdapter {
+        type Worker = ZtfAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<ZtfAliases>;
+        type Updates = (
+            Vec<ZtfPrvCandidate>,
+            Vec<ZtfPrvCandidate>,
+            Vec<ZtfForcedPhot>,
+        );
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![
+                    existing_aux.prv_candidates.clone(),
+                    existing_aux.prv_nondetections.clone(),
+                    existing_aux.fp_hists.clone(),
+                ],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(ZtfAliases::default())
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            (vec![], vec![], vec![])
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 3);
+            (
+                vec![self.det_gen.at_jd(jds[0])],
+                vec![self.nondet_gen.at_jd(jds[1])],
+                vec![self.fp_gen.at_jd(jds[2])],
+            )
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 1.0 },
+                        doc! { "jd": 1.0 },
+                    ],
+                    "prv_nondetections": vec![
+                        doc! { "jd": 4.0 },
+                        doc! { "jd": 3.0 },
+                        doc! { "jd": 3.0 },
+                    ],
+                    "fp_hists": vec![
+                        doc! { "jd": 6.0 },
+                        doc! { "jd": 5.0 },
+                        doc! { "jd": 5.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": f64::NAN },
+                        doc! { "jd": 1.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0], vec![3.0, 4.0], vec![5.0, 6.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            let (prv_candidates, prv_nondetections, fp_hists) = updates;
+            apply_update(
+                worker,
+                object_id,
+                prv_candidates,
+                prv_nondetections,
+                fp_hists,
+                survey_matches,
+                existing_aux,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -1361,15 +1485,8 @@ mod tests {
     async fn test_process_alert_includes_current_candidate_in_prv_candidates() {
         let mut worker = ztf_alert_worker().await;
 
-        let (candid, object_id, _ra, _dec, bytes_content) =
-            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
-
-        let parsed_alert: ZtfRawAvroAlert = worker
-            .schema_cache
-            .alert_from_avro_bytes(&bytes_content)
-            .unwrap();
-        let current_candid = parsed_alert.candid;
-        let current_jd = parsed_alert.candidate.candidate.jd;
+        let (candid, object_id, parsed_alert, bytes_content) = seed_ztf_alert(&mut worker).await;
+        let jd = parsed_alert.candidate.candidate.jd;
 
         let status = worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(status, ProcessAlertStatus::Added(candid));
@@ -1383,12 +1500,11 @@ mod tests {
 
         assert!(
             aux.prv_candidates.iter().any(|pc| {
-                pc.prv_candidate.candid == Some(current_candid)
-                    && (pc.prv_candidate.jd - current_jd).abs() < 1e-9
+                pc.prv_candidate.candid == Some(candid) && (pc.prv_candidate.jd - jd).abs() < 1e-9
             }),
             "current candidate (candid={}, jd={}) should be present in prv_candidates",
-            current_candid,
-            current_jd
+            candid,
+            jd
         );
 
         drop_alert_from_collections(candid, "ZTF").await.unwrap();
@@ -1442,280 +1558,39 @@ mod tests {
     async fn test_update_aux_branches_and_fallback() {
         let mut worker = ztf_alert_worker().await;
 
-        let (candid, object_id, bytes_content) = seed_ztf_alert(&mut worker).await;
+        let (candid, object_id, mut parsed_alert, _) = seed_ztf_alert(&mut worker).await;
 
-        let mut parsed_alert: ZtfRawAvroAlert = worker
-            .schema_cache
-            .alert_from_avro_bytes(&bytes_content)
-            .unwrap();
         let mut parsed_prv_candidates = parsed_alert.prv_candidates.take().unwrap_or_default();
         let mut parsed_fp_hists = parsed_alert.fp_hists.take().unwrap_or_default();
         ZtfPrvCandidate::sanitize_timeseries(&mut parsed_prv_candidates);
         ZtfForcedPhot::sanitize_timeseries(&mut parsed_fp_hists);
         let (detections, nondetections) = worker.split_prv_candidates(parsed_prv_candidates);
 
-        let detection_template = detections
-            .first()
-            .cloned()
-            .expect("test data should include at least one ZTF detection");
-        let nondetection_template = nondetections
-            .first()
-            .cloned()
-            .expect("test data should include at least one ZTF non-detection");
-        let fp_template = parsed_fp_hists
-            .first()
-            .cloned()
-            .expect("test data should include at least one ZTF forced photometry point");
+        let mut adapter = ZtfAuxBranchAdapter {
+            det_gen: ZtfPrvLightcurveGen::new(
+                detections
+                    .first()
+                    .cloned()
+                    .expect("test data should include at least one ZTF detection"),
+                candid + 1,
+            ),
+            nondet_gen: ZtfPrvLightcurveGen::new(
+                nondetections
+                    .first()
+                    .cloned()
+                    .expect("test data should include at least one ZTF non-detection"),
+                candid + 10_000,
+            ),
+            fp_gen: ZtfFpLightcurveGen::new(
+                parsed_fp_hists
+                    .first()
+                    .cloned()
+                    .expect("test data should include at least one ZTF forced photometry point"),
+                candid + 20_000,
+            ),
+        };
 
-        let mut det_gen = ZtfPrvLightcurveGen::new(detection_template, candid + 1);
-        let mut nondet_gen = ZtfPrvLightcurveGen::new(nondetection_template, candid + 10_000);
-        let mut fp_gen = ZtfFpLightcurveGen::new(fp_template, candid + 20_000);
-        let survey_matches = Some(ZtfAliases::default());
-
-        // Branch: empty push updates => update uses $set only.
-        let existing_before = load_aux(&worker, &object_id).await;
-        let prv_len_before = existing_before.prv_candidates.len();
-        let nondet_len_before = existing_before.prv_nondetections.len();
-        let fp_len_before = existing_before.fp_hists.len();
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            vec![],
-            &survey_matches,
-            &existing_before,
-        )
-        .await;
-
-        let after_empty = load_aux(&worker, &object_id).await;
-        assert_eq!(after_empty.prv_candidates.len(), prv_len_before);
-        assert_eq!(after_empty.prv_nondetections.len(), nondet_len_before);
-        assert_eq!(after_empty.fp_hists.len(), fp_len_before);
-        assert_eq!(
-            after_empty.version,
-            Some(existing_before.version.unwrap_or(0) + 1)
-        );
-
-        // Branch: append-only updates without sort for all three time-series fields.
-        let append_prv_jd = after_empty.prv_candidates.last().unwrap().jd + 100.0;
-        let append_nondet_jd = after_empty.prv_nondetections.last().unwrap().jd + 100.0;
-        let append_fp_jd = after_empty.fp_hists.last().unwrap().jd + 100.0;
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![det_gen.at_jd(append_prv_jd)],
-            vec![nondet_gen.at_jd(append_nondet_jd)],
-            vec![fp_gen.at_jd(append_fp_jd)],
-            &survey_matches,
-            &after_empty,
-        )
-        .await;
-
-        let after_append = load_aux(&worker, &object_id).await;
-        assert_eq!(after_append.prv_candidates.len(), prv_len_before + 1);
-        assert_eq!(after_append.prv_nondetections.len(), nondet_len_before + 1);
-        assert_eq!(after_append.fp_hists.len(), fp_len_before + 1);
-
-        // Branch: overlap requires full update with sort.
-        let sort_prv_jd = after_append.prv_candidates.first().unwrap().jd - 50.0;
-        let sort_nondet_jd = after_append.prv_nondetections.first().unwrap().jd - 50.0;
-        let sort_fp_jd = after_append.fp_hists.first().unwrap().jd - 50.0;
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![det_gen.at_jd(sort_prv_jd)],
-            vec![nondet_gen.at_jd(sort_nondet_jd)],
-            vec![fp_gen.at_jd(sort_fp_jd)],
-            &survey_matches,
-            &after_append,
-        )
-        .await;
-
-        let after_sort = load_aux(&worker, &object_id).await;
-        assert_eq!(after_sort.prv_candidates.len(), prv_len_before + 2);
-        assert_eq!(after_sort.prv_nondetections.len(), nondet_len_before + 2);
-        assert_eq!(after_sort.fp_hists.len(), fp_len_before + 2);
-        assert!(after_sort
-            .prv_candidates
-            .windows(2)
-            .all(|window| window[0].jd < window[1].jd));
-        assert!(after_sort
-            .prv_nondetections
-            .windows(2)
-            .all(|window| window[0].jd < window[1].jd));
-        assert!(after_sort
-            .fp_hists
-            .windows(2)
-            .all(|window| window[0].jd < window[1].jd));
-
-        // Branch: optimistic-lock miss triggers fallback update.
-        let stale_aux = load_aux(&worker, &object_id).await;
-        let fresh_aux = load_aux(&worker, &object_id).await;
-
-        let concurrent_prv_jd = after_sort.prv_candidates.last().unwrap().jd + 10.0;
-        let concurrent_nondet_jd = after_sort.prv_nondetections.last().unwrap().jd + 10.0;
-        let concurrent_fp_jd = after_sort.fp_hists.last().unwrap().jd + 10.0;
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![det_gen.at_jd(concurrent_prv_jd)],
-            vec![nondet_gen.at_jd(concurrent_nondet_jd)],
-            vec![fp_gen.at_jd(concurrent_fp_jd)],
-            &survey_matches,
-            &fresh_aux,
-        )
-        .await;
-
-        let fallback_prv_jd = concurrent_prv_jd + 1.0;
-        let fallback_nondet_jd = concurrent_nondet_jd + 1.0;
-        let fallback_fp_jd = concurrent_fp_jd + 1.0;
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![det_gen.at_jd(fallback_prv_jd)],
-            vec![nondet_gen.at_jd(fallback_nondet_jd)],
-            vec![fp_gen.at_jd(fallback_fp_jd)],
-            &survey_matches,
-            &stale_aux,
-        )
-        .await;
-
-        let after_fallback = load_aux(&worker, &object_id).await;
-        assert!(after_fallback
-            .prv_candidates
-            .iter()
-            .any(|point| (point.jd - fallback_prv_jd).abs() < 1e-9));
-        assert!(after_fallback
-            .prv_nondetections
-            .iter()
-            .any(|point| (point.jd - fallback_nondet_jd).abs() < 1e-9));
-        assert!(after_fallback
-            .fp_hists
-            .iter()
-            .any(|point| (point.jd - fallback_fp_jd).abs() < 1e-9));
-        assert_eq!(
-            after_fallback.version,
-            Some(stale_aux.version.unwrap_or(0) + 2)
-        );
-
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_aux_repairs_corrupted_existing_lightcurves() {
-        let mut worker = ztf_alert_worker().await;
-
-        let (candid, object_id, _bytes_content) = seed_ztf_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![
-                    doc! { "jd": 2.0 },
-                    doc! { "jd": 1.0 },
-                    doc! { "jd": 1.0 },
-                ],
-                "prv_nondetections": vec![
-                    doc! { "jd": 4.0 },
-                    doc! { "jd": 3.0 },
-                    doc! { "jd": 3.0 },
-                ],
-                "fp_hists": vec![
-                    doc! { "jd": 6.0 },
-                    doc! { "jd": 5.0 },
-                    doc! { "jd": 5.0 },
-                ],
-            },
-        )
-        .await;
-
-        let corrupted = load_aux(&worker, &object_id).await;
-        let version_before = corrupted.version.unwrap_or(0);
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            vec![],
-            &Some(ZtfAliases::default()),
-            &corrupted,
-        )
-        .await;
-
-        let repaired = load_aux(&worker, &object_id).await;
-        assert_strictly_increasing_unique(&repaired.prv_candidates);
-        assert_strictly_increasing_unique(&repaired.prv_nondetections);
-        assert_strictly_increasing_unique(&repaired.fp_hists);
-        assert_eq!(
-            repaired
-                .prv_candidates
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![1.0, 2.0]
-        );
-        assert_eq!(
-            repaired
-                .prv_nondetections
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![3.0, 4.0]
-        );
-        assert_eq!(
-            repaired
-                .fp_hists
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![5.0, 6.0]
-        );
-        assert_eq!(repaired.version, Some(version_before + 1));
-
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_aux_with_non_finite_existing_jd_hits_failure_mode() {
-        let mut worker = ztf_alert_worker().await;
-
-        let (candid, object_id, _bytes_content) = seed_ztf_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![doc! { "jd": f64::NAN }],
-            },
-        )
-        .await;
-
-        let corrupted = load_aux(&worker, &object_id).await;
-        let version_before = corrupted.version.unwrap_or(0);
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            vec![],
-            &Some(ZtfAliases::default()),
-            &corrupted,
-        )
-        .await;
-
-        let after = load_aux(&worker, &object_id).await;
-        assert_eq!(after.version, Some(version_before + 1));
-        assert!(LightcurveJdOnly::validate_strictly_increasing(
-            &after.prv_candidates,
-            "prv_candidates"
-        )
-        .is_err());
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 
         drop_alert_from_collections(candid, "ZTF").await.unwrap();
     }

@@ -515,7 +515,11 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{decam_alert_worker, drop_alert_from_collections, AlertRandomizer},
+        testing::{
+            assert_update_aux_branches_and_fallback, decam_alert_worker,
+            drop_alert_from_collections, AlertRandomizer, AuxBranchSnapshot,
+            AuxUpdateBranchTestAdapter,
+        },
     };
 
     struct DecamPrvLightcurveGen {
@@ -550,11 +554,6 @@ mod tests {
             fp.fp_hist.mjd = jd - 2400000.5;
             fp
         }
-    }
-
-    fn assert_strictly_increasing_unique(points: &[LightcurveJdOnly]) {
-        assert!(points.iter().all(|point| point.jd.is_finite()));
-        assert!(points.windows(2).all(|window| window[0].jd < window[1].jd));
     }
 
     async fn seed_decam_alert(worker: &mut DecamAlertWorker) -> (i64, String, Vec<u8>) {
@@ -596,6 +595,111 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    struct DecamAuxBranchAdapter {
+        prv_gen: DecamPrvLightcurveGen,
+        fp_gen: DecamFpLightcurveGen,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for DecamAuxBranchAdapter {
+        type Worker = DecamAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<DecamAliases>;
+        type Updates = (Vec<DecamCandidate>, Vec<DecamForcedPhot>);
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![
+                    existing_aux.prv_candidates.clone(),
+                    existing_aux.fp_hists.clone(),
+                ],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(empty_aliases())
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            (vec![], vec![])
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 2);
+            (
+                vec![self.prv_gen.at_jd(jds[0])],
+                vec![self.fp_gen.at_jd(jds[1])],
+            )
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 1.0 },
+                        doc! { "jd": 1.0 },
+                    ],
+                    "fp_hists": vec![
+                        doc! { "jd": 3.0 },
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 2.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0], vec![2.0, 3.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": f64::NAN },
+                        doc! { "jd": 1.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0], vec![2.0, 3.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            let (prv_candidates, fp_hists) = updates;
+            apply_update(
+                worker,
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                existing_aux,
+            )
+            .await;
+        }
     }
 
     fn empty_aliases() -> DecamAliases {
@@ -650,226 +754,17 @@ mod tests {
             .schema_cache
             .alert_from_avro_bytes(&bytes_content)
             .unwrap();
-        let candidate_template = parsed_alert.candidate;
-        let fp_template = parsed_alert
-            .fp_hists
-            .first()
-            .cloned()
-            .expect("test data should include at least one DECAM forced photometry point");
+        let mut adapter =
+            DecamAuxBranchAdapter {
+                prv_gen: DecamPrvLightcurveGen::new(parsed_alert.candidate),
+                fp_gen: DecamFpLightcurveGen::new(
+                    parsed_alert.fp_hists.first().cloned().expect(
+                        "test data should include at least one DECAM forced photometry point",
+                    ),
+                ),
+            };
 
-        let prv_gen = DecamPrvLightcurveGen::new(candidate_template);
-        let fp_gen = DecamFpLightcurveGen::new(fp_template);
-        let survey_matches = Some(empty_aliases());
-
-        // Branch: empty push updates => update uses $set only.
-        let existing_before = load_aux(&worker, &object_id).await;
-        let prv_len_before = existing_before.prv_candidates.len();
-        let fp_len_before = existing_before.fp_hists.len();
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            &survey_matches,
-            &existing_before,
-        )
-        .await;
-
-        let after_empty = load_aux(&worker, &object_id).await;
-        assert_eq!(after_empty.prv_candidates.len(), prv_len_before);
-        assert_eq!(after_empty.fp_hists.len(), fp_len_before);
-        assert_eq!(
-            after_empty.version,
-            Some(existing_before.version.unwrap_or(0) + 1)
-        );
-
-        // Branch: append-only updates without sort.
-        let append_prv_jd = after_empty.prv_candidates.last().unwrap().jd + 100.0;
-        let append_fp_jd = after_empty.fp_hists.last().unwrap().jd + 100.0;
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![prv_gen.at_jd(append_prv_jd)],
-            vec![fp_gen.at_jd(append_fp_jd)],
-            &survey_matches,
-            &after_empty,
-        )
-        .await;
-
-        let after_append = load_aux(&worker, &object_id).await;
-        assert_eq!(after_append.prv_candidates.len(), prv_len_before + 1);
-        assert_eq!(after_append.fp_hists.len(), fp_len_before + 1);
-        assert!((after_append.prv_candidates.last().unwrap().jd - append_prv_jd).abs() < 1e-9);
-        assert!((after_append.fp_hists.last().unwrap().jd - append_fp_jd).abs() < 1e-9);
-
-        // Branch: overlap requires full update with sort.
-        let sort_prv_jd = after_append.prv_candidates.first().unwrap().jd - 50.0;
-        let sort_fp_jd = after_append.fp_hists.first().unwrap().jd - 50.0;
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![prv_gen.at_jd(sort_prv_jd)],
-            vec![fp_gen.at_jd(sort_fp_jd)],
-            &survey_matches,
-            &after_append,
-        )
-        .await;
-
-        let after_sort = load_aux(&worker, &object_id).await;
-        assert_eq!(after_sort.prv_candidates.len(), prv_len_before + 2);
-        assert_eq!(after_sort.fp_hists.len(), fp_len_before + 2);
-        assert!(after_sort
-            .prv_candidates
-            .windows(2)
-            .all(|window| window[0].jd < window[1].jd));
-        assert!(after_sort
-            .fp_hists
-            .windows(2)
-            .all(|window| window[0].jd < window[1].jd));
-
-        // Branch: optimistic-lock miss triggers fallback update.
-        let stale_aux = load_aux(&worker, &object_id).await;
-        let fresh_aux = load_aux(&worker, &object_id).await;
-
-        let concurrent_prv_jd = after_sort.prv_candidates.last().unwrap().jd + 10.0;
-        let concurrent_fp_jd = after_sort.fp_hists.last().unwrap().jd + 10.0;
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![prv_gen.at_jd(concurrent_prv_jd)],
-            vec![fp_gen.at_jd(concurrent_fp_jd)],
-            &survey_matches,
-            &fresh_aux,
-        )
-        .await;
-
-        let fallback_prv_jd = concurrent_prv_jd + 1.0;
-        let fallback_fp_jd = concurrent_fp_jd + 1.0;
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![prv_gen.at_jd(fallback_prv_jd)],
-            vec![fp_gen.at_jd(fallback_fp_jd)],
-            &survey_matches,
-            &stale_aux,
-        )
-        .await;
-
-        let after_fallback = load_aux(&worker, &object_id).await;
-        assert!(after_fallback
-            .prv_candidates
-            .iter()
-            .any(|point| (point.jd - fallback_prv_jd).abs() < 1e-9));
-        assert!(after_fallback
-            .fp_hists
-            .iter()
-            .any(|point| (point.jd - fallback_fp_jd).abs() < 1e-9));
-        assert_eq!(
-            after_fallback.version,
-            Some(stale_aux.version.unwrap_or(0) + 2)
-        );
-
-        drop_alert_from_collections(candid, "DECAM").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_aux_repairs_corrupted_existing_lightcurves() {
-        let mut worker = decam_alert_worker().await;
-
-        let (candid, object_id, _bytes_content) = seed_decam_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![
-                    doc! { "jd": 2.0 },
-                    doc! { "jd": 1.0 },
-                    doc! { "jd": 1.0 },
-                ],
-                "fp_hists": vec![
-                    doc! { "jd": 3.0 },
-                    doc! { "jd": 2.0 },
-                    doc! { "jd": 2.0 },
-                ],
-            },
-        )
-        .await;
-
-        let corrupted = load_aux(&worker, &object_id).await;
-        let version_before = corrupted.version.unwrap_or(0);
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            &Some(empty_aliases()),
-            &corrupted,
-        )
-        .await;
-
-        let repaired = load_aux(&worker, &object_id).await;
-        assert_strictly_increasing_unique(&repaired.prv_candidates);
-        assert_strictly_increasing_unique(&repaired.fp_hists);
-        assert_eq!(
-            repaired
-                .prv_candidates
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![1.0, 2.0]
-        );
-        assert_eq!(
-            repaired
-                .fp_hists
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![2.0, 3.0]
-        );
-        assert_eq!(repaired.version, Some(version_before + 1));
-
-        drop_alert_from_collections(candid, "DECAM").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_aux_with_non_finite_existing_jd_hits_failure_mode() {
-        let mut worker = decam_alert_worker().await;
-
-        let (candid, object_id, _bytes_content) = seed_decam_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![doc! { "jd": f64::NAN }],
-            },
-        )
-        .await;
-
-        let corrupted = load_aux(&worker, &object_id).await;
-        let version_before = corrupted.version.unwrap_or(0);
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            &Some(empty_aliases()),
-            &corrupted,
-        )
-        .await;
-
-        let after = load_aux(&worker, &object_id).await;
-        assert_eq!(after.version, Some(version_before + 1));
-        assert!(LightcurveJdOnly::validate_strictly_increasing(
-            &after.prv_candidates,
-            "prv_candidates"
-        )
-        .is_err());
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 
         drop_alert_from_collections(candid, "DECAM").await.unwrap();
     }

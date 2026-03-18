@@ -1242,7 +1242,10 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{drop_alert_from_collections, lsst_alert_worker, AlertRandomizer},
+        testing::{
+            assert_update_aux_branches_and_fallback, drop_alert_from_collections,
+            lsst_alert_worker, AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
+        },
     };
 
     struct PrvLightcurveGen {
@@ -1265,15 +1268,6 @@ mod tests {
             self.next_candid += 1;
             candidate
         }
-
-        fn curve(&mut self, jds: &[f64]) -> Vec<LsstPrvCandidate> {
-            jds.iter().map(|jd| self.at_jd(*jd)).collect()
-        }
-    }
-
-    fn assert_strictly_increasing_unique(points: &[LightcurveJdOnly]) {
-        assert!(points.iter().all(|point| point.jd.is_finite()));
-        assert!(points.windows(2).all(|window| window[0].jd < window[1].jd));
     }
 
     async fn seed_lsst_alert(worker: &mut LsstAlertWorker) -> (i64, String, Vec<u8>) {
@@ -1315,6 +1309,104 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    struct LsstAuxBranchAdapter {
+        lc_gen: PrvLightcurveGen,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for LsstAuxBranchAdapter {
+        type Worker = LsstAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<LsstAliases>;
+        type Updates = (Vec<LsstPrvCandidate>, Vec<LsstForcedPhot>);
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![existing_aux.prv_candidates.clone()],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(LsstAliases::default())
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            (vec![], vec![])
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 1);
+            (vec![self.lc_gen.at_jd(jds[0])], vec![])
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 1.0 },
+                        doc! { "jd": 1.0 },
+                    ],
+                    "fp_hists": vec![
+                        doc! { "jd": 3.0 },
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 2.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0], vec![2.0, 3.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": f64::NAN },
+                        doc! { "jd": 1.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0], vec![2.0, 3.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            let (prv_candidates, fp_hists) = updates;
+            apply_update(
+                worker,
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                existing_aux,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -1385,203 +1477,11 @@ mod tests {
             .await
             .unwrap();
         let base_prv = LsstPrvCandidate::try_from(parsed_alert.dia_source.clone()).unwrap();
-        let mut lc_gen = PrvLightcurveGen::new(base_prv, candid + 1);
-        let survey_matches = Some(LsstAliases::default());
+        let mut adapter = LsstAuxBranchAdapter {
+            lc_gen: PrvLightcurveGen::new(base_prv, candid + 1),
+        };
 
-        // Branch: empty push updates => update uses $set only.
-        let existing_before = load_aux(&worker, &object_id).await;
-        let len_before = existing_before.prv_candidates.len();
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            &survey_matches,
-            &existing_before,
-        )
-        .await;
-
-        let after_empty = load_aux(&worker, &object_id).await;
-        assert_eq!(after_empty.prv_candidates.len(), len_before);
-        assert_eq!(
-            after_empty.version,
-            Some(existing_before.version.unwrap_or(0) + 1)
-        );
-
-        // Branch: append-only update without sort.
-        let append_jd = after_empty.prv_candidates.last().unwrap().jd + 100.0;
-        let append_candidate = lc_gen.at_jd(append_jd);
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![append_candidate],
-            vec![],
-            &survey_matches,
-            &after_empty,
-        )
-        .await;
-
-        let after_append = load_aux(&worker, &object_id).await;
-        assert_eq!(after_append.prv_candidates.len(), len_before + 1);
-        assert!((after_append.prv_candidates.last().unwrap().jd - append_jd).abs() < 1e-9);
-
-        // Branch: full update path with sort required.
-        let sort_jd = after_append.prv_candidates.first().unwrap().jd - 50.0;
-        let sort_candidate = lc_gen.at_jd(sort_jd);
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![sort_candidate],
-            vec![],
-            &survey_matches,
-            &after_append,
-        )
-        .await;
-
-        let after_sort = load_aux(&worker, &object_id).await;
-        assert_eq!(after_sort.prv_candidates.len(), len_before + 2);
-        assert!((after_sort.prv_candidates.first().unwrap().jd - sort_jd).abs() < 1e-9);
-        assert!(after_sort
-            .prv_candidates
-            .windows(2)
-            .all(|window| window[0].jd < window[1].jd));
-
-        // Branch: optimistic-lock miss triggers fallback update.
-        let stale_aux = load_aux(&worker, &object_id).await;
-        let fresh_aux = load_aux(&worker, &object_id).await;
-
-        let concurrent_jd = after_sort.prv_candidates.last().unwrap().jd + 10.0;
-        let concurrent_candidate = lc_gen.at_jd(concurrent_jd);
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![concurrent_candidate],
-            vec![],
-            &survey_matches,
-            &fresh_aux,
-        )
-        .await;
-
-        let fallback_jd = concurrent_jd + 1.0;
-        let fallback_candidate = lc_gen.curve(&[fallback_jd]).remove(0);
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![fallback_candidate],
-            vec![],
-            &survey_matches,
-            &stale_aux,
-        )
-        .await;
-
-        let after_fallback = load_aux(&worker, &object_id).await;
-        assert!(after_fallback
-            .prv_candidates
-            .iter()
-            .any(|point| (point.jd - fallback_jd).abs() < 1e-9));
-        assert_eq!(
-            after_fallback.version,
-            Some(stale_aux.version.unwrap_or(0) + 2)
-        );
-
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_aux_repairs_corrupted_existing_lightcurves() {
-        let mut worker = lsst_alert_worker().await;
-        let (candid, object_id, _bytes_content) = seed_lsst_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![
-                    doc! { "jd": 2.0 },
-                    doc! { "jd": 1.0 },
-                    doc! { "jd": 1.0 },
-                ],
-                "fp_hists": vec![
-                    doc! { "jd": 3.0 },
-                    doc! { "jd": 2.0 },
-                    doc! { "jd": 2.0 },
-                ],
-            },
-        )
-        .await;
-
-        let corrupted = load_aux(&worker, &object_id).await;
-        let version_before = corrupted.version.unwrap_or(0);
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            &Some(LsstAliases::default()),
-            &corrupted,
-        )
-        .await;
-
-        let repaired = load_aux(&worker, &object_id).await;
-        assert_strictly_increasing_unique(&repaired.prv_candidates);
-        assert_strictly_increasing_unique(&repaired.fp_hists);
-        assert_eq!(
-            repaired
-                .prv_candidates
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![1.0, 2.0]
-        );
-        assert_eq!(
-            repaired
-                .fp_hists
-                .iter()
-                .map(|point| point.jd)
-                .collect::<Vec<_>>(),
-            vec![2.0, 3.0]
-        );
-        assert_eq!(repaired.version, Some(version_before + 1));
-
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_update_aux_with_non_finite_existing_jd_hits_failure_mode() {
-        let mut worker = lsst_alert_worker().await;
-
-        let (candid, object_id, _bytes_content) = seed_lsst_alert(&mut worker).await;
-
-        set_aux_fields(
-            &worker,
-            &object_id,
-            doc! {
-                "prv_candidates": vec![doc! { "jd": f64::NAN }],
-            },
-        )
-        .await;
-
-        let corrupted = load_aux(&worker, &object_id).await;
-        let version_before = corrupted.version.unwrap_or(0);
-
-        apply_update(
-            &mut worker,
-            &object_id,
-            vec![],
-            vec![],
-            &Some(LsstAliases::default()),
-            &corrupted,
-        )
-        .await;
-
-        let after = load_aux(&worker, &object_id).await;
-        assert_eq!(after.version, Some(version_before + 1));
-        assert!(LightcurveJdOnly::validate_strictly_increasing(
-            &after.prv_candidates,
-            "prv_candidates"
-        )
-        .is_err());
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 
         drop_alert_from_collections(candid, "LSST").await.unwrap();
     }
