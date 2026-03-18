@@ -242,6 +242,8 @@ pub enum AlertError {
     InvalidTimeseriesInput(String),
     #[error("failed to run fallback aux update (no match with existing aux for {0})")]
     AlertAuxFallbackUpdateFailed(String),
+    #[error("concurrent aux update detected for {0}")]
+    ConcurrentAuxUpdate(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -1174,6 +1176,107 @@ pub trait AlertWorker {
         };
         Ok(matches)
     }
+
+    async fn db_only_aux_update<T>(
+        object_id: &str,
+        update_pipeline: Vec<Document>,
+        alert_aux_collection: &mongodb::Collection<T>,
+    ) -> Result<(), AlertError>
+    where
+        T: Serialize + Unpin + Send + Sync,
+    {
+        let update_result = alert_aux_collection
+            .update_one(doc! { "_id": object_id }, update_pipeline)
+            .await?;
+        if update_result.matched_count == 0 {
+            return Err(AlertError::AlertAuxFallbackUpdateFailed(
+                object_id.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_to_push_aux_update(
+        push_updates: &mut Document,
+        field_name: &str,
+        new_docs: Vec<Document>,
+        need_sort: bool,
+    ) {
+        if !new_docs.is_empty() {
+            if need_sort {
+                push_updates.insert(field_name, doc! { "$each": new_docs, "$sort": { "jd": 1 } });
+            } else {
+                push_updates.insert(field_name, doc! { "$each": new_docs });
+            }
+        }
+    }
+
+    fn make_find_doc_aux_update(object_id: &str, current_version: Option<i32>) -> Document {
+        match current_version {
+            Some(version) => doc! { "_id": object_id, "version": version },
+            None => doc! {
+                "_id": object_id,
+                "$or": [
+                    doc! { "version": { "$exists": false } },
+                    doc! { "version": mongodb::bson::Bson::Null },
+                ]
+            },
+        }
+    }
+
+    fn make_filter_doc_aux_update<T>(
+        push_updates: Document,
+        survey_matches: &Option<T>,
+        current_version: Option<i32>,
+        now: f64,
+    ) -> Document
+    where
+        T: Serialize,
+    {
+        let mut update_doc = doc! {
+            "$set": {
+                "aliases": mongify(survey_matches),
+                "updated_at": now,
+                "version": current_version.unwrap_or(0) + 1,
+            }
+        };
+
+        if !push_updates.is_empty() {
+            update_doc.insert("$push", push_updates);
+        };
+        update_doc
+    }
+
+    async fn finalize_aux_update<T, K>(
+        object_id: &str,
+        push_updates: Document,
+        survey_matches: &Option<T>,
+        current_version: Option<i32>,
+        now: f64,
+        alert_aux_collection: &mongodb::Collection<K>,
+    ) -> Result<(), AlertError>
+    where
+        T: Serialize + Sync,
+        K: Serialize + Unpin + Send + Sync,
+    {
+        let update_doc =
+            Self::make_filter_doc_aux_update(push_updates, survey_matches, current_version, now);
+
+        let find_doc = Self::make_find_doc_aux_update(object_id, current_version);
+
+        let update_result = alert_aux_collection
+            .update_one(find_doc, update_doc)
+            .await?;
+        if update_result.matched_count == 0 {
+            warn!(
+                "Concurrent modification detected for object_id {}. Using DB-only update.",
+                object_id
+            );
+            return Err(AlertError::ConcurrentAuxUpdate(object_id.to_string()));
+        }
+        Ok(())
+    }
+
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 

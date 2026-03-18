@@ -278,24 +278,14 @@ impl DecamAlertWorker {
                 "version": doc! { "$add": [ { "$ifNull": [ "$version", 0 ] }, 1 ] },
             }
         }];
-        let update_result = self
-            .alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
-            .await?;
-
-        if update_result.matched_count == 0 {
-            return Err(AlertError::AlertAuxFallbackUpdateFailed(
-                object_id.to_string(),
-            ));
-        }
-        Ok(())
+        Self::db_only_aux_update(object_id, update_pipeline, &self.alert_aux_collection).await
     }
 
     #[instrument(
         skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
         err
     )]
-    async fn update_aux(
+    async fn update_aux_inner(
         &mut self,
         object_id: &str,
         prv_candidates: &Vec<DecamCandidate>,
@@ -306,95 +296,72 @@ impl DecamAlertWorker {
     ) -> Result<(), AlertError> {
         let current_version = existing_alert_aux.version;
 
-        let Ok((new_prv_candidates_docs, need_sort_prv_candidates)) =
-            DecamCandidate::prepare_timeseries_update(
-                prv_candidates,
-                &existing_alert_aux.prv_candidates,
-                "prv_candidates",
-            )
-        else {
-            return self
-                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
-                .await;
-        };
+        let prepared_prv_candidates = DecamCandidate::prepare_timeseries_update(
+            prv_candidates,
+            &existing_alert_aux.prv_candidates,
+            "prv_candidates",
+        )?;
 
-        let Ok((new_fp_hists_docs, need_sort_fp_hists)) =
-            DecamForcedPhot::prepare_timeseries_update(
-                fp_hists,
-                &existing_alert_aux.fp_hists,
-                "fp_hists",
-            )
-        else {
-            return self
-                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
-                .await;
-        };
+        let prepared_fp_hists = DecamForcedPhot::prepare_timeseries_update(
+            fp_hists,
+            &existing_alert_aux.fp_hists,
+            "fp_hists",
+        )?;
 
         let mut push_updates = Document::new();
-        if !new_prv_candidates_docs.is_empty() {
-            if need_sort_prv_candidates {
-                push_updates.insert(
-                    "prv_candidates",
-                    doc! { "$each": new_prv_candidates_docs, "$sort": { "jd": 1 } },
-                );
-            } else {
-                push_updates.insert("prv_candidates", doc! { "$each": new_prv_candidates_docs });
-            }
-        }
-        if !new_fp_hists_docs.is_empty() {
-            if need_sort_fp_hists {
-                push_updates.insert(
-                    "fp_hists",
-                    doc! { "$each": new_fp_hists_docs, "$sort": { "jd": 1 } },
-                );
-            } else {
-                push_updates.insert("fp_hists", doc! { "$each": new_fp_hists_docs });
-            }
-        }
+        Self::add_to_push_aux_update(
+            &mut push_updates,
+            "prv_candidates",
+            prepared_prv_candidates.0,
+            prepared_prv_candidates.1,
+        );
+        Self::add_to_push_aux_update(
+            &mut push_updates,
+            "fp_hists",
+            prepared_fp_hists.0,
+            prepared_fp_hists.1,
+        );
 
-        let update_doc = if push_updates.is_empty() {
-            doc! {
-                "$set": {
-                    "aliases": mongify(survey_matches),
-                    "updated_at": now,
-                    "version": current_version.unwrap_or(0) + 1,
-                }
+        Self::finalize_aux_update(
+            object_id,
+            push_updates,
+            survey_matches,
+            current_version,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
+    }
+
+    async fn update_aux(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<DecamCandidate>,
+        fp_hists: &Vec<DecamForcedPhot>,
+        survey_matches: &Option<DecamAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        match self
+            .update_aux_inner(
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                now,
+                existing_alert_aux,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(AlertError::ConcurrentAuxUpdate(_)) => {
+                // if we get a concurrent modification error or an error preparing the lightcurves update,
+                // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                    .await
             }
-        } else {
-            doc! {
-                "$push": push_updates,
-                "$set": {
-                    "aliases": mongify(survey_matches),
-                    "updated_at": now,
-                    "version": current_version.unwrap_or(0) + 1,
-                }
-            }
-        };
-        let find_doc = if let Some(version) = current_version {
-            doc! { "_id": object_id, "version": version }
-        } else {
-            doc! {
-                 "_id": object_id,
-                 "$or": [
-                     doc! { "version": { "$exists": false } },
-                     doc! { "version": mongodb::bson::Bson::Null },
-                 ]
-            }
-        };
-        let update_result = self
-            .alert_aux_collection
-            .update_one(find_doc, update_doc)
-            .await?;
-        if update_result.matched_count == 0 {
-            warn!(
-                "Concurrent modification detected for object_id {}. Using DB-only update.",
-                object_id
-            );
-            return self
-                .update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
-                .await;
+            Err(e) => Err(e),
         }
-        Ok(())
     }
 }
 
