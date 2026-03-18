@@ -738,6 +738,7 @@ pub trait TimeSeries {
     {
         timeseries.sort_by(|a, b| a.time().total_cmp(&b.time()));
         timeseries.dedup_by(|a, b| a.time() == b.time());
+        timeseries.retain(|point| point.time().is_finite());
     }
 
     fn prepare_timeseries_update(
