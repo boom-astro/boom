@@ -945,7 +945,7 @@ impl LsstAlertWorker {
 
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
     async fn update_aux_fallback(
-        self: &mut Self,
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<LsstPrvCandidate>,
         fp_hists: &Vec<LsstForcedPhot>,
@@ -980,7 +980,7 @@ impl LsstAlertWorker {
         err
     )]
     async fn update_aux(
-        self: &mut Self,
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<LsstPrvCandidate>,
         fp_hists: &Vec<LsstForcedPhot>,
@@ -1160,10 +1160,7 @@ impl AlertWorker for LsstAlertWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let mut avro_alert: LsstRawAvroAlert = self
             .schema_registry

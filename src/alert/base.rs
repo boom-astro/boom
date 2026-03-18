@@ -535,7 +535,7 @@ impl SchemaRegistry {
 
     #[instrument(skip_all, err)]
     pub async fn alert_from_avro_bytes<T: for<'a> Deserialize<'a>>(
-        self: &mut Self,
+        &mut self,
         avro_bytes: &[u8],
     ) -> Result<T, AlertError> {
         let magic = avro_bytes[0];
@@ -1174,10 +1174,7 @@ pub trait AlertWorker {
         };
         Ok(matches)
     }
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError>;
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 
 #[instrument(skip_all)]

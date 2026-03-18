@@ -260,7 +260,7 @@ impl DecamAlertWorker {
 
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
     async fn update_aux_fallback(
-        self: &mut Self,
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<DecamCandidate>,
         fp_hists: &Vec<DecamForcedPhot>,
@@ -296,7 +296,7 @@ impl DecamAlertWorker {
         err
     )]
     async fn update_aux(
-        self: &mut Self,
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<DecamCandidate>,
         fp_hists: &Vec<DecamForcedPhot>,
@@ -452,10 +452,7 @@ impl AlertWorker for DecamAlertWorker {
         format!("{}_alerts_enrichment_queue", self.stream_name)
     }
 
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let avro_alert: DecamRawAvroAlert = self
             .schema_cache

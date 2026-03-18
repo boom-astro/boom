@@ -756,7 +756,7 @@ impl ZtfAlertWorker {
         err
     )]
     async fn update_aux_fallback(
-        self: &mut Self,
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<ZtfPrvCandidate>,
         prv_nondetections: &Vec<ZtfPrvCandidate>,
@@ -800,7 +800,7 @@ impl ZtfAlertWorker {
         err
     )]
     async fn update_aux(
-        self: &mut Self,
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<ZtfPrvCandidate>,
         prv_nondetections: &Vec<ZtfPrvCandidate>,
@@ -1024,10 +1024,7 @@ impl AlertWorker for ZtfAlertWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let mut avro_alert: ZtfRawAvroAlert = self
             .schema_cache
