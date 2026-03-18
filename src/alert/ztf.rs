@@ -1004,7 +1004,19 @@ impl AlertWorker for ZtfAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
 
-        if existing_alert_aux.is_none() {
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                &object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
@@ -1037,18 +1049,6 @@ impl AlertWorker for ZtfAlertWorker {
             } else {
                 result.inspect_err(as_error!())?;
             }
-        } else {
-            self.update_aux(
-                &object_id,
-                &prv_candidates,
-                &prv_nondetections,
-                &fp_hists,
-                &survey_matches,
-                now,
-                &existing_alert_aux.unwrap(),
-            )
-            .await
-            .inspect_err(as_error!())?;
         }
 
         let alert = ZtfAlert {
