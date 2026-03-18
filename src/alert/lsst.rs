@@ -994,18 +994,8 @@ impl LsstAlertWorker {
         )?;
 
         let mut push_updates = Document::new();
-        Self::add_to_push_aux_update(
-            &mut push_updates,
-            "prv_candidates",
-            prepared_prv_candidates.0,
-            prepared_prv_candidates.1,
-        );
-        Self::add_to_push_aux_update(
-            &mut push_updates,
-            "fp_hists",
-            prepared_fp_hists.0,
-            prepared_fp_hists.1,
-        );
+        Self::add_to_push_aux_update(&mut push_updates, "prv_candidates", prepared_prv_candidates);
+        Self::add_to_push_aux_update(&mut push_updates, "fp_hists", prepared_fp_hists);
 
         Self::finalize_aux_update(
             object_id,

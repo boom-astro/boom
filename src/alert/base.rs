@@ -1199,9 +1199,9 @@ pub trait AlertWorker {
     fn add_to_push_aux_update(
         push_updates: &mut Document,
         field_name: &str,
-        new_docs: Vec<Document>,
-        need_sort: bool,
+        prepared_lc: (Vec<Document>, bool),
     ) {
+        let (new_docs, need_sort) = prepared_lc;
         if !new_docs.is_empty() {
             if need_sort {
                 push_updates.insert(field_name, doc! { "$each": new_docs, "$sort": { "jd": 1 } });
