@@ -10,7 +10,7 @@ use crate::{
 
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::{serde_avro_bytes, DeflateSettings, Writer};
+use apache_avro::{serde_avro_bytes, Writer};
 use apache_avro::{AvroSchema, Schema};
 use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
@@ -19,7 +19,7 @@ use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
 };
-use rdkafka::producer::FutureProducer;
+use rdkafka::producer::{FutureProducer, Producer};
 use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
@@ -196,11 +196,7 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::with_codec(
-        schema,
-        Vec::new(),
-        apache_avro::Codec::Deflate(DeflateSettings::default()),
-    );
+    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Null);
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
@@ -226,19 +222,31 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
 pub async fn create_producer(
     kafka_producer_config: &conf::KafkaProducerConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
+    let message_timeout_ms = kafka_producer_config.message_timeout_ms.to_string();
+    let batch_size = kafka_producer_config.batch_size.to_string();
+    let linger_ms = kafka_producer_config.linger_ms.to_string();
+    let max_in_flight_requests_per_connection = kafka_producer_config
+        .max_in_flight_requests_per_connection
+        .to_string();
+    let retries = kafka_producer_config.retries.to_string();
+
     let producer: FutureProducer = ClientConfig::new()
         // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
         // .set("debug", "broker,topic,msg")
         .set("bootstrap.servers", &kafka_producer_config.server)
-        .set("message.timeout.ms", "5000")
+        .set("message.timeout.ms", &message_timeout_ms)
         // it's best to increase batch.size if the cluster
         // is running on another machine. Locally, lower means less
         // latency, since we are not limited by network speed anyways
-        .set("batch.size", "16384")
-        .set("linger.ms", "5")
-        .set("acks", "1")
-        .set("max.in.flight.requests.per.connection", "5")
-        .set("retries", "3")
+        .set("batch.size", &batch_size)
+        .set("linger.ms", &linger_ms)
+        .set("acks", &kafka_producer_config.acks)
+        .set(
+            "max.in.flight.requests.per.connection",
+            &max_in_flight_requests_per_connection,
+        )
+        .set("retries", &retries)
+        .set("compression.type", &kafka_producer_config.compression_type)
         .create()?;
 
     Ok(producer)
@@ -274,6 +282,69 @@ pub async fn send_alert_to_kafka(
         })?;
 
     Ok(())
+}
+
+/// Sends a batch of alerts to Kafka with optimized batching.
+/// Enqueues all alerts without awaiting per-message, then does a single flush.
+///
+/// # Arguments
+/// * `alerts` - A slice of Alert objects to send.
+/// * `schema` - A reference to the Avro Schema used for encoding.
+/// * `producer` - A reference to the Kafka FutureProducer used to send alerts.
+/// * `topic` - The Kafka topic to which alerts will be sent.
+/// * `flush_timeout_ms` - Timeout in milliseconds for the flush operation.
+///
+/// # Returns
+/// * `Result<usize, FilterWorkerError>` - The number of alerts sent, or an error.
+#[instrument(skip(alerts, schema, producer), err)]
+pub async fn send_alerts_batch(
+    alerts: &[Alert],
+    schema: &Schema,
+    producer: &FutureProducer,
+    topic: &str,
+    flush_timeout_ms: u32,
+) -> Result<usize, FilterWorkerError> {
+    let start_enqueue = std::time::Instant::now();
+    let mut reusable_buffer = Vec::with_capacity(8192);
+
+    // Enqueue all alerts without awaiting to maximize producer batching.
+    for alert in alerts {
+        reusable_buffer.clear();
+        let mut writer = Writer::with_codec(
+            schema,
+            std::mem::take(&mut reusable_buffer),
+            apache_avro::Codec::Null,
+        );
+        writer.append_ser(alert)?;
+        reusable_buffer = writer.into_inner()?;
+
+        let record: FutureRecord<'_, (), Vec<u8>> =
+            FutureRecord::to(topic).payload(&reusable_buffer);
+
+        producer
+            .send_result(record)
+            .map_err(|(e, _)| FilterWorkerError::Kafka(e))?;
+    }
+
+    tracing::debug!(
+        "Enqueued {} alerts for topic {} in {} ms",
+        alerts.len(),
+        topic,
+        start_enqueue.elapsed().as_millis()
+    );
+
+    // Single flush at the end for all alerts.
+    let start_flush = std::time::Instant::now();
+    producer.flush(std::time::Duration::from_millis(flush_timeout_ms as u64))?;
+
+    tracing::info!(
+        "Flushed {} alerts to topic {} in {} ms",
+        alerts.len(),
+        topic,
+        start_flush.elapsed().as_millis()
+    );
+
+    Ok(alerts.len())
 }
 
 /// Recursively checks if a given field is used in a MongoDB aggregation stage.
@@ -918,23 +989,30 @@ pub async fn run_filter_worker<T: FilterWorker>(
             (alerts.len() - alerts_output.len()) as u64,
             &ok_excluded_attrs,
         );
-        for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
-                .await
-                .inspect_err(|_| {
-                    let attributes = &output_error_attrs;
-                    ACTIVE.add(-1, &active_attrs);
-                    BATCH_PROCESSED.add(1, attributes);
-                    ALERT_PROCESSED.add(1, attributes);
-                })?;
+
+        // Batch send all alerts with optimized Kafka producer batching
+        if !alerts_output.is_empty() {
+            send_alerts_batch(
+                &alerts_output,
+                &schema,
+                &producer,
+                &output_topic,
+                config.kafka.producer.flush_timeout_ms,
+            )
+            .await
+            .inspect_err(|_| {
+                let attributes = &output_error_attrs;
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, attributes);
+                ALERT_PROCESSED.add(alerts_output.len() as u64, attributes);
+            })?;
+
+            ALERT_PROCESSED.add(alerts_output.len() as u64, &ok_included_attrs);
             trace!(
-                "Sent alert with candid {} to Kafka topic {}",
-                &alert.candid,
+                "Sent {} alerts to Kafka topic {}",
+                alerts_output.len(),
                 &output_topic
             );
-            // Incrementing by alerts_output.len() outside this loop may be more
-            // efficient, but incrementing by 1 here is more accurate.
-            ALERT_PROCESSED.add(1, &ok_included_attrs);
         }
 
         ACTIVE.add(-1, &active_attrs);

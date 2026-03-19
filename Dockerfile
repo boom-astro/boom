@@ -1,7 +1,7 @@
 FROM rust:1.93.1-slim-trixie AS builder
 
 RUN apt-get update && \
-    apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config && \
+    apt-get install -y curl gcc g++ libhdf5-dev libclang-dev libzstd-dev zlib1g-dev perl make libsasl2-dev pkg-config && \
     apt-get autoremove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -55,7 +55,7 @@ WORKDIR /app
 ARG KAFKA_VERSION=4.1.1
 ARG SCALA_VERSION=2.13
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsasl2-2 ca-certificates openjdk-25-jre-headless curl bash tar \
+    libsasl2-2 libclang-dev libzstd-dev zlib1g-dev ca-certificates openjdk-25-jre-headless curl bash tar \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz \
     && tar -xzf /tmp/kafka.tgz -C /opt \

@@ -805,7 +805,7 @@ async fn test_babamul_process_ztf_alerts() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let babamul = Babamul::new(&config);
+    let babamul = Babamul::new(&config).await.unwrap();
 
     // Expected topic for non-stellar ZTF alerts without LSST match
     let topic = "babamul.ztf.no-lsst-match.hostless";
@@ -870,7 +870,7 @@ async fn test_babamul_process_lsst_alerts() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let babamul = Babamul::new(&config);
+    let babamul = Babamul::new(&config).await.unwrap();
     let topic = "babamul.lsst.no-ztf-match.hostless";
 
     // Create unique objectIds to avoid matching stale messages
@@ -928,7 +928,7 @@ async fn test_babamul_filters_low_reliability() {
     use boom::enrichment::babamul::Babamul;
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let babamul = Babamul::new(&config);
+    let babamul = Babamul::new(&config).await.unwrap();
 
     // Create alerts with low reliability (should be filtered out)
     let alert1 =
@@ -955,7 +955,7 @@ async fn test_babamul_filters_rocks() {
     use boom::enrichment::babamul::Babamul;
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let babamul = Babamul::new(&config);
+    let babamul = Babamul::new(&config).await.unwrap();
 
     // Create alerts marked as rocks (should be filtered out)
     let ztf_rock = create_mock_enriched_ztf_alert(1234567892, "ZTF21aaaaaac", true);
@@ -979,7 +979,7 @@ async fn test_babamul_filters_low_drb() {
     use boom::enrichment::babamul::Babamul;
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let babamul = Babamul::new(&config);
+    let babamul = Babamul::new(&config).await.unwrap();
 
     // Create a ZTF alert with DRB below the ZTF_MIN_DRB threshold (0.2)
     let mut alert_low_drb = create_mock_enriched_ztf_alert(1234567900, "ZTF21aaaaaak", false);
@@ -1011,7 +1011,7 @@ async fn test_babamul_filters_pixel_flags() {
     use boom::enrichment::babamul::Babamul;
 
     let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let babamul = Babamul::new(&config);
+    let babamul = Babamul::new(&config).await.unwrap();
 
     // Create LSST alert with pixel_flags set (should be filtered out)
     let alert =

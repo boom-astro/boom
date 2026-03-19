@@ -302,10 +302,91 @@ pub struct KafkaConsumerConfig {
     pub password: Option<String>,                   // Password for authentication (if any)
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct KafkaProducerConfig {
     #[serde(default = "default_kafka_server")]
     pub server: String, // URL of the Kafka broker
+    /// Number of partitions for producer topics
+    #[serde(default = "default_producer_topic_partitions")]
+    pub topic_partitions: i32,
+    /// Kafka producer message timeout in milliseconds
+    #[serde(default = "default_producer_message_timeout_ms")]
+    pub message_timeout_ms: u32,
+    /// Kafka producer batch size in bytes
+    #[serde(default = "default_producer_batch_size")]
+    pub batch_size: u32,
+    /// Kafka producer linger in milliseconds
+    #[serde(default = "default_producer_linger_ms")]
+    pub linger_ms: u32,
+    /// Kafka producer acknowledgement level
+    #[serde(default = "default_producer_acks")]
+    pub acks: String,
+    /// Kafka producer max in-flight requests per connection
+    #[serde(default = "default_producer_max_in_flight_requests_per_connection")]
+    pub max_in_flight_requests_per_connection: u32,
+    /// Kafka producer retries
+    #[serde(default = "default_producer_retries")]
+    pub retries: u32,
+    /// Kafka producer compression type (none, gzip, snappy, lz4, zstd)
+    #[serde(default = "default_producer_compression_type")]
+    pub compression_type: String,
+    /// Flush timeout in milliseconds after enqueueing messages
+    #[serde(default = "default_producer_flush_timeout_ms")]
+    pub flush_timeout_ms: u32,
+}
+
+impl Default for KafkaProducerConfig {
+    fn default() -> Self {
+        KafkaProducerConfig {
+            server: default_kafka_server(),
+            topic_partitions: default_producer_topic_partitions(),
+            message_timeout_ms: default_producer_message_timeout_ms(),
+            batch_size: default_producer_batch_size(),
+            linger_ms: default_producer_linger_ms(),
+            acks: default_producer_acks(),
+            max_in_flight_requests_per_connection:
+                default_producer_max_in_flight_requests_per_connection(),
+            retries: default_producer_retries(),
+            compression_type: default_producer_compression_type(),
+            flush_timeout_ms: default_producer_flush_timeout_ms(),
+        }
+    }
+}
+
+fn default_producer_topic_partitions() -> i32 {
+    15
+}
+
+fn default_producer_flush_timeout_ms() -> u32 {
+    15000
+}
+
+fn default_producer_message_timeout_ms() -> u32 {
+    5000
+}
+
+fn default_producer_batch_size() -> u32 {
+    16384
+}
+
+fn default_producer_linger_ms() -> u32 {
+    5
+}
+
+fn default_producer_acks() -> String {
+    "1".to_string()
+}
+
+fn default_producer_max_in_flight_requests_per_connection() -> u32 {
+    5
+}
+
+fn default_producer_retries() -> u32 {
+    3
+}
+
+fn default_producer_compression_type() -> String {
+    "zstd".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -373,6 +454,14 @@ impl Default for RedisConfig {
     }
 }
 
+fn default_babamul_retention_days() -> u32 {
+    3
+}
+
+fn default_password_reset_cooldown_minutes() -> u32 {
+    15
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct BabamulConfig {
     pub enabled: bool,
@@ -380,6 +469,33 @@ pub struct BabamulConfig {
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
+    /// Number of partitions for Babamul Kafka topics
+    #[serde(default = "default_producer_topic_partitions")]
+    pub topic_partitions: i32,
+    /// Kafka producer message timeout in milliseconds
+    #[serde(default = "default_producer_message_timeout_ms")]
+    pub producer_message_timeout_ms: u32,
+    /// Kafka producer batch size in bytes
+    #[serde(default = "default_producer_batch_size")]
+    pub producer_batch_size: u32,
+    /// Kafka producer linger in milliseconds
+    #[serde(default = "default_producer_linger_ms")]
+    pub producer_linger_ms: u32,
+    /// Kafka producer acknowledgement level
+    #[serde(default = "default_producer_acks")]
+    pub producer_acks: String,
+    /// Kafka producer max in-flight requests per connection
+    #[serde(default = "default_producer_max_in_flight_requests_per_connection")]
+    pub producer_max_in_flight_requests_per_connection: u32,
+    /// Kafka producer retries
+    #[serde(default = "default_producer_retries")]
+    pub producer_retries: u32,
+    /// Kafka producer compression type (none, gzip, snappy, lz4, zstd)
+    #[serde(default = "default_producer_compression_type")]
+    pub producer_compression_type: String,
+    /// Flush timeout in milliseconds after enqueueing a Babamul batch
+    #[serde(default = "default_producer_flush_timeout_ms")]
+    pub producer_flush_timeout_ms: u32,
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
@@ -391,17 +507,19 @@ impl Default for BabamulConfig {
             enabled: false,
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
+            topic_partitions: default_producer_topic_partitions(),
+            producer_message_timeout_ms: default_producer_message_timeout_ms(),
+            producer_batch_size: default_producer_batch_size(),
+            producer_linger_ms: default_producer_linger_ms(),
+            producer_acks: default_producer_acks(),
+            producer_max_in_flight_requests_per_connection:
+                default_producer_max_in_flight_requests_per_connection(),
+            producer_retries: default_producer_retries(),
+            producer_compression_type: default_producer_compression_type(),
+            producer_flush_timeout_ms: default_producer_flush_timeout_ms(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
         }
     }
-}
-
-fn default_babamul_retention_days() -> u32 {
-    3
-}
-
-fn default_password_reset_cooldown_minutes() -> u32 {
-    15
 }
 
 #[derive(Deserialize, Debug, Clone)]

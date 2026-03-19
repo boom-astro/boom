@@ -8,20 +8,38 @@ use crate::enrichment::lsst::{
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
 use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
-use apache_avro::{AvroSchema, DeflateSettings, Schema, Writer};
+use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
 };
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
-use std::collections::{HashMap, HashSet};
-use tokio::sync::Mutex;
+use rdkafka::producer::Producer;
+use std::collections::HashMap;
 use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
 const LSST_MIN_RELIABILITY: f32 = 0.0; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
 const ZTF_MIN_DRB: f32 = 0.2;
+const ZTF_TOPIC_CATEGORIES: [&str; 6] = [
+    "lsst-match.stellar",
+    "lsst-match.hosted",
+    "lsst-match.hostless",
+    "no-lsst-match.stellar",
+    "no-lsst-match.hosted",
+    "no-lsst-match.hostless",
+];
+const LSST_TOPIC_CATEGORIES: [&str; 8] = [
+    "ztf-match.stellar",
+    "ztf-match.hosted",
+    "ztf-match.hostless",
+    "ztf-match.unknown",
+    "no-ztf-match.stellar",
+    "no-ztf-match.hosted",
+    "no-ztf-match.hostless",
+    "no-ztf-match.unknown",
+];
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -417,15 +435,27 @@ pub struct Babamul {
     lsst_avro_schema: Schema,
     ztf_avro_schema: Schema,
     kafka_admin_client: AdminClient<DefaultClientContext>,
+    // Retention in milliseconds for Babamul topics, derived from config retention_days
     topic_retention_ms: i64,
-    // A cache for Kafka topics we've checked exist and match retention policy
-    checked_topics: Mutex<HashSet<String>>,
+    // Number of partitions for Babamul topics, from config. Helps to scale to multiple producer instances.
+    topic_partitions: i32,
+    // Timeout for flushing the producer; since we do a single flush for the entire batch,
+    // we can afford to set a higher timeout than if we flushed after every message
+    producer_flush_timeout: std::time::Duration,
 }
 
 impl Babamul {
-    pub fn new(config: &AppConfig) -> Self {
+    pub async fn new(config: &AppConfig) -> Result<Self, EnrichmentWorkerError> {
         // Read Kafka producer config from kafka: producer in the config
         let kafka_producer_host = config.kafka.producer.server.clone();
+        let producer_message_timeout_ms = config.babamul.producer_message_timeout_ms.to_string();
+        let producer_batch_size = config.babamul.producer_batch_size.to_string();
+        let producer_linger_ms = config.babamul.producer_linger_ms.to_string();
+        let producer_max_in_flight_requests_per_connection = config
+            .babamul
+            .producer_max_in_flight_requests_per_connection
+            .to_string();
+        let producer_retries = config.babamul.producer_retries.to_string();
 
         // Create Kafka producer
         let kafka_producer: rdkafka::producer::FutureProducer =
@@ -433,17 +463,29 @@ impl Babamul {
                 // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
                 // .set("debug", "broker,topic,msg")
                 .set("bootstrap.servers", &kafka_producer_host)
-                .set("message.timeout.ms", "5000")
+                .set("message.timeout.ms", &producer_message_timeout_ms)
                 // it's best to increase batch.size if the cluster
                 // is running on another machine. Locally, lower means less
                 // latency, since we are not limited by network speed anyways
-                .set("batch.size", "16384")
-                .set("linger.ms", "5")
-                .set("acks", "1")
-                .set("max.in.flight.requests.per.connection", "5")
-                .set("retries", "3")
+                .set("batch.size", &producer_batch_size)
+                .set("linger.ms", &producer_linger_ms)
+                .set("acks", &config.babamul.producer_acks)
+                .set(
+                    "max.in.flight.requests.per.connection",
+                    &producer_max_in_flight_requests_per_connection,
+                )
+                .set("retries", &producer_retries)
+                .set(
+                    "compression.type",
+                    &config.babamul.producer_compression_type,
+                )
                 .create()
-                .expect("Failed to create Babamul Kafka producer");
+                .map_err(|e| {
+                    EnrichmentWorkerError::Kafka(format!(
+                        "Failed to create Babamul Kafka producer: {}",
+                        e
+                    ))
+                })?;
 
         // Generate Avro schemas
         let lsst_avro_schema = BabamulLsstAlert::get_schema();
@@ -453,22 +495,58 @@ impl Babamul {
         let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
             .set("bootstrap.servers", &kafka_producer_host)
             .create()
-            .expect("Failed to create Babamul Kafka admin client");
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!(
+                    "Failed to create Babamul Kafka admin client: {}",
+                    e
+                ))
+            })?;
 
         // Compute retention in milliseconds from config (days)
         let babamul_retention_ms: i64 =
             (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
 
-        Babamul {
+        let babamul = Babamul {
             kafka_producer,
             lsst_avro_schema,
             ztf_avro_schema,
             kafka_admin_client: admin_client,
             topic_retention_ms: babamul_retention_ms,
-            checked_topics: Mutex::new(HashSet::new()),
-        }
+            topic_partitions: config.babamul.topic_partitions,
+            producer_flush_timeout: std::time::Duration::from_millis(
+                config.babamul.producer_flush_timeout_ms as u64,
+            ),
+        };
+
+        // Ensure topics are initialized at construction time so downstream
+        // processing does not need to perform topic checks.
+        babamul.initialize_ztf_topics().await?;
+        babamul.initialize_lsst_topics().await?;
+
+        Ok(babamul)
     }
 
+    /// Ensure all ZTF topics exist with the correct retention policy. This should be called at startup before processing any alerts.
+    #[instrument(skip_all, err)]
+    pub async fn initialize_ztf_topics(&self) -> Result<(), EnrichmentWorkerError> {
+        for category in ZTF_TOPIC_CATEGORIES {
+            let topic_name = format!("babamul.ztf.{}", category);
+            self.check_topic(&topic_name).await?;
+        }
+        Ok(())
+    }
+
+    /// Ensure all LSST topics exist with the correct retention policy. This should be called at startup before processing any alerts.
+    #[instrument(skip_all, err)]
+    pub async fn initialize_lsst_topics(&self) -> Result<(), EnrichmentWorkerError> {
+        for category in LSST_TOPIC_CATEGORIES {
+            let topic_name = format!("babamul.lsst.{}", category);
+            self.check_topic(&topic_name).await?;
+        }
+        Ok(())
+    }
+
+    /// Helper function to send alerts to Kafka topics based on their category, with a single flush at the end for efficiency.
     #[instrument(skip_all, err)]
     async fn send_alerts_by_topic<T, F>(
         &self,
@@ -479,76 +557,91 @@ impl Babamul {
         for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
     {
         let mut total_sent: usize = 0;
+        let start_all_enqueue = std::time::Instant::now();
+
+        // Reuse a single buffer across all alerts to reduce heap allocations.
+        // Each alert gets serialized into this buffer, which is then cloned for sending.
+        // The producer internally copies the data, so reusing the buffer is safe.
+        let mut reusable_buffer = Vec::with_capacity(8192);
+
+        // Enqueue all alerts across all topics without flushing yet.
+        // This allows the producer to batch messages more efficiently.
         for (topic_name, alerts) in alerts_by_topic {
             tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
-            // Check topic exists with the desired retention policy
-            self.check_topic(&topic_name).await?;
-
-            // Convert alerts to Avro payloads
-            let mut payloads = Vec::new();
             for alert in &alerts {
-                let payload = self.alert_to_avro_bytes(to_enriched(alert))?;
-                payloads.push(payload);
-            }
-
-            tracing::debug!(
-                "Prepared {} payloads for topic {}",
-                payloads.len(),
-                topic_name
-            );
-
-            // Send all messages to Kafka without awaiting immediately (allow batching)
-            let mut send_futures = Vec::new();
-            for payload in &payloads {
+                let payload =
+                    self.alert_to_avro_bytes_with_buffer(to_enriched(alert), &mut reusable_buffer)?;
                 let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
-                let future = self
-                    .kafka_producer
-                    .send(record, std::time::Duration::from_secs(15));
-                send_futures.push(future);
-            }
+                    rdkafka::producer::FutureRecord::to(&topic_name).payload(&payload);
 
-            // Await all sends and map errors
-            for send_result in send_futures {
-                send_result.await.map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
+                self.kafka_producer.send_result(record).map_err(|(e, _)| {
+                    EnrichmentWorkerError::Kafka(format!("Failed to enqueue Kafka record: {}", e))
                 })?;
                 total_sent += 1;
             }
         }
 
+        tracing::debug!(
+            "Enqueued {} total payloads across all topics in {} ms",
+            total_sent,
+            start_all_enqueue.elapsed().as_millis()
+        );
+
+        // Single flush at the end for all topics.
+        // This maximizes producer-side batching and reduces context switches.
+        let start_flush = std::time::Instant::now();
+        self.kafka_producer
+            .flush(self.producer_flush_timeout)
+            .map_err(|e| EnrichmentWorkerError::Kafka(format!("Kafka flush failed: {}", e)))?;
+
+        tracing::debug!(
+            "Flushed {} messages in {} ms",
+            total_sent,
+            start_flush.elapsed().as_millis()
+        );
+
         Ok(total_sent)
     }
 
+    /// Serialize an enriched alert to Avro bytes using the appropriate schema, reusing a provided buffer to minimize allocations.
     #[instrument(skip_all, err)]
-    fn alert_to_avro_bytes(&self, alert: EnrichedAlert) -> Result<Vec<u8>, EnrichmentWorkerError> {
+    fn alert_to_avro_bytes_with_buffer(
+        &self,
+        alert: EnrichedAlert,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Vec<u8>, EnrichmentWorkerError> {
+        buffer.clear(); // Reuse the buffer; keep its capacity
         match alert {
             EnrichedAlert::Lsst(a) => {
                 let mut writer = Writer::with_codec(
                     &self.lsst_avro_schema,
-                    Vec::new(),
-                    apache_avro::Codec::Deflate(DeflateSettings::default()),
+                    std::mem::take(buffer), // Take ownership; Writer will populate it
+                    apache_avro::Codec::Null,
                 );
                 writer
                     .append_serdavro(a)
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-                writer
+                let result = writer
                     .into_inner()
-                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+                *buffer = result.clone(); // Clone result, store capacity back in buffer
+                Ok(result)
             }
             EnrichedAlert::Ztf(a) => {
                 let mut writer = Writer::with_codec(
                     &self.ztf_avro_schema,
-                    Vec::new(),
-                    apache_avro::Codec::Deflate(DeflateSettings::default()),
+                    std::mem::take(buffer),
+                    apache_avro::Codec::Null,
                 );
                 writer
                     .append_serdavro(a)
                     .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
-                writer
+                let result = writer
                     .into_inner()
-                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))
+                    .map_err(|e| EnrichmentWorkerError::Serialization(e.to_string()))?;
+                *buffer = result.clone();
+                Ok(result)
             }
         }
     }
@@ -556,19 +649,15 @@ impl Babamul {
     /// Ensure the given topic exists with the desired retention policy
     #[instrument(skip_all, err)]
     async fn check_topic(&self, topic_name: &str) -> Result<(), EnrichmentWorkerError> {
-        // Fast-path: skip if already checked in this process
-        {
-            let checked = self.checked_topics.lock().await;
-            if checked.contains(topic_name) {
-                return Ok(());
-            }
-        }
-
         // Create topic with retention if it does not exist; ignore "already exists" errors
         let retention_ms_string = self.topic_retention_ms.to_string();
-        let new_topic = NewTopic::new(topic_name, 1, TopicReplication::Fixed(1))
-            .set("retention.ms", &retention_ms_string)
-            .set("cleanup.policy", "delete");
+        let new_topic = NewTopic::new(
+            topic_name,
+            self.topic_partitions,
+            TopicReplication::Fixed(1),
+        )
+        .set("retention.ms", &retention_ms_string)
+        .set("cleanup.policy", "delete");
 
         let opts = AdminOptions::new();
         let results: Vec<Result<String, (String, RDKafkaErrorCode)>> = self
@@ -617,10 +706,6 @@ impl Babamul {
                 )));
             }
         }
-
-        // Record that we've checked this topic during this process lifetime
-        let mut checked = self.checked_topics.lock().await;
-        checked.insert(topic_name.to_string());
         Ok(())
     }
 
@@ -665,8 +750,15 @@ impl Babamul {
         }
 
         // Send all grouped alerts using shared helper
-        self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Lsst(a))
-            .await
+        let start = std::time::Instant::now();
+        let send_results = self
+            .send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Lsst(a))
+            .await;
+        tracing::info!(
+            "Sent LSST alerts to Babamul in {} ms",
+            start.elapsed().as_millis()
+        );
+        send_results
     }
 
     #[instrument(skip_all, err)]
@@ -710,7 +802,14 @@ impl Babamul {
         }
 
         // Send all grouped alerts using shared helper
-        self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Ztf(a))
-            .await
+        let start = std::time::Instant::now();
+        let send_results = self
+            .send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Ztf(a))
+            .await;
+        tracing::info!(
+            "Sent ZTF alerts to Babamul in {} ms",
+            start.elapsed().as_millis()
+        );
+        send_results
     }
 }

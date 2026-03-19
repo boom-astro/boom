@@ -11,6 +11,15 @@ database:
 babamul:
   enabled: true # Enabled for testing
   retention_days: 2 # Set different from default to test override
+  topic_partitions: 15
+  producer_message_timeout_ms: 5000
+  producer_batch_size: 16384
+  producer_linger_ms: 5
+  producer_acks: "1"
+  producer_max_in_flight_requests_per_connection: 5
+  producer_retries: 3
+  producer_compression_type: "zstd"
+  producer_flush_timeout_ms: 15000
 api:
   port: 4000 # Set via BOOM_API__PORT environment variable
   domain: localhost
@@ -40,6 +49,15 @@ kafka:
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
+    topic_partitions: 15
+    message_timeout_ms: 5000
+    batch_size: 16384
+    linger_ms: 5
+    acks: "1"
+    max_in_flight_requests_per_connection: 5
+    retries: 3
+    compression_type: "zstd"
+    flush_timeout_ms: 15000
 workers:
   ztf:
     command_interval: 500
