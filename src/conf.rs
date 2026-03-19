@@ -333,6 +333,9 @@ pub struct KafkaProducerConfig {
     /// Flush timeout in milliseconds after enqueueing messages
     #[serde(default = "default_producer_flush_timeout_ms")]
     pub flush_timeout_ms: u32,
+    /// Maximum number of in-flight send futures per worker batch send loop
+    #[serde(default = "default_producer_max_in_flight_sends")]
+    pub max_in_flight_sends: u32,
 }
 
 impl Default for KafkaProducerConfig {
@@ -349,6 +352,7 @@ impl Default for KafkaProducerConfig {
             retries: default_producer_retries(),
             compression_type: default_producer_compression_type(),
             flush_timeout_ms: default_producer_flush_timeout_ms(),
+            max_in_flight_sends: default_producer_max_in_flight_sends(),
         }
     }
 }
@@ -359,6 +363,10 @@ fn default_producer_topic_partitions() -> i32 {
 
 fn default_producer_flush_timeout_ms() -> u32 {
     15000
+}
+
+fn default_producer_max_in_flight_sends() -> u32 {
+    10
 }
 
 fn default_producer_message_timeout_ms() -> u32 {
@@ -496,6 +504,9 @@ pub struct BabamulConfig {
     /// Flush timeout in milliseconds after enqueueing a Babamul batch
     #[serde(default = "default_producer_flush_timeout_ms")]
     pub producer_flush_timeout_ms: u32,
+    /// Maximum number of in-flight send futures per Babamul worker batch send loop
+    #[serde(default = "default_producer_max_in_flight_sends")]
+    pub producer_max_in_flight_sends: u32,
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
@@ -517,6 +528,7 @@ impl Default for BabamulConfig {
             producer_retries: default_producer_retries(),
             producer_compression_type: default_producer_compression_type(),
             producer_flush_timeout_ms: default_producer_flush_timeout_ms(),
+            producer_max_in_flight_sends: default_producer_max_in_flight_sends(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
         }
     }

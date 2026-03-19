@@ -11,7 +11,7 @@ use crate::kafka::{create_future_producer, ensure_topic};
 use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
-use rdkafka::producer::Producer;
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::HashMap;
 use tracing::instrument;
 
@@ -435,9 +435,10 @@ pub struct Babamul {
     topic_retention_ms: i64,
     // Number of partitions for Babamul topics, from config. Helps to scale to multiple producer instances.
     topic_partitions: i32,
-    // Timeout for flushing the producer; since we do a single flush for the entire batch,
-    // we can afford to set a higher timeout than if we flushed after every message
-    producer_flush_timeout: std::time::Duration,
+    // Timeout for each Kafka delivery future in batch sending.
+    producer_send_timeout: std::time::Duration,
+    // Maximum number of in-flight send futures in Babamul batch sending.
+    max_in_flight_sends: usize,
 }
 
 impl Babamul {
@@ -457,6 +458,7 @@ impl Babamul {
             retries: config.babamul.producer_retries,
             compression_type: config.babamul.producer_compression_type.clone(),
             flush_timeout_ms: config.babamul.producer_flush_timeout_ms,
+            max_in_flight_sends: config.babamul.producer_max_in_flight_sends,
         };
 
         // Create Kafka producer
@@ -471,6 +473,15 @@ impl Babamul {
         // Compute retention in milliseconds from config (days)
         let babamul_retention_ms: i64 =
             (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
+        let max_in_flight_sends = usize::try_from(config.babamul.producer_max_in_flight_sends)
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                EnrichmentWorkerError::ConfigurationError(format!(
+                    "Invalid babamul.producer_max_in_flight_sends: {}. Must be > 0",
+                    config.babamul.producer_max_in_flight_sends
+                ))
+            })?;
 
         let babamul = Babamul {
             kafka_producer,
@@ -479,9 +490,10 @@ impl Babamul {
             kafka_bootstrap_servers: kafka_producer_host,
             topic_retention_ms: babamul_retention_ms,
             topic_partitions: config.babamul.topic_partitions,
-            producer_flush_timeout: std::time::Duration::from_millis(
+            producer_send_timeout: std::time::Duration::from_millis(
                 config.babamul.producer_flush_timeout_ms as u64,
             ),
+            max_in_flight_sends,
         };
 
         // Ensure topics are initialized at construction time so downstream
@@ -522,52 +534,105 @@ impl Babamul {
     where
         for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
     {
-        let mut total_sent: usize = 0;
-        let start_all_enqueue = std::time::Instant::now();
+        let mut total_delivered: usize = 0;
+        let start_all_send = std::time::Instant::now();
 
         // Reuse a single buffer across all alerts to reduce heap allocations.
         // Each alert gets serialized into this buffer, which is then cloned for sending.
         // The producer internally copies the data, so reusing the buffer is safe.
         let mut reusable_buffer = Vec::with_capacity(8192);
 
-        // Enqueue all alerts across all topics without flushing yet.
-        // This allows the producer to batch messages more efficiently.
+        // Send alerts with bounded concurrent delivery futures per topic.
+        // We drain futures before moving to the next topic so topic_name
+        // references remain valid for in-flight records.
         for (topic_name, alerts) in alerts_by_topic {
             tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
-            for alert in &alerts {
-                let payload =
-                    self.alert_to_avro_bytes_with_buffer(to_enriched(alert), &mut reusable_buffer)?;
-                let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(&payload);
+            let mut in_flight = FuturesUnordered::new();
+            let mut topic_delivered: usize = 0;
+            let mut first_error: Option<EnrichmentWorkerError> = None;
 
-                self.kafka_producer.send_result(record).map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to enqueue Kafka record: {}", e))
-                })?;
-                total_sent += 1;
+            for alert in &alerts {
+                if first_error.is_some() {
+                    break;
+                }
+
+                let payload = match self
+                    .alert_to_avro_bytes_with_buffer(to_enriched(alert), &mut reusable_buffer)
+                {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        first_error = Some(err);
+                        break;
+                    }
+                };
+
+                let topic = topic_name.clone();
+                let timeout = self.producer_send_timeout;
+                let send_future = async move {
+                    let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
+                        rdkafka::producer::FutureRecord::to(&topic).payload(&payload);
+                    self.kafka_producer.send(record, timeout).await
+                };
+                in_flight.push(send_future);
+
+                if in_flight.len() >= self.max_in_flight_sends {
+                    match in_flight.next().await {
+                        Some(Ok(_)) => {
+                            topic_delivered += 1;
+                        }
+                        Some(Err((e, _))) => {
+                            if first_error.is_none() {
+                                first_error = Some(EnrichmentWorkerError::Kafka(format!(
+                                    "Failed to deliver Kafka record: {}",
+                                    e
+                                )));
+                            }
+                            break;
+                        }
+                        None => {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            while let Some(result) = in_flight.next().await {
+                match result {
+                    Ok(_) => {
+                        topic_delivered += 1;
+                    }
+                    Err((e, _)) => {
+                        if first_error.is_none() {
+                            first_error = Some(EnrichmentWorkerError::Kafka(format!(
+                                "Failed to deliver Kafka record: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+            }
+
+            total_delivered += topic_delivered;
+
+            if let Some(error) = first_error {
+                return Err(match error {
+                    EnrichmentWorkerError::Kafka(msg) => EnrichmentWorkerError::Kafka(format!(
+                        "Failed after delivering {} messages: {}",
+                        total_delivered, msg
+                    )),
+                    other => other,
+                });
             }
         }
 
         tracing::debug!(
-            "Enqueued {} total payloads across all topics in {} ms",
-            total_sent,
-            start_all_enqueue.elapsed().as_millis()
+            "Delivered {} total payloads across all topics in {} ms",
+            total_delivered,
+            start_all_send.elapsed().as_millis()
         );
 
-        // Single flush at the end for all topics.
-        // This maximizes producer-side batching and reduces context switches.
-        let start_flush = std::time::Instant::now();
-        self.kafka_producer
-            .flush(self.producer_flush_timeout)
-            .map_err(|e| EnrichmentWorkerError::Kafka(format!("Kafka flush failed: {}", e)))?;
-
-        tracing::debug!(
-            "Flushed {} messages in {} ms",
-            total_sent,
-            start_flush.elapsed().as_millis()
-        );
-
-        Ok(total_sent)
+        Ok(total_delivered)
     }
 
     /// Serialize an enriched alert to Avro bytes using the appropriate schema, reusing a provided buffer to minimize allocations.

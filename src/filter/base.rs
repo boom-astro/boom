@@ -14,14 +14,14 @@ use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 use apache_avro::{serde_avro_bytes, Writer};
 use apache_avro::{AvroSchema, Schema};
 use apache_avro_macros::serdavro;
-use futures::stream::StreamExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 use mongodb::bson::{doc, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
 };
+use rdkafka::producer::FutureProducer;
 use rdkafka::producer::FutureRecord;
-use rdkafka::producer::{FutureProducer, Producer};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -267,14 +267,14 @@ pub struct BatchSendError {
 }
 
 /// Sends a batch of alerts to Kafka with optimized batching.
-/// Enqueues all alerts without awaiting per-message, then does a single flush.
+/// Uses bounded concurrent delivery futures to avoid blocking the async runtime.
 ///
 /// # Arguments
 /// * `alerts` - A slice of Alert objects to send.
 /// * `schema` - A reference to the Avro Schema used for encoding.
 /// * `producer` - A reference to the Kafka FutureProducer used to send alerts.
 /// * `topic` - The Kafka topic to which alerts will be sent.
-/// * `flush_timeout_ms` - Timeout in milliseconds for the flush operation.
+/// * `flush_timeout_ms` - Timeout in milliseconds for each Kafka delivery future.
 ///
 /// # Returns
 /// * `Result<usize, BatchSendError>` - The number of alerts sent, or an error with partial enqueue count.
@@ -285,64 +285,93 @@ pub async fn send_alerts_batch(
     producer: &FutureProducer,
     topic: &str,
     flush_timeout_ms: u32,
+    max_in_flight_sends: usize,
 ) -> Result<usize, BatchSendError> {
-    let start_enqueue = std::time::Instant::now();
+    let start_send = std::time::Instant::now();
+    let send_timeout = std::time::Duration::from_millis(flush_timeout_ms as u64);
     let mut reusable_buffer = Vec::with_capacity(8192);
-    let mut enqueued: usize = 0;
+    let mut delivered: usize = 0;
+    let mut first_error: Option<FilterWorkerError> = None;
+    let mut in_flight = FuturesUnordered::new();
 
-    // Enqueue all alerts without awaiting to maximize producer batching.
+    // Send alerts with bounded concurrency to avoid unbounded memory growth.
     for alert in alerts {
+        if first_error.is_some() {
+            break;
+        }
+
         reusable_buffer.clear();
         let mut writer = Writer::with_codec(
             schema,
             std::mem::take(&mut reusable_buffer),
             apache_avro::Codec::Null,
         );
-        writer.append_ser(alert).map_err(|e| BatchSendError {
-            enqueued,
-            source: FilterWorkerError::Avro(e),
-        })?;
-        reusable_buffer = writer.into_inner().map_err(|e| BatchSendError {
-            enqueued,
-            source: FilterWorkerError::Avro(e),
-        })?;
+        if let Err(e) = writer.append_ser(alert) {
+            first_error = Some(FilterWorkerError::Avro(e));
+            break;
+        }
+        reusable_buffer = match writer.into_inner() {
+            Ok(buf) => buf,
+            Err(e) => {
+                first_error = Some(FilterWorkerError::Avro(e));
+                break;
+            }
+        };
 
-        let record: FutureRecord<'_, (), Vec<u8>> =
-            FutureRecord::to(topic).payload(&reusable_buffer);
+        let payload = reusable_buffer.clone();
+        let send_future = async move {
+            let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(topic).payload(&payload);
+            producer.send(record, send_timeout).await
+        };
+        in_flight.push(send_future);
 
-        producer
-            .send_result(record)
-            .map_err(|(e, _)| BatchSendError {
-                enqueued,
-                source: FilterWorkerError::Kafka(e),
-            })?;
-        enqueued += 1;
+        if in_flight.len() >= max_in_flight_sends {
+            match in_flight.next().await {
+                Some(Ok(_)) => {
+                    delivered += 1;
+                }
+                Some(Err((e, _))) => {
+                    if first_error.is_none() {
+                        first_error = Some(FilterWorkerError::Kafka(e));
+                    }
+                    break;
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Drain remaining delivery futures so partial success accounting remains accurate.
+    while let Some(result) = in_flight.next().await {
+        match result {
+            Ok(_) => {
+                delivered += 1;
+            }
+            Err((e, _)) => {
+                if first_error.is_none() {
+                    first_error = Some(FilterWorkerError::Kafka(e));
+                }
+            }
+        }
+    }
+
+    if let Some(source) = first_error {
+        return Err(BatchSendError {
+            enqueued: delivered,
+            source,
+        });
     }
 
     tracing::debug!(
-        "Enqueued {} alerts for topic {} in {} ms",
-        enqueued,
+        "Delivered {} alerts to topic {} in {} ms",
+        delivered,
         topic,
-        start_enqueue.elapsed().as_millis()
+        start_send.elapsed().as_millis()
     );
 
-    // Single flush at the end for all alerts.
-    let start_flush = std::time::Instant::now();
-    producer
-        .flush(std::time::Duration::from_millis(flush_timeout_ms as u64))
-        .map_err(|e| BatchSendError {
-            enqueued,
-            source: FilterWorkerError::Kafka(e),
-        })?;
-
-    tracing::info!(
-        "Flushed {} alerts to topic {} in {} ms",
-        enqueued,
-        topic,
-        start_flush.elapsed().as_millis()
-    );
-
-    Ok(enqueued)
+    Ok(delivered)
 }
 
 /// Recursively checks if a given field is used in a MongoDB aggregation stage.
@@ -866,6 +895,8 @@ pub enum FilterWorkerError {
     KafkaConfigMissing(Survey),
     #[error("invalid kafka producer topic_partitions: {0}. Must be > 0")]
     InvalidTopicPartitions(i32),
+    #[error("invalid kafka producer max_in_flight_sends: {0}. Must be > 0")]
+    InvalidMaxInFlightSends(u32),
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
     #[error("missing cutouts for candid {0}")]
@@ -935,6 +966,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
+    let max_in_flight_sends = usize::try_from(config.kafka.producer.max_in_flight_sends)
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or(FilterWorkerError::InvalidMaxInFlightSends(
+            config.kafka.producer.max_in_flight_sends,
+        ))?;
 
     let command_interval: usize = 500;
     let mut command_check_countdown = command_interval;
@@ -1014,6 +1051,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 &producer,
                 &output_topic,
                 config.kafka.producer.flush_timeout_ms,
+                max_in_flight_sends,
             )
             .await
             {
