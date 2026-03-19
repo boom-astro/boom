@@ -11,7 +11,8 @@ use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
-    AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
+    AdminClient, AdminOptions, AlterConfig, NewPartitions, NewTopic, ResourceSpecifier,
+    TopicReplication,
 };
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
@@ -651,6 +652,15 @@ impl Babamul {
     async fn check_topic(&self, topic_name: &str) -> Result<(), EnrichmentWorkerError> {
         // Create topic with retention if it does not exist; ignore "already exists" errors
         let retention_ms_string = self.topic_retention_ms.to_string();
+        let desired_partitions = usize::try_from(self.topic_partitions)
+            .ok()
+            .filter(|partitions| *partitions > 0)
+            .ok_or_else(|| {
+                EnrichmentWorkerError::Kafka(format!(
+                    "Invalid topic_partitions for {}: {}. Must be > 0",
+                    topic_name, self.topic_partitions
+                ))
+            })?;
         let new_topic = NewTopic::new(
             topic_name,
             self.topic_partitions,
@@ -668,9 +678,12 @@ impl Babamul {
                 EnrichmentWorkerError::Kafka(format!("Admin create_topics error: {}", e))
             })?;
 
+        let mut topic_created_now = false;
         for r in results.into_iter() {
             match r {
-                Ok(_created) => (),
+                Ok(_created) => {
+                    topic_created_now = true;
+                }
                 Err((_topic, code)) => {
                     if code == RDKafkaErrorCode::TopicAlreadyExists {
                         // Continue to alter configs below
@@ -683,6 +696,86 @@ impl Babamul {
                 }
             }
         }
+
+        // If we just created the topic in this process, skip immediate partition reconciliation.
+        // This avoids transient metadata races where Kafka may report 0 partitions briefly.
+        if !topic_created_now {
+            // Ensure the topic has at least the configured number of partitions.
+            // Kafka can only increase partition count, not decrease it.
+            let mut existing_partitions: Option<i32> = None;
+            for attempt in 0..3 {
+                let metadata = self
+                    .kafka_admin_client
+                    .inner()
+                    .fetch_metadata(Some(topic_name), std::time::Duration::from_secs(30))
+                    .map_err(|e| {
+                        EnrichmentWorkerError::Kafka(format!(
+                            "Failed to fetch metadata for topic {}: {}",
+                            topic_name, e
+                        ))
+                    })?;
+
+                existing_partitions = metadata
+                    .topics()
+                    .iter()
+                    .find(|topic| topic.name() == topic_name)
+                    .map(|topic| topic.partitions().len() as i32);
+
+                if existing_partitions.unwrap_or(0) > 0 {
+                    break;
+                }
+
+                if attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+
+            let existing_partitions = existing_partitions.unwrap_or(0);
+
+            if existing_partitions > 0 && existing_partitions < self.topic_partitions {
+                let partition_results = self
+                    .kafka_admin_client
+                    .create_partitions(&[NewPartitions::new(topic_name, desired_partitions)], &opts)
+                    .await
+                    .map_err(|e| {
+                        EnrichmentWorkerError::Kafka(format!(
+                            "Admin create_partitions error for {}: {}",
+                            topic_name, e
+                        ))
+                    })?;
+
+                for res in partition_results {
+                    if let Err((_topic, code)) = res {
+                        if code == RDKafkaErrorCode::InvalidPartitions {
+                            // Another worker likely reconciled partitions concurrently.
+                            tracing::debug!(
+                                "Ignoring concurrent create_partitions race for {} (code: {:?})",
+                                topic_name,
+                                code
+                            );
+                            continue;
+                        }
+                        return Err(EnrichmentWorkerError::Kafka(format!(
+                            "Failed to increase partitions for {} from {} to {} (code: {:?})",
+                            topic_name, existing_partitions, self.topic_partitions, code
+                        )));
+                    }
+                }
+            } else if existing_partitions > self.topic_partitions {
+                tracing::warn!(
+                    "Topic {} has {} partitions, which is greater than configured {}. Kafka cannot decrease partitions.",
+                    topic_name,
+                    existing_partitions,
+                    self.topic_partitions
+                );
+            } else if existing_partitions == 0 {
+                tracing::warn!(
+                    "Topic {} metadata reported 0 partitions during startup; skipping partition reconciliation for now",
+                    topic_name
+                );
+            }
+        }
+
         // Apply or update retention policy even if topic already existed
         let mut entries: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
         entries.insert("retention.ms", &retention_ms_string);

@@ -1,6 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
+    kafka::initialize_topic,
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -284,6 +285,14 @@ pub async fn send_alert_to_kafka(
     Ok(())
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("failed to send alert batch after enqueueing {enqueued} alerts: {source}")]
+pub struct BatchSendError {
+    pub enqueued: usize,
+    #[source]
+    pub source: FilterWorkerError,
+}
+
 /// Sends a batch of alerts to Kafka with optimized batching.
 /// Enqueues all alerts without awaiting per-message, then does a single flush.
 ///
@@ -295,7 +304,7 @@ pub async fn send_alert_to_kafka(
 /// * `flush_timeout_ms` - Timeout in milliseconds for the flush operation.
 ///
 /// # Returns
-/// * `Result<usize, FilterWorkerError>` - The number of alerts sent, or an error.
+/// * `Result<usize, BatchSendError>` - The number of alerts sent, or an error with partial enqueue count.
 #[instrument(skip(alerts, schema, producer), err)]
 pub async fn send_alerts_batch(
     alerts: &[Alert],
@@ -303,9 +312,10 @@ pub async fn send_alerts_batch(
     producer: &FutureProducer,
     topic: &str,
     flush_timeout_ms: u32,
-) -> Result<usize, FilterWorkerError> {
+) -> Result<usize, BatchSendError> {
     let start_enqueue = std::time::Instant::now();
     let mut reusable_buffer = Vec::with_capacity(8192);
+    let mut enqueued: usize = 0;
 
     // Enqueue all alerts without awaiting to maximize producer batching.
     for alert in alerts {
@@ -315,36 +325,51 @@ pub async fn send_alerts_batch(
             std::mem::take(&mut reusable_buffer),
             apache_avro::Codec::Null,
         );
-        writer.append_ser(alert)?;
-        reusable_buffer = writer.into_inner()?;
+        writer.append_ser(alert).map_err(|e| BatchSendError {
+            enqueued,
+            source: FilterWorkerError::Avro(e),
+        })?;
+        reusable_buffer = writer.into_inner().map_err(|e| BatchSendError {
+            enqueued,
+            source: FilterWorkerError::Avro(e),
+        })?;
 
         let record: FutureRecord<'_, (), Vec<u8>> =
             FutureRecord::to(topic).payload(&reusable_buffer);
 
         producer
             .send_result(record)
-            .map_err(|(e, _)| FilterWorkerError::Kafka(e))?;
+            .map_err(|(e, _)| BatchSendError {
+                enqueued,
+                source: FilterWorkerError::Kafka(e),
+            })?;
+        enqueued += 1;
     }
 
     tracing::debug!(
         "Enqueued {} alerts for topic {} in {} ms",
-        alerts.len(),
+        enqueued,
         topic,
         start_enqueue.elapsed().as_millis()
     );
 
     // Single flush at the end for all alerts.
     let start_flush = std::time::Instant::now();
-    producer.flush(std::time::Duration::from_millis(flush_timeout_ms as u64))?;
+    producer
+        .flush(std::time::Duration::from_millis(flush_timeout_ms as u64))
+        .map_err(|e| BatchSendError {
+            enqueued,
+            source: FilterWorkerError::Kafka(e),
+        })?;
 
     tracing::info!(
         "Flushed {} alerts to topic {} in {} ms",
-        alerts.len(),
+        enqueued,
         topic,
         start_flush.elapsed().as_millis()
     );
 
-    Ok(alerts.len())
+    Ok(enqueued)
 }
 
 /// Recursively checks if a given field is used in a MongoDB aggregation stage.
@@ -866,6 +891,8 @@ pub enum FilterWorkerError {
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
     KafkaConfigMissing(Survey),
+    #[error("invalid kafka producer topic_partitions: {0}. Must be > 0")]
+    InvalidTopicPartitions(i32),
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
     #[error("missing cutouts for candid {0}")]
@@ -916,6 +943,20 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
+
+    let output_topic_partitions = usize::try_from(config.kafka.producer.topic_partitions)
+        .ok()
+        .filter(|partitions| *partitions > 0)
+        .ok_or(FilterWorkerError::InvalidTopicPartitions(
+            config.kafka.producer.topic_partitions,
+        ))?;
+
+    let _ = initialize_topic(
+        &config.kafka.producer.server,
+        &output_topic,
+        output_topic_partitions,
+    )
+    .await?;
 
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
@@ -992,7 +1033,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         // Batch send all alerts with optimized Kafka producer batching
         if !alerts_output.is_empty() {
-            send_alerts_batch(
+            let enqueued = match send_alerts_batch(
                 &alerts_output,
                 &schema,
                 &producer,
@@ -1000,19 +1041,24 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 config.kafka.producer.flush_timeout_ms,
             )
             .await
-            .inspect_err(|_| {
-                let attributes = &output_error_attrs;
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, attributes);
-                ALERT_PROCESSED.add(alerts_output.len() as u64, attributes);
-            })?;
+            {
+                Ok(enqueued) => enqueued,
+                Err(err) => {
+                    let failed = alerts_output.len().saturating_sub(err.enqueued);
+                    if err.enqueued > 0 {
+                        ALERT_PROCESSED.add(err.enqueued as u64, &ok_included_attrs);
+                    }
+                    if failed > 0 {
+                        ALERT_PROCESSED.add(failed as u64, &output_error_attrs);
+                    }
+                    ACTIVE.add(-1, &active_attrs);
+                    BATCH_PROCESSED.add(1, &output_error_attrs);
+                    return Err(err.source);
+                }
+            };
 
-            ALERT_PROCESSED.add(alerts_output.len() as u64, &ok_included_attrs);
-            trace!(
-                "Sent {} alerts to Kafka topic {}",
-                alerts_output.len(),
-                &output_topic
-            );
+            ALERT_PROCESSED.add(enqueued as u64, &ok_included_attrs);
+            trace!("Sent {} alerts to Kafka topic {}", enqueued, &output_topic);
         }
 
         ACTIVE.add(-1, &active_attrs);

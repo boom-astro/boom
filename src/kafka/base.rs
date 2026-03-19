@@ -14,11 +14,11 @@ use std::sync::LazyLock;
 use indicatif::ProgressBar;
 use opentelemetry::{metrics::Counter, KeyValue};
 use rdkafka::{
-    admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
+    admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer},
-    error::{KafkaError, KafkaResult},
+    error::{KafkaError, KafkaResult, RDKafkaErrorCode},
     message::Message,
     producer::{FutureProducer, FutureRecord, Producer},
     TopicPartitionList,
@@ -110,29 +110,93 @@ pub async fn initialize_topic(
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
 
-    let nb_partitions = match check_kafka_topic_partitions(
+    let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
+
+    let mut nb_partitions = check_kafka_topic_partitions(
         bootstrap_servers,
         topic_name,
         "producer-topic-check",
         None,
         None,
-    )? {
+    )?;
+
+    // Kafka metadata may briefly report a topic with 0 partitions during startup races.
+    if nb_partitions == Some(0) {
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            nb_partitions = check_kafka_topic_partitions(
+                bootstrap_servers,
+                topic_name,
+                "producer-topic-check",
+                None,
+                None,
+            )?;
+            if nb_partitions != Some(0) {
+                break;
+            }
+        }
+    }
+
+    let nb_partitions = match nb_partitions {
         Some(nb_partitions) => {
-            if nb_partitions != expected_nb_partitions {
+            if nb_partitions == 0 {
                 warn!(
-                    "Topic {} exists but has {} partitions instead of expected {}",
+                    "Topic {} metadata reported 0 partitions; skipping partition reconciliation",
+                    topic_name
+                );
+                return Ok(0);
+            }
+
+            if nb_partitions < expected_nb_partitions {
+                info!(
+                    "Increasing topic {} partitions from {} to {}",
                     topic_name, nb_partitions, expected_nb_partitions
                 );
+                let partition_results = admin_client
+                    .create_partitions(
+                        &[NewPartitions::new(topic_name, expected_nb_partitions)],
+                        &opts,
+                    )
+                    .await?;
+
+                for result in partition_results {
+                    if let Err((_topic, code)) = result {
+                        if code == RDKafkaErrorCode::InvalidPartitions {
+                            // Another worker likely reconciled this topic concurrently.
+                            debug!(
+                                "Ignoring concurrent create_partitions race for {}",
+                                topic_name
+                            );
+                            continue;
+                        }
+                        return Err(KafkaError::AdminOp(code));
+                    }
+                }
+
+                check_kafka_topic_partitions(
+                    bootstrap_servers,
+                    topic_name,
+                    "producer-topic-check",
+                    None,
+                    None,
+                )?
+                .unwrap_or(nb_partitions)
+            } else {
+                if nb_partitions > expected_nb_partitions {
+                    warn!(
+                        "Topic {} exists with {} partitions, greater than expected {} (cannot decrease)",
+                        topic_name, nb_partitions, expected_nb_partitions
+                    );
+                }
+                nb_partitions
             }
-            nb_partitions
         }
         None => {
-            let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
             info!(
                 "Creating topic {} with {} partitions...",
                 topic_name, expected_nb_partitions
             );
-            admin_client
+            let create_results = admin_client
                 .create_topics(
                     &[NewTopic::new(
                         topic_name,
@@ -142,6 +206,24 @@ pub async fn initialize_topic(
                     &opts,
                 )
                 .await?;
+
+            for result in create_results {
+                if let Err((_topic, code)) = result {
+                    if code == RDKafkaErrorCode::TopicAlreadyExists {
+                        // Another worker likely created it concurrently.
+                        return Ok(check_kafka_topic_partitions(
+                            bootstrap_servers,
+                            topic_name,
+                            "producer-topic-check",
+                            None,
+                            None,
+                        )?
+                        .unwrap_or(0));
+                    }
+                    return Err(KafkaError::AdminOp(code));
+                }
+            }
+
             info!(
                 "Topic {} created successfully with {} partitions",
                 topic_name, expected_nb_partitions
