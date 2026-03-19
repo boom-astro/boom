@@ -57,7 +57,7 @@ jobs:
       - name: Run test
         run: uv run tests/throughput/run.py
           --timeout 600
-          --n-alert-workers=6
+          --n-alert-workers=7
           --n-enrichment-workers=5
           --n-filter-workers=2
       - name: Upload logs (including wall time) as artifact
