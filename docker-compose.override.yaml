@@ -43,6 +43,25 @@ services:
   scheduler-ztf:
     env_file:
       - .env
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /app
+    command: ["cargo", "watch", "-x", "run --bin scheduler -- ztf --config /app/config.yaml"]
+    volumes:
+      - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+      - ${PWD}/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
   scheduler-lsst:
     env_file:
       - .env
@@ -84,6 +103,26 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
     ports:
       - "4000:4000"
+  consumer-ztf:
+    env_file:
+      - .env
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /app
+    command: ["cargo", "watch", "-x", "run --bin kafka_consumer -- ztf --programids public --config /app/config.yaml"]
+    volumes:
+      - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+      - ${PWD}/config.yaml:/app/config.yaml
   otel-collector:
     ports:
       - "4317:4317"   # OTLP gRPC receiver (from Rust OTLP exporter)

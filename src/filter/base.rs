@@ -845,6 +845,11 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
+    let survey = input_queue
+        .split('_')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
 
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
@@ -853,30 +858,40 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let active_attrs = [worker_id_attr.clone()];
-    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let survey_attr = KeyValue::new("survey", survey);
+    let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
+    let ok_attrs = [
+        worker_id_attr.clone(),
+        survey_attr.clone(),
+        KeyValue::new("status", "ok"),
+    ];
     let ok_included_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "included"),
     ];
     let ok_excluded_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "excluded"),
     ];
     let input_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
     let processing_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
     let output_error_attrs = [
         worker_id_attr,
+        survey_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "kafka_send"),
     ];

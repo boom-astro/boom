@@ -72,22 +72,35 @@ code.
 
 ### Start services for local development
 
-1. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode
-   using Docker, with the provided `docker-compose.yaml` file:
-    ```bash
-    docker compose --profile api up -d
-    ```
-    This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
-    *To check if the containers are running and healthy, run `docker ps`.*
+Bring up the local dev stack with:
 
-    **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+```bash
+make dev
+```
 
-2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
-    ```bash
-    cargo build --release
-    ```
+This starts `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
+the supporting Docker services they need.
 
-## Running BOOM:
+## Running BOOM
+
+### Local dev pipeline (recommended)
+
+For local development, use:
+
+```bash
+make dev
+```
+
+This brings up the hot-reloading API, ZTF consumer, and ZTF scheduler.
+
+To produce alerts for testing, run:
+
+```bash
+make produce-ztf
+```
+
+If you change the producer date or program, make sure the consumer is reading
+the same topic date/program combination.
 
 ### Alert Production (not required for production use)
 

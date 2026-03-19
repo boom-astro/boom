@@ -1424,29 +1424,35 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let active_attrs = [worker_id_attr.clone()];
+    let survey_attr = KeyValue::new("survey", stream_name.clone());
+    let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
     let ok_added_attrs = vec![
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "added"),
     ];
     let ok_exists_attrs = vec![
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "exists"),
     ];
     let input_error_attrs = vec![
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
     let processing_error_attrs = vec![
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
     let output_error_attrs = vec![
         worker_id_attr,
+        survey_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "output_queue"),
     ];

@@ -518,8 +518,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(alert_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "alert worker",
+          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "alert worker {{survey}}",
           "range": true,
           "refId": "B"
         },
@@ -529,8 +529,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "enrichment worker",
+          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "enrichment worker {{survey}}",
           "range": true,
           "refId": "C"
         },
@@ -540,8 +540,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(filter_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "filter worker",
+          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "filter worker {{survey}}",
           "range": true,
           "refId": "D"
         }
@@ -606,8 +606,57 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(alert_worker_active) or vector(0)",
-          "legendFormat": "alert",
+          "expr": "max by (survey, worker_type) (scheduler_worker_live) or vector(0)",
+          "legendFormat": "{{survey}} {{worker_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Running Workers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (survey) (scheduler_queue_depth{stage=\"packets\"}) or vector(0)",
+          "legendFormat": "{{survey}} packets",
           "range": true,
           "refId": "A"
         },
@@ -617,8 +666,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(enrichment_worker_active) or vector(0)",
-          "legendFormat": "enrichment",
+          "expr": "max by (survey) (scheduler_queue_depth{stage=\"packets_temp\"}) or vector(0)",
+          "legendFormat": "{{survey}} packets_temp",
           "range": true,
           "refId": "B"
         },
@@ -628,8 +677,243 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(filter_worker_active) or vector(0)",
-          "legendFormat": "filter",
+          "expr": "max by (survey) (scheduler_queue_depth{stage=\"enrichment\"}) or vector(0)",
+          "legendFormat": "{{survey}} enrichment",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (survey) (scheduler_queue_depth{stage=\"filter\"}) or vector(0)",
+          "legendFormat": "{{survey}} filter",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Valkey Queue Depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_data_size) or vector(0)",
+          "legendFormat": "data",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_storage_size) or vector(0)",
+          "legendFormat": "storage",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_index_size) or vector(0)",
+          "legendFormat": "index",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_total_size) or vector(0)",
+          "legendFormat": "total",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "MongoDB Storage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_objects) or vector(0)",
+          "legendFormat": "objects",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_collections) or vector(0)",
+          "legendFormat": "collections",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(scheduler_mongodb_indexes) or vector(0)",
+          "legendFormat": "indexes",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "MongoDB Logical Stats",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (alert_worker_active) or vector(0)",
+          "legendFormat": "alert {{survey}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (enrichment_worker_active) or vector(0)",
+          "legendFormat": "enrichment {{survey}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (filter_worker_active) or vector(0)",
+          "legendFormat": "filter {{survey}}",
           "range": true,
           "refId": "C"
         }
@@ -653,9 +937,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 22
+        "w": 12,
+        "x": 12,
+        "y": 38
       },
       "id": 9,
       "options": {
@@ -726,6 +1010,6 @@
   "timezone": "",
   "title": "BOOM Observability",
   "uid": "boom-overview",
-  "version": 2,
+  "version": 6,
   "weekStart": ""
 }

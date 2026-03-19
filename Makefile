@@ -1,6 +1,10 @@
 .PHONY: dev
 dev:
-	docker compose --profile api up --build
+	docker compose --profile dev up --build
+
+.PHONY: produce-ztf
+produce-ztf:
+	cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092
 
 .PHONY: api-dev
 api-dev:

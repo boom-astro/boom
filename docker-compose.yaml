@@ -175,7 +175,7 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
     profiles:
       - prod
-      - api
+      - dev
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
