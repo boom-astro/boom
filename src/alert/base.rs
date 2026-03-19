@@ -677,6 +677,9 @@ where
     binary.serialize(serializer)
 }
 
+/// Convert a Julian Date (JD) to a normalized u64 bit representation for consistent hashing and deduplication.
+/// This function normalizes -0.0 to 0.0 and all NaN values to a single representation
+/// to ensure that equivalent time values hash to the same value.
 fn to_bits_normalized(jd: f64) -> u64 {
     let mut bits = jd.to_bits();
     // Normalize -0.0 and NaN to ensure consistent hashing and deduplication
@@ -689,9 +692,14 @@ fn to_bits_normalized(jd: f64) -> u64 {
 }
 
 pub trait TimeSeries {
+    /// Return the time value of this TimeSeries point as a Julian Date (JD).
     fn time(&self) -> f64;
 
-    fn validate_strictly_increasing(
+    /// Validate that a TimeSeries slice is strictly monotonically increasing by time, and contains
+    /// only finite time values.
+    /// Returns an error if the timeseries is invalid, with a message that includes the provided series
+    /// name for easier debugging.
+    fn validate_monotonic_increasing(
         timeseries: &[Self],
         series_name: &str,
     ) -> Result<(), AlertError>
@@ -731,7 +739,8 @@ pub trait TimeSeries {
         Ok(())
     }
 
-    // In-place sort+dedup, by timestamp
+    /// Sanitize a TimeSeries vector by sorting it by time, deduplicating any points with the same
+    /// time (keeping the first occurrence),and removing any points with non-finite time values.
     fn sanitize_timeseries(timeseries: &mut Vec<Self>)
     where
         Self: Sized,
@@ -741,6 +750,11 @@ pub trait TimeSeries {
         timeseries.retain(|point| point.time().is_finite());
     }
 
+    /// Prepare a timeseries update by merging new data with existing data, ensuring the
+    /// result is strictly increasing by time and contains no duplicate time values.
+    /// Returns a tuple of (prepared_data, needs_sorting) where prepared_data is the merged
+    /// and deduplicated data ready for insertion, and needs_sorting indicates whether the
+    /// prepared data needs to be sorted before insertion (it can be safely appended if false).
     fn prepare_timeseries_update(
         new_data: &[Self],
         existing_data: &[LightcurveJdOnly],
@@ -750,7 +764,7 @@ pub trait TimeSeries {
         Self: Sized + serde::Serialize,
     {
         // Validate existing data is also strictly increasing, to ensure the correctness of the merge logic below.
-        LightcurveJdOnly::validate_strictly_increasing(existing_data, series_name).inspect_err(
+        LightcurveJdOnly::validate_monotonic_increasing(existing_data, series_name).inspect_err(
             |error| {
                 warn!(
                     ?error,
@@ -760,7 +774,7 @@ pub trait TimeSeries {
         )?;
 
         // Validate new data is strictly increasing, which allows for optimizations in the merge logic below.
-        Self::validate_strictly_increasing(new_data, series_name).inspect_err(|error| {
+        Self::validate_monotonic_increasing(new_data, series_name).inspect_err(|error| {
             warn!(
                 ?error,
                 "prepare_timeseries_update rejected new {} input", series_name
@@ -829,6 +843,7 @@ impl TimeSeries for LightcurveJdOnly {
         self.jd
     }
 }
+
 #[cfg(test)]
 mod timeseries_tests {
     use super::{AlertError, LightcurveJdOnly, TimeSeries};
@@ -881,19 +896,19 @@ mod timeseries_tests {
     }
 
     #[test]
-    fn validate_strictly_increasing_accepts_strictly_increasing_input() {
+    fn validate_monotonic_increasing_accepts_strictly_increasing_input() {
         let data = vec![point(1.0, 1), point(2.0, 2), point(3.0, 3)];
-        let result = TestPoint::validate_strictly_increasing(&data, "test_series");
+        let result = TestPoint::validate_monotonic_increasing(&data, "test_series");
         assert!(result.is_ok());
     }
 
     #[test]
-    fn validate_strictly_increasing_rejects_equal_or_decreasing_values() {
+    fn validate_monotonic_increasing_rejects_equal_or_decreasing_values() {
         let dup = vec![point(1.0, 1), point(1.0, 2)];
         let dec = vec![point(2.0, 1), point(1.0, 2)];
 
-        let dup_err = TestPoint::validate_strictly_increasing(&dup, "test_series");
-        let dec_err = TestPoint::validate_strictly_increasing(&dec, "test_series");
+        let dup_err = TestPoint::validate_monotonic_increasing(&dup, "test_series");
+        let dec_err = TestPoint::validate_monotonic_increasing(&dec, "test_series");
 
         assert!(matches!(
             dup_err,
@@ -906,12 +921,12 @@ mod timeseries_tests {
     }
 
     #[test]
-    fn validate_strictly_increasing_rejects_non_finite_values() {
+    fn validate_monotonic_increasing_rejects_non_finite_values() {
         let first_nan = vec![point(f64::NAN, 1), point(2.0, 2)];
         let inner_inf = vec![point(1.0, 1), point(f64::INFINITY, 2)];
 
-        let first_err = TestPoint::validate_strictly_increasing(&first_nan, "test_series");
-        let inner_err = TestPoint::validate_strictly_increasing(&inner_inf, "test_series");
+        let first_err = TestPoint::validate_monotonic_increasing(&first_nan, "test_series");
+        let inner_err = TestPoint::validate_monotonic_increasing(&inner_inf, "test_series");
 
         assert!(matches!(
             first_err,
@@ -1027,7 +1042,7 @@ mod timeseries_tests {
     #[test]
     fn validate_lightcurve_jd_only_accepts_strictly_increasing_input() {
         let data = existing(&[1.0, 2.0, 3.0]);
-        assert!(LightcurveJdOnly::validate_strictly_increasing(&data, "existing_series").is_ok());
+        assert!(LightcurveJdOnly::validate_monotonic_increasing(&data, "existing_series").is_ok());
     }
 
     #[test]
@@ -1036,11 +1051,11 @@ mod timeseries_tests {
         let unsorted = existing(&[2.0, 1.0]);
 
         assert!(matches!(
-            LightcurveJdOnly::validate_strictly_increasing(&dup, "existing_series"),
+            LightcurveJdOnly::validate_monotonic_increasing(&dup, "existing_series"),
             Err(AlertError::InvalidTimeseriesInput(_))
         ));
         assert!(matches!(
-            LightcurveJdOnly::validate_strictly_increasing(&unsorted, "existing_series"),
+            LightcurveJdOnly::validate_monotonic_increasing(&unsorted, "existing_series"),
             Err(AlertError::InvalidTimeseriesInput(_))
         ));
     }
@@ -1184,6 +1199,9 @@ pub trait AlertWorker {
         Ok(matches)
     }
 
+    /// Update the alert auxiliary collection (object-level table) with new survey matches,
+    /// and adding new lightcurve points to the existing ones, while ensuring that the lightcurves
+    /// remains strictly increasing by time and contains no duplicate time values.
     async fn db_only_aux_update<T, K>(
         object_id: &str,
         mut lc_set_update: Document,
@@ -1215,6 +1233,10 @@ pub trait AlertWorker {
         Ok(())
     }
 
+    /// Add a new prepared lightcurve update to the push_updates document for the auxiliary update.
+    /// The prepared lightcurve update is a tuple of (new_docs, need_sort) where new_docs is the vector
+    /// of new lightcurve points to add, and need_sort indicates whether the new_docs need to be sorted
+    /// before insertion (it can be safely appended if false).
     fn add_to_push_aux_update(
         push_updates: &mut Document,
         field_name: &str,
@@ -1230,6 +1252,10 @@ pub trait AlertWorker {
         }
     }
 
+    /// Make the filter document for the auxiliary update, which includes a version check to ensure that
+    /// the update is only applied if the version in the database matches that retrieved when the document
+    /// was fetched before preparing the update. This allows us to detect concurrent modifications to the
+    /// same document and fallback to a DB-only update if needed.
     fn make_find_doc_aux_update(object_id: &str, current_version: Option<i32>) -> Document {
         match current_version {
             Some(version) => doc! { "_id": object_id, "version": version },
@@ -1243,6 +1269,10 @@ pub trait AlertWorker {
         }
     }
 
+    /// Make the update document for the auxiliary update, which includes setting the new survey matches
+    /// and updated_at time, incrementing the version, and pushing any new lightcurve points.
+    /// The update document is structured to be used in an update_one operation with a filter
+    /// that includes a version check for concurrency control.
     fn make_filter_doc_aux_update<T>(
         push_updates: Document,
         survey_matches: &Option<T>,
@@ -1266,6 +1296,9 @@ pub trait AlertWorker {
         update_doc
     }
 
+    /// Finalize the auxiliary update by performing an update_one with a filter that includes a
+    /// version check for concurrency control. If the update fails due to a concurrent modification
+    /// (matched_count == 0), an error is returned to trigger a fallback to a DB-only update.
     async fn finalize_aux_update<T, K>(
         object_id: &str,
         push_updates: Document,
