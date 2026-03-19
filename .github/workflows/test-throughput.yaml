@@ -59,7 +59,7 @@ jobs:
           --timeout 600
           --n-alert-workers=7
           --n-enrichment-workers=5
-          --n-filter-workers=2
+          --n-filter-workers=3
       - name: Upload logs (including wall time) as artifact
         if: always()
         uses: actions/upload-artifact@v4
