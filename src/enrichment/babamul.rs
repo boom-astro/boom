@@ -8,14 +8,16 @@ use crate::enrichment::lsst::{
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
 use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
-use apache_avro::{AvroSchema, DeflateSettings, Schema, Writer};
+use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
     AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
 };
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
+use rdkafka::producer::Producer;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::instrument;
 
@@ -434,14 +436,15 @@ impl Babamul {
                 // .set("debug", "broker,topic,msg")
                 .set("bootstrap.servers", &kafka_producer_host)
                 .set("message.timeout.ms", "5000")
-                // it's best to increase batch.size if the cluster
-                // is running on another machine. Locally, lower means less
-                // latency, since we are not limited by network speed anyways
-                .set("batch.size", "16384")
-                .set("linger.ms", "5")
+                // generally, lower batch size means lower latency but also lower throughput
+                // here we use 1MB batch size to optimize for throughput since the enriched alerts can be
+                // quite large and we want to avoid splitting them across multiple batches if possible
+                .set("batch.size", "1048576")
+                .set("linger.ms", "50")
                 .set("acks", "1")
                 .set("max.in.flight.requests.per.connection", "5")
                 .set("retries", "3")
+                .set("compression.type", "zstd")
                 .create()
                 .expect("Failed to create Babamul Kafka producer");
 
@@ -479,6 +482,7 @@ impl Babamul {
         for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
     {
         let mut total_sent: usize = 0;
+        let nb_topics = alerts_by_topic.len();
         for (topic_name, alerts) in alerts_by_topic {
             tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
@@ -486,39 +490,31 @@ impl Babamul {
             self.check_topic(&topic_name).await?;
 
             // Convert alerts to Avro payloads
-            let mut payloads = Vec::new();
             for alert in &alerts {
                 let payload = self.alert_to_avro_bytes(to_enriched(alert))?;
-                payloads.push(payload);
-            }
-
-            tracing::debug!(
-                "Prepared {} payloads for topic {}",
-                payloads.len(),
-                topic_name
-            );
-
-            // Send all messages to Kafka without awaiting immediately (allow batching)
-            let mut send_futures = Vec::new();
-            for payload in &payloads {
                 let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
-                let future = self
-                    .kafka_producer
-                    .send(record, std::time::Duration::from_secs(15));
-                send_futures.push(future);
-            }
-
-            // Await all sends and map errors
-            for send_result in send_futures {
-                send_result.await.map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
+                    rdkafka::producer::FutureRecord::to(&topic_name).payload(&payload);
+                self.kafka_producer.send_result(record).map_err(|(e, _)| {
+                    EnrichmentWorkerError::Kafka(format!("Failed to enqueue Kafka record: {}", e))
                 })?;
                 total_sent += 1;
             }
         }
 
+        tracing::debug!(
+            "Prepared and sent {} payloads across {} topics",
+            total_sent,
+            nb_topics
+        );
+
         Ok(total_sent)
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn flush(&self, timeout: Duration) -> Result<(), EnrichmentWorkerError> {
+        self.kafka_producer
+            .flush(timeout)
+            .map_err(|e| EnrichmentWorkerError::Kafka(format!("Kafka flush failed: {}", e)))
     }
 
     #[instrument(skip_all, err)]
@@ -528,7 +524,7 @@ impl Babamul {
                 let mut writer = Writer::with_codec(
                     &self.lsst_avro_schema,
                     Vec::new(),
-                    apache_avro::Codec::Deflate(DeflateSettings::default()),
+                    apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
                 );
                 writer
                     .append_serdavro(a)
@@ -541,7 +537,7 @@ impl Babamul {
                 let mut writer = Writer::with_codec(
                     &self.ztf_avro_schema,
                     Vec::new(),
-                    apache_avro::Codec::Deflate(DeflateSettings::default()),
+                    apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
                 );
                 writer
                     .append_serdavro(a)
@@ -566,7 +562,7 @@ impl Babamul {
 
         // Create topic with retention if it does not exist; ignore "already exists" errors
         let retention_ms_string = self.topic_retention_ms.to_string();
-        let new_topic = NewTopic::new(topic_name, 1, TopicReplication::Fixed(1))
+        let new_topic = NewTopic::new(topic_name, 15, TopicReplication::Fixed(1))
             .set("retention.ms", &retention_ms_string)
             .set("cleanup.policy", "delete");
 
@@ -712,5 +708,15 @@ impl Babamul {
         // Send all grouped alerts using shared helper
         self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Ztf(a))
             .await
+    }
+}
+
+impl Drop for Babamul {
+    fn drop(&mut self) {
+        // Best-effort flush to reduce message loss if Babamul is dropped unexpectedly.
+        // The explicit worker shutdown path also calls flush and should be preferred.
+        if let Err(e) = self.flush(Duration::from_secs(10)) {
+            tracing::warn!("Babamul drop flush failed: {}", e);
+        }
     }
 }

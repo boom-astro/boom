@@ -10,7 +10,7 @@ use crate::{
 
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::{serde_avro_bytes, DeflateSettings, Writer};
+use apache_avro::{serde_avro_bytes, Writer};
 use apache_avro::{AvroSchema, Schema};
 use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
@@ -19,7 +19,7 @@ use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
 };
-use rdkafka::producer::FutureProducer;
+use rdkafka::producer::{FutureProducer, Producer};
 use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
@@ -199,7 +199,7 @@ where
     let mut writer = Writer::with_codec(
         schema,
         Vec::new(),
-        apache_avro::Codec::Deflate(DeflateSettings::default()),
+        apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
     );
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
@@ -231,14 +231,12 @@ pub async fn create_producer(
         // .set("debug", "broker,topic,msg")
         .set("bootstrap.servers", &kafka_producer_config.server)
         .set("message.timeout.ms", "5000")
-        // it's best to increase batch.size if the cluster
-        // is running on another machine. Locally, lower means less
-        // latency, since we are not limited by network speed anyways
-        .set("batch.size", "16384")
-        .set("linger.ms", "5")
+        .set("batch.size", "1048576")
+        .set("linger.ms", "50")
         .set("acks", "1")
         .set("max.in.flight.requests.per.connection", "5")
         .set("retries", "3")
+        .set("compression.type", "zstd")
         .create()?;
 
     Ok(producer)
@@ -265,13 +263,10 @@ pub async fn send_alert_to_kafka(
 
     let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
 
-    producer
-        .send(record, std::time::Duration::from_secs(30))
-        .await
-        .map_err(|(e, _)| {
-            warn!("Failed to send filter result to Kafka: {}", e);
-            e
-        })?;
+    producer.send_result(record).map_err(|(e, _)| {
+        warn!("Failed to send alert to Kafka topic {}: {}", topic, e);
+        FilterWorkerError::Kafka(e)
+    })?;
 
     Ok(())
 }
@@ -883,6 +878,9 @@ pub async fn run_filter_worker<T: FilterWorker>(
     loop {
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
+                // flush the producer before terminating to avoid losing messages
+                producer.flush(std::time::Duration::from_secs(10))?;
+                info!("termination signal received, shutting down gracefully");
                 break;
             }
             command_check_countdown = command_interval + 1;

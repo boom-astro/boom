@@ -1,7 +1,7 @@
 FROM rust:1.93.1-slim-trixie AS builder
 
 RUN apt-get update && \
-    apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config && \
+    apt-get install -y curl gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config && \
     apt-get autoremove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
