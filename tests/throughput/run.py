@@ -35,7 +35,7 @@ parser.add_argument(
 parser.add_argument(
     "--n-filter-workers",
     type=int,
-    default=1,
+    default=2,
     help="Number of filter workers to use for benchmarking.",
 )
 parser.add_argument(
