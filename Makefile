@@ -1,6 +1,6 @@
 .PHONY: dev
 dev:
-	docker compose --profile api up
+	docker compose --profile api up --build
 
 .PHONY: api-dev
 api-dev:

@@ -331,9 +331,9 @@ services:
       - --homepath=/usr/share/grafana
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_USERS_ALLOW_SIGN_UP: ${GRAFANA_USERS_ALLOW_SIGN_UP:-false}
-      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_AUTH_ANONYMOUS_ENABLED:-false}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_USERS_ALLOW_SIGN_UP: false
+      GF_AUTH_ANONYMOUS_ENABLED: false
     volumes:
       - grafana_data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
