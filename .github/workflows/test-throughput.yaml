@@ -58,7 +58,7 @@ jobs:
         run: uv run tests/throughput/run.py
           --timeout 600
           --n-alert-workers=7
-          --n-enrichment-workers=4
+          --n-enrichment-workers=3
           --n-filter-workers=2
       - name: Upload logs (including wall time) as artifact
         if: always()
