@@ -32,9 +32,10 @@ services:
     networks:
       - boom
     volumes:
-      - ${PWD}/tests/throughput/mongo-init.sh:/mongo-init.sh
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/mongo-init.sh:/mongo-init.sh
       - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
-      - ${PWD}/tests/throughput/cats150.filter.json:/cats150.filter.json
+      - ${PWD}/data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz:/boom_throughput.ZTF_alerts_aux.dump.gz
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/cats150.filter.json:/cats150.filter.json
     environment:
       - DB_NAME=boom-benchmarking
       - DB_ADD_URI=
@@ -96,8 +97,8 @@ services:
     image: boom/boom-benchmarking:latest
     hostname: producer
     build:
-      dockerfile: ${PWD}/Dockerfile
-      context: ${PWD}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
+      context: ${BOOM_REPO_ROOT:?Variable not set}
       pull: false
     command:
       - /app/kafka_producer
@@ -116,13 +117,13 @@ services:
     # Mount local data directory so we don't need to redownload
     volumes:
       - ${PWD}/data/alerts:/app/data/alerts
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   consumer:
     image: boom-astro/boom:latest
     hostname: consumer
     build:
-      dockerfile: ${PWD}/Dockerfile
-      context: ${PWD}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
+      context: ${BOOM_REPO_ROOT:?Variable not set}
       pull: false
     networks:
       - boom
@@ -140,13 +141,13 @@ services:
       mongo-init:
         condition: service_completed_successfully
     volumes:
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   scheduler:
     image: boom-astro/boom:latest
     hostname: scheduler
     build:
-      dockerfile: ${PWD}/Dockerfile
-      context: ${PWD}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
+      context: ${BOOM_REPO_ROOT:?Variable not set}
       pull: false
     command:
       - /app/scheduler
@@ -165,6 +166,6 @@ services:
       valkey:
         condition: service_healthy
     volumes:
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-      - ${PWD}/data/models:/app/data/models:ro
-      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/data/models:/app/data/models:ro
+      - ${BOOM_REPO_ROOT:?Variable not set}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
