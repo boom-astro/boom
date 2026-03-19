@@ -38,6 +38,13 @@ pub static PRODUCER_METER: LazyLock<Meter> =
 pub static SCHEDULER_METER: LazyLock<Meter> =
     LazyLock::new(|| opentelemetry::global::meter("boom-scheduler-meter"));
 
+/// Global OTel meter used to create instruments throughout the API
+/// application.
+///
+/// Only available after calling `init_metrics`.
+pub static API_METER: LazyLock<Meter> =
+    LazyLock::new(|| opentelemetry::global::meter("boom-api-meter"));
+
 /// The error type returned when initializing metrics.
 #[derive(Debug, thiserror::Error)]
 pub enum InitMetricsError {
@@ -56,8 +63,8 @@ pub enum InitMetricsError {
 /// This function is responsible for creating an exporter for OTel metrics, a
 /// meter provider based on that exporter, and then some global meters used to
 /// create instruments for different applications. The meters can be accessed
-/// from the static items `CONSUMER_METER`, `PRODUCER_METER`, and
-/// `SCHEDULER_METER`, which are only available after this function completes.
+/// from the static items `CONSUMER_METER`, `PRODUCER_METER`, `SCHEDULER_METER`,
+/// and `API_METER`, which are only available after this function completes.
 ///
 /// The exporter is an OTLP exporter designed to send metrics every 60 s over
 /// gRPC to the OTel Collector. The endpoint can be overridden with the standard

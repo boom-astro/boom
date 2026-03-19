@@ -778,7 +778,7 @@
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },
@@ -808,7 +808,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_queue_depth{stage=\"packets\"}) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets\"}[5m])) or vector(0)",
           "legendFormat": "{{survey}} packets",
           "range": true,
           "refId": "A"
@@ -819,7 +819,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_queue_depth{stage=\"packets_temp\"}) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets_temp\"}[5m])) or vector(0)",
           "legendFormat": "{{survey}} packets_temp",
           "range": true,
           "refId": "B"
@@ -830,7 +830,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_queue_depth{stage=\"enrichment\"}) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"enrichment\"}[5m])) or vector(0)",
           "legendFormat": "{{survey}} enrichment",
           "range": true,
           "refId": "C"
@@ -841,13 +841,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_queue_depth{stage=\"filter\"}) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"filter\"}[5m])) or vector(0)",
           "legendFormat": "{{survey}} filter",
           "range": true,
           "refId": "D"
         }
       ],
-      "title": "Valkey Queue Depth",
+      "title": "Valkey Queue Depth (peak over 5m)",
       "type": "timeseries"
     },
     {
@@ -1144,6 +1144,115 @@
       ],
       "title": "Worker Error Ratio by Reason",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(scheduler_kafka_alert_published_total{producer=\"filter_worker\"}[5m])) or (sum(increase(kafka_topic_partition_current_offset{topic=~\".*_alerts_results\"}[5m])) / 300) or vector(0)",
+          "legendFormat": "filter worker",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(scheduler_kafka_alert_published_total{producer=\"babamul\"}[5m])) or (sum(increase(kafka_topic_partition_current_offset{topic=~\"babamul\\\\..+\"}[5m])) / 300) or vector(0)",
+          "legendFormat": "babamul",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Kafka Messages Produced",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
+      "id": 17,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (api) (rate(api_request_total[5m])) or vector(0)",
+          "legendFormat": "{{api}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "API Requests",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -1163,6 +1272,6 @@
   "timezone": "",
   "title": "BOOM Observability",
   "uid": "boom-overview",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }

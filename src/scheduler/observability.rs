@@ -7,7 +7,7 @@ use std::{sync::LazyLock, time::Duration};
 
 use mongodb::bson::{doc, Bson, Decimal128, Document};
 use opentelemetry::{
-    metrics::{Gauge, Meter},
+    metrics::{Counter, Gauge, Meter},
     KeyValue,
 };
 use redis::AsyncCommands;
@@ -86,6 +86,14 @@ static WORKER_TOTAL: LazyLock<Gauge<i64>> = LazyLock::new(|| {
         .build()
 });
 
+static KAFKA_ALERT_PUBLISHED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    scheduler_meter()
+        .u64_counter("scheduler.kafka.alert.published")
+        .with_unit("{alert}")
+        .with_description("Number of alerts published to Kafka by scheduler-owned producers.")
+        .build()
+});
+
 pub fn record_worker_pool_state(
     survey: &Survey,
     worker_type: &'static str,
@@ -98,6 +106,15 @@ pub fn record_worker_pool_state(
     ];
     WORKER_LIVE.record(i64::try_from(live).unwrap_or(i64::MAX), &attrs);
     WORKER_TOTAL.record(i64::try_from(total).unwrap_or(i64::MAX), &attrs);
+}
+
+pub fn record_kafka_alert_published(producer: &'static str, survey: &str, topic: &str, count: u64) {
+    let attrs = [
+        KeyValue::new("producer", producer),
+        KeyValue::new("survey", survey.to_string()),
+        KeyValue::new("topic", topic.to_string()),
+    ];
+    KAFKA_ALERT_PUBLISHED.add(count, &attrs);
 }
 
 pub fn spawn_observability_poller(config: AppConfig, survey: Survey) -> JoinHandle<()> {

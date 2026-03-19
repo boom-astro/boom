@@ -1,6 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
+    scheduler::record_kafka_alert_published,
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -858,7 +859,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let survey_attr = KeyValue::new("survey", survey);
+    let survey_attr = KeyValue::new("survey", survey.clone());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
     let ok_attrs = [
         worker_id_attr.clone(),
@@ -947,6 +948,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 &alert.candid,
                 &output_topic
             );
+            record_kafka_alert_published("filter_worker", &survey, &output_topic, 1);
             // Incrementing by alerts_output.len() outside this loop may be more
             // efficient, but incrementing by 1 here is more accurate.
             ALERT_PROCESSED.add(1, &ok_included_attrs);

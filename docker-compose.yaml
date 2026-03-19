@@ -158,6 +158,7 @@ services:
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides (these have defaults in config.yaml)
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
       BOOM_DATABASE__HOST: mongo
