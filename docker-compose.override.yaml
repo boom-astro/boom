@@ -43,6 +43,8 @@ services:
   scheduler-ztf:
     env_file:
       - .env
+    environment:
+      BOOM_KAFKA__PRODUCER__SERVER: broker:29092
     profiles:
       - dev
     build:
@@ -106,6 +108,8 @@ services:
   consumer-ztf:
     env_file:
       - .env
+    environment:
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: broker:29092
     profiles:
       - dev
     build:
@@ -113,7 +117,7 @@ services:
       dockerfile: Dockerfile
       target: dev
     working_dir: /app
-    command: ["cargo", "watch", "-x", "run --bin kafka_consumer -- ztf --programids public --config /app/config.yaml"]
+    command: ["cargo", "watch", "-x", "run --bin kafka_consumer -- ztf 20240617 --programids public --config /app/config.yaml"]
     volumes:
       - ./src:/app/src
       - ./apache-avro-macros:/app/apache-avro-macros

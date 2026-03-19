@@ -557,6 +557,159 @@
       "fieldConfig": {
         "defaults": {
           "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(kafka_consumer_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "kafka consumer (total)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "alert worker {{survey}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "enrichment {{survey}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "filter {{survey}}",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Throughput by Stage (alerts/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(kafka_consumer_alert_processed_total[5m])) - sum(rate(alert_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "consumer → alert (backlog growth)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(alert_worker_alert_processed_total[5m])) - sum(rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "alert → enrichment (backlog growth)",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(enrichment_worker_alert_processed_total[5m])) - sum(rate(filter_worker_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "enrichment → filter (backlog growth)",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Bottleneck Analysis (net backlog growth)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
             "mode": "thresholds"
           },
           "thresholds": {
@@ -584,7 +737,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 30
       },
       "id": 8,
       "options": {
@@ -633,7 +786,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "id": 10,
       "options": {
@@ -715,7 +868,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 38
       },
       "id": 11,
       "options": {
@@ -797,7 +950,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 46
       },
       "id": 12,
       "options": {
@@ -868,7 +1021,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 54
       },
       "id": 13,
       "options": {
@@ -939,7 +1092,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 54
       },
       "id": 9,
       "options": {
@@ -1010,6 +1163,6 @@
   "timezone": "",
   "title": "BOOM Observability",
   "uid": "boom-overview",
-  "version": 6,
+  "version": 7,
   "weekStart": ""
 }
