@@ -1,7 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
-    kafka::initialize_topic,
+    kafka::ensure_topic,
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -951,10 +951,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
             config.kafka.producer.topic_partitions,
         ))?;
 
-    let _ = initialize_topic(
+    let _ = ensure_topic(
         &config.kafka.producer.server,
         &output_topic,
         output_topic_partitions,
+        None,
+        None,
     )
     .await?;
 

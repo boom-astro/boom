@@ -9,12 +9,15 @@ use crate::{
     },
 };
 
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
 use indicatif::ProgressBar;
 use opentelemetry::{metrics::Counter, KeyValue};
 use rdkafka::{
-    admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
+    admin::{
+        AdminClient, AdminOptions, AlterConfig, NewPartitions, NewTopic, ResourceSpecifier,
+        TopicReplication,
+    },
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer},
@@ -101,10 +104,12 @@ pub fn check_kafka_topic_partitions(
 }
 
 #[instrument(skip_all, err)]
-pub async fn initialize_topic(
+pub async fn ensure_topic(
     bootstrap_servers: &str,
     topic_name: &str,
     expected_nb_partitions: usize,
+    retention_ms: Option<i64>,
+    cleanup_policy: Option<&str>,
 ) -> Result<usize, KafkaError> {
     let admin_client: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
@@ -231,6 +236,31 @@ pub async fn initialize_topic(
             expected_nb_partitions
         }
     };
+    if retention_ms.is_some() || cleanup_policy.is_some() {
+        let mut entries: HashMap<&str, &str> = HashMap::new();
+        let retention_ms_string = retention_ms.map(|v| v.to_string());
+
+        if let Some(ref retention_ms_string) = retention_ms_string {
+            entries.insert("retention.ms", retention_ms_string.as_str());
+        }
+        if let Some(cleanup_policy) = cleanup_policy {
+            entries.insert("cleanup.policy", cleanup_policy);
+        }
+
+        if !entries.is_empty() {
+            let alter = AlterConfig {
+                specifier: ResourceSpecifier::Topic(topic_name),
+                entries,
+            };
+            let alter_results = admin_client.alter_configs(&[alter], &opts).await?;
+            for result in alter_results {
+                if let Err((_spec, code)) = result {
+                    return Err(KafkaError::AdminOp(code));
+                }
+            }
+        }
+    }
+
     Ok(nb_partitions)
 }
 
@@ -375,10 +405,12 @@ pub trait AlertProducer {
             .create()
             .expect("Producer creation error");
 
-        let _ = initialize_topic(
+        let _ = ensure_topic(
             &self.server_url(),
             &topic_name,
             self.default_nb_partitions(),
+            None,
+            None,
         )
         .await?;
 
