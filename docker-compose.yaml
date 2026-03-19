@@ -134,6 +134,17 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    hostname: kafka-exporter
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks:
+      - boom
+    command:
+      - --kafka.server=broker:29092
+    restart: always
   api:
     image: boom-astro/boom:latest
     hostname: api
@@ -199,6 +210,7 @@ services:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -224,6 +236,7 @@ services:
       BOOM_KAFKA__CONSUMER__LSST__GROUP_ID: ${BOOM_KAFKA__CONSUMER__LSST__GROUP_ID:?BOOM_KAFKA__CONSUMER__LSST__GROUP_ID must be set}
       BOOM_KAFKA__CONSUMER__LSST__USERNAME: ${BOOM_KAFKA__CONSUMER__LSST__USERNAME:?BOOM_KAFKA__CONSUMER__LSST__USERNAME must be set}
       BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${BOOM_KAFKA__CONSUMER__LSST__PASSWORD:?BOOM_KAFKA__CONSUMER__LSST__PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -246,6 +259,7 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -271,6 +285,7 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -327,17 +342,23 @@ services:
     restart: always
   grafana:
     image: grafana/grafana:11.5.2
+    entrypoint:
+      - bash
+      - /scripts/grafana-dashboard-provisioning.sh
     command:
-      - --homepath=/usr/share/grafana
+      - /run.sh
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: false
       GF_AUTH_ANONYMOUS_ENABLED: false
+      # Dashboards are read-only by default in production; set to true in docker-compose.override.yaml for dev
+      GRAFANA_DASHBOARD_EDITABLE: false
     volumes:
       - grafana_data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./scripts/grafana-dashboard-provisioning.sh:/scripts/grafana-dashboard-provisioning.sh:ro
     expose:
       - "3000"
     networks:

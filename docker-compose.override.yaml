@@ -92,9 +92,21 @@ services:
   prometheus:
     ports:
       - "9090:9090"
+  kafka-exporter:
+    ports:
+      - "9308:9308"
   grafana:
+    environment:
+      # Enable dashboard editing in dev mode
+      GRAFANA_DASHBOARD_EDITABLE: "true"
     ports:
       - "3000:3000"
+    volumes:
+      # Override to make provisioning directory writable so the dashboard provisioning script can configure it
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./scripts/grafana-dashboard-provisioning.sh:/scripts/grafana-dashboard-provisioning.sh:ro
 
 networks:
   traefik-public:
