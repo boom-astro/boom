@@ -1,4 +1,5 @@
 use crate::{
+    conf::{AppConfig, BoomConfigError, KafkaProducerConfig},
     kafka::base::{AlertConsumer, AlertProducer},
     utils::{data::count_files_in_dir, enums::Survey},
 };
@@ -37,18 +38,29 @@ impl AlertConsumer for DecamAlertConsumer {
 pub struct DecamAlertProducer {
     date: chrono::NaiveDate,
     limit: i64,
-    server_url: String,
+    kafka_producer_config: KafkaProducerConfig,
     verbose: bool,
 }
 
 impl DecamAlertProducer {
-    pub fn new(date: chrono::NaiveDate, limit: i64, server_url: &str, verbose: bool) -> Self {
-        DecamAlertProducer {
+    pub fn new(
+        date: chrono::NaiveDate,
+        limit: i64,
+        config_path: &str,
+        server_url: Option<&str>,
+        verbose: bool,
+    ) -> Result<Self, BoomConfigError> {
+        let mut kafka_producer_config = AppConfig::from_path(config_path)?.kafka.producer;
+        if let Some(server_url) = server_url {
+            kafka_producer_config.server = server_url.to_string();
+        }
+
+        Ok(DecamAlertProducer {
             date,
             limit,
-            server_url: server_url.to_string(),
+            kafka_producer_config,
             verbose,
-        }
+        })
     }
 }
 
@@ -60,8 +72,12 @@ impl AlertProducer for DecamAlertProducer {
     fn data_directory(&self) -> String {
         format!("data/alerts/decam/{}", self.date.format("%Y%m%d"))
     }
+    fn kafka_producer_config(&self) -> KafkaProducerConfig {
+        self.kafka_producer_config.clone()
+    }
+
     fn server_url(&self) -> String {
-        self.server_url.clone()
+        self.kafka_producer_config.server.clone()
     }
     fn limit(&self) -> i64 {
         self.limit

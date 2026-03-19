@@ -1,13 +1,13 @@
 //! Babamul is an optional component of ZTF and LSST enrichment pipelines,
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
-use crate::conf::AppConfig;
+use crate::conf::{AppConfig, KafkaProducerConfig};
 use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
-use crate::kafka::ensure_topic;
+use crate::kafka::{create_future_producer, ensure_topic};
 use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
@@ -444,44 +444,25 @@ impl Babamul {
     pub async fn new(config: &AppConfig) -> Result<Self, EnrichmentWorkerError> {
         // Read Kafka producer config from kafka: producer in the config
         let kafka_producer_host = config.kafka.producer.server.clone();
-        let producer_message_timeout_ms = config.babamul.producer_message_timeout_ms.to_string();
-        let producer_batch_size = config.babamul.producer_batch_size.to_string();
-        let producer_linger_ms = config.babamul.producer_linger_ms.to_string();
-        let producer_max_in_flight_requests_per_connection = config
-            .babamul
-            .producer_max_in_flight_requests_per_connection
-            .to_string();
-        let producer_retries = config.babamul.producer_retries.to_string();
+        let kafka_producer_config = KafkaProducerConfig {
+            server: kafka_producer_host.clone(),
+            topic_partitions: config.babamul.topic_partitions,
+            message_timeout_ms: config.babamul.producer_message_timeout_ms,
+            batch_size: config.babamul.producer_batch_size,
+            linger_ms: config.babamul.producer_linger_ms,
+            acks: config.babamul.producer_acks.clone(),
+            max_in_flight_requests_per_connection: config
+                .babamul
+                .producer_max_in_flight_requests_per_connection,
+            retries: config.babamul.producer_retries,
+            compression_type: config.babamul.producer_compression_type.clone(),
+            flush_timeout_ms: config.babamul.producer_flush_timeout_ms,
+        };
 
         // Create Kafka producer
-        let kafka_producer: rdkafka::producer::FutureProducer =
-            rdkafka::config::ClientConfig::new()
-                // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
-                // .set("debug", "broker,topic,msg")
-                .set("bootstrap.servers", &kafka_producer_host)
-                .set("message.timeout.ms", &producer_message_timeout_ms)
-                // it's best to increase batch.size if the cluster
-                // is running on another machine. Locally, lower means less
-                // latency, since we are not limited by network speed anyways
-                .set("batch.size", &producer_batch_size)
-                .set("linger.ms", &producer_linger_ms)
-                .set("acks", &config.babamul.producer_acks)
-                .set(
-                    "max.in.flight.requests.per.connection",
-                    &producer_max_in_flight_requests_per_connection,
-                )
-                .set("retries", &producer_retries)
-                .set(
-                    "compression.type",
-                    &config.babamul.producer_compression_type,
-                )
-                .create()
-                .map_err(|e| {
-                    EnrichmentWorkerError::Kafka(format!(
-                        "Failed to create Babamul Kafka producer: {}",
-                        e
-                    ))
-                })?;
+        let kafka_producer = create_future_producer(&kafka_producer_config).map_err(|e| {
+            EnrichmentWorkerError::Kafka(format!("Failed to create Babamul Kafka producer: {}", e))
+        })?;
 
         // Generate Avro schemas
         let lsst_avro_schema = BabamulLsstAlert::get_schema();

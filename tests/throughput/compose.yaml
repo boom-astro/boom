@@ -105,8 +105,6 @@ services:
       - ztf
       - "20250311"
       - public
-      - --server-url
-      - broker:29092
     environment:
       RUST_LOG: debug,ort=error
     networks:

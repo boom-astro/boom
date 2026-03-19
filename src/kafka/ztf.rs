@@ -1,4 +1,5 @@
 use crate::{
+    conf::{AppConfig, BoomConfigError, KafkaProducerConfig},
     kafka::base::{AlertConsumer, AlertProducer},
     utils::{
         data::{count_files_in_dir, download_to_file},
@@ -53,7 +54,7 @@ pub struct ZtfAlertProducer {
     limit: i64,
     partnership_archive_username: Option<String>,
     partnership_archive_password: Option<String>,
-    server_url: String,
+    kafka_producer_config: KafkaProducerConfig,
     verbose: bool,
     working_dir: String,
 }
@@ -63,9 +64,10 @@ impl ZtfAlertProducer {
         date: chrono::NaiveDate,
         limit: i64,
         program_id: ProgramId,
-        server_url: &str,
+        config_path: &str,
+        server_url: Option<&str>,
         verbose: bool,
-    ) -> Self {
+    ) -> Result<Self, BoomConfigError> {
         // if program_id > 1, check that we have a ZTF_PARTNERSHIP_ARCHIVE_USERNAME
         // and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD set as env variables
         let partnership_archive_username = match std::env::var("ZTF_PARTNERSHIP_ARCHIVE_USERNAME") {
@@ -82,16 +84,21 @@ impl ZtfAlertProducer {
             panic!("ZTF_PARTNERSHIP_ARCHIVE_USERNAME and ZTF_PARTNERSHIP_ARCHIVE_PASSWORD environment variables must be set for partnership program ID");
         }
 
-        ZtfAlertProducer {
+        let mut kafka_producer_config = AppConfig::from_path(config_path)?.kafka.producer;
+        if let Some(server_url) = server_url {
+            kafka_producer_config.server = server_url.to_string();
+        }
+
+        Ok(ZtfAlertProducer {
             date,
             limit,
             program_id,
             partnership_archive_username,
             partnership_archive_password,
-            server_url: server_url.to_string(),
+            kafka_producer_config,
             verbose,
             working_dir: ".".to_string(),
-        }
+        })
     }
 
     pub fn with_working_dir(self, working_dir: &str) -> Self {
@@ -124,8 +131,12 @@ impl AlertProducer for ZtfAlertProducer {
             self.date.format("%Y%m%d")
         )
     }
+    fn kafka_producer_config(&self) -> KafkaProducerConfig {
+        self.kafka_producer_config.clone()
+    }
+
     fn server_url(&self) -> String {
-        self.server_url.clone()
+        self.kafka_producer_config.server.clone()
     }
     fn limit(&self) -> i64 {
         self.limit

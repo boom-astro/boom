@@ -26,9 +26,11 @@ struct Cli {
     program_id: ProgramId,
     #[arg(long, help = "Limit the number of alerts produced")]
     limit: Option<i64>,
+    #[arg(long, default_value = "config.yaml", help = "Path to config file")]
+    config_path: String,
     #[arg(
         long,
-        help = "URL of the Kafka broker to produce to, defaults to localhost:9092"
+        help = "URL of the Kafka broker to produce to. Overrides the server URL specified in the config file."
     )]
     server_url: Option<String>,
 }
@@ -51,17 +53,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let program_id = args.program_id;
 
-    let server_url = args
-        .server_url
-        .unwrap_or_else(|| "localhost:9092".to_string());
+    let server_url = args.server_url.as_deref();
 
     match args.survey {
         Survey::Ztf => {
-            let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);
+            let producer = ZtfAlertProducer::new(
+                date,
+                limit,
+                program_id,
+                &args.config_path,
+                server_url,
+                true,
+            )?;
             producer.produce(None).await?;
         }
         Survey::Decam => {
-            let producer = DecamAlertProducer::new(date, limit, &server_url, true);
+            let producer =
+                DecamAlertProducer::new(date, limit, &args.config_path, server_url, true)?;
             producer.produce(None).await?;
         }
         _ => {

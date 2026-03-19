@@ -1,7 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
-    kafka::ensure_topic,
+    kafka::{create_future_producer, ensure_topic},
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -20,8 +20,8 @@ use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
 };
+use rdkafka::producer::FutureRecord;
 use rdkafka::producer::{FutureProducer, Producer};
-use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -223,34 +223,7 @@ pub fn alert_to_avro_bytes(alert: &Alert, schema: &Schema) -> Result<Vec<u8>, Fi
 pub async fn create_producer(
     kafka_producer_config: &conf::KafkaProducerConfig,
 ) -> Result<FutureProducer, FilterWorkerError> {
-    let message_timeout_ms = kafka_producer_config.message_timeout_ms.to_string();
-    let batch_size = kafka_producer_config.batch_size.to_string();
-    let linger_ms = kafka_producer_config.linger_ms.to_string();
-    let max_in_flight_requests_per_connection = kafka_producer_config
-        .max_in_flight_requests_per_connection
-        .to_string();
-    let retries = kafka_producer_config.retries.to_string();
-
-    let producer: FutureProducer = ClientConfig::new()
-        // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
-        // .set("debug", "broker,topic,msg")
-        .set("bootstrap.servers", &kafka_producer_config.server)
-        .set("message.timeout.ms", &message_timeout_ms)
-        // it's best to increase batch.size if the cluster
-        // is running on another machine. Locally, lower means less
-        // latency, since we are not limited by network speed anyways
-        .set("batch.size", &batch_size)
-        .set("linger.ms", &linger_ms)
-        .set("acks", &kafka_producer_config.acks)
-        .set(
-            "max.in.flight.requests.per.connection",
-            &max_in_flight_requests_per_connection,
-        )
-        .set("retries", &retries)
-        .set("compression.type", &kafka_producer_config.compression_type)
-        .create()?;
-
-    Ok(producer)
+    create_future_producer(kafka_producer_config).map_err(FilterWorkerError::Kafka)
 }
 
 /// Sends an alert to Kafka after encoding it to Avro format.

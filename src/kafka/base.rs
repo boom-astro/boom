@@ -103,6 +103,44 @@ pub fn check_kafka_topic_partitions(
     Ok(partition_ids.map(|ids| ids.len()))
 }
 
+/// Creates a Kafka FutureProducer from a KafkaProducerConfig.
+///
+/// This is the shared producer creation path used by filter workers,
+/// Babamul, and generic alert producers to keep settings consistent.
+#[instrument(skip_all, err)]
+pub fn create_future_producer(
+    kafka_producer_config: &conf::KafkaProducerConfig,
+) -> Result<FutureProducer, KafkaError> {
+    let message_timeout_ms = kafka_producer_config.message_timeout_ms.to_string();
+    let batch_size = kafka_producer_config.batch_size.to_string();
+    let linger_ms = kafka_producer_config.linger_ms.to_string();
+    let max_in_flight_requests_per_connection = kafka_producer_config
+        .max_in_flight_requests_per_connection
+        .to_string();
+    let retries = kafka_producer_config.retries.to_string();
+
+    let producer: FutureProducer = ClientConfig::new()
+        // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
+        // .set("debug", "broker,topic,msg")
+        .set("bootstrap.servers", &kafka_producer_config.server)
+        .set("message.timeout.ms", &message_timeout_ms)
+        // it's best to increase batch.size if the cluster
+        // is running on another machine. Locally, lower means less
+        // latency, since we are not limited by network speed anyways
+        .set("batch.size", &batch_size)
+        .set("linger.ms", &linger_ms)
+        .set("acks", &kafka_producer_config.acks)
+        .set(
+            "max.in.flight.requests.per.connection",
+            &max_in_flight_requests_per_connection,
+        )
+        .set("retries", &retries)
+        .set("compression.type", &kafka_producer_config.compression_type)
+        .create()?;
+
+    Ok(producer)
+}
+
 #[instrument(skip_all, err)]
 pub async fn ensure_topic(
     bootstrap_servers: &str,
@@ -320,6 +358,7 @@ pub fn count_messages(
 pub trait AlertProducer {
     fn topic_name(&self) -> String;
     fn data_directory(&self) -> String;
+    fn kafka_producer_config(&self) -> conf::KafkaProducerConfig;
     fn server_url(&self) -> String;
     fn limit(&self) -> i64;
     fn verbose(&self) -> bool {
@@ -331,8 +370,11 @@ pub trait AlertProducer {
         &self,
         topic: Option<String>,
     ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+        let kafka_producer_config = self.kafka_producer_config();
+        let producer_server = kafka_producer_config.server.clone();
+
         let topic_name = topic.unwrap_or_else(|| self.topic_name());
-        if let Some(total_messages) = count_messages(&self.server_url(), &topic_name)? {
+        if let Some(total_messages) = count_messages(&producer_server, &topic_name)? {
             // Topic exists, skip producing if it has the expected number of
             // messages. Count the number of Avro files in the data directory:
             if let Some(avro_count) = count_files_in_dir(&self.data_directory(), Some(&["avro"]))
@@ -374,7 +416,7 @@ pub trait AlertProducer {
             // The topic and data directory are inconsistent. Delete the topic
             // to start fresh:
             warn!("recreating topic {}", topic_name);
-            delete_topic(&self.server_url(), &topic_name).await?;
+            delete_topic(&producer_server, &topic_name).await?;
         }
 
         match self.download_alerts_from_archive().await {
@@ -389,30 +431,14 @@ pub trait AlertProducer {
         let verbose = self.verbose();
 
         info!("Initializing kafka alert producer");
-        let producer: FutureProducer = ClientConfig::new()
-            // Uncomment the following to get logs from kafka (RUST_LOG doesn't work):
-            // .set("debug", "broker,topic,msg")
-            .set("bootstrap.servers", &self.server_url())
-            .set("message.timeout.ms", "5000")
-            // it's best to increase batch.size if the cluster
-            // is running on another machine. Locally, lower means less
-            // latency, since we are not limited by network speed anyways
-            .set("batch.size", "16384")
-            .set("linger.ms", "5")
-            .set("acks", "1")
-            .set("max.in.flight.requests.per.connection", "5")
-            .set("retries", "3")
-            .create()
-            .expect("Producer creation error");
+        let producer = create_future_producer(&kafka_producer_config)?;
 
-        let _ = ensure_topic(
-            &self.server_url(),
-            &topic_name,
-            self.default_nb_partitions(),
-            None,
-            None,
-        )
-        .await?;
+        let topic_partitions = usize::try_from(kafka_producer_config.topic_partitions)
+            .ok()
+            .filter(|partitions| *partitions > 0)
+            .unwrap_or_else(|| self.default_nb_partitions());
+
+        let _ = ensure_topic(&producer_server, &topic_name, topic_partitions, None, None).await?;
 
         let data_folder = self.data_directory();
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
