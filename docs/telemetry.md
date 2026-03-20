@@ -29,7 +29,7 @@ Prometheus datasource and a starter dashboard (`BOOM Overview`). By default,
 credentials are `admin`/`admin`, but this can be overridden with
 `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD`.
 
-* [Kakfa consumer][kafka-consumer-queries]
+* [Kafka consumer][kafka-consumer-queries]
 * [Alert workers][alert-worker-queries]
 * [Enrichment workers][enrichment-worker-queries]
 * [Filter workers][filter-worker-queries]
