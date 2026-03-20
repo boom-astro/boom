@@ -562,7 +562,11 @@ impl Babamul {
 
         // Create topic with retention if it does not exist; ignore "already exists" errors
         let retention_ms_string = self.topic_retention_ms.to_string();
-        let new_topic = NewTopic::new(topic_name, 15, TopicReplication::Fixed(1))
+        let nb_partitions: i32 = std::env::var("KAFKA_NUM_PARTITIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
+        let new_topic = NewTopic::new(topic_name, nb_partitions, TopicReplication::Fixed(1))
             .set("retention.ms", &retention_ms_string)
             .set("cleanup.policy", "delete");
 

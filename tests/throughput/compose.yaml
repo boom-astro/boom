@@ -85,7 +85,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
-      KAFKA_NUM_PARTITIONS: 15
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-15}
       # Limit heap + use G1GC with fewer threads (auto-tuned based on heap size)
       KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
       KAFKA_OPTS: "-Djava.security.egd=file:/dev/./urandom"
