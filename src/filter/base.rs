@@ -252,7 +252,7 @@ pub async fn create_producer(
 /// * `topic` - The Kafka topic to which the alert will be sent.
 ///
 /// # Returns
-/// * `Result<(), FilterWorkerError>` - Returns Ok(()) if the alert is sent successfully, otherwise returns a FilterWorkerError.
+/// * `Result<DeliveryFuture, FilterWorkerError>` - Returns Ok(DeliveryFuture) if the alert is enqueued successfully, otherwise returns a FilterWorkerError.
 #[instrument(skip(alert, schema, producer), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub async fn send_alert_to_kafka(
     alert: &Alert,
@@ -933,9 +933,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
                     .await
                     .inspect_err(|_| {
-                        let attributes = &output_error_attrs;
-                        ACTIVE.add(-1, attributes);
-                        ALERT_PROCESSED.add(1, attributes);
+                        ACTIVE.add(-1, &active_attrs);
+                        ALERT_PROCESSED.add(1, &output_error_attrs);
                     })?,
             );
             total_enqueued += 1;
