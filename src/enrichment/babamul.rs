@@ -502,7 +502,7 @@ impl Babamul {
         }
 
         tracing::debug!(
-            "Prepared and sent {} payloads across {} topics",
+            "Enqueued total of {} alerts to {} topics",
             total_sent,
             nb_topics
         );
