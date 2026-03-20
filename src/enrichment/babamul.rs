@@ -481,8 +481,9 @@ impl Babamul {
     where
         for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
     {
-        let mut total_sent: usize = 0;
         let nb_topics = alerts_by_topic.len();
+        let mut total_enqueued: usize = 0;
+        let mut delivery_futures = Vec::new();
         for (topic_name, alerts) in alerts_by_topic {
             tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
 
@@ -494,16 +495,38 @@ impl Babamul {
                 let payload = self.alert_to_avro_bytes(to_enriched(alert))?;
                 let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
                     rdkafka::producer::FutureRecord::to(&topic_name).payload(&payload);
-                self.kafka_producer.send_result(record).map_err(|(e, _)| {
+                let result = self.kafka_producer.send_result(record).map_err(|(e, _)| {
                     EnrichmentWorkerError::Kafka(format!("Failed to enqueue Kafka record: {}", e))
                 })?;
-                total_sent += 1;
+                delivery_futures.push(result);
+                total_enqueued += 1;
             }
         }
 
         tracing::debug!(
             "Enqueued total of {} alerts to {} topics",
+            total_enqueued,
+            nb_topics
+        );
+
+        // Wait for all futures to complete and check for errors
+        let mut total_sent = 0;
+        let results = futures::future::join_all(delivery_futures).await;
+        for r in results {
+            let result = r.map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Failed to send Kafka record: {}", e))
+            })?;
+            if let Err((e, _)) = result {
+                tracing::error!("Failed to deliver Kafka record: {}", e);
+            } else {
+                total_sent += 1;
+            }
+        }
+
+        tracing::debug!(
+            "Successfully sent {}/{} alerts to {} topics",
             total_sent,
+            total_enqueued,
             nb_topics
         );
 
