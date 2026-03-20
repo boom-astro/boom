@@ -1,6 +1,6 @@
 .PHONY: dev
 dev:
-	docker compose --profile dev up --build
+	docker compose --profile dev up
 
 .PHONY: produce-ztf
 produce-ztf:
