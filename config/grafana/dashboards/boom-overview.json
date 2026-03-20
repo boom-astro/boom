@@ -88,257 +88,6 @@
         "x": 0,
         "y": 0
       },
-      "id": 7,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(kafka_consumer_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "alerts consumed",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "alert worker {{survey}}",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "enrichment worker {{survey}}",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "filter worker {{survey}}",
-          "range": true,
-          "refId": "D"
-        }
-      ],
-      "title": "BOOM Pipeline Throughput",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "ops"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 15,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(kafka_consumer_alert_processed_total[5m])) - sum(rate(alert_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "consumer → alert (backlog growth)",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(alert_worker_alert_processed_total[5m])) - sum(rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "alert → enrichment (backlog growth)",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(rate(enrichment_worker_alert_processed_total[5m])) - sum(rate(filter_worker_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "enrichment → filter (backlog growth)",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "title": "Bottleneck Analysis (net backlog growth)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "ops"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      },
       "id": 14,
       "options": {
         "legend": {
@@ -400,7 +149,7 @@
           "refId": "D"
         }
       ],
-      "title": "Throughput by Stage (alerts/s)",
+      "title": "Throughput by stage (alerts/s)",
       "type": "timeseries"
     },
     {
@@ -469,10 +218,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 5,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 0
       },
       "id": 8,
       "options": {
@@ -502,7 +251,127 @@
           "refId": "A"
         }
       ],
-      "title": "Running Workers",
+      "title": "Running workers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (alert_worker_active) or vector(0)",
+          "legendFormat": "alert {{survey}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (enrichment_worker_active) or vector(0)",
+          "legendFormat": "enrichment {{survey}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (survey) (filter_worker_active) or vector(0)",
+          "legendFormat": "filter {{survey}}",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Active workers",
       "type": "timeseries"
     },
     {
@@ -570,7 +439,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 8
       },
       "id": 10,
       "options": {
@@ -633,7 +502,7 @@
           "refId": "D"
         }
       ],
-      "title": "Valkey Queue Depth (peak over 5m)",
+      "title": "Valkey queue depth (peak over 5m)",
       "type": "timeseries"
     },
     {
@@ -693,7 +562,7 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "percentunit"
         },
         "overrides": []
       },
@@ -701,9 +570,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 10
       },
-      "id": 13,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [],
@@ -725,8 +594,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (alert_worker_active) or vector(0)",
-          "legendFormat": "alert {{survey}}",
+          "expr": "sum by (reason) (rate(alert_worker_alert_processed_total{status=\"error\"}[5m])) / clamp_min(sum(rate(alert_worker_alert_processed_total[5m])), 1e-9) or vector(0)",
+          "legendFormat": "alert {{reason}}",
           "range": true,
           "refId": "A"
         },
@@ -736,8 +605,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (enrichment_worker_active) or vector(0)",
-          "legendFormat": "enrichment {{survey}}",
+          "expr": "sum by (reason) (rate(enrichment_worker_alert_processed_total{status=\"error\"}[5m])) / clamp_min(sum(rate(enrichment_worker_alert_processed_total[5m])), 1e-9) or vector(0)",
+          "legendFormat": "enrichment {{reason}}",
           "range": true,
           "refId": "B"
         },
@@ -747,13 +616,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (filter_worker_active) or vector(0)",
-          "legendFormat": "filter {{survey}}",
+          "expr": "sum by (reason) (rate(filter_worker_alert_processed_total{status=\"error\"}[5m])) / clamp_min(sum(rate(filter_worker_alert_processed_total[5m])), 1e-9) or vector(0)",
+          "legendFormat": "filter {{reason}}",
           "range": true,
           "refId": "C"
         }
       ],
-      "title": "Active Workers",
+      "title": "Worker error ratio by reason",
       "type": "timeseries"
     },
     {
@@ -821,7 +690,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 16
       },
       "id": 16,
       "options": {
@@ -862,7 +731,7 @@
           "refId": "B"
         }
       ],
-      "title": "Kafka Messages Produced",
+      "title": "Kafka messages produced",
       "type": "timeseries"
     },
     {
@@ -927,10 +796,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 6,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 18
       },
       "id": 11,
       "options": {
@@ -993,7 +862,7 @@
           "refId": "D"
         }
       ],
-      "title": "MongoDB Storage",
+      "title": "MongoDB storage",
       "type": "timeseries"
     },
     {
@@ -1044,7 +913,7 @@
         "h": 2,
         "w": 4,
         "x": 0,
-        "y": 32
+        "y": 24
       },
       "id": 1,
       "options": {
@@ -1127,7 +996,7 @@
         "h": 2,
         "w": 4,
         "x": 4,
-        "y": 32
+        "y": 24
       },
       "id": 2,
       "options": {
@@ -1210,7 +1079,7 @@
         "h": 2,
         "w": 4,
         "x": 8,
-        "y": 32
+        "y": 24
       },
       "id": 3,
       "options": {
@@ -1302,7 +1171,7 @@
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "reqps"
         },
         "overrides": []
       },
@@ -1310,9 +1179,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 24
       },
-      "id": 9,
+      "id": 17,
       "options": {
         "legend": {
           "calcs": [],
@@ -1334,35 +1203,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (reason) (rate(alert_worker_alert_processed_total{status=\"error\"}[5m])) / clamp_min(sum(rate(alert_worker_alert_processed_total[5m])), 1e-9) or vector(0)",
-          "legendFormat": "alert {{reason}}",
+          "expr": "sum by (api) (rate(api_request_total[5m])) or vector(0)",
+          "legendFormat": "{{api}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (reason) (rate(enrichment_worker_alert_processed_total{status=\"error\"}[5m])) / clamp_min(sum(rate(enrichment_worker_alert_processed_total[5m])), 1e-9) or vector(0)",
-          "legendFormat": "enrichment {{reason}}",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (reason) (rate(filter_worker_alert_processed_total{status=\"error\"}[5m])) / clamp_min(sum(rate(filter_worker_alert_processed_total[5m])), 1e-9) or vector(0)",
-          "legendFormat": "filter {{reason}}",
-          "range": true,
-          "refId": "C"
         }
       ],
-      "title": "Worker Error Ratio by Reason",
+      "title": "API requests",
       "type": "timeseries"
     },
     {
@@ -1430,7 +1277,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 26
       },
       "id": 5,
       "options": {
@@ -1482,7 +1329,7 @@
           "refId": "C"
         }
       ],
-      "title": "Collector Metric Flow",
+      "title": "Collector metric flow",
       "type": "timeseries"
     },
     {
@@ -1550,7 +1397,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 32
       },
       "id": 6,
       "options": {
@@ -1591,105 +1438,7 @@
           "refId": "B"
         }
       ],
-      "title": "Collector and Exporter Memory",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 40
-      },
-      "id": 17,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (api) (rate(api_request_total[5m])) or vector(0)",
-          "legendFormat": "{{api}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "API Requests",
+      "title": "Collector and exporter Memory",
       "type": "timeseries"
     },
     {
@@ -1756,8 +1505,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 48
+        "x": 12,
+        "y": 32
       },
       "id": 12,
       "options": {
@@ -1809,7 +1558,7 @@
           "refId": "C"
         }
       ],
-      "title": "MongoDB Logical Stats",
+      "title": "MongoDB logical stats",
       "type": "timeseries"
     }
   ],
@@ -1831,6 +1580,6 @@
   "timezone": "",
   "title": "BOOM Observability",
   "uid": "boom-overview",
-  "version": 23,
+  "version": 25,
   "weekStart": ""
 }
