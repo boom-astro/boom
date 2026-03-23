@@ -1,3 +1,4 @@
+use crate::api::db::PROTECTED_COLLECTION_NAMES;
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::utils::enums::Survey;
@@ -217,6 +218,125 @@ pub async fn get_stats(
         &format!("nightly stats for {} nights", results.len()),
         serde_json::json!(results),
     )
+}
+
+const CATALOG_STATS_CACHE_KEY: &str = "catalog_stats";
+/// Cache catalog stats for 24 hours — reference catalogs rarely change.
+const CATALOG_STATS_CACHE_SECS: f64 = 24.0 * 3600.0;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CatalogStatsCacheEntry {
+    #[serde(rename = "_id")]
+    id: String,
+    n_catalogs: usize,
+    catalogs: Vec<CatalogEntry>,
+    updated_at: f64,
+    cache_until: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CatalogEntry {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CatalogStats {
+    pub n_catalogs: usize,
+    pub catalogs: Vec<CatalogEntry>,
+}
+
+/// Get catalog statistics: number of catalogs and document count per catalog.
+///
+/// Results are cached for 24 hours since reference catalogs rarely change.
+#[utoipa::path(
+    get,
+    path = "/babamul/catalogs/stats",
+    responses(
+        (status = 200, description = "Catalog stats retrieved", body = CatalogStats),
+        (status = 500, description = "Internal server error")
+    ),
+    tags = ["Stats"]
+)]
+#[get("/catalogs/stats")]
+pub async fn get_catalog_stats(
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    if current_user.is_none() {
+        return HttpResponse::Unauthorized().body("Unauthorized");
+    }
+
+    let now_ts = Utc::now().timestamp() as f64;
+    let stats_collection: Collection<CatalogStatsCacheEntry> = db.collection(STATS_COLLECTION);
+
+    // Try cache first
+    if let Ok(Some(cached)) = stats_collection
+        .find_one(doc! { "_id": CATALOG_STATS_CACHE_KEY })
+        .await
+    {
+        if cached.cache_until > now_ts {
+            let stats = CatalogStats {
+                n_catalogs: cached.n_catalogs,
+                catalogs: cached.catalogs,
+            };
+            return response::ok_ser("catalog stats (cached)", stats);
+        }
+    }
+
+    // Cache miss or expired — compute fresh
+    let collection_names = match db.list_collection_names().await {
+        Ok(c) => c,
+        Err(e) => {
+            return response::internal_error(&format!("Error listing collections: {}", e));
+        }
+    };
+
+    let mut catalog_names: Vec<String> = collection_names
+        .into_iter()
+        .filter(|name| {
+            !PROTECTED_COLLECTION_NAMES.contains(&name.as_str()) && !name.starts_with("system.")
+        })
+        .collect();
+    catalog_names.sort();
+
+    let mut catalogs = Vec::new();
+    for name in &catalog_names {
+        let collection = db.collection::<mongodb::bson::Document>(name);
+        let count = match collection.estimated_document_count().await {
+            Ok(c) => c,
+            Err(e) => {
+                return response::internal_error(&format!(
+                    "Error counting documents in {}: {}",
+                    name, e
+                ));
+            }
+        };
+        catalogs.push(CatalogEntry {
+            name: name.clone(),
+            count,
+        });
+    }
+
+    // Upsert into cache
+    let cache_entry = CatalogStatsCacheEntry {
+        id: CATALOG_STATS_CACHE_KEY.to_string(),
+        n_catalogs: catalogs.len(),
+        catalogs: catalogs.clone(),
+        updated_at: now_ts,
+        cache_until: now_ts + CATALOG_STATS_CACHE_SECS,
+    };
+    let _ = stats_collection
+        .replace_one(doc! { "_id": CATALOG_STATS_CACHE_KEY }, &cache_entry)
+        .upsert(true)
+        .await;
+
+    let stats = CatalogStats {
+        n_catalogs: catalogs.len(),
+        catalogs,
+    };
+
+    response::ok_ser("catalog stats", stats)
 }
 
 #[cfg(test)]
