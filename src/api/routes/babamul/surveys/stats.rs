@@ -234,7 +234,7 @@ struct CatalogStatsCacheEntry {
     cache_until: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CatalogEntry {
     pub name: String,
     pub count: u64,
