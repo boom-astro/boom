@@ -238,6 +238,8 @@ struct CatalogStatsCacheEntry {
 pub struct CatalogEntry {
     pub name: String,
     pub count: u64,
+    /// Storage size in bytes (compressed, on-disk).
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -315,9 +317,20 @@ pub async fn get_catalog_stats(
                 ));
             }
         };
+        let size_bytes = match db.run_command(doc! { "collStats": name }).await {
+            Ok(doc) => match doc.get("storageSize") {
+                Some(bson) => bson
+                    .as_i64()
+                    .or_else(|| bson.as_f64().map(|f| f as i64))
+                    .unwrap_or(0) as u64,
+                None => 0,
+            },
+            Err(_) => 0,
+        };
         catalogs.push(CatalogEntry {
             name: name.clone(),
             count,
+            size_bytes,
         });
     }
 
