@@ -295,7 +295,10 @@ pub async fn get_catalog_stats(
     let mut catalog_names: Vec<String> = collection_names
         .into_iter()
         .filter(|name| {
-            !PROTECTED_COLLECTION_NAMES.contains(&name.as_str()) && !name.starts_with("system.")
+            !PROTECTED_COLLECTION_NAMES.contains(&name.as_str())
+                && !name.starts_with("system.")
+                && !name.starts_with("ZTF_")
+                && !name.starts_with("LSST_")
         })
         .collect();
     catalog_names.sort();
