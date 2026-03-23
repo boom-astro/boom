@@ -321,6 +321,7 @@ pub async fn get_catalog_stats(
             Ok(doc) => match doc.get("storageSize") {
                 Some(bson) => bson
                     .as_i64()
+                    .or_else(|| bson.as_i32().map(|i| i as i64))
                     .or_else(|| bson.as_f64().map(|f| f as i64))
                     .unwrap_or(0) as u64,
                 None => 0,
