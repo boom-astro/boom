@@ -249,6 +249,7 @@ services:
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
+      NVIDIA_VISIBLE_DEVICES: all
     networks:
       - boom
     profiles:
@@ -257,6 +258,13 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
       - ${PWD}/data/models:/app/data/models:ro
       - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     command:
       - /app/scheduler
       - ztf

@@ -1,10 +1,14 @@
-FROM rust:1.93.1-slim-trixie AS builder
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS builder
 
+# Install Rust toolchain
 RUN apt-get update && \
     apt-get install -y curl gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.1 && \
     apt-get autoremove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # First we build an empty rust project to cache dependencies
 # this way we skip dependencies build when only the source code changes
@@ -47,7 +51,7 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 
 ## Create a minimal runtime image for binaries
-FROM debian:trixie-slim
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
 WORKDIR /app
 
