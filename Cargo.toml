@@ -57,13 +57,21 @@ zune-inflate = { version = "0.2", default-features = false, features = [
     "std",
 ] }
 
+[features]
+default = []
+# The `gpu` feature only controls villar-pso. ONNX GPU is already enabled
+# unconditionally on Linux via ort's `cuda` + `load-dynamic` features below,
+# and is toggled purely at runtime via `config.gpu.enabled`.
+gpu = ["dep:villar-pso"]
+
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
 
-# otherwise, install ort with the cuda feature
+# otherwise, install ort without cuda by default (enabled via gpu feature)
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic"] }
+villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["cuda"], optional = true }
 
 [workspace]
 members = ["apache-avro-macros"]
