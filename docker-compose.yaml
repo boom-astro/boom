@@ -27,6 +27,8 @@ services:
     hostname: mongo
     expose:
       - "27017"
+    ports:
+      - "27018:27017"
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin}
       - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set and non-empty}

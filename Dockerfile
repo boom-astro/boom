@@ -1,27 +1,14 @@
-ARG ENABLE_GPU=false
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS builder
 
-FROM rust:1.93.1-slim-trixie AS builder
-
-ARG ENABLE_GPU
-
+# Install Rust toolchain
 RUN apt-get update && \
     apt-get install -y curl gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.1 && \
     apt-get autoremove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Conditionally install CUDA toolkit for GPU support
-RUN if [ "$ENABLE_GPU" = "true" ]; then \
-    apt-get update && \
-    apt-get install -y --no-install-recommends wget && \
-    wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
-    dpkg -i cuda-keyring_1.1-1_all.deb && \
-    rm cuda-keyring_1.1-1_all.deb && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends cuda-toolkit-12-8 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
-    fi
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # First we build an empty rust project to cache dependencies
 # this way we skip dependencies build when only the source code changes
@@ -64,24 +51,9 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 
 ## Create a minimal runtime image for binaries
-FROM debian:trixie-slim
-
-ARG ENABLE_GPU
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 WORKDIR /app
-
-# Conditionally install CUDA runtime libraries for GPU support
-RUN if [ "$ENABLE_GPU" = "true" ]; then \
-    apt-get update && \
-    apt-get install -y --no-install-recommends wget && \
-    wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
-    dpkg -i cuda-keyring_1.1-1_all.deb && \
-    rm cuda-keyring_1.1-1_all.deb && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends cuda-libraries-12-8 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
-    fi
 
 # Install runtime deps + Kafka CLI
 ARG KAFKA_VERSION=4.1.1
@@ -103,6 +75,10 @@ COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
 COPY --from=builder /app/target/release/api /app/boom-api
 COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
+
+# Copy ONNX Runtime shared libraries (bundled by the ort crate during build)
+COPY --from=builder /app/target/release/libonnxruntime*.so* /usr/lib/x86_64-linux-gnu/
+RUN ldconfig
 
 # Set the entrypoint, though this will be overridden
 CMD ["/app/scheduler"]
