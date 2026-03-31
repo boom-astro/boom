@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-# Only import NED alerts if the collection does not exist
+NED_EXPECTED_COUNT=1872544
+
+# Only import NED alerts if the collection does not exist or has the wrong count
 NED_COLLECTION_NAME="NED"
 NED_COLLECTION_EXISTS=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollectionNames().includes('$NED_COLLECTION_NAME')")
 NED_COLLECTION_COUNT=0
@@ -8,11 +10,11 @@ if [ "$NED_COLLECTION_EXISTS" = "true" ]; then
     NED_COLLECTION_COUNT=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollection('$NED_COLLECTION_NAME').countDocuments()")
 fi
 echo "NED collection exists: $NED_COLLECTION_EXISTS"
-echo "NED collection count: $NED_COLLECTION_COUNT"
+echo "NED collection count: $NED_COLLECTION_COUNT (expected $NED_EXPECTED_COUNT)"
 
-if [ "$NED_COLLECTION_EXISTS" = "false" ] || [ "${NED_COLLECTION_COUNT:-0}" -eq 0 ]; then
+if [ "$NED_COLLECTION_EXISTS" = "false" ] || [ "${NED_COLLECTION_COUNT:-0}" -ne "$NED_EXPECTED_COUNT" ]; then
     if [ "$NED_COLLECTION_EXISTS" = "true" ]; then
-        echo "NED collection exists but is empty; dropping and reimporting"
+        echo "NED collection exists but has wrong count ($NED_COLLECTION_COUNT != $NED_EXPECTED_COUNT); dropping and reimporting"
         mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
             --quiet --eval "db.$NED_COLLECTION_NAME.drop()"
     fi
@@ -33,12 +35,12 @@ if [ "$NED_COLLECTION_EXISTS" = "false" ] || [ "${NED_COLLECTION_COUNT:-0}" -eq 
         --jsonArray
 
     NED_COLLECTION_COUNT=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollection('$NED_COLLECTION_NAME').countDocuments()")
-    if [ "${NED_COLLECTION_COUNT:-0}" -le 0 ]; then
-        echo "Failed to import NED alerts into $DB_NAME; collection is empty"
+    if [ "${NED_COLLECTION_COUNT:-0}" -ne "$NED_EXPECTED_COUNT" ]; then
+        echo "Failed to import NED alerts: expected $NED_EXPECTED_COUNT documents but got $NED_COLLECTION_COUNT"
         exit 1
     fi
 else
-    echo "NED alerts already imported; skipping import"
+    echo "NED alerts already imported with correct count ($NED_COLLECTION_COUNT); skipping import"
 fi
 
 # Always drop ZTF_alerts, ZTF_alerts_aux, ZTF_alerts_cutouts, and filters collections
