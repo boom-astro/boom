@@ -3,9 +3,20 @@
 # Only import NED alerts if the collection does not exist
 NED_COLLECTION_NAME="NED"
 NED_COLLECTION_EXISTS=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollectionNames().includes('$NED_COLLECTION_NAME')")
+NED_COLLECTION_COUNT=0
+if [ "$NED_COLLECTION_EXISTS" = "true" ]; then
+    NED_COLLECTION_COUNT=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollection('$NED_COLLECTION_NAME').countDocuments()")
+fi
 echo "NED collection exists: $NED_COLLECTION_EXISTS"
+echo "NED collection count: $NED_COLLECTION_COUNT"
 
-if [ "$NED_COLLECTION_EXISTS" = "false" ]; then
+if [ "$NED_COLLECTION_EXISTS" = "false" ] || [ "${NED_COLLECTION_COUNT:-0}" -eq 0 ]; then
+    if [ "$NED_COLLECTION_EXISTS" = "true" ]; then
+        echo "NED collection exists but is empty; dropping and reimporting"
+        mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
+            --quiet --eval "db.$NED_COLLECTION_NAME.drop()"
+    fi
+
     echo "Creating collection $NED_COLLECTION_NAME"
     mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
         --eval "db.createCollection('$NED_COLLECTION_NAME')"
@@ -20,6 +31,12 @@ if [ "$NED_COLLECTION_EXISTS" = "false" ]; then
         "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin$DB_ADD_URI" \
         --collection $NED_COLLECTION_NAME \
         --jsonArray
+
+    NED_COLLECTION_COUNT=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollection('$NED_COLLECTION_NAME').countDocuments()")
+    if [ "${NED_COLLECTION_COUNT:-0}" -le 0 ]; then
+        echo "Failed to import NED alerts into $DB_NAME; collection is empty"
+        exit 1
+    fi
 else
     echo "NED alerts already imported; skipping import"
 fi
