@@ -14,6 +14,24 @@ gpu:
 
 Environment variable overrides: `BOOM_GPU__ENABLED`, `BOOM_GPU__DEVICE_IDS`.
 
+## Docker deployment
+
+The Dockerfile uses NVIDIA CUDA base images so the container can run on both GPU and CPU-only hosts. GPU device passthrough is controlled by a separate compose override file.
+
+**CPU-only** (works on any host):
+
+```bash
+docker compose up
+```
+
+**With GPUs** (requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up
+```
+
+The GPU override adds NVIDIA device reservations to all scheduler services. Set `gpu.enabled: true` in `config.yaml` to have the application use them.
+
 ## Platform behavior
 
 ### Linux (CUDA)
