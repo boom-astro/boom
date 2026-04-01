@@ -61,6 +61,7 @@ zune-inflate = { version = "0.2", default-features = false, features = [
 [features]
 default = []
 cuda = ["lightcurve-fitting/cuda"]
+metal = ["lightcurve-fitting/metal"]
 
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
