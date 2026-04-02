@@ -110,7 +110,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(kafka_consumer_alert_processed_total[5m])) or vector(0)",
+          "expr": "sum(rate(kafka_consumer_alert_processed_total{status=\"ok\"}[30m])) or vector(0)",
           "legendFormat": "kafka consumer (total)",
           "range": true,
           "refId": "A"
@@ -121,7 +121,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total[5m])) or vector(0)",
+          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total{status=\"ok\",reason=\"added\"}[30m]))",
           "legendFormat": "alert worker {{survey}}",
           "range": true,
           "refId": "B"
@@ -132,7 +132,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total[5m])) or vector(0)",
+          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total{status=\"ok\"}[30m]))",
           "legendFormat": "enrichment {{survey}}",
           "range": true,
           "refId": "C"
@@ -143,7 +143,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total[5m])) or vector(0)",
+          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total{status=\"ok\"}[30m]))",
           "legendFormat": "filter {{survey}}",
           "range": true,
           "refId": "D"
@@ -245,7 +245,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey, worker_type) (scheduler_worker_live) or vector(0)",
+          "expr": "max by (survey, worker_type) (scheduler_worker_live)",
           "legendFormat": "{{survey}} {{worker_type}}",
           "range": true,
           "refId": "A"
@@ -343,7 +343,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (alert_worker_active) or vector(0)",
+          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"alert\"})",
           "legendFormat": "alert {{survey}}",
           "range": true,
           "refId": "A"
@@ -354,7 +354,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (enrichment_worker_active) or vector(0)",
+          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"enrichment\"})",
           "legendFormat": "enrichment {{survey}}",
           "range": true,
           "refId": "B"
@@ -365,13 +365,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (filter_worker_active) or vector(0)",
+          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"filter\"})",
           "legendFormat": "filter {{survey}}",
           "range": true,
           "refId": "C"
         }
       ],
-      "title": "Active workers",
+      "title": "Live workers by stage",
       "type": "timeseries"
     },
     {
@@ -463,7 +463,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets\"}[5m])) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets\"}[30m])) or vector(0)",
           "legendFormat": "{{survey}} packets",
           "range": true,
           "refId": "A"
@@ -474,7 +474,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets_temp\"}[5m])) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets_temp\"}[30m])) or vector(0)",
           "legendFormat": "{{survey}} packets_temp",
           "range": true,
           "refId": "B"
@@ -485,7 +485,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"enrichment\"}[5m])) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"enrichment\"}[30m])) or vector(0)",
           "legendFormat": "{{survey}} enrichment",
           "range": true,
           "refId": "C"
@@ -496,7 +496,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"filter\"}[5m])) or vector(0)",
+          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"filter\"}[30m])) or vector(0)",
           "legendFormat": "{{survey}} filter",
           "range": true,
           "refId": "D"
@@ -682,7 +682,7 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },
@@ -714,7 +714,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(scheduler_kafka_alert_published_total{producer=\"filter_worker\"}[5m])) or (sum(increase(kafka_topic_partition_current_offset{topic=~\".*_alerts_results\"}[5m])) / 300) or vector(0)",
+          "expr": "sum(rate(scheduler_kafka_alert_published_total{producer=\"filter_worker\"}[30m])) or (sum(increase(kafka_topic_partition_current_offset{topic=~\".*_alerts_results\"}[30m])) / 1800) or vector(0)",
           "legendFormat": "filter worker",
           "range": true,
           "refId": "A"
@@ -725,7 +725,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(scheduler_kafka_alert_published_total{producer=\"babamul\"}[5m])) or (sum(increase(kafka_topic_partition_current_offset{topic=~\"babamul\\\\..+\"}[5m])) / 300) or vector(0)",
+          "expr": "sum(rate(scheduler_kafka_alert_published_total{producer=\"babamul\"}[30m])) or (sum(increase(kafka_topic_partition_current_offset{topic=~\"babamul\\\\..+\"}[30m])) / 1800) or vector(0)",
           "legendFormat": "babamul",
           "range": true,
           "refId": "B"

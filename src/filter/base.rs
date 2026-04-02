@@ -11,7 +11,7 @@ use crate::{
 
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::{serde_avro_bytes, DeflateSettings, Writer};
+use apache_avro::{serde_avro_bytes, Writer};
 use apache_avro::{AvroSchema, Schema};
 use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
@@ -20,11 +20,11 @@ use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
 };
-use rdkafka::producer::FutureProducer;
+use rdkafka::producer::{DeliveryFuture, FutureProducer, Producer};
 use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -200,7 +200,7 @@ where
     let mut writer = Writer::with_codec(
         schema,
         Vec::new(),
-        apache_avro::Codec::Deflate(DeflateSettings::default()),
+        apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
     );
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
@@ -232,15 +232,14 @@ pub async fn create_producer(
         // .set("debug", "broker,topic,msg")
         .set("bootstrap.servers", &kafka_producer_config.server)
         .set("message.timeout.ms", "5000")
-        // it's best to increase batch.size if the cluster
-        // is running on another machine. Locally, lower means less
-        // latency, since we are not limited by network speed anyways
-        .set("batch.size", "16384")
-        .set("linger.ms", "5")
+        .set("batch.size", "1048576")
+        .set("linger.ms", "50")
         .set("acks", "1")
         .set("max.in.flight.requests.per.connection", "5")
         .set("retries", "3")
-        .create()?;
+        .set("compression.type", "zstd")
+        .create()
+        .map_err(|e| FilterWorkerError::Kafka(format!("Failed to create Kafka producer: {}", e)))?;
 
     Ok(producer)
 }
@@ -254,27 +253,25 @@ pub async fn create_producer(
 /// * `topic` - The Kafka topic to which the alert will be sent.
 ///
 /// # Returns
-/// * `Result<(), FilterWorkerError>` - Returns Ok(()) if the alert is sent successfully, otherwise returns a FilterWorkerError.
+/// * `Result<DeliveryFuture, FilterWorkerError>` - Returns Ok(DeliveryFuture) if the alert is enqueued successfully, otherwise returns a FilterWorkerError.
 #[instrument(skip(alert, schema, producer), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub async fn send_alert_to_kafka(
     alert: &Alert,
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-) -> Result<(), FilterWorkerError> {
-    let encoded = alert_to_avro_bytes(alert, schema)?;
+) -> Result<DeliveryFuture, FilterWorkerError> {
+    let payload = alert_to_avro_bytes(alert, schema)?;
+    let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&payload);
+    let result = producer.send_result(record).map_err(|(e, _)| {
+        warn!("Failed to enqueue alert in Kafka topic {}: {}", topic, e);
+        FilterWorkerError::Kafka(format!(
+            "Failed to enqueue alert in Kafka topic {}: {}",
+            topic, e
+        ))
+    })?;
 
-    let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
-
-    producer
-        .send(record, std::time::Duration::from_secs(30))
-        .await
-        .map_err(|(e, _)| {
-            warn!("Failed to send filter result to Kafka: {}", e);
-            e
-        })?;
-
-    Ok(())
+    Ok(result)
 }
 
 /// Recursively checks if a given field is used in a MongoDB aggregation stage.
@@ -776,8 +773,8 @@ pub enum FilterWorkerError {
     Avro(#[from] apache_avro::Error),
     #[error("value access error from bson")]
     BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
-    #[error("error from kafka")]
-    Kafka(#[from] rdkafka::error::KafkaError),
+    #[error("kafka error: {0}")]
+    Kafka(String),
     #[error("error from mongo")]
     Mongodb(#[from] mongodb::error::Error),
     #[error("error from redis")]
@@ -899,6 +896,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
     loop {
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
+                // flush the producer before terminating to avoid losing messages
+                producer
+                    .flush(std::time::Duration::from_secs(10))
+                    .map_err(|e| {
+                        FilterWorkerError::Kafka(format!(
+                            "Failed to flush Kafka producer on termination: {}",
+                            e
+                        ))
+                    })?;
+                info!("termination signal received, shutting down gracefully");
                 break;
             }
             command_check_countdown = command_interval + 1;
@@ -934,25 +941,61 @@ pub async fn run_filter_worker<T: FilterWorker>(
             (alerts.len() - alerts_output.len()) as u64,
             &ok_excluded_attrs,
         );
+
+        let mut total_enqueued = 0;
+        let mut delivery_futures = Vec::new();
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
-                .await
-                .inspect_err(|_| {
-                    let attributes = &output_error_attrs;
-                    ACTIVE.add(-1, &active_attrs);
-                    BATCH_PROCESSED.add(1, attributes);
-                    ALERT_PROCESSED.add(1, attributes);
-                })?;
-            trace!(
-                "Sent alert with candid {} to Kafka topic {}",
-                &alert.candid,
-                &output_topic
+            delivery_futures.push(
+                send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
+                    .await
+                    .inspect_err(|_| {
+                        ACTIVE.add(-1, &active_attrs);
+                        ALERT_PROCESSED.add(1, &output_error_attrs);
+                    })?,
             );
             record_kafka_alert_published("filter_worker", &survey, &output_topic, 1);
             // Incrementing by alerts_output.len() outside this loop may be more
             // efficient, but incrementing by 1 here is more accurate.
             ALERT_PROCESSED.add(1, &ok_included_attrs);
+            total_enqueued += 1;
         }
+
+        tracing::debug!(
+            "Enqueued total of {} alerts to Kafka topic {}",
+            total_enqueued,
+            &output_topic
+        );
+
+        // Wait for all futures to complete and check for errors
+        let mut total_sent = 0;
+        let results = futures::future::join_all(delivery_futures).await;
+        for r in results {
+            let result = r.map_err(|e| {
+                let attributes = &output_error_attrs;
+                ACTIVE.add(-1, attributes);
+                ALERT_PROCESSED.add(1, attributes);
+                FilterWorkerError::Kafka(format!(
+                    "Failed to deliver alert to Kafka topic {}: {}",
+                    &output_topic, e
+                ))
+            })?;
+            if let Err((e, _)) = result {
+                error!(
+                    "Failed to deliver alert to Kafka topic {}: {}",
+                    &output_topic, e
+                );
+            } else {
+                total_sent += 1;
+                ALERT_PROCESSED.add(1, &ok_included_attrs);
+            }
+        }
+
+        tracing::debug!(
+            "Successfully sent total of {}/{} alerts to Kafka topic {}",
+            total_sent,
+            total_enqueued,
+            &output_topic
+        );
 
         ACTIVE.add(-1, &active_attrs);
     }

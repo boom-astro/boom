@@ -123,8 +123,31 @@ pub async fn initialize_topic(
                     "Topic {} exists but has {} partitions instead of expected {}",
                     topic_name, nb_partitions, expected_nb_partitions
                 );
+                // Topic deletion is asynchronous in Kafka. If we race against a
+                // previous delete/recreate cycle, metadata can temporarily show
+                // 0 partitions and consumers will hit UnknownPartition.
+                warn!(
+                    "Recreating topic {} to restore expected partition metadata",
+                    topic_name
+                );
+                let _ = delete_topic(bootstrap_servers, topic_name).await;
+                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+
+                let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
+                admin_client
+                    .create_topics(
+                        &[NewTopic::new(
+                            topic_name,
+                            expected_nb_partitions as i32,
+                            TopicReplication::Fixed(1),
+                        )],
+                        &opts,
+                    )
+                    .await?;
+                expected_nb_partitions
+            } else {
+                nb_partitions
             }
-            nb_partitions
         }
         None => {
             let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
@@ -238,18 +261,40 @@ pub trait AlertProducer {
                     avro_count,
                     self.data_directory()
                 );
+                // If a limit is set, compare against the number we intend to
+                // produce in this run rather than all available files.
+                let expected_messages = if self.limit() > 0 {
+                    (avro_count.min(self.limit() as usize)) as u32
+                } else {
+                    avro_count as u32
+                };
                 // If the counts match, then nothing to do, return early.
-                if total_messages == avro_count as u32 {
+                if total_messages == expected_messages {
                     info!(
-                        "Topic {} already exists with {} messages, no need to produce",
-                        topic_name, total_messages
+                        "Topic {} already exists with {} messages (expected {}), no need to produce",
+                        topic_name,
+                        total_messages,
+                        expected_messages
+                    );
+                    return Ok(None);
+                }
+                // If the topic already has more messages than expected for this
+                // run (e.g. previous larger load), skip to avoid destructive
+                // topic recreation while consumers are live.
+                if total_messages > expected_messages {
+                    warn!(
+                        "Topic {} already has {} messages which exceeds expected {} for this run; skipping production",
+                        topic_name,
+                        total_messages,
+                        expected_messages
                     );
                     return Ok(None);
                 } else {
                     warn!(
-                        "Topic {} already exists with {} messages, but {} Avro files found in data directory",
+                        "Topic {} already exists with {} messages, expected {} for this run ({} Avro files available)",
                         topic_name,
                         total_messages,
+                        expected_messages,
                         avro_count
                     );
                 }
@@ -539,6 +584,16 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
     Ok(())
 }
 
+fn is_unknown_topic_or_partition_error(error: &KafkaError) -> bool {
+    matches!(
+        error,
+        KafkaError::MessageConsumption(
+            rdkafka::error::RDKafkaErrorCode::UnknownTopicOrPartition
+                | rdkafka::error::RDKafkaErrorCode::UnknownPartition
+        )
+    )
+}
+
 #[instrument(skip(config, survey_consumer_config))]
 pub async fn consumer(
     id: &str,
@@ -636,14 +691,19 @@ pub async fn consumer(
                 break;
             }
             Some(Err(e)) => {
-                if exit_on_eof {
-                    if let rdkafka::error::KafkaError::MessageConsumption(
-                        rdkafka::error::RDKafkaErrorCode::UnknownTopicOrPartition,
-                    ) = e
-                    {
+                if is_unknown_topic_or_partition_error(&e) {
+                    if exit_on_eof {
                         info!("Topic or partition unknown, exiting consumer {}", id);
                         return Ok(());
                     }
+                    warn!(
+                        "Consumer {} hit unknown topic/partition during startup, resubscribing",
+                        id
+                    );
+                    consumer.unsubscribe();
+                    consumer
+                        .subscribe(&topics)
+                        .inspect_err(as_error!("failed to resubscribe to topics"))?;
                 }
                 error!("Error during initial poll: {:?}", e);
                 // sleep and retry
@@ -743,6 +803,16 @@ pub async fn consumer(
                 }
             }
             Some(Err(e)) => {
+                if is_unknown_topic_or_partition_error(&e) {
+                    warn!(
+                        "Consumer {} hit unknown topic/partition while polling, resubscribing",
+                        id
+                    );
+                    consumer.unsubscribe();
+                    consumer
+                        .subscribe(&topics)
+                        .inspect_err(as_error!("failed to resubscribe to topics"))?;
+                }
                 error!("Error while consuming from Kafka, retrying: {}", e);
                 ALERT_PROCESSED.add(1, &input_error_attrs);
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;

@@ -29,6 +29,15 @@ Prometheus datasource and a starter dashboard (`BOOM Overview`). By default,
 credentials are `admin`/`admin`, but this can be overridden with
 `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD`.
 
+The BOOM Overview dashboard uses these conventions:
+
+* Kafka consumer throughput is computed from successful polls only:
+  `kafka_consumer_alert_processed_total{status="ok"}`.
+* "Live workers by stage" is based on `scheduler_worker_live`, which tracks
+  worker thread liveness, not in-flight work.
+* Queue depth is expected to be frequently zero in steady state; use
+  `max_over_time` windows to observe short backlog spikes.
+
 * [Kafka consumer][kafka-consumer-queries]
 * [Alert workers][alert-worker-queries]
 * [Enrichment workers][enrichment-worker-queries]
