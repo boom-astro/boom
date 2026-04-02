@@ -58,7 +58,7 @@ zune-inflate = { version = "0.2", default-features = false, features = [
 ] }
 
 [features]
-default = ["gpu"]
+default = []
 gpu = ["dep:villar-pso", "ort/cuda"]
 
 # on mac os silicon platform, install ort with the coreml feature

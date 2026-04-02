@@ -23,9 +23,9 @@ use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 #[cfg(feature = "gpu")]
 use std::sync::atomic::{AtomicI32, Ordering};
-use tracing::{instrument, warn};
+use tracing::{instrument, trace, warn};
 #[cfg(feature = "gpu")]
-use tracing::{info, trace};
+use tracing::info;
 #[cfg(feature = "gpu")]
 use villar_pso::gpu::{GpuBatchData, GpuContext, SourceData};
 

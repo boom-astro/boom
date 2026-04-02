@@ -1,7 +1,7 @@
 FROM rust:1.93.1-slim-bookworm AS builder
 
 # Build arg to toggle GPU support (installs CUDA/cuDNN runtime libs)
-ARG USE_GPU=true
+ARG USE_GPU=false
 
 # Install build dependencies
 RUN apt-get update && \
@@ -37,9 +37,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY apache-avro-macros ./apache-avro-macros
 COPY ./src ./src
 RUN if [ "$USE_GPU" = "true" ]; then \
-      cargo build --release; \
+      cargo build --release --features gpu; \
     else \
-      cargo build --release --no-default-features; \
+      cargo build --release; \
     fi
 
 
@@ -68,7 +68,7 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 ## Minimal runtime image
 FROM debian:bookworm-slim
 
-ARG USE_GPU=true
+ARG USE_GPU=false
 
 WORKDIR /app
 
