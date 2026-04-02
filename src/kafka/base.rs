@@ -118,17 +118,14 @@ pub async fn initialize_topic(
         None,
     )? {
         Some(nb_partitions) => {
-            if nb_partitions != expected_nb_partitions {
+            if nb_partitions == 0 {
+                // Topic deletion is asynchronous in Kafka. A count of 0 means
+                // we are racing against a previous delete/recreate cycle; the
+                // metadata hasn't settled yet. Delete and recreate to restore
+                // a consistent partition layout.
                 warn!(
-                    "Topic {} exists but has {} partitions instead of expected {}",
-                    topic_name, nb_partitions, expected_nb_partitions
-                );
-                // Topic deletion is asynchronous in Kafka. If we race against a
-                // previous delete/recreate cycle, metadata can temporarily show
-                // 0 partitions and consumers will hit UnknownPartition.
-                warn!(
-                    "Recreating topic {} to restore expected partition metadata",
-                    topic_name
+                    "Topic {} reports 0 partitions (transient post-delete state), recreating with {} partitions",
+                    topic_name, expected_nb_partitions
                 );
                 let _ = delete_topic(bootstrap_servers, topic_name).await;
                 tokio::time::sleep(core::time::Duration::from_secs(1)).await;
@@ -145,6 +142,12 @@ pub async fn initialize_topic(
                     )
                     .await?;
                 expected_nb_partitions
+            } else if nb_partitions != expected_nb_partitions {
+                warn!(
+                    "Topic {} exists with {} partitions (expected {}); proceeding without recreating",
+                    topic_name, nb_partitions, expected_nb_partitions
+                );
+                nb_partitions
             } else {
                 nb_partitions
             }
@@ -241,73 +244,79 @@ pub trait AlertProducer {
     async fn produce(
         &self,
         topic: Option<String>,
+        force: bool,
     ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
         let topic_name = topic.unwrap_or_else(|| self.topic_name());
-        if let Some(total_messages) = count_messages(&self.server_url(), &topic_name)? {
-            // Topic exists, skip producing if it has the expected number of
-            // messages. Count the number of Avro files in the data directory:
-            if let Some(avro_count) = count_files_in_dir(&self.data_directory(), Some(&["avro"]))
-                .map(|count| Some(count))
-                .or_else(|error| match error.kind() {
-                    std::io::ErrorKind::NotFound => Ok(None),
-                    _ => Err(error),
-                })?
-            {
-                if avro_count == 0 {
-                    warn!("data directory {} is empty", self.data_directory());
-                }
-                debug!(
-                    "{} avro files found in {}",
-                    avro_count,
-                    self.data_directory()
-                );
-                // If a limit is set, compare against the number we intend to
-                // produce in this run rather than all available files.
-                let expected_messages = if self.limit() > 0 {
-                    (avro_count.min(self.limit() as usize)) as u32
-                } else {
-                    avro_count as u32
-                };
-                // If the counts match, then nothing to do, return early.
-                if total_messages == expected_messages {
-                    info!(
+        if !force {
+            if let Some(total_messages) = count_messages(&self.server_url(), &topic_name)? {
+                // Topic exists, skip producing if it has the expected number of
+                // messages. Count the number of Avro files in the data directory:
+                if let Some(avro_count) =
+                    count_files_in_dir(&self.data_directory(), Some(&["avro"]))
+                        .map(|count| Some(count))
+                        .or_else(|error| match error.kind() {
+                            std::io::ErrorKind::NotFound => Ok(None),
+                            _ => Err(error),
+                        })?
+                {
+                    if avro_count == 0 {
+                        warn!("data directory {} is empty", self.data_directory());
+                    }
+                    debug!(
+                        "{} avro files found in {}",
+                        avro_count,
+                        self.data_directory()
+                    );
+                    // If a limit is set, compare against the number we intend to
+                    // produce in this run rather than all available files.
+                    let expected_messages = if self.limit() > 0 {
+                        (avro_count.min(self.limit() as usize)) as u32
+                    } else {
+                        avro_count as u32
+                    };
+                    // If the counts match, then nothing to do, return early.
+                    if total_messages == expected_messages {
+                        info!(
                         "Topic {} already exists with {} messages (expected {}), no need to produce",
                         topic_name,
                         total_messages,
                         expected_messages
                     );
-                    return Ok(None);
-                }
-                // If the topic already has more messages than expected for this
-                // run (e.g. previous larger load), skip to avoid destructive
-                // topic recreation while consumers are live.
-                if total_messages > expected_messages {
-                    warn!(
+                        return Ok(None);
+                    }
+                    // If the topic already has more messages than expected for this
+                    // run (e.g. previous larger load), skip to avoid destructive
+                    // topic recreation while consumers are live.
+                    if total_messages > expected_messages {
+                        warn!(
                         "Topic {} already has {} messages which exceeds expected {} for this run; skipping production",
                         topic_name,
                         total_messages,
                         expected_messages
                     );
-                    return Ok(None);
-                } else {
-                    warn!(
+                        return Ok(None);
+                    } else {
+                        warn!(
                         "Topic {} already exists with {} messages, expected {} for this run ({} Avro files available)",
                         topic_name,
                         total_messages,
                         expected_messages,
                         avro_count
                     );
+                    }
+                } else {
+                    warn!(
+                        "Topic {} already exists, but data directory not found",
+                        topic_name,
+                    );
                 }
-            } else {
+                // The topic and data directory are inconsistent; continue without
+                // destructive topic recreation so live consumers are not disrupted.
                 warn!(
-                    "Topic {} already exists, but data directory not found",
-                    topic_name,
-                );
+                "Topic {} and local data appear inconsistent; proceeding without topic deletion",
+                topic_name
+            );
             }
-            // The topic and data directory are inconsistent. Delete the topic
-            // to start fresh:
-            warn!("recreating topic {}", topic_name);
-            delete_topic(&self.server_url(), &topic_name).await?;
         }
 
         match self.download_alerts_from_archive().await {

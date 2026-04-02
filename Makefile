@@ -7,6 +7,12 @@ produce-ztf:
 	@$(MAKE) reset-ztf-state
 	cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092
 
+.PHONY: produce-ztf-live
+produce-ztf-live:
+	@echo "Starting continuous ZTF traffic for dashboard testing (Ctrl+C to stop)..."
+	@echo "Tip: tune with LIMIT=<n> INTERVAL_MS=<ms>"
+	cargo run --bin kafka_producer ztf 20240617 public --limit $${LIMIT:-50} --server-url localhost:9092 --continuous --interval-ms $${INTERVAL_MS:-2000}
+
 .PHONY: reset-ztf-state
 reset-ztf-state:
 	@echo "Resetting ZTF dev pipeline state (Mongo, Valkey)..."
