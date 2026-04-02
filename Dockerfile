@@ -11,45 +11,36 @@ RUN apt-get update && \
     apt-get autoremove && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install CUDA toolkit (nvcc for compiling .cu kernels) + runtime libs + cuDNN
+# Install CUDA toolkit (nvcc), runtime libs (cudart, cublas, cufft), and cuDNN
 ENV CUDA_DIR=/usr/local/cuda
 RUN if [ "$USE_GPU" = "true" ]; then \
       CUDA_URL=https://developer.download.nvidia.com/compute/cuda/redist && \
       CUDNN_URL=https://developer.download.nvidia.com/compute/cudnn/redist && \
-      mkdir -p $CUDA_DIR/lib64 $CUDA_DIR/bin $CUDA_DIR/include && \
-      # CUDA compiler (nvcc) and tools
-      curl -fsSL ${CUDA_URL}/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.8.93-archive.tar.xz | \
-        tar -xJf - --strip-components=1 -C $CUDA_DIR && \
-      # CUDA runtime libraries
-      curl -fsSL ${CUDA_URL}/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz | \
-        tar -xJf - --strip-components=1 -C $CUDA_DIR && \
-      # cuBLAS
-      curl -fsSL ${CUDA_URL}/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.3.14-archive.tar.xz | \
-        tar -xJf - --strip-components=1 -C $CUDA_DIR && \
-      # cuFFT
-      curl -fsSL ${CUDA_URL}/libcufft/linux-x86_64/libcufft-linux-x86_64-11.3.3.83-archive.tar.xz | \
-        tar -xJf - --strip-components=1 -C $CUDA_DIR && \
-      # cuDNN
-      curl -fsSL ${CUDNN_URL}/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda12-archive.tar.xz | \
-        tar -xJf - --strip-components=1 -C $CUDA_DIR && \
+      mkdir -p $CUDA_DIR && \
+      for pkg in \
+        ${CUDA_URL}/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.8.93-archive.tar.xz \
+        ${CUDA_URL}/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz \
+        ${CUDA_URL}/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.3.14-archive.tar.xz \
+        ${CUDA_URL}/libcufft/linux-x86_64/libcufft-linux-x86_64-11.3.3.83-archive.tar.xz \
+        ${CUDNN_URL}/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda12-archive.tar.xz \
+      ; do curl -fsSL "$pkg" | tar -xJf - --strip-components=1 -C $CUDA_DIR; done && \
       ldconfig; \
     fi
 
 ENV PATH="/usr/local/cuda/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64"
-ENV LIBRARY_PATH="/usr/local/cuda/lib64"
-
-# Cache dependencies by building an empty project first
-RUN cargo init app
-COPY Cargo.toml Cargo.lock /app/
-COPY apache-avro-macros /app/apache-avro-macros
-RUN cd app && cargo build --release && \
-    rm -rf app/src
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib"
+ENV LIBRARY_PATH="/usr/local/cuda/lib"
 
 # Copy source and build
 WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY apache-avro-macros ./apache-avro-macros
 COPY ./src ./src
-RUN cargo build --release
+RUN if [ "$USE_GPU" = "true" ]; then \
+      cargo build --release; \
+    else \
+      cargo build --release --no-default-features; \
+    fi
 
 
 ## Dev target for fast rebuilds in container
@@ -94,24 +85,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV PATH="/opt/kafka/bin:${PATH}"
 
-# Install CUDA/cuDNN runtime libraries (curl and xz-utils available from apt above)
-ENV CUDA_DIR=/usr/local/cuda/lib64
+# Install CUDA/cuDNN runtime libraries only (.so files, no toolkit)
+ENV CUDA_DIR=/usr/local/cuda/lib
 RUN if [ "$USE_GPU" = "true" ]; then \
       CUDA_URL=https://developer.download.nvidia.com/compute/cuda/redist && \
       CUDNN_URL=https://developer.download.nvidia.com/compute/cudnn/redist && \
       mkdir -p $CUDA_DIR && \
-      curl -fsSL ${CUDA_URL}/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz | \
-        tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*' && \
-      curl -fsSL ${CUDA_URL}/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.3.14-archive.tar.xz | \
-        tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*' && \
-      curl -fsSL ${CUDA_URL}/libcufft/linux-x86_64/libcufft-linux-x86_64-11.3.3.83-archive.tar.xz | \
-        tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*' && \
-      curl -fsSL ${CUDNN_URL}/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda12-archive.tar.xz | \
-        tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*' && \
+      for pkg in \
+        ${CUDA_URL}/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz \
+        ${CUDA_URL}/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.3.14-archive.tar.xz \
+        ${CUDA_URL}/libcufft/linux-x86_64/libcufft-linux-x86_64-11.3.3.83-archive.tar.xz \
+        ${CUDNN_URL}/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda12-archive.tar.xz \
+      ; do curl -fsSL "$pkg" | tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*'; done && \
       ldconfig; \
     fi
 
-ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib"
 
 # Copy the built executables from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler

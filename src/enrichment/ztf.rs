@@ -1,4 +1,5 @@
 use crate::conf::AppConfig;
+#[cfg(feature = "gpu")]
 use crate::utils::enums::Survey;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
@@ -20,11 +21,16 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
+#[cfg(feature = "gpu")]
 use std::sync::atomic::{AtomicI32, Ordering};
-use tracing::{info, instrument, trace, warn};
+use tracing::{instrument, warn};
+#[cfg(feature = "gpu")]
+use tracing::{info, trace};
+#[cfg(feature = "gpu")]
 use villar_pso::gpu::{GpuBatchData, GpuContext, SourceData};
 
 /// Atomic counter for round-robin GPU device assignment across worker threads.
+#[cfg(feature = "gpu")]
 static GPU_DEVICE_COUNTER: AtomicI32 = AtomicI32::new(0);
 
 #[serdavro]
@@ -393,9 +399,11 @@ pub struct ZtfEnrichmentWorker {
     acai_b_model: AcaiModel,
     btsbot_model: BtsBotModel,
     babamul: Option<Babamul>,
+    #[cfg(feature = "gpu")]
     gpu_ctx: GpuContext,
 }
 
+#[cfg(feature = "gpu")]
 fn to_villar_photometry(p: &PhotometryMag) -> Option<villar_pso::PhotometryMag> {
     let band = match p.band {
         Band::G => villar_pso::Band::G,
@@ -441,19 +449,22 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         };
 
         // Assign a GPU device to this worker via round-robin over configured num_gpus
-        let num_gpus = config
-            .workers
-            .get(&Survey::Ztf)
-            .map(|w| w.enrichment.num_gpus)
-            .unwrap_or(1);
-        let device_id = GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) % num_gpus;
-        info!(device_id, "initializing GPU context");
-        let gpu_ctx = GpuContext::new(device_id).map_err(|e| {
-            EnrichmentWorkerError::ConfigurationError(format!(
-                "GPU init failed for device {}: {}",
-                device_id, e
-            ))
-        })?;
+        #[cfg(feature = "gpu")]
+        let gpu_ctx = {
+            let num_gpus = config
+                .workers
+                .get(&Survey::Ztf)
+                .map(|w| w.enrichment.num_gpus)
+                .unwrap_or(1);
+            let device_id = GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) % num_gpus;
+            info!(device_id, "initializing GPU context");
+            GpuContext::new(device_id).map_err(|e| {
+                EnrichmentWorkerError::ConfigurationError(format!(
+                    "GPU init failed for device {}: {}",
+                    device_id, e
+                ))
+            })?
+        };
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -469,6 +480,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             acai_b_model,
             btsbot_model,
             babamul,
+            #[cfg(feature = "gpu")]
             gpu_ctx,
         })
     }
@@ -518,6 +530,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
+        #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
@@ -526,7 +539,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
+            #[cfg(feature = "gpu")]
             let (properties, all_bands_properties, programid, lightcurve) =
+                self.get_alert_properties(&alert).await?;
+            #[cfg(not(feature = "gpu"))]
+            let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alert).await?;
 
             // Now, prepare inputs for ML models and run inference
@@ -593,97 +610,101 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 enriched_alerts.push(enriched_alert);
             }
 
+            #[cfg(feature = "gpu")]
             villar_inputs.push((candid, lightcurve));
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
         // GPU batch Villar light curve fitting
-        let nan_params = vec![f64::NAN; 14];
-        let mut villar_sources: Vec<(i64, SourceData)> = Vec::new();
-        let mut villar_nan_updates: Vec<WriteModel> = Vec::new();
-        for (candid, lc) in &villar_inputs {
-            let villar_lc: Vec<villar_pso::PhotometryMag> =
-                lc.iter().filter_map(to_villar_photometry).collect();
-            match villar_pso::preprocess_from_photometry(&villar_lc) {
-                Ok(preproc) => {
-                    villar_sources.push((
-                        *candid,
-                        SourceData {
-                            name: candid.to_string(),
-                            data: preproc,
-                        },
-                    ));
-                }
-                Err(e) => {
-                    trace!(candid, "skipping Villar fit: {}", e);
-                    villar_nan_updates.push(WriteModel::UpdateOne(
-                        UpdateOneModel::builder()
-                            .namespace(self.alert_collection.namespace())
-                            .filter(doc! { "_id": *candid })
-                            .update(doc! { "$set": {
-                                "villar_fit.phys_params": &nan_params,
-                                "villar_fit.reduced_chi2": f64::NAN,
-                            }})
-                            .build(),
-                    ));
-                }
-            }
-        }
-
-        if !villar_sources.is_empty() {
-            let sources: Vec<&SourceData> =
-                villar_sources.iter().map(|(_, s)| s).collect();
-            let candids_for_fit: Vec<i64> =
-                villar_sources.iter().map(|(c, _)| *c).collect();
-
-            let fit_updates: Vec<WriteModel> = match GpuBatchData::new(&sources)
-                .and_then(|batch_data| {
-                    let pso_config = villar_pso::PsoConfig::default();
-                    self.gpu_ctx
-                        .batch_pso_multi_seed(&batch_data, &sources, &pso_config)
-                }) {
-                Ok(results) => results
-                    .iter()
-                    .zip(candids_for_fit.iter())
-                    .map(|(result, candid)| {
-                        WriteModel::UpdateOne(
+        #[cfg(feature = "gpu")]
+        {
+            let nan_params = vec![f64::NAN; 14];
+            let mut villar_sources: Vec<(i64, SourceData)> = Vec::new();
+            let mut villar_nan_updates: Vec<WriteModel> = Vec::new();
+            for (candid, lc) in &villar_inputs {
+                let villar_lc: Vec<villar_pso::PhotometryMag> =
+                    lc.iter().filter_map(to_villar_photometry).collect();
+                match villar_pso::preprocess_from_photometry(&villar_lc) {
+                    Ok(preproc) => {
+                        villar_sources.push((
+                            *candid,
+                            SourceData {
+                                name: candid.to_string(),
+                                data: preproc,
+                            },
+                        ));
+                    }
+                    Err(e) => {
+                        trace!(candid, "skipping Villar fit: {}", e);
+                        villar_nan_updates.push(WriteModel::UpdateOne(
                             UpdateOneModel::builder()
                                 .namespace(self.alert_collection.namespace())
                                 .filter(doc! { "_id": *candid })
                                 .update(doc! { "$set": {
-                                    "villar_fit.phys_params": result.phys_params.to_vec(),
-                                    "villar_fit.reduced_chi2": result.reduced_chi2,
+                                    "villar_fit.phys_params": &nan_params,
+                                    "villar_fit.reduced_chi2": f64::NAN,
                                 }})
                                 .build(),
-                        )
-                    })
-                    .collect(),
-                Err(e) => {
-                    warn!("GPU Villar batch fitting failed: {}", e);
-                    candids_for_fit
+                        ));
+                    }
+                }
+            }
+
+            if !villar_sources.is_empty() {
+                let sources: Vec<&SourceData> =
+                    villar_sources.iter().map(|(_, s)| s).collect();
+                let candids_for_fit: Vec<i64> =
+                    villar_sources.iter().map(|(c, _)| *c).collect();
+
+                let fit_updates: Vec<WriteModel> = match GpuBatchData::new(&sources)
+                    .and_then(|batch_data| {
+                        let pso_config = villar_pso::PsoConfig::default();
+                        self.gpu_ctx
+                            .batch_pso_multi_seed(&batch_data, &sources, &pso_config)
+                    }) {
+                    Ok(results) => results
                         .iter()
-                        .map(|candid| {
+                        .zip(candids_for_fit.iter())
+                        .map(|(result, candid)| {
                             WriteModel::UpdateOne(
                                 UpdateOneModel::builder()
                                     .namespace(self.alert_collection.namespace())
                                     .filter(doc! { "_id": *candid })
                                     .update(doc! { "$set": {
-                                        "villar_fit.phys_params": &nan_params,
-                                        "villar_fit.reduced_chi2": f64::NAN,
+                                        "villar_fit.phys_params": result.phys_params.to_vec(),
+                                        "villar_fit.reduced_chi2": result.reduced_chi2,
                                     }})
                                     .build(),
                             )
                         })
-                        .collect()
-                }
-            };
-            villar_nan_updates.extend(fit_updates);
-        }
+                        .collect(),
+                    Err(e) => {
+                        warn!("GPU Villar batch fitting failed: {}", e);
+                        candids_for_fit
+                            .iter()
+                            .map(|candid| {
+                                WriteModel::UpdateOne(
+                                    UpdateOneModel::builder()
+                                        .namespace(self.alert_collection.namespace())
+                                        .filter(doc! { "_id": *candid })
+                                        .update(doc! { "$set": {
+                                            "villar_fit.phys_params": &nan_params,
+                                            "villar_fit.reduced_chi2": f64::NAN,
+                                        }})
+                                        .build(),
+                                )
+                            })
+                            .collect()
+                    }
+                };
+                villar_nan_updates.extend(fit_updates);
+            }
 
-        if !villar_nan_updates.is_empty() {
-            if let Err(e) = self.client.bulk_write(villar_nan_updates).await {
-                warn!("failed to write Villar fit results: {}", e);
+            if !villar_nan_updates.is_empty() {
+                if let Err(e) = self.client.bulk_write(villar_nan_updates).await {
+                    warn!("failed to write Villar fit results: {}", e);
+                }
             }
         }
 
