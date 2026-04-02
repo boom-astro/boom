@@ -57,6 +57,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+  valkey-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    hostname: valkey-exporter
+    depends_on:
+      valkey:
+        condition: service_healthy
+    command:
+      - --redis.addr=redis://valkey:6379
+      - --check-single-keys=ZTF_alerts_packets_queue,ZTF_alerts_packets_queue_temp,ZTF_alerts_enrichment_queue,ZTF_alerts_filter_queue,LSST_alerts_packets_queue,LSST_alerts_packets_queue_temp,LSST_alerts_enrichment_queue,LSST_alerts_filter_queue
+      - --redis-only-metrics
+    networks:
+      - boom
+    restart: always
+  mongodb-exporter:
+    image: percona/mongodb_exporter:0.44.0
+    hostname: mongodb-exporter
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command:
+      - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
+      - --collector.dbstats
+      - --web.listen-address=:9216
+    networks:
+      - boom
+    restart: always
   broker:
     image: apache/kafka:4.1.1
     hostname: broker

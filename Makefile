@@ -9,11 +9,17 @@ produce-ztf:
 
 .PHONY: reset-ztf-state
 reset-ztf-state:
-	@echo "Resetting ZTF dev pipeline state (Mongo, Valkey, Kafka topic)..."
+	@echo "Resetting ZTF dev pipeline state (Mongo, Valkey)..."
 	@docker compose exec -T mongo sh -lc 'mongosh "mongodb://$$MONGO_INITDB_ROOT_USERNAME:$$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/boom?authSource=admin" --quiet --eval "db.ZTF_alerts.deleteMany({}); db.ZTF_alerts_aux.deleteMany({}); db.ZTF_alerts_cutouts.deleteMany({});"'
 	@docker compose exec -T valkey redis-cli DEL ZTF_alerts_packets_queue ZTF_alerts_packets_queue_temp ZTF_alerts_enrichment_queue ZTF_alerts_filter_queue >/dev/null
-	@docker compose exec -T broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:29092 --delete --if-exists --topic ztf_20240617_programid1 >/dev/null || true
 	@echo "ZTF state reset complete."
+
+.PHONY: reset-ztf-state-hard
+reset-ztf-state-hard:
+	@echo "Hard reset of ZTF dev state (includes Kafka topic deletion; stop consumers first)..."
+	@$(MAKE) reset-ztf-state
+	@docker compose exec -T broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:29092 --delete --if-exists --topic ztf_20240617_programid1 >/dev/null || true
+	@echo "ZTF hard reset complete."
 
 .PHONY: api-dev
 api-dev:

@@ -1,6 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
-    scheduler::{record_worker_pool_state, spawn_observability_poller, ThreadPool},
+    scheduler::{record_worker_pool_state, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
@@ -66,8 +66,6 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     initialize_survey_indexes(&args.survey, &db)
         .await
         .expect("could not initialize indexes");
-
-    let observability_poller = spawn_observability_poller(config.clone(), args.survey.clone());
 
     // Spawn sigint handler task
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -149,7 +147,6 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 
     // Shut down:
     info!("shutting down");
-    observability_poller.abort();
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);

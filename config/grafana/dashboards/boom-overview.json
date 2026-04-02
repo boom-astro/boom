@@ -78,7 +78,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -110,7 +110,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(kafka_consumer_alert_processed_total{status=\"ok\"}[30m])) or vector(0)",
+          "expr": "sum(rate(kafka_consumer_alert_processed_total{status=\"ok\"}[2m])) or vector(0)",
           "legendFormat": "kafka consumer (total)",
           "range": true,
           "refId": "A"
@@ -121,7 +121,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total{status=\"ok\",reason=\"added\"}[30m]))",
+          "expr": "sum by (survey) (rate(alert_worker_alert_processed_total{status=\"ok\",reason=\"added\"}[2m]))",
           "legendFormat": "alert worker {{survey}}",
           "range": true,
           "refId": "B"
@@ -132,7 +132,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total{status=\"ok\"}[30m]))",
+          "expr": "sum by (survey) (rate(enrichment_worker_alert_processed_total{status=\"ok\"}[2m]))",
           "legendFormat": "enrichment {{survey}}",
           "range": true,
           "refId": "C"
@@ -143,7 +143,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total{status=\"ok\"}[30m]))",
+          "expr": "sum by (survey) (rate(filter_worker_alert_processed_total{status=\"ok\"}[2m]))",
           "legendFormat": "filter {{survey}}",
           "range": true,
           "refId": "D"
@@ -245,13 +245,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey, worker_type) (scheduler_worker_live)",
+          "expr": "max by (survey, worker_type) (scheduler_worker_total)",
           "legendFormat": "{{survey}} {{worker_type}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Running workers",
+      "title": "Configured workers",
       "type": "timeseries"
     },
     {
@@ -431,7 +431,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -463,7 +463,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets\"}[30m])) or vector(0)",
+          "expr": "max by (survey) (label_replace(redis_key_size{key=~\"(ZTF|LSST)_alerts_packets_queue\"}, \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_packets_queue\")) or vector(0)",
           "legendFormat": "{{survey}} packets",
           "range": true,
           "refId": "A"
@@ -474,7 +474,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"packets_temp\"}[30m])) or vector(0)",
+          "expr": "max by (survey) (label_replace(redis_key_size{key=~\"(ZTF|LSST)_alerts_packets_queue_temp\"}, \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_packets_queue_temp\")) or vector(0)",
           "legendFormat": "{{survey}} packets_temp",
           "range": true,
           "refId": "B"
@@ -485,7 +485,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"enrichment\"}[30m])) or vector(0)",
+          "expr": "max by (survey) (label_replace(redis_key_size{key=~\"(ZTF|LSST)_alerts_enrichment_queue\"}, \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_enrichment_queue\")) or vector(0)",
           "legendFormat": "{{survey}} enrichment",
           "range": true,
           "refId": "C"
@@ -496,13 +496,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (max_over_time(scheduler_queue_depth{stage=\"filter\"}[30m])) or vector(0)",
+          "expr": "max by (survey) (label_replace(redis_key_size{key=~\"(ZTF|LSST)_alerts_filter_queue\"}, \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_filter_queue\")) or vector(0)",
           "legendFormat": "{{survey}} filter",
           "range": true,
           "refId": "D"
         }
       ],
-      "title": "Valkey queue depth (peak over 5m)",
+      "title": "Valkey queue depth (messages)",
       "type": "timeseries"
     },
     {
@@ -823,7 +823,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_data_size) or vector(0)",
+          "expr": "max(mongodb_dbstats_dataSize) or vector(0)",
           "legendFormat": "data",
           "range": true,
           "refId": "A"
@@ -834,7 +834,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_storage_size) or vector(0)",
+          "expr": "max(mongodb_dbstats_storageSize) or vector(0)",
           "legendFormat": "storage",
           "range": true,
           "refId": "B"
@@ -845,7 +845,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_index_size) or vector(0)",
+          "expr": "max(mongodb_dbstats_indexSize) or vector(0)",
           "legendFormat": "index",
           "range": true,
           "refId": "C"
@@ -856,7 +856,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_total_size) or vector(0)",
+          "expr": "max(mongodb_dbstats_totalSize) or vector(0)",
           "legendFormat": "total",
           "range": true,
           "refId": "D"
@@ -1530,7 +1530,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_objects) or vector(0)",
+          "expr": "max(mongodb_dbstats_objects) or vector(0)",
           "legendFormat": "objects",
           "range": true,
           "refId": "A"
@@ -1541,7 +1541,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_collections) or vector(0)",
+          "expr": "max(mongodb_dbstats_collections) or vector(0)",
           "legendFormat": "collections",
           "range": true,
           "refId": "B"
@@ -1552,7 +1552,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(scheduler_mongodb_indexes) or vector(0)",
+          "expr": "max(mongodb_dbstats_indexes) or vector(0)",
           "legendFormat": "indexes",
           "range": true,
           "refId": "C"
