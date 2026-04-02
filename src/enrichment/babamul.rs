@@ -502,6 +502,13 @@ impl Babamul {
                 delivery_futures.push(result);
                 total_enqueued += 1;
             }
+
+            record_kafka_alert_published(
+                "babamul",
+                survey_from_topic(&topic_name),
+                &topic_name,
+                alerts.len() as u64,
+            );
         }
 
         tracing::debug!(
@@ -522,13 +529,6 @@ impl Babamul {
             } else {
                 total_sent += 1;
             }
-
-            record_kafka_alert_published(
-                "babamul",
-                survey_from_topic(&topic_name),
-                &topic_name,
-                payloads.len() as u64,
-            );
         }
 
         tracing::debug!(
