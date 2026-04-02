@@ -78,7 +78,7 @@ async fn test_produce_and_consume_from_archive() {
     );
 
     // Verify that the producer runs and reports the correct count:
-    let result = producer.produce(Some(topic.clone())).await;
+    let result = producer.produce(Some(topic.clone()), false).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap().unwrap(), expected_count as i64);
 
@@ -179,7 +179,7 @@ async fn produce_ztf_in_dir(
     // Produce the alerts and verify the message count
     // (test_produce_and_consume_from_archive does a more detailed check):
     let message_count = producer
-        .produce(Some(topic.to_string()))
+        .produce(Some(topic.to_string()), false)
         .await
         .unwrap()
         .unwrap();
@@ -205,7 +205,7 @@ async fn test_skip_producing_when_counts_match() {
 
     // Try again: the message count matches the avro count, so no more messages
     // will be produced:
-    let option = producer.produce(Some(topic.clone())).await.unwrap();
+    let option = producer.produce(Some(topic.clone()), false).await.unwrap();
     assert!(option.is_none()); // Reported count is None, i.e., no messages were produced
 
     // Verify the topic still has the correct number of messages:
@@ -236,23 +236,16 @@ async fn test_produce_when_counts_do_not_match() {
         .path();
     std::fs::remove_file(first_file).unwrap();
 
-    // Try again: the message count does not match the avro count, so we should
-    // produce again. The missing file won't be redownloaded; the download logic
-    // just recognizes that the directory exists and is non-empty. The producer
-    // produces whatever it finds in the data directory, and now there is one
-    // fewer alert than before:
-    let message_count = producer
-        .produce(Some(topic.clone()))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(message_count, (limit - 1) as i64);
+    // Try again: topic already has more messages than this run's expected
+    // count, so the producer should skip in non-destructive mode.
+    let option = producer.produce(Some(topic.clone()), false).await.unwrap();
+    assert!(option.is_none());
 
-    // Verify the topic now has one fewer message:
+    // Verify topic contents are unchanged:
     let message_count = count_messages(&producer.server_url(), &topic)
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, limit - 1);
+    assert_eq!(message_count, limit);
 }
 
 #[tokio::test]
@@ -271,7 +264,7 @@ async fn test_produce_when_topic_does_not_exist() {
 
     // Try again: the topic doesn't exist, so should produce as usual:
     let message_count = producer
-        .produce(Some(topic.clone()))
+        .produce(Some(topic.clone()), false)
         .await
         .unwrap()
         .unwrap();
@@ -304,7 +297,7 @@ async fn test_produce_when_data_does_not_exist() {
     // Try again: the data doesn't exist, so there's no avro count to verify
     // that the message count is correct. Should produce as usual:
     let message_count = producer
-        .produce(Some(topic.clone()))
+        .produce(Some(topic.clone()), false)
         .await
         .unwrap()
         .unwrap();
