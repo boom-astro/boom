@@ -1,5 +1,7 @@
 # https://opentelemetry.io/docs/collector/configuration/
 
+file_format: "0.3"
+
 receivers:
   otlp: # [^1]
     protocols:
