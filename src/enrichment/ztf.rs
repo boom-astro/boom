@@ -619,7 +619,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // GPU batch Villar light curve fitting
         #[cfg(feature = "gpu")]
         {
-            let nan_params = vec![f64::NAN; 14];
+            // Build a NaN document with the same keys as a successful fit
+            let nan_set_doc = {
+                let mut d = doc! { "villar_fit.reduced_chi2": f64::NAN };
+                for filt in villar_pso::FILTERS {
+                    for pname in villar_pso::PARAM_NAMES {
+                        d.insert(format!("villar_fit.{}_{}", pname, filt), f64::NAN);
+                    }
+                }
+                d
+            };
+
             let mut villar_sources: Vec<(i64, SourceData)> = Vec::new();
             let mut villar_nan_updates: Vec<WriteModel> = Vec::new();
             for (candid, lc) in &villar_inputs {
@@ -641,10 +651,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                             UpdateOneModel::builder()
                                 .namespace(self.alert_collection.namespace())
                                 .filter(doc! { "_id": *candid })
-                                .update(doc! { "$set": {
-                                    "villar_fit.phys_params": &nan_params,
-                                    "villar_fit.reduced_chi2": f64::NAN,
-                                }})
+                                .update(doc! { "$set": nan_set_doc.clone() })
                                 .build(),
                         ));
                     }
@@ -667,14 +674,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         .iter()
                         .zip(candids_for_fit.iter())
                         .map(|(result, candid)| {
+                            let named = result.params_unnorm.to_named_map();
+                            let mut set_doc = doc! {
+                                "villar_fit.reduced_chi2": result.reduced_chi2,
+                            };
+                            for (key, val) in &named {
+                                set_doc.insert(format!("villar_fit.{}", key), *val);
+                            }
                             WriteModel::UpdateOne(
                                 UpdateOneModel::builder()
                                     .namespace(self.alert_collection.namespace())
                                     .filter(doc! { "_id": *candid })
-                                    .update(doc! { "$set": {
-                                        "villar_fit.phys_params": result.phys_params.to_vec(),
-                                        "villar_fit.reduced_chi2": result.reduced_chi2,
-                                    }})
+                                    .update(doc! { "$set": set_doc })
                                     .build(),
                             )
                         })
@@ -688,10 +699,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                                     UpdateOneModel::builder()
                                         .namespace(self.alert_collection.namespace())
                                         .filter(doc! { "_id": *candid })
-                                        .update(doc! { "$set": {
-                                            "villar_fit.phys_params": &nan_params,
-                                            "villar_fit.reduced_chi2": f64::NAN,
-                                        }})
+                                        .update(doc! { "$set": nan_set_doc.clone() })
                                         .build(),
                                 )
                             })
