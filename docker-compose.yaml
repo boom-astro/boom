@@ -101,6 +101,18 @@ services:
     networks:
       - boom
     restart: always
+  docker-metadata-exporter:
+    image: python:3.12-alpine
+    hostname: docker-metadata-exporter
+    command:
+      - python
+      - /scripts/docker_metadata_exporter.py
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./scripts/docker_metadata_exporter.py:/scripts/docker_metadata_exporter.py:ro
+    networks:
+      - boom
+    restart: always
   broker:
     image: apache/kafka:4.1.1
     hostname: broker

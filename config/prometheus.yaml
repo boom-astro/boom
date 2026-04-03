@@ -52,3 +52,11 @@ scrape_configs:
       - source_labels: [__address__]
         target_label: instance
         replacement: "cadvisor"
+
+  - job_name: "docker-metadata"
+    static_configs:
+      - targets: ["docker-metadata-exporter:9158"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "docker-metadata-exporter"
