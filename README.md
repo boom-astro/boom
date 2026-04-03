@@ -1,4 +1,11 @@
-# BOOM (Burst & Outburst Observations Monitor)
+<div align="center">
+    <h1>
+        <img src="docs/boom_logo.png" alt="BOOM logo" width="160">
+        <br/>
+        BOOM
+    </h1>
+    <em>Burst & Outburst Observations Monitor</em>
+</div>
 
 ## Description
 
