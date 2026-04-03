@@ -4,7 +4,7 @@ This guide covers how to run BOOM locally with telemetry, view dashboards in Gra
 
 ## Local quick start
 
-Start the full local dev stack (Mongo, Valkey, Kafka, OTel Collector, Prometheus, Grafana, API, and dev worker services):
+Start the full local dev stack (Mongo, Valkey, Kafka, cAdvisor, OTel Collector, Prometheus, Grafana, API, and dev worker services):
 
 ```sh
 make dev
@@ -34,30 +34,6 @@ Produce a deterministic ZTF batch used in dev:
 make produce-ztf
 ```
 
-Produce continuous traffic for dashboard testing:
-
-```sh
-make produce-ztf-live
-```
-
-Optional tuning:
-
-```sh
-LIMIT=200 INTERVAL_MS=1000 make produce-ztf-live
-```
-
-Reset pipeline state when re-running experiments:
-
-```sh
-make reset-ztf-state
-```
-
-Hard reset (also deletes the Kafka topic and restarts consumer):
-
-```sh
-make reset-ztf-state-hard
-```
-
 ### Custom producer invocation
 
 For custom dates, limits, or options, using the binary directly is fine:
@@ -75,10 +51,10 @@ The BOOM dashboard already includes the most operationally useful queries.
 ### Pipeline throughput and health
 
 - **Throughput by stage (alerts/s)**
-  - `sum(rate(kafka_consumer_alert_processed_total{status="ok"}[1m]))`
-  - `sum by (survey) (rate(alert_worker_alert_processed_total{status="ok"}[1m]))`
-  - `sum by (survey) (rate(enrichment_worker_alert_processed_total{status="ok"}[1m]))`
-  - `sum by (survey) (rate(filter_worker_alert_processed_total{status="ok"}[1m]))`
+  - `sum(irate(kafka_consumer_alert_processed_total[5m]))`
+  - `sum by (survey) (irate(alert_worker_alert_processed_total[5m]))`
+  - `sum by (survey) (irate(enrichment_worker_alert_processed_total[5m]))`
+  - `sum by (survey) (irate(filter_worker_alert_processed_total[5m]))`
 - **Configured workers**
   - `max by (survey, worker_type) (scheduler_worker_total)`
 - **Live workers by stage**
@@ -101,6 +77,8 @@ The BOOM dashboard already includes the most operationally useful queries.
   - accepted/sent/failed metric points from OTel Collector
 - **MongoDB storage** and **MongoDB logical stats**
   - DB growth and object/index counts
+- **Container CPU usage by service** and **Container memory usage by service**
+  - compose service-level resource usage across the whole stack (including `mongo`)
 - **Prometheus / OTEL Collector / Kafka Exporter**
   - `up` checks for observability dependencies
 

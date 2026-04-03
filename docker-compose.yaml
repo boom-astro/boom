@@ -83,6 +83,22 @@ services:
     networks:
       - boom
     restart: always
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.56.2
+    hostname: cadvisor
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /Users/pete/.docker/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - boom
+    restart: always
   broker:
     image: apache/kafka:4.1.1
     hostname: broker
@@ -161,7 +177,7 @@ services:
         delay: 5s
         max_attempts: 3
   kafka-exporter:
-    image: danielqsj/kafka-exporter:latest
+    image: danielqsj/kafka-exporter:v1.9.0
     hostname: kafka-exporter
     depends_on:
       broker:
