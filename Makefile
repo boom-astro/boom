@@ -5,12 +5,14 @@ dev:
 .PHONY: produce-ztf
 produce-ztf:
 	@$(MAKE) reset-ztf-state
+	@docker compose restart consumer-ztf
 	cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092
 
 .PHONY: produce-ztf-live
 produce-ztf-live:
 	@echo "Starting continuous ZTF traffic for dashboard testing (Ctrl+C to stop)..."
 	@echo "Tip: tune with LIMIT=<n> INTERVAL_MS=<ms>"
+	@docker compose restart consumer-ztf
 	cargo run --bin kafka_producer ztf 20240617 public --limit $${LIMIT:-50} --server-url localhost:9092 --continuous --interval-ms $${INTERVAL_MS:-2000}
 
 .PHONY: reset-ztf-state
@@ -25,7 +27,7 @@ reset-ztf-state-hard:
 	@echo "Hard reset of ZTF dev state (includes Kafka topic deletion; stop consumers first)..."
 	@$(MAKE) reset-ztf-state
 	@docker compose exec -T broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:29092 --delete --if-exists --topic ztf_20240617_programid1 >/dev/null || true
-	@echo "ZTF hard reset complete."
+	@echo "ZTF hard reset complete
 
 .PHONY: api-dev
 api-dev:
