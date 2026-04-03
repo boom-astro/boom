@@ -3,9 +3,9 @@
     <br/>
     BOOM
     <br/>
-    <span style="font-size: 14px; font-weight: normal;">
+    <h5 align="center">
         <em>Burst & Outburst Observations Monitor</em>
-    </span>
+    </h5>
 </h1>
 
 ## Description
