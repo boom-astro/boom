@@ -236,16 +236,23 @@ async fn test_produce_when_counts_do_not_match() {
         .path();
     std::fs::remove_file(first_file).unwrap();
 
-    // Try again: topic already has more messages than this run's expected
-    // count, so the producer should skip in non-destructive mode.
-    let option = producer.produce(Some(topic.clone()), false).await.unwrap();
-    assert!(option.is_none());
+    // Try again: the message count does not match the avro count, so we should
+    // produce again. The missing file won't be redownloaded; the download logic
+    // just recognizes that the directory exists and is non-empty. The producer
+    // produces whatever it finds in the data directory, and now there is one
+    // fewer alert than before:
+    let message_count = producer
+        .produce(Some(topic.clone()), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message_count, (limit - 1) as i64);
 
-    // Verify topic contents are unchanged:
+    // Verify the topic now has one fewer message:
     let message_count = count_messages(&producer.server_url(), &topic)
         .unwrap()
         .unwrap();
-    assert_eq!(message_count, limit);
+    assert_eq!(message_count, limit - 1);
 }
 
 #[tokio::test]

@@ -283,18 +283,6 @@ pub trait AlertProducer {
                         expected_messages
                     );
                         return Ok(None);
-                    }
-                    // If the topic already has more messages than expected for this
-                    // run (e.g. previous larger load), skip to avoid destructive
-                    // topic recreation while consumers are live.
-                    if total_messages > expected_messages {
-                        warn!(
-                        "Topic {} already has {} messages which exceeds expected {} for this run; skipping production",
-                        topic_name,
-                        total_messages,
-                        expected_messages
-                    );
-                        return Ok(None);
                     } else {
                         warn!(
                         "Topic {} already exists with {} messages, expected {} for this run ({} Avro files available)",
@@ -310,12 +298,8 @@ pub trait AlertProducer {
                         topic_name,
                     );
                 }
-                // The topic and data directory are inconsistent; continue without
-                // destructive topic recreation so live consumers are not disrupted.
-                warn!(
-                "Topic {} and local data appear inconsistent; proceeding without topic deletion",
-                topic_name
-            );
+                warn!("recreating topic {}", topic_name);
+                delete_topic(&self.server_url(), &topic_name).await?;
             }
         }
 

@@ -15,7 +15,8 @@ else
 fi
 
 # Create/update the dashboards provisioning config with environment-aware settings
-cat > "$DASH_CONFIG" <<EOF
+write_dashboard_config() {
+  cat > "$DASH_CONFIG" <<EOF
 apiVersion: 1
 
 providers:
@@ -29,6 +30,13 @@ providers:
     options:
       path: /var/lib/grafana/dashboards
 EOF
+}
 
-echo "Dashboard provisioning configured with allowUiUpdates=${EDITABLE}"
+if [[ -w "$DASH_CONFIG" ]] || [[ ! -e "$DASH_CONFIG" && -w "$(dirname "$DASH_CONFIG")" ]]; then
+  write_dashboard_config
+  echo "Dashboard provisioning configured with allowUiUpdates=${EDITABLE}"
+else
+  echo "Dashboard provisioning file is read-only; using checked-in config at ${DASH_CONFIG}"
+fi
+
 exec "$@"

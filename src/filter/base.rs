@@ -1,7 +1,6 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
-    scheduler::record_kafka_alert_published,
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -953,10 +952,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
                         ALERT_PROCESSED.add(1, &output_error_attrs);
                     })?,
             );
-            record_kafka_alert_published("filter_worker", &survey, &output_topic, 1);
-            // Incrementing by alerts_output.len() outside this loop may be more
-            // efficient, but incrementing by 1 here is more accurate.
-            ALERT_PROCESSED.add(1, &ok_included_attrs);
             total_enqueued += 1;
         }
 
@@ -971,15 +966,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
         let results = futures::future::join_all(delivery_futures).await;
         for r in results {
             let result = r.map_err(|e| {
-                let attributes = &output_error_attrs;
-                ACTIVE.add(-1, attributes);
-                ALERT_PROCESSED.add(1, attributes);
+                ACTIVE.add(-1, &active_attrs);
+                ALERT_PROCESSED.add(1, &output_error_attrs);
                 FilterWorkerError::Kafka(format!(
                     "Failed to deliver alert to Kafka topic {}: {}",
                     &output_topic, e
                 ))
             })?;
             if let Err((e, _)) = result {
+                ACTIVE.add(-1, &active_attrs);
+                ALERT_PROCESSED.add(1, &output_error_attrs);
                 error!(
                     "Failed to deliver alert to Kafka topic {}: {}",
                     &output_topic, e

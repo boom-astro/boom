@@ -648,7 +648,8 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, AvroSchema, ToSchema, Default)]
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Default)]
 pub struct ZtfAliases {
     #[serde(rename = "LSST")]
     pub lsst: Vec<String>,

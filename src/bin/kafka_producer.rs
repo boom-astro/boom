@@ -31,16 +31,6 @@ struct Cli {
         help = "URL of the Kafka broker to produce to, defaults to localhost:9092"
     )]
     server_url: Option<String>,
-    #[arg(long, default_value_t = 1, help = "Number of producer runs to execute")]
-    repeat: usize,
-    #[arg(
-        long,
-        default_value_t = 2000,
-        help = "Delay in milliseconds between repeated runs"
-    )]
-    interval_ms: u64,
-    #[arg(long, help = "Run continuously until interrupted (Ctrl+C)")]
-    continuous: bool,
     #[arg(
         long,
         help = "Force production even if the topic already has messages (non-destructive append mode)"
@@ -70,48 +60,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .server_url
         .unwrap_or_else(|| "localhost:9092".to_string());
 
-    let force = args.force || args.continuous || args.repeat > 1;
-
-    if args.continuous {
-        loop {
-            match args.survey {
-                Survey::Ztf => {
-                    let producer =
-                        ZtfAlertProducer::new(date, limit, program_id.clone(), &server_url, true);
-                    producer.produce(None, force).await?;
-                }
-                Survey::Decam => {
-                    let producer = DecamAlertProducer::new(date, limit, &server_url, true);
-                    producer.produce(None, force).await?;
-                }
-                _ => {
-                    error!("Unsupported survey for producing alerts: {}", args.survey);
-                    return Ok(());
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(args.interval_ms)).await;
+    match args.survey {
+        Survey::Ztf => {
+            let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);
+            producer.produce(None, args.force).await?;
         }
-    }
-
-    for run_idx in 0..args.repeat {
-        match args.survey {
-            Survey::Ztf => {
-                let producer =
-                    ZtfAlertProducer::new(date, limit, program_id.clone(), &server_url, true);
-                producer.produce(None, force).await?;
-            }
-            Survey::Decam => {
-                let producer = DecamAlertProducer::new(date, limit, &server_url, true);
-                producer.produce(None, force).await?;
-            }
-            _ => {
-                error!("Unsupported survey for producing alerts: {}", args.survey);
-                return Ok(());
-            }
+        Survey::Decam => {
+            let producer = DecamAlertProducer::new(date, limit, &server_url, true);
+            producer.produce(None, args.force).await?;
         }
-
-        if run_idx + 1 < args.repeat {
-            tokio::time::sleep(std::time::Duration::from_millis(args.interval_ms)).await;
+        _ => {
+            error!("Unsupported survey for producing alerts: {}", args.survey);
+            return Ok(());
         }
     }
 

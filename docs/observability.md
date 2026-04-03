@@ -12,15 +12,15 @@ make dev
 
 Then open Grafana:
 
-- URL: <http://localhost:3000>
-- Username: `admin` unless overridden by `GRAFANA_ADMIN_USER`
-- Password: value of `GRAFANA_ADMIN_PASSWORD` in your environment / `.env`
+- URL: <http://grafana.localhost>
+- Username: value of `GRAFANA_ADMIN_USER` in your environment / `.env` (defaults to `admin` if unset)
+- Password: value of `GRAFANA_ADMIN_PASSWORD` in your environment / `.env` (required)
 
 The pre-provisioned dashboard is:
 
 - **BOOM Observability**
 
-Prometheus is also available locally at <http://localhost:9090>.
+Prometheus is also available locally at <http://prometheus.localhost> or any local port mapping provided by your dev override.
 
 ## Generate traffic for dashboards
 
@@ -39,7 +39,7 @@ make produce-ztf
 For custom dates, limits, or options, using the binary directly is fine:
 
 ```sh
-cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092
+cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092 --force
 ```
 
 You can switch date/program/flags as needed for local load tests.
@@ -55,10 +55,8 @@ The BOOM dashboard already includes the most operationally useful queries.
   - `sum by (survey) (irate(alert_worker_alert_processed_total[5m]))`
   - `sum by (survey) (irate(enrichment_worker_alert_processed_total[5m]))`
   - `sum by (survey) (irate(filter_worker_alert_processed_total[5m]))`
-- **Configured workers**
-  - `max by (survey, worker_type) (scheduler_worker_total)`
-- **Live workers by stage**
-  - `max by (survey) (scheduler_worker_live{worker_type="alert"|"enrichment"|"filter"})`
+- **Scheduler workers**
+  - configured and live traces for alert, enrichment, and filter worker pools
 
 ### Backpressure and failures
 
@@ -77,8 +75,8 @@ The BOOM dashboard already includes the most operationally useful queries.
   - accepted/sent/failed metric points from OTel Collector
 - **MongoDB storage** and **MongoDB logical stats**
   - DB growth and object/index counts
-- **Container CPU usage by service** and **Container memory usage by service**
-  - compose service-level resource usage across the whole stack (including `mongo`)
+- **Container CPU usage by container** and **Container memory usage by container**
+  - container-level resource usage joined against Docker metadata for readable names
 - **Prometheus / OTEL Collector / Kafka Exporter**
   - `up` checks for observability dependencies
 
@@ -108,8 +106,10 @@ Without these settings, redirects and static assets can break.
 ## Operational checklist
 
 1. Verify dependency health first (`Prometheus`, `OTEL Collector`, `Kafka Exporter` panels).
-2. Check worker liveness (`Live workers by stage`) against configured counts.
+2. Check worker liveness in `Scheduler workers` against configured counts.
 3. Compare throughput across consumer/alert/enrichment/filter stages for bottlenecks.
 4. Watch queue depth to detect sustained backlog.
 5. Use error ratio by reason to identify failure mode shifts.
 6. Confirm output publication rate (`Kafka messages produced`) matches expectations.
+
+Prometheus retention can be adjusted with `PROMETHEUS_RETENTION_TIME` in your compose environment.

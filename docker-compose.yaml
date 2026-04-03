@@ -65,8 +65,6 @@ services:
         condition: service_healthy
     command:
       - --redis.addr=redis://valkey:6379
-      - --check-single-keys=ZTF_alerts_packets_queue,ZTF_alerts_packets_queue_temp,ZTF_alerts_enrichment_queue,ZTF_alerts_filter_queue,LSST_alerts_packets_queue,LSST_alerts_packets_queue_temp,LSST_alerts_enrichment_queue,LSST_alerts_filter_queue
-      - --redis-only-metrics
     networks:
       - boom
     restart: always
@@ -413,6 +411,8 @@ services:
       GRAFANA_DASHBOARD_EDITABLE: false
     volumes:
       - grafana_data:/var/lib/grafana
+      # Keep provisioning read-only in the container; the entrypoint script
+      # skips rewriting dashboards.yaml when this mount is not writable.
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - ./scripts/grafana-dashboard-provisioning.sh:/scripts/grafana-dashboard-provisioning.sh:ro
