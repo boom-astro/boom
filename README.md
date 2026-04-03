@@ -5,7 +5,7 @@
         <img src="docs/boom_logo.png" alt="BOOM logo" width="160">
         <br/>
         BOOM
-      </h1>  
+      </h1>
     </summary>
   </ul>
   <em>Burst & Outburst Observations Monitor</em>
