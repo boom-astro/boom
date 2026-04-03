@@ -188,5 +188,18 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
 
 pub async fn get_test_db_api() -> Database {
     let config = AppConfig::from_test_config().unwrap();
-    build_db_api(&config).await.unwrap()
+    let db = build_db_api(&config).await.unwrap();
+
+    // LSST Babamul enrichment requires the LSPSC catalog collection to exist.
+    // In tests we ensure this collection is present even if it is empty.
+    if config.babamul.enabled {
+        let collections = db.list_collection_names().await.unwrap_or_default();
+        if !collections.contains(&"LSPSC".to_string()) {
+            db.create_collection("LSPSC")
+                .await
+                .expect("failed to create LSPSC collection for tests");
+        }
+    }
+
+    db
 }
