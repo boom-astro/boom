@@ -92,7 +92,6 @@ services:
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
-      - /Users/pete/.docker/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
