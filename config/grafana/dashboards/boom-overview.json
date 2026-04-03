@@ -1495,22 +1495,16 @@
             }
           },
           "mappings": [],
-          "max": 100,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
               }
             ]
           },
-          "unit": "percent"
+          "unit": "cores"
         },
         "overrides": []
       },
@@ -1541,13 +1535,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (service) (label_replace(irate(container_cpu_usage_seconds_total{name!=\"\",id=~\"/docker/.+\"}[5m]), \"service\", \"$1\", \"name\", \"boom-(.*)-[0-9]+\")) or sum by (service) (label_replace(irate(container_cpu_usage_seconds_total{id=~\"/docker/.+\"}[5m]), \"service\", \"$1\", \"id\", \"/docker/(.{12})\")) or vector(0)",
-          "legendFormat": "{{service}}",
+          "expr": "sum by (container) (label_replace(irate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"$compose_project\",id=~\"/docker/[0-9a-f]{12,}.*\",name!=\"\",cpu=\"total\"}[5m]), \"container\", \"$1\", \"name\", \"/?(.+)\")) or sum by (container) (label_replace(irate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"$compose_project\",id=~\"/docker/[0-9a-f]{12,}.*\",container_label_com_docker_compose_service!=\"\",cpu=\"total\"}[5m]), \"container\", \"$1\", \"container_label_com_docker_compose_service\", \"(.+)\")) or sum by (container) (label_replace(irate(container_cpu_usage_seconds_total{id=~\"/docker/[0-9a-f]{12,}.*\",cpu=\"total\"}[5m]), \"container\", \"$1\", \"id\", \"/docker/([0-9a-f]{12}).*\"))",
+          "legendFormat": "{{container}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Container CPU usage by service",
+      "title": "Container CPU usage by container",
       "type": "timeseries"
     },
     {
@@ -1633,13 +1627,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (service) (label_replace(container_memory_working_set_bytes{name!=\"\",id=~\"/docker/.+\"}, \"service\", \"$1\", \"name\", \"boom-(.*)-[0-9]+\")) or sum by (service) (label_replace(container_memory_working_set_bytes{id=~\"/docker/.+\"}, \"service\", \"$1\", \"id\", \"/docker/(.{12})\")) or vector(0)",
-          "legendFormat": "{{service}}",
+          "expr": "sum by (container) (label_replace(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"$compose_project\",id=~\"/docker/[0-9a-f]{12,}.*\",name!=\"\"}, \"container\", \"$1\", \"name\", \"/?(.+)\")) or sum by (container) (label_replace(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"$compose_project\",id=~\"/docker/[0-9a-f]{12,}.*\",container_label_com_docker_compose_service!=\"\"}, \"container\", \"$1\", \"container_label_com_docker_compose_service\", \"(.+)\")) or sum by (container) (label_replace(container_memory_working_set_bytes{id=~\"/docker/[0-9a-f]{12,}.*\"}, \"container\", \"$1\", \"id\", \"/docker/([0-9a-f]{12}).*\"))",
+          "legendFormat": "{{container}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Container memory usage by service",
+      "title": "Container memory usage by container",
       "type": "timeseries"
     }
   ],
@@ -1651,7 +1645,35 @@
     "observability"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "boom",
+          "value": "boom"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(container_cpu_usage_seconds_total{container_label_com_docker_compose_project!=\"\"}, container_label_com_docker_compose_project)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Compose project",
+        "multi": false,
+        "name": "compose_project",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(container_cpu_usage_seconds_total{container_label_com_docker_compose_project!=\"\"}, container_label_com_docker_compose_project)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-30m",
@@ -1661,6 +1683,6 @@
   "timezone": "",
   "title": "BOOM Observability",
   "uid": "boom-overview",
-  "version": 33,
+  "version": 60,
   "weekStart": ""
 }
