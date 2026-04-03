@@ -160,108 +160,6 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 8,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "max by (survey, worker_type) (scheduler_worker_total)",
-          "legendFormat": "{{survey}} {{worker_type}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Configured workers",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
             "mode": "palette-classic"
           },
           "custom": {
@@ -319,7 +217,7 @@
         "h": 5,
         "w": 12,
         "x": 12,
-        "y": 5
+        "y": 0
       },
       "id": 13,
       "options": {
@@ -343,8 +241,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"alert\"})",
-          "legendFormat": "alert {{survey}}",
+          "expr": "max by (survey) (scheduler_worker_total{worker_type=\"alert\"})",
+          "legendFormat": "alert configured {{survey}}",
           "range": true,
           "refId": "A"
         },
@@ -354,8 +252,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"enrichment\"})",
-          "legendFormat": "enrichment {{survey}}",
+          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"alert\"})",
+          "legendFormat": "alert live {{survey}}",
           "range": true,
           "refId": "B"
         },
@@ -365,13 +263,46 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"filter\"})",
-          "legendFormat": "filter {{survey}}",
+          "expr": "max by (survey) (scheduler_worker_total{worker_type=\"enrichment\"})",
+          "legendFormat": "enrichment configured {{survey}}",
           "range": true,
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"enrichment\"})",
+          "legendFormat": "enrichment live {{survey}}",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (survey) (scheduler_worker_total{worker_type=\"filter\"})",
+          "legendFormat": "filter configured {{survey}}",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (survey) (scheduler_worker_live{worker_type=\"filter\"})",
+          "legendFormat": "filter live {{survey}}",
+          "range": true,
+          "refId": "F"
         }
       ],
-      "title": "Live workers by stage",
+      "title": "Scheduler workers",
       "type": "timeseries"
     },
     {
@@ -1683,6 +1614,6 @@
   "timezone": "",
   "title": "BOOM Observability",
   "uid": "boom-overview",
-  "version": 80,
+  "version": 82,
   "weekStart": ""
 }
