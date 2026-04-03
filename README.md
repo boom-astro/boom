@@ -1,12 +1,11 @@
-<h1 align="center">
-    <img src="docs/boom_logo.png" alt="BOOM logo" width="160">
-    <br/>
-    BOOM
-    <br/>
-    <h5 align="center">
-        <em>Burst & Outburst Observations Monitor</em>
-    </h5>
-</h1>
+<div align="center">
+    <h1>
+        <img src="docs/boom_logo.png" alt="BOOM logo" width="160">
+        <br/>
+        BOOM
+    </h1>
+    <em>Burst & Outburst Observations Monitor</em>
+</div>
 
 ## Description
 
