@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# A function that returns the current date and time
+current_datetime() {
+    TZ=utc date "+%Y-%m-%d %H:%M:%S"
+}
+
 # Parse args
 KEEP_UP=false
 POSITIONAL_ARGS=()
@@ -34,6 +39,13 @@ fi
 COMPOSE_CONFIG=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.yaml")
 BG_PIDS=()
 
+PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
+    echo "BOOM_GPU__ENABLED is true and platform is Linux; adding GPU override to Docker Compose configuration (CUDA support)"
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cuda.yaml")
+fi
+
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
 if [ "${LOW_STORAGE:-}" = "true" ]; then
     COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml")
@@ -41,11 +53,6 @@ fi
 
 # Logs folder is the optional positional argument to the script
 LOGS_DIR=${POSITIONAL_ARGS[0]:-logs/boom}
-
-# A function that returns the current date and time
-current_datetime() {
-    TZ=utc date "+%Y-%m-%d %H:%M:%S"
-}
 
 cleanup() {
     echo "$(current_datetime) - Cleaning up background processes"

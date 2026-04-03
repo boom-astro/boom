@@ -3,6 +3,9 @@
 
 services:
   scheduler-ztf:
+    image: boom-astro/boom-gpu:latest
+    build:
+      target: app-gpu
     environment:
       NVIDIA_VISIBLE_DEVICES: all
     deploy:
@@ -13,6 +16,9 @@ services:
               count: all
               capabilities: [gpu]
   scheduler-lsst:
+    image: boom-astro/boom-gpu:latest
+    build:
+      target: app-gpu
     environment:
       NVIDIA_VISIBLE_DEVICES: all
     deploy:

@@ -83,7 +83,7 @@ impl AllModels {
 #[test]
 #[ignore]
 fn bench_inference_cpu_vs_batched() {
-    let use_gpu = std::env::var("USE_GPU").unwrap_or_else(|_| "true".to_string());
+    let use_gpu = std::env::var("BOOM_GPU__ENABLED").unwrap_or_else(|_| "true".to_string());
     println!("\nUSE_GPU={}", use_gpu);
 
     println!("Loading models...");
@@ -125,5 +125,7 @@ fn bench_inference_cpu_vs_batched() {
     println!("\nNotes:");
     println!("  - 'one-at-a-time': 6 models × N sequential predict(batch=1) calls");
     println!("  - 'batched': 6 models × 1 predict(batch=N) call");
-    println!("  - USE_GPU={use_gpu}. Set USE_GPU=false to force CPU-only execution.");
+    println!(
+        "  - BOOM_GPU__ENABLED={use_gpu}. Set BOOM_GPU__ENABLED=false to force CPU-only execution."
+    );
 }

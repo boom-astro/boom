@@ -27,7 +27,7 @@ docker compose up
 **With GPUs** (requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):
 
 ```bash
-docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up
+docker compose -f docker-compose.yaml -f docker-compose.cuda.yaml up
 ```
 
 The GPU override adds NVIDIA device reservations to all scheduler services. Set `gpu.enabled: true` in `config.yaml` to have the application use them.

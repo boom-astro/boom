@@ -25,20 +25,27 @@ pub enum ModelError {
 
 /// Load an ONNX model, optionally on a specific CUDA device.
 ///
-/// GPU usage is controlled by the `USE_GPU` environment variable (default: `"true"`).
+/// GPU usage is controlled by the `BOOM_GPU__ENABLED` environment variable (default: `"true"`).
 /// When `device_id` is `Some(id)`, that CUDA device is used; otherwise device 0.
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
     load_model_on_device(path, None)
 }
 
+fn env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
-    let use_gpu = env::var("USE_GPU")
-        .unwrap_or_else(|_| "true".to_string())
-        .to_lowercase()
-        == "true";
-    // Only attempt to load CUDA/CoreML when USE_GPU=true
+    let use_gpu = env::var("BOOM_GPU__ENABLED")
+        .map(|v| env_truthy(&v))
+        .unwrap_or(true);
+
+    // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if use_gpu {
         // if CUDA or Apple's CoreML aren't available,
         // it will fall back to CPU execution provider
@@ -50,6 +57,10 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
                 .build(),
             #[cfg(target_os = "macos")]
             ort::execution_providers::CoreMLExecutionProvider::default().build(),
+        ])?;
+    } else {
+        builder = builder.with_execution_providers([
+            ort::execution_providers::CPUExecutionProvider::default().build(),
         ])?;
     }
 
