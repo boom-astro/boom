@@ -57,13 +57,18 @@ zune-inflate = { version = "0.2", default-features = false, features = [
     "std",
 ] }
 
+[features]
+default = []
+gpu = ["dep:villar-pso", "ort/cuda"]
+
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
 
-# otherwise, install ort with the cuda feature
+# otherwise, install ort without cuda by default (enabled via gpu feature)
 [target.'cfg(target_os = "linux")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
+ort = { version = "=2.0.0-rc.10" }
+villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["cuda"], optional = true }
 
 [workspace]
 members = ["apache-avro-macros"]

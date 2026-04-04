@@ -407,6 +407,8 @@ fn default_password_reset_cooldown_minutes() -> u32 {
 #[derive(Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
     pub n_workers: usize,
+    #[serde(default)]
+    pub num_gpus: i32,
 }
 
 #[derive(Deserialize, Debug, Clone)]

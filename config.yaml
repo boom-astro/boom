@@ -47,6 +47,7 @@ workers:
       n_workers: 3
     enrichment:
       n_workers: 3
+      num_gpus: 1
     filter:
       n_workers: 3
   lsst:
