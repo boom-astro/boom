@@ -19,7 +19,7 @@ From: rust:1.93.1-slim-trixie
     SCALA_VERSION=2.13
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      curl gcc g++ libhdf5-dev perl \
+      curl gcc g++ libhdf5-dev libclang-dev perl \
       make libsasl2-dev pkg-config \
       libsasl2-2 ca-certificates \
       openjdk-25-jre-headless tar && \
@@ -40,3 +40,11 @@ From: rust:1.93.1-slim-trixie
     cp /app/target/release/api /app/boom-api
     cp /app/target/release/migrate_fp_flux /app/migrate_fp_flux
     cp /app/target/release/migrate_snr /app/migrate_snr
+
+    # Cleanup: remove build deps and artifacts to reduce image size
+    apt-get purge -y gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config
+    apt-get autoremove -y
+    apt-get clean
+    rm -rf /app/target /app/src /app/apache-avro-macros /app/Cargo.toml /app/Cargo.lock
+    rm -rf /root/.cargo /usr/local/cargo /usr/local/rustup
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
