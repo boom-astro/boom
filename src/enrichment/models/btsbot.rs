@@ -1,6 +1,6 @@
 use crate::{
     enrichment::{
-        models::{load_model, Model, ModelError},
+        models::{load_model, load_model_on_device, Model, ModelError},
         ZtfAlertForEnrichment,
     },
     utils::lightcurves::AllBandsProperties,
@@ -42,6 +42,13 @@ impl Model for BtsBotModel {
 }
 
 impl BtsBotModel {
+    /// Load on a specific CUDA device.
+    pub fn new_on_device(path: &str, device_id: i32) -> Result<Self, ModelError> {
+        Ok(Self {
+            model: load_model_on_device(path, Some(device_id))?,
+        })
+    }
+
     #[instrument(skip_all, err)]
     pub fn get_metadata(
         &self,

@@ -20,6 +20,13 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+gpu:
+  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  # Models are loaded once at startup and shared across all enrichment workers.
+  # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
+  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  # ONNX models are loaded on the first device. Additional devices are available
+  # for the GPU pool (future lightcurve fitting).
 redis:
   host: localhost
   port: 6379

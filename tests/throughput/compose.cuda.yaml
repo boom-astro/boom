@@ -1,0 +1,16 @@
+# GPU override, requires NVIDIA Container Toolkit on the host.
+
+services:
+  scheduler:
+    image: boom-astro/boom-gpu:latest
+    build:
+      target: app-gpu
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

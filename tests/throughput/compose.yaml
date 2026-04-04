@@ -131,6 +131,7 @@ services:
     command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public"]
     environment:
       RUST_LOG: debug,ort=error
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
     depends_on:
       producer:
         condition: service_completed_successfully
@@ -154,6 +155,7 @@ services:
       - ztf
     environment:
       RUST_LOG: debug,ort=error
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
     networks:
       - boom
     depends_on:
