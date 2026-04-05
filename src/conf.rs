@@ -1,4 +1,4 @@
-use crate::utils::{enums::Survey, o11y::logging::as_error};
+use crate::utils::{enums::Survey, host::HostGalaxyConfig, o11y::logging::as_error};
 use config::{Config, File, Value};
 use dotenvy;
 use mongodb::bson::doc;
@@ -430,6 +430,8 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
+    #[serde(default)]
+    pub host_galaxy: HostGalaxyConfig,
 }
 
 impl AppConfig {

@@ -6,6 +6,7 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
 };
@@ -134,6 +135,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "ztf": {
                         "$cond": {
@@ -189,6 +191,7 @@ pub struct LsstAlertForEnrichment {
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
@@ -199,6 +202,7 @@ pub struct LsstAlertProperties {
     pub stationary: bool,
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
+    pub hosted: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
 }
@@ -462,10 +466,19 @@ impl LsstEnrichmentWorker {
             photstats.clone()
         };
 
+        // Derive hosted boolean from object-level host galaxy association
+        let hosted = alert
+            .host_galaxy
+            .as_ref()
+            .and_then(|hg| hg.best_host.as_ref())
+            .map(|best| best.dlr < 5.0)
+            .unwrap_or(false);
+
         Ok(LsstAlertProperties {
             rock: is_rock,
             star: is_star,
             near_brightstar: is_near_brightstar,
+            hosted,
             stationary,
             photstats,
             multisurvey_photstats,
