@@ -1,6 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
-    scheduler::ThreadPool,
+    scheduler::{record_worker_pool_state, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
@@ -98,9 +98,33 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
-        args.survey,
+        args.survey.clone(),
         config_path,
     );
+
+    let record_pool_metrics = || {
+        record_worker_pool_state(
+            &args.survey,
+            "alert",
+            alert_pool.live_worker_count(),
+            alert_pool.total_worker_count(),
+        );
+        record_worker_pool_state(
+            &args.survey,
+            "enrichment",
+            enrichment_pool.live_worker_count(),
+            enrichment_pool.total_worker_count(),
+        );
+        record_worker_pool_state(
+            &args.survey,
+            "filter",
+            filter_pool.live_worker_count(),
+            filter_pool.total_worker_count(),
+        );
+    };
+
+    // Emit an initial sample so dashboards show running workers immediately.
+    record_pool_metrics();
 
     // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
     let mut shutdown_rx = shutdown_rx;
@@ -110,6 +134,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
                 break;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                record_pool_metrics();
                 info!(
                     alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
                     enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),

@@ -1,6 +1,12 @@
 .PHONY: dev
 dev:
-	docker compose --profile api up
+	docker compose --profile dev up
+
+.PHONY: produce-ztf
+produce-ztf: # Delete Kafka topic and re-produce ZTF traffic for testing
+	@docker compose exec -T broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:29092 --delete --if-exists --topic ztf_20240617_programid1 >/dev/null || true
+	@docker compose restart consumer-ztf
+	cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092 --force
 
 .PHONY: api-dev
 api-dev:

@@ -43,6 +43,41 @@ services:
   scheduler-ztf:
     env_file:
       - .env
+    environment:
+      BOOM_KAFKA__PRODUCER__SERVER: broker:29092
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /app
+    command:
+      - cargo
+      - watch
+      - --watch
+      - src
+      - --watch
+      - apache-avro-macros
+      - --watch
+      - Cargo.toml
+      - --watch
+      - Cargo.lock
+      - --ignore
+      - target
+      - -x
+      - run --bin scheduler -- ztf --config /app/config.yaml
+    volumes:
+      - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+      - ${PWD}/config.yaml:/app/config.yaml
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
   scheduler-lsst:
     env_file:
       - .env
@@ -72,7 +107,21 @@ services:
       dockerfile: Dockerfile
       target: dev
     working_dir: /app
-    command: ["cargo", "watch", "-x", "run --bin api"]
+    command:
+      - cargo
+      - watch
+      - --watch
+      - src
+      - --watch
+      - apache-avro-macros
+      - --watch
+      - Cargo.toml
+      - --watch
+      - Cargo.lock
+      - --ignore
+      - target
+      - -x
+      - run --bin api
     volumes:
       - ./src:/app/src
       - ./apache-avro-macros:/app/apache-avro-macros
@@ -84,6 +133,42 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
     ports:
       - "4000:4000"
+  consumer-ztf:
+    env_file:
+      - .env
+    environment:
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: broker:29092
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /app
+    command:
+      - cargo
+      - watch
+      - --watch
+      - src
+      - --watch
+      - apache-avro-macros
+      - --watch
+      - Cargo.toml
+      - --watch
+      - Cargo.lock
+      - --ignore
+      - target
+      - -x
+      - run --bin kafka_consumer -- ztf 20240617 --programids public --config /app/config.yaml
+    volumes:
+      - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+      - ${PWD}/config.yaml:/app/config.yaml
   otel-collector:
     ports:
       - "4317:4317"   # OTLP gRPC receiver (from Rust OTLP exporter)
@@ -92,6 +177,21 @@ services:
   prometheus:
     ports:
       - "9090:9090"
+  kafka-exporter:
+    ports:
+      - "9308:9308"
+  grafana:
+    environment:
+      # Enable dashboard editing in dev mode
+      GRAFANA_DASHBOARD_EDITABLE: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      # Override to make provisioning directory writable so the dashboard provisioning script can configure it
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./scripts/grafana-dashboard-provisioning.sh:/scripts/grafana-dashboard-provisioning.sh:ro
 
 networks:
   traefik-public:
