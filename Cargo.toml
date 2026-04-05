@@ -65,5 +65,10 @@ ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
 
+# on windows, build rdkafka from source with cmake and install ort with default features (CPU)
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { version = "=2.0.0-rc.10" }
+rdkafka = { version = "0.38.0", features = ["cmake-build", "gssapi", "ssl", "tracing", "sasl"] }
+
 [workspace]
 members = ["apache-avro-macros"]
