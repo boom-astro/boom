@@ -193,6 +193,50 @@ echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
 python $BOOM_REPO_ROOT/tests/throughput/read-kafka-output.py
 
+# Export collection stats to JSON for analysis
+echo "$(current_datetime) - Collecting MongoDB collection stats"
+MONGO_RESULT="$({
+	docker compose "${COMPOSE_CONFIG[@]}" exec -T mongo \
+		mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017/admin?authSource=admin" \
+		--quiet \
+		--eval '
+const dbName = "boom-benchmarking";
+const d = db.getSiblingDB(dbName);
+function collectionStats(name) {
+	const c = d.getCollection(name);
+	const s = c.stats();
+  return {
+	collection: name,
+	count: c.countDocuments(),
+	data_size_bytes: s.size,
+	storage_size_bytes: s.storageSize,
+	total_index_size_bytes: s.totalIndexSize,
+	total_size_bytes: s.totalSize
+  };
+}
+const collectionNames = d
+	.getCollectionInfos({ type: "collection" })
+	.map((info) => info.name)
+	.sort();
+const out = {
+  generated_at_utc: new Date().toISOString(),
+  database: dbName,
+  collections: collectionNames.map(collectionStats)
+};
+print(JSON.stringify(out));
+'
+} | tail -n 1)"
+
+if [ -n "$MONGO_RESULT" ]; then
+	mkdir -p "$LOGS_DIR"
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s\n' "$MONGO_RESULT" | jq . > "$LOGS_DIR/collection_stats.json"
+	else
+		printf '%s\n' "$MONGO_RESULT" > "$LOGS_DIR/collection_stats.json"
+	fi
+	echo "$(current_datetime) - Wrote collection stats to $LOGS_DIR/collection_stats.json"
+fi
+
 # Check to see if any of our containers have exited with a non-zero status,
 # which would indicate an error
 EXIT_CODE=$(docker compose "${COMPOSE_CONFIG[@]}" ps -aq | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
