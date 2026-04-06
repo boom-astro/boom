@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Valkey health check
-# nb_retries  max retries (empty = unlimited)
-# --instance  name of the Apptainer instance (default: valkey)
+#  nb_retries  max retries (empty = unlimited)
+#  --instance  name of the Apptainer instance (default: valkey)
 
 YELLOW="\e[33m"
 GREEN="\e[32m"

@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # MongoDB health check
-# Usage: $0 [nb_retries] [--port PORT]
 #   nb_retries  max retries (empty = unlimited)
 #   --port      port of the MongoDB instance (default: 27017)
 #   --instance  name of the Apptainer instance (default: mongo)
