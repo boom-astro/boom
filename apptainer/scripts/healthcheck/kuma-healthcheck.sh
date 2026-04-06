@@ -16,7 +16,7 @@ NB_RETRIES=${1:-}
 cpt=0
 until timeout 3 curl -sSf http://localhost:3001 > /dev/null 2>&1; do
     echo -e "${RED}$(current_datetime) - uptime kuma unhealthy${END}"
-    if [ -n "$NB_RETRIES" ] && [ $cpt -ge $NB_RETRIES ]; then
+    if [ -n "$NB_RETRIES" ] && [ $cpt -ge "$NB_RETRIES" ]; then
         exit 1
     fi
 

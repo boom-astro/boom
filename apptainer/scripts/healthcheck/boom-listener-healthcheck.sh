@@ -18,7 +18,7 @@ URL=${2:-http://localhost:5554/health}
 cpt=0
 until timeout 3 curl -fs "$URL" >/dev/null 2>&1; do
     echo -e "${RED}$(current_datetime) - listener unhealthy${END}"
-    if [ -n "$NB_RETRIES" ] && [ $cpt -ge $NB_RETRIES ]; then
+    if [ -n "$NB_RETRIES" ] && [ $cpt -ge "$NB_RETRIES" ]; then
       exit 1
     fi
 
