@@ -198,6 +198,18 @@ fi
 # -----------------------------
 if [ "$1" == "benchmark" ]; then
   pip install pandas pyyaml astropy confluent-kafka
+  # check if the benchmark .sif file exists
+  mkdir -p "$BOOM_DIR/tests/apptainer/sif"
+  if [ ! -f "$BOOM_DIR/tests/apptainer/sif/mongo.sif" ]; then
+    apptainer build tests/apptainer/sif/mongo.sif tests/apptainer/def/mongo.def
+  fi
+  if [ ! -f "$BOOM_DIR/tests/apptainer/sif/kafka.sif" ]; then
+    apptainer build tests/apptainer/sif/kafka.sif tests/apptainer/def/kafka.def
+  fi
+  if [ ! -f "$BOOM_DIR/tests/apptainer/sif/valkey.sif" ]; then
+    apptainer build tests/apptainer/sif/valkey.sif tests/apptainer/def/valkey.def
+  fi
+  # Run the benchmark
   python3 "$BOOM_DIR/tests/throughput/run.py" --apptainer
   exit 0
 fi

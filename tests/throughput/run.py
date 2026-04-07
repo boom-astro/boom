@@ -59,21 +59,31 @@ parser.add_argument(
 )
 args = parser.parse_args()
 use_apptainer = args.apptainer
+hosts = {
+    "mongo": "localhost" if use_apptainer else "mongo",
+    "redis": "localhost" if use_apptainer else "valkey",
+    "kafka": "localhost" if use_apptainer else "broker",
+}
+ports = {
+    "mongo": 27018 if use_apptainer else 27017,
+    "redis": 6380 if use_apptainer else 6379,
+    "kafka": 29192 if use_apptainer else 29092,
+}
 with open(os.path.join(args.boom_repo_dir, "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
+config["database"]["host"] = hosts["mongo"]
+config["database"]["port"] = ports["mongo"]
+config["database"]["name"] = "boom-benchmarking"
+config["database"]["password"] = "mongoadminsecret"
+config["redis"]["host"] = hosts["redis"]
+config["redis"]["port"] = ports["redis"]
+config["kafka"]["consumer"]["ztf"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
+config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
+config["kafka"]["producer"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
+config["babamul"]["enabled"] = True
 config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
 config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
 config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
-config["database"]["name"] = "boom-benchmarking"
-config["database"]["host"] = "localhost" if use_apptainer else "mongo"
-config["database"]["password"] = "mongoadminsecret"
-config["kafka"]["consumer"]["ztf"]["server"] = "localhost:29092" if use_apptainer else "broker:29092"
-config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
-config["kafka"]["producer"]["server"] = "localhost:29092" if use_apptainer else "broker:29092"
-config["redis"]["host"] = "localhost" if use_apptainer else "valkey"
-config["api"]["auth"]["secret_key"] = "1234"
-config["api"]["auth"]["admin_password"] = "adminsecret"
-config["babamul"]["enabled"] = True
 with open(
     os.path.join(args.boom_repo_dir, "tests", "throughput", "config.yaml"), "w"
 ) as f:
@@ -127,6 +137,9 @@ logs_dir = os.path.join(
 
 # Now run the benchmark
 os.environ["BOOM_REPO_ROOT"] = os.path.abspath(args.boom_repo_dir)
+os.environ["BENCHMARK_MONGO_PORT"] = str(ports["mongo"])
+os.environ["BENCHMARK_REDIS_PORT"] = str(ports["redis"])
+os.environ["BENCHMARK_KAFKA_PORT"] = str(ports["kafka"])
 os.environ["TIMEOUT_SECS"] = str(args.timeout)
 cmd = [
     "bash",

@@ -18,12 +18,16 @@ if [ -z "${BOOM_REPO_ROOT:-}" ]; then
     exit 1
 fi
 
+# Ports
+MONGO_PORT=$BENCHMARK_MONGO_PORT
+REDIS_PORT=$BENCHMARK_REDIS_PORT
+KAFKA_PORT=$BENCHMARK_KAFKA_PORT
+
 # Paths
 TESTS_DIR="$BOOM_REPO_ROOT/tests"
 CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
 SCRIPTS_DIR="$BOOM_REPO_ROOT/apptainer/scripts"
-SIF_DIR="$BOOM_REPO_ROOT/apptainer/sif"
-PERSISTENT_DIR="$TESTS_DIR/apptainer/persistent"
+BENCHMARK_SIF_DIR="$TESTS_DIR/apptainer/sif"
 COMPOSE_CONFIG=("-f" "$TESTS_DIR/throughput/compose.yaml")
 BG_PIDS=()
 
@@ -87,10 +91,10 @@ stop_all_instances() {
   fi
   echo -e "$(current_datetime) - ${GREEN}Shutting down BOOM services${END}"
   if [ "$APPTAINER" == "true" ]; then
-    apptainer instance stop boom
-    apptainer instance stop kafka
-    apptainer instance stop valkey
-    apptainer instance stop mongo
+    apptainer instance stop benchmark_boom
+    apptainer instance stop benchmark_kafka
+    apptainer instance stop benchmark_valkey
+    apptainer instance stop benchmark_mongo
   else
     docker compose "${COMPOSE_CONFIG[@]}" down
   fi
@@ -104,7 +108,7 @@ run_mongo_query(){
         auth="/admin?authSource=admin"
     fi
     if [ "$APPTAINER" == "true" ]; then
-      apptainer exec instance://mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017${auth}" --quiet --eval "$query"
+      apptainer exec instance://benchmark_mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:${MONGO_PORT}${auth}" --quiet --eval "$query"
     else
       docker compose "${COMPOSE_CONFIG[@]}" exec -T mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017${auth}" --quiet --eval "$query"
     fi
@@ -112,7 +116,8 @@ run_mongo_query(){
 
 mongo_count() {
     local query="$1"
-    local raw=$(run_mongo_query "$query")
+    local raw
+    raw=$(run_mongo_query "$query")
     raw=$(printf '%s\n' "$raw" | tail -n 1 | tr -d '\r')
     raw=$(printf '%s' "$raw" | tr -cd '0-9')
     echo "${raw:-0}"
@@ -130,12 +135,9 @@ if [ "$APPTAINER" == "true" ]; then
   # Start MongoDB
   # -----------------------------
   echo && echo "$(current_datetime) - Starting MongoDB"
-  mkdir -p "$PERSISTENT_DIR/mongodb"
-  apptainer instance run --bind "$PERSISTENT_DIR/mongodb:/data/db" "$SIF_DIR/mongo.sif" mongo
-#    --env MONGO_INITDB_ROOT_USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin} \
-#    --env MONGO_INITDB_ROOT_PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set} \
+  apptainer instance run --bind "$LOGS_DIR/mongodb:/log" "$BENCHMARK_SIF_DIR/mongo.sif" benchmark_mongo
   sleep 5
-  "$SCRIPTS_DIR/mongodb-healthcheck.sh"
+  "$SCRIPTS_DIR/mongodb-healthcheck.sh" --port "$MONGO_PORT" --instance benchmark_mongo
 
   echo "$(current_datetime) - Initializing MongoDB with test data"
   apptainer exec \
@@ -145,88 +147,64 @@ if [ "$APPTAINER" == "true" ]; then
       --bind "$TESTS_DIR/throughput/cats150.filter.json:/cats150.filter.json" \
       --env DB_NAME=boom-benchmarking \
       --env DB_ADD_URI= \
-      "$SIF_DIR/mongo.sif" \
+      "$BENCHMARK_SIF_DIR/mongo.sif" \
       /bin/bash /mongo-init.sh
 
   # -----------------------------
   # Start Valkey
   # -----------------------------
   echo && echo "$(current_datetime) - Starting Valkey"
-  mkdir -p "$PERSISTENT_DIR/valkey"
   mkdir -p "$LOGS_DIR/valkey"
-  apptainer instance run \
-    --bind "$LOGS_DIR/valkey:/log" \
-    "$SIF_DIR/valkey.sif" valkey
-#    --bind "$PERSISTENT_DIR/valkey:/data" \
-  "$SCRIPTS_DIR/valkey-healthcheck.sh"
+  apptainer instance run --bind "$LOGS_DIR/valkey:/log" "$BENCHMARK_SIF_DIR/valkey.sif" benchmark_valkey
+  "$SCRIPTS_DIR/valkey-healthcheck.sh" --port "$REDIS_PORT" --instance benchmark_valkey
 
   # -----------------------------
   # Start Kafka
   # -----------------------------
   echo && echo "$(current_datetime) - Starting Kafka"
-  mkdir -p "$PERSISTENT_DIR/kafka_data"
   mkdir -p "$LOGS_DIR/kafka"
   apptainer instance run \
       --bind "$BOOM_REPO_ROOT/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
       --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
-      "$SIF_DIR/kafka.sif" kafka
-#      --bind "$PERSISTENT_DIR/kafka_data:/var/lib/kafka/data" \
-#      --bind "$PERSISTENT_DIR/kafka_data:/opt/kafka/config" \
-  "$SCRIPTS_DIR/kafka-healthcheck.sh"
+      "$BENCHMARK_SIF_DIR/kafka.sif" benchmark_kafka
+  "$SCRIPTS_DIR/kafka-healthcheck.sh" --port "$KAFKA_PORT" --instance benchmark_kafka
 
   # -----------------------------
   # Start Boom
   # -----------------------------
   echo && echo "$(current_datetime) - Starting BOOM instance"
-  mkdir -p "$PERSISTENT_DIR/alerts"
   apptainer instance start \
     --env RUST_LOG=debug,ort=error \
     --bind "$CONFIG_FILE:/app/config.yaml" \
-    --bind "$PERSISTENT_DIR/alerts:/app/data/alerts" \
-    "$SIF_DIR/boom.sif" boom
-#    --env BOOM_DATABASE__PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set} \
-#    --env BOOM_DATABASE__USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin} \
-
+    --bind "$TESTS_DIR/data/alerts:/app/data/alerts" \
+    "$BOOM_REPO_ROOT/apptainer/sif/boom.sif" benchmark_boom
   sleep 3
 
   # -----------------------------
   # Start Producer
   # -----------------------------
   echo && echo "$(current_datetime) - Starting Producer"
-  if pgrep -f "/app/kafka_producer" > /dev/null; then
-    echo -e "${RED}Boom producer already running.${END}"
-  else
-    apptainer exec --pwd /app \
-      instance://boom /app/kafka_producer ztf 20250311 public --server-url localhost:29092 \
-      > "$LOGS_DIR/producer.log" 2>&1
-    echo -e "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
-  fi
+  apptainer exec --pwd /app \
+    instance://benchmark_boom /app/kafka_producer ztf 20250311 public --server-url localhost:"$KAFKA_PORT" \
+    > "$LOGS_DIR/producer.log" 2>&1
+  echo -e "${GREEN}$(current_datetime) - Producer finished sending alerts${END}"
 
   # -----------------------------
   # Start Consumer
   # -----------------------------
   echo && echo "$(current_datetime) - Starting Consumer"
-  if pgrep -f "/app/kafka_consumer" > /dev/null; then
-    echo -e "${RED}Boom consumer already running.${END}"
-  else
-    apptainer exec --pwd /app \
-      instance://boom /app/kafka_consumer ztf 20250311 --programids public \
-      > "$LOGS_DIR/consumer.log" 2>&1 &
-    echo -e "${GREEN}Boom consumer started for survey ztf${END}"
-  fi
+  apptainer exec --pwd /app \
+    instance://benchmark_boom /app/kafka_consumer ztf 20250311 --programids public \
+    > "$LOGS_DIR/consumer.log" 2>&1 &
+  echo -e "${GREEN}Boom consumer started for survey ztf${END}"
 
   # -----------------------------
   # Start Scheduler
   # -----------------------------
   echo && echo "$(current_datetime) - Starting Scheduler"
-  if pgrep -f "/app/scheduler" > /dev/null; then
-    echo -e "${RED}Boom scheduler already running.${END}"
-  else
-    apptainer exec --pwd /app \
-      instance://boom /app/scheduler ztf \
-      > "$LOGS_DIR/scheduler.log" 2>&1 &
-    echo -e "${GREEN}Boom scheduler started for survey ztf${END}"
-  fi
+  apptainer exec --pwd /app instance://benchmark_boom /app/scheduler ztf \
+    > "$LOGS_DIR/scheduler.log" 2>&1 &
+  echo -e "${GREEN}Boom scheduler started for survey ztf${END}"
 
 else
   # Remove any existing containers
@@ -368,7 +346,11 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts filtered in $FILTERING_T
 
 echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
-python "$TESTS_DIR/throughput/read-kafka-output.py"
+if [ "$APPTAINER" == "true" ]; then
+  python "$TESTS_DIR/throughput/read-kafka-output.py" --server "localhost:$KAFKA_PORT"
+else
+  python "$TESTS_DIR/throughput/read-kafka-output.py"
+fi
 
 # -----------------------------
 # Export MongoDB collection stats to JSON for analysis
@@ -413,7 +395,7 @@ if [ -n "$MONGO_RESULT" ]; then
 fi
 
 # -----------------------------
-# 10. Stop all instances
+# Stop all instances
 # -----------------------------
 if [ "$APPTAINER" == "false" ]; then
   # Check to see if any of our containers have exited with a non-zero status, which would indicate an error

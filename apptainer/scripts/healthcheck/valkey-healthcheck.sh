@@ -2,6 +2,7 @@
 
 # Valkey health check
 #  nb_retries  max retries (empty = unlimited)
+#  --port      port to connect to (default: 6379)
 #  --instance  name of the Apptainer instance (default: valkey)
 
 YELLOW="\e[33m"
@@ -31,6 +32,10 @@ usage() {
 NB_RETRIES=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --port)
+      PORT="$2"
+      shift 2
+      ;;
     --instance)
       INSTANCE="$2"
       shift 2
@@ -52,7 +57,7 @@ done
 
 cpt=0
 while true; do
-  output=$(timeout 3 bash -c "apptainer exec instance://${INSTANCE:-valkey} redis-cli ping" 2>&1)
+  output=$(timeout 3 bash -c "apptainer exec instance://${INSTANCE:-valkey} redis-cli -p ${PORT:-6379} ping 2>&1")
   if echo "$output" | grep -q "PONG"; then
     log "valkey is healthy" "$GREEN"
     exit 0

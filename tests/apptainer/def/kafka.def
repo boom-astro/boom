@@ -1,0 +1,24 @@
+Bootstrap: docker
+From: apache/kafka:4.1.1
+
+%environment
+    export PATH=/opt/kafka/bin:$PATH
+    export KAFKA_BROKER_ID=1
+    export KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+    export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:29192,PLAINTEXT_HOST://127.0.0.1:9192
+    export KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    export KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+    export KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+    export KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+    export KAFKA_PROCESS_ROLES=broker,controller
+    export KAFKA_NODE_ID=1
+    export KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:29193
+    export KAFKA_LISTENERS=PLAINTEXT://127.0.0.1:29192,CONTROLLER://127.0.0.1:29193,PLAINTEXT_HOST://0.0.0.0:9192
+    export KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+    export KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+    export KAFKA_LOG_DIRS=/var/lib/kafka/data
+    export KAFKA_NUM_PARTITIONS=15
+    # Limit heap + use G1GC with fewer threads (auto-tuned based on heap size)
+    export KAFKA_HEAP_OPTS="-Xmx1G -Xms1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+    export KAFKA_OPTS="-Djava.security.egd=file:/dev/./urandom"
+#    export KAFKA_OPTS="-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf -Djava.security.egd=file:/dev/./urandom"

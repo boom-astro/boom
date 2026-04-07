@@ -1,17 +1,24 @@
-"""Script to read the Kafka output from the BOOM throughput test."""
-# /// script
-# requires-python = ">=3.13"
-# dependencies = [
-#     "confluent-kafka",
-# ]
-# ///
+"""Script to read the Kafka output from the BOOM throughput test.
+    requires:
+        Python 3.13+,
+        confluent-kafka
+"""
 
+import argparse
 from confluent_kafka import Consumer, KafkaException
 
-# Now let's check that we can read all of the alerts from the babamul.ztf.none
-# Kafka topic
+parser = argparse.ArgumentParser(description="Read the Kafka output from the BOOM throughput test.")
+parser.add_argument(
+    "--server",
+    required=False,
+    default="localhost:9092",
+    help="The bootstrap server to connect to."
+)
+args = parser.parse_args()
+
+# Now let's check that we can read all the alerts from babamul.* kafka topics.
 consumer_conf = {
-    "bootstrap.servers": "localhost:9092",
+    "bootstrap.servers": args.server,
     "group.id": "throughput-benchmarking-verify",
     "auto.offset.reset": "earliest",
 }
