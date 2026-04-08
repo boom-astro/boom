@@ -65,6 +65,7 @@ services:
         condition: service_healthy
     command:
       - --redis.addr=redis://valkey:6379
+      - --check-keys=*_queue*
     networks:
       - boom
     restart: always
