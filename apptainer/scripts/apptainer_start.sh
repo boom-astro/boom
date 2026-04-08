@@ -211,7 +211,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       echo && echo -e "${YELLOW}$(current_datetime) - Boom is already running${END}"
     else
       echo && echo "$(current_datetime) - Starting boom${survey:+_$survey} instance"
-      apptainer instance start --env-file .env \
+      apptainer instance start --nv --env-file .env \
         --bind "$CONFIG_FILE:/app/config.yaml" \
         "$SIF_DIR/boom.sif" "boom${survey:+_$survey}"
       sleep 3
