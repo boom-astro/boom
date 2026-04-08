@@ -1,4 +1,4 @@
-# GPU override — use with: docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up
+# GPU override — use with: docker compose -f docker-compose.yaml -f docker-compose.cuda.yaml up
 # Requires NVIDIA Container Toolkit on the host.
 
 services:
