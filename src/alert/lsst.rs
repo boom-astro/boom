@@ -1,14 +1,14 @@
 use crate::{
     alert::{
         base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
-            SchemaRegistry,
+            AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
+            ProcessAlertStatus, SchemaRegistry,
         },
-        decam, ztf,
+        decam, ztf, TimeSeries,
     },
     conf::{self, AppConfig, BoomConfigError},
     utils::{
-        db::{mongify, update_timeseries_op},
+        db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
         o11y::logging::as_error,
@@ -24,7 +24,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
-use tracing::instrument;
+use tracing::{instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "LSST";
@@ -456,6 +456,12 @@ impl TryFrom<LsstCandidate> for LsstPrvCandidate {
     }
 }
 
+impl TimeSeries for LsstPrvCandidate {
+    fn time(&self) -> f64 {
+        self.jd
+    }
+}
+
 #[serde_as]
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
@@ -752,7 +758,13 @@ impl TryFrom<DiaForcedSource> for LsstForcedPhot {
     }
 }
 
-/// Rubin Avro alert schema v7.3
+impl TimeSeries for LsstForcedPhot {
+    fn time(&self) -> f64 {
+        self.jd
+    }
+}
+
+/// Rubin Avro alert schema v10.0 (minus SSO metadata, which we do not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
@@ -867,6 +879,15 @@ pub struct LsstAlert {
     pub updated_at: f64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    #[serde(default)]
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
+}
+
 pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
@@ -874,6 +895,7 @@ pub struct LsstAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
+    alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
     alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
@@ -907,27 +929,116 @@ impl LsstAlertWorker {
             decam: decam_matches,
         })
     }
+
+    async fn get_existing_aux(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
+        let result = self
+            .alert_aux_collection_update
+            .find_one(doc! { "_id": object_id })
+            .projection(doc! { "prv_candidates.jd": 1, "fp_hists.jd": 1, "version": 1 })
+            .await
+            .inspect_err(as_error!())?;
+        Ok(result)
+    }
+
     #[instrument(skip(self, prv_candidates, fp_hists, survey_matches), err)]
-    async fn update_aux(
-        self: &mut Self,
+    async fn update_aux_fallback(
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<LsstPrvCandidate>,
         fp_hists: &Vec<LsstForcedPhot>,
         survey_matches: &Option<LsstAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
-            "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "aliases": mongify(survey_matches),
-                "updated_at": now,
+        Self::db_only_aux_update(
+            object_id,
+            doc! {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
+            },
+            survey_matches,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
+    }
+
+    #[instrument(
+        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
+        err
+    )]
+    async fn update_aux_inner(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<LsstPrvCandidate>,
+        fp_hists: &Vec<LsstForcedPhot>,
+        survey_matches: &Option<LsstAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        let current_version = existing_alert_aux.version;
+
+        let prepared_prv_candidates = LsstPrvCandidate::prepare_timeseries_update(
+            prv_candidates,
+            &existing_alert_aux.prv_candidates,
+            "prv_candidates",
+        )?;
+
+        let prepared_fp_hists = LsstForcedPhot::prepare_timeseries_update(
+            fp_hists,
+            &existing_alert_aux.fp_hists,
+            "fp_hists",
+        )?;
+
+        let mut push_updates = Document::new();
+        Self::add_to_push_aux_update(&mut push_updates, "prv_candidates", prepared_prv_candidates);
+        Self::add_to_push_aux_update(&mut push_updates, "fp_hists", prepared_fp_hists);
+
+        Self::finalize_aux_update(
+            object_id,
+            push_updates,
+            survey_matches,
+            current_version,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
+    }
+
+    #[instrument(
+        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
+        err
+    )]
+    async fn update_aux(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<LsstPrvCandidate>,
+        fp_hists: &Vec<LsstForcedPhot>,
+        survey_matches: &Option<LsstAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        match self
+            .update_aux_inner(
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                now,
+                existing_alert_aux,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                // if we get a concurrent modification error or an error preparing the lightcurves update,
+                // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
+                    .await
             }
-        }];
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
-            .await?;
-        Ok(())
+        }
     }
 }
 
@@ -970,6 +1081,7 @@ impl AlertWorker for LsstAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
@@ -989,6 +1101,7 @@ impl AlertWorker for LsstAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
+            alert_aux_collection_update,
             alert_cutout_collection,
             ztf_alert_aux_collection,
             decam_alert_aux_collection,
@@ -1009,10 +1122,7 @@ impl AlertWorker for LsstAlertWorker {
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let mut avro_alert: LsstRawAvroAlert = self
             .schema_registry
@@ -1029,9 +1139,18 @@ impl AlertWorker for LsstAlertWorker {
         let dec = candidate.dia_source.dec;
 
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
-        let fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
+        let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
-        let status = self
+        // Add the current candidate as the last point in the prv_candidates, if it's not already there (based on jd)
+        if !prv_candidates.iter().any(|pc| pc.jd == candidate.jd) {
+            prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
+        }
+
+        // Sort and deduplicate time series data by jd
+        LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
+        LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
+
+        let cutout_status = self
             .format_and_insert_cutouts(
                 candid,
                 avro_alert.cutout_science,
@@ -1042,16 +1161,9 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+        if let ProcessAlertStatus::Exists(_) = cutout_status {
+            return Ok(cutout_status);
         }
-
-        let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
-            .await
-            .inspect_err(as_error!())?;
-
-        prv_candidates.push(LsstPrvCandidate::try_from(candidate.clone())?);
 
         let survey_matches = Some(
             self.get_survey_matches(ra, dec)
@@ -1059,7 +1171,20 @@ impl AlertWorker for LsstAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
-        if !alert_aux_exists {
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                &object_id,
+                &prv_candidates,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
             let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
             let obj = LsstObject {
                 object_id: object_id.clone(),
@@ -1074,7 +1199,12 @@ impl AlertWorker for LsstAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                self.update_aux(
+                // use the race-condition free fallback update
+                warn!(
+                    "Alert aux document for object_id {} already exists. Using fallback update.",
+                    object_id
+                );
+                self.update_aux_fallback(
                     &object_id,
                     &obj.prv_candidates,
                     &obj.fp_hists,
@@ -1086,10 +1216,6 @@ impl AlertWorker for LsstAlertWorker {
             } else {
                 result.inspect_err(as_error!())?;
             }
-        } else {
-            self.update_aux(&object_id, &prv_candidates, &fp_hists, &survey_matches, now)
-                .await
-                .inspect_err(as_error!())?;
         }
 
         let alert = LsstAlert {
@@ -1116,8 +1242,172 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{lsst_alert_worker, AlertRandomizer},
+        testing::{
+            assert_update_aux_branches_and_fallback, drop_alert_from_collections,
+            lsst_alert_worker, AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
+        },
     };
+
+    struct PrvLightcurveGen {
+        template: LsstPrvCandidate,
+        next_candid: i64,
+    }
+
+    impl PrvLightcurveGen {
+        fn new(template: LsstPrvCandidate, first_candid: i64) -> Self {
+            Self {
+                template,
+                next_candid: first_candid,
+            }
+        }
+
+        fn at_jd(&mut self, jd: f64) -> LsstPrvCandidate {
+            let mut candidate = self.template.clone();
+            candidate.jd = jd;
+            candidate.dia_source.candid = self.next_candid;
+            self.next_candid += 1;
+            candidate
+        }
+    }
+
+    async fn seed_lsst_alert(worker: &mut LsstAlertWorker) -> (i64, String, Vec<u8>) {
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Lsst).get().await;
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        (candid, object_id, bytes_content)
+    }
+
+    async fn load_aux(worker: &LsstAlertWorker, object_id: &str) -> AlertAuxForUpdate {
+        worker.get_existing_aux(object_id).await.unwrap().unwrap()
+    }
+
+    async fn set_aux_fields(worker: &LsstAlertWorker, object_id: &str, set_doc: Document) {
+        worker
+            .alert_aux_collection
+            .update_one(doc! { "_id": object_id }, doc! { "$set": set_doc })
+            .await
+            .unwrap();
+    }
+
+    async fn apply_update(
+        worker: &mut LsstAlertWorker,
+        object_id: &str,
+        prv_candidates: Vec<LsstPrvCandidate>,
+        fp_hists: Vec<LsstForcedPhot>,
+        survey_matches: &Option<LsstAliases>,
+        existing_aux: &AlertAuxForUpdate,
+    ) {
+        worker
+            .update_aux(
+                object_id,
+                &prv_candidates,
+                &fp_hists,
+                survey_matches,
+                Time::now().to_jd(),
+                existing_aux,
+            )
+            .await
+            .unwrap();
+    }
+
+    struct LsstAuxBranchAdapter {
+        lc_gen: PrvLightcurveGen,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for LsstAuxBranchAdapter {
+        type Worker = LsstAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<LsstAliases>;
+        type Updates = (Vec<LsstPrvCandidate>, Vec<LsstForcedPhot>);
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![existing_aux.prv_candidates.clone()],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(LsstAliases::default())
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            (vec![], vec![])
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 1);
+            (vec![self.lc_gen.at_jd(jds[0])], vec![])
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 1.0 },
+                        doc! { "jd": 1.0 },
+                    ],
+                    "fp_hists": vec![
+                        doc! { "jd": 3.0 },
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 2.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0], vec![2.0, 3.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": f64::NAN },
+                        doc! { "jd": 1.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0], vec![2.0, 3.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            let (prv_candidates, fp_hists) = updates;
+            apply_update(
+                worker,
+                object_id,
+                prv_candidates,
+                fp_hists,
+                survey_matches,
+                existing_aux,
+            )
+            .await;
+        }
+    }
 
     #[tokio::test]
     async fn test_lsst_alert_from_avro_bytes() {
@@ -1174,5 +1464,25 @@ mod tests {
         // TODO: check prv_candidates and forced photometry once we have alerts
         //       where they aren't empty
         // TODO: check non detections once these are available in the schema
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_branches_and_fallback() {
+        let mut worker = lsst_alert_worker().await;
+
+        let (candid, object_id, bytes_content) = seed_lsst_alert(&mut worker).await;
+        let parsed_alert: LsstRawAvroAlert = worker
+            .schema_registry
+            .alert_from_avro_bytes(&bytes_content)
+            .await
+            .unwrap();
+        let base_prv = LsstPrvCandidate::try_from(parsed_alert.dia_source.clone()).unwrap();
+        let mut adapter = LsstAuxBranchAdapter {
+            lc_gen: PrvLightcurveGen::new(base_prv, candid + 1),
+        };
+
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
+
+        drop_alert_from_collections(candid, "LSST").await.unwrap();
     }
 }

@@ -1,7 +1,7 @@
 use crate::{
     alert::{
-        AlertWorker, DecamAlertWorker, LsstAlertWorker, SchemaRegistry, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
+        AlertWorker, DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker, SchemaRegistry,
+        ZtfAlertWorker, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -12,6 +12,7 @@ use apache_avro::{
     types::{Record, Value},
     Reader, Schema, Writer,
 };
+use async_trait::async_trait;
 use mongodb::bson::doc;
 use rand::Rng;
 use redis::AsyncCommands;
@@ -195,6 +196,268 @@ pub async fn empty_processed_alerts_queue(
     Ok(())
 }
 
+pub fn get_jds(points: &[LightcurveJdOnly]) -> Vec<f64> {
+    points.iter().map(|point| point.jd).collect()
+}
+
+pub fn assert_strictly_increasing_unique(points: &[LightcurveJdOnly]) {
+    assert!(points.iter().all(|point| point.jd.is_finite()));
+    assert!(points.windows(2).all(|window| window[0].jd < window[1].jd));
+}
+
+pub struct AuxBranchSnapshot {
+    pub series: Vec<Vec<LightcurveJdOnly>>,
+    pub version: Option<i32>,
+}
+
+#[async_trait]
+pub trait AuxUpdateBranchTestAdapter {
+    type Worker;
+    type ExistingAux;
+    type SurveyMatches;
+    type Updates;
+
+    async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux;
+
+    fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot;
+
+    fn survey_matches(&self) -> Self::SurveyMatches;
+
+    fn empty_updates(&self) -> Self::Updates;
+
+    fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates;
+
+    async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str);
+
+    fn expected_repaired_jds(&self) -> Vec<Vec<f64>>;
+
+    async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str);
+
+    fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>>;
+
+    async fn apply_update(
+        &self,
+        worker: &mut Self::Worker,
+        object_id: &str,
+        updates: Self::Updates,
+        survey_matches: &Self::SurveyMatches,
+        existing_aux: &Self::ExistingAux,
+    );
+}
+
+pub async fn assert_update_aux_branches_and_fallback<A>(
+    worker: &mut A::Worker,
+    object_id: &str,
+    adapter: &mut A,
+) where
+    A: AuxUpdateBranchTestAdapter,
+{
+    fn lengths(snapshot: &AuxBranchSnapshot) -> Vec<usize> {
+        snapshot.series.iter().map(Vec::len).collect()
+    }
+
+    fn shifted_last(snapshot: &AuxBranchSnapshot, delta: f64) -> Vec<f64> {
+        snapshot
+            .series
+            .iter()
+            .map(|series| series.last().expect("series should not be empty").jd + delta)
+            .collect()
+    }
+
+    fn shifted_first(snapshot: &AuxBranchSnapshot, delta: f64) -> Vec<f64> {
+        snapshot
+            .series
+            .iter()
+            .map(|series| series.first().expect("series should not be empty").jd + delta)
+            .collect()
+    }
+
+    let survey_matches = adapter.survey_matches();
+
+    // Branch: empty updates should repair corrupted, unsorted, duplicated existing lightcurves.
+    adapter.inject_corrupted_existing(worker, object_id).await;
+    let corrupted_existing = adapter.load_existing(worker, object_id).await;
+    let corrupted_snapshot = adapter.snapshot(&corrupted_existing);
+
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            adapter.empty_updates(),
+            &survey_matches,
+            &corrupted_existing,
+        )
+        .await;
+
+    let repaired_existing = adapter.load_existing(worker, object_id).await;
+    let repaired_snapshot = adapter.snapshot(&repaired_existing);
+    for (series, expected_jds) in repaired_snapshot
+        .series
+        .iter()
+        .zip(adapter.expected_repaired_jds().iter())
+    {
+        assert_strictly_increasing_unique(series);
+        assert_eq!(get_jds(series), *expected_jds);
+    }
+    assert_eq!(
+        repaired_snapshot.version,
+        Some(corrupted_snapshot.version.unwrap_or(0) + 1),
+        "repair update should bump version"
+    );
+
+    // Branch: non-finite existing values should also be repaired by fallback.
+    adapter.inject_non_finite_existing(worker, object_id).await;
+    let non_finite_existing = adapter.load_existing(worker, object_id).await;
+    let non_finite_snapshot = adapter.snapshot(&non_finite_existing);
+
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            adapter.empty_updates(),
+            &survey_matches,
+            &non_finite_existing,
+        )
+        .await;
+
+    let after_non_finite_existing = adapter.load_existing(worker, object_id).await;
+    let after_non_finite = adapter.snapshot(&after_non_finite_existing);
+    for (series, expected_jds) in after_non_finite
+        .series
+        .iter()
+        .zip(adapter.expected_non_finite_repaired_jds().iter())
+    {
+        assert_strictly_increasing_unique(series);
+        assert_eq!(get_jds(series), *expected_jds);
+    }
+    assert_eq!(
+        after_non_finite.version,
+        Some(non_finite_snapshot.version.unwrap_or(0) + 1),
+        "non-finite repair update should bump version"
+    );
+
+    // Branch: empty push updates => update uses $set only.
+    let existing_before = after_non_finite_existing;
+    let before = adapter.snapshot(&existing_before);
+    let len_before = lengths(&before);
+
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            adapter.empty_updates(),
+            &survey_matches,
+            &existing_before,
+        )
+        .await;
+
+    let after_empty_existing = adapter.load_existing(worker, object_id).await;
+    let after_empty = adapter.snapshot(&after_empty_existing);
+    assert_eq!(lengths(&after_empty), len_before);
+    assert_eq!(
+        after_empty.version,
+        Some(before.version.unwrap_or(0) + 1),
+        "empty update should still bump version"
+    );
+
+    // Branch: append-only updates without sort.
+    let append_jds = shifted_last(&after_empty, 100.0);
+    let append_updates = adapter.updates_at_jds(&append_jds);
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            append_updates,
+            &survey_matches,
+            &after_empty_existing,
+        )
+        .await;
+
+    let after_append_existing = adapter.load_existing(worker, object_id).await;
+    let after_append = adapter.snapshot(&after_append_existing);
+    let expected_append_lengths: Vec<usize> = len_before.iter().map(|len| len + 1).collect();
+    assert_eq!(lengths(&after_append), expected_append_lengths);
+
+    // Branch: overlap requires full update with sort.
+    let sort_jds = shifted_first(&after_append, -50.0);
+    let sort_updates = adapter.updates_at_jds(&sort_jds);
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            sort_updates,
+            &survey_matches,
+            &after_append_existing,
+        )
+        .await;
+
+    let after_sort_existing = adapter.load_existing(worker, object_id).await;
+    let after_sort = adapter.snapshot(&after_sort_existing);
+    let expected_sorted_lengths: Vec<usize> = len_before.iter().map(|len| len + 2).collect();
+    assert_eq!(lengths(&after_sort), expected_sorted_lengths);
+    for series in &after_sort.series {
+        assert_strictly_increasing_unique(series);
+    }
+
+    // Branch: optimistic-lock miss triggers fallback update.
+    let stale_aux = adapter.load_existing(worker, object_id).await;
+    let stale_snapshot = adapter.snapshot(&stale_aux);
+    let fresh_aux = adapter.load_existing(worker, object_id).await;
+
+    let concurrent_jds = shifted_last(&after_sort, 10.0);
+    let concurrent_updates = adapter.updates_at_jds(&concurrent_jds);
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            concurrent_updates,
+            &survey_matches,
+            &fresh_aux,
+        )
+        .await;
+
+    let fallback_jds: Vec<f64> = concurrent_jds.iter().map(|jd| jd + 1.0).collect();
+    let fallback_updates = adapter.updates_at_jds(&fallback_jds);
+    adapter
+        .apply_update(
+            worker,
+            object_id,
+            fallback_updates,
+            &survey_matches,
+            &stale_aux,
+        )
+        .await;
+
+    let after_fallback = adapter.snapshot(&adapter.load_existing(worker, object_id).await);
+    for (series, jd) in after_fallback.series.iter().zip(fallback_jds.iter()) {
+        assert!(
+            series.iter().any(|point| (point.jd - jd).abs() < 1e-9),
+            "fallback update should insert jd={jd}"
+        );
+    }
+    assert_eq!(
+        after_fallback.version,
+        Some(stale_snapshot.version.unwrap_or(0) + 2)
+    );
+}
+
+pub fn randomize_object_id(survey: &Survey) -> String {
+    let mut rng = rand::rng();
+    match survey {
+        Survey::Ztf | Survey::Decam => {
+            let mut object_id = survey.to_string();
+            for _ in 0..2 {
+                object_id.push(rng.random_range('0'..='9'));
+            }
+            for _ in 0..7 {
+                object_id.push(rng.random_range('a'..='z'));
+            }
+            object_id
+        }
+        Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AlertRandomizer {
     survey: Survey,
@@ -242,7 +505,7 @@ impl AlertRandomizer {
                 let reader = Reader::new(&payload[..]).unwrap();
                 let schema = reader.writer_schema().clone();
                 (
-                    Some(Self::randomize_object_id(&survey)),
+                    Some(randomize_object_id(&survey)),
                     Some(payload),
                     Some(schema),
                     None,
@@ -251,7 +514,7 @@ impl AlertRandomizer {
             Survey::Lsst => {
                 let payload = fs::read("tests/data/alerts/lsst/7912941781254298.avro").unwrap();
                 (
-                    Some(Self::randomize_object_id(&survey)),
+                    Some(randomize_object_id(&survey)),
                     Some(payload),
                     None,
                     Some(SchemaRegistry::new(
@@ -308,7 +571,7 @@ impl AlertRandomizer {
         self
     }
     pub fn rand_object_id(mut self) -> Self {
-        self.object_id = Some(Self::randomize_object_id(&self.survey));
+        self.object_id = Some(randomize_object_id(&self.survey));
         self
     }
     pub fn rand_candid(mut self) -> Self {
@@ -322,23 +585,6 @@ impl AlertRandomizer {
     pub fn rand_dec(mut self) -> Self {
         self.dec = Some(rand::rng().random_range(-90.0..90.0));
         self
-    }
-
-    fn randomize_object_id(survey: &Survey) -> String {
-        let mut rng = rand::rng();
-        match survey {
-            Survey::Ztf | Survey::Decam => {
-                let mut object_id = survey.to_string();
-                for _ in 0..2 {
-                    object_id.push(rng.random_range('0'..='9'));
-                }
-                for _ in 0..7 {
-                    object_id.push(rng.random_range('a'..='z'));
-                }
-                object_id
-            }
-            Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
-        }
     }
 
     fn update_candidate_fields(
