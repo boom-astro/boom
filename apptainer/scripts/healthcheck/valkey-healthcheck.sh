@@ -65,7 +65,7 @@ while true; do
     log "valkey is loading the dataset" "$YELLOW"
     sleep 5
   else
-    log "valkey is unhealthy: $output" "$RED"
+    log "valkey unhealthy" "$RED"
     sleep 1
   fi
 

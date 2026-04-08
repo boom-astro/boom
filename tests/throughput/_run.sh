@@ -4,7 +4,7 @@
 # Usage: $0 [--keep-up] [--apptainer] [logs_dir]
 #   --keep-up     Leave services running after the script finishes
 #   --apptainer   Use Apptainer instead of Docker
-#   logs_dir      Log directory (optional; default: $BOOM_REPO_ROOT/logs/boom)
+#   logs_dir      Log directory (optional; default: $BOOM_REPO_ROOT/logs/boom_benchmark)
 
 set -euo pipefail
 
@@ -25,8 +25,9 @@ KAFKA_PORT=$BENCHMARK_KAFKA_PORT
 
 # Paths
 TESTS_DIR="$BOOM_REPO_ROOT/tests"
+PERSISTENCE_DIR="$TESTS_DIR/apptainer/persistent"
 CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
-SCRIPTS_DIR="$BOOM_REPO_ROOT/apptainer/scripts"
+HEALTHCHECK_DIR="$BOOM_REPO_ROOT/apptainer/scripts/healthcheck"
 BENCHMARK_SIF_DIR="$TESTS_DIR/apptainer/sif"
 COMPOSE_CONFIG=("-f" "$TESTS_DIR/throughput/compose.yaml")
 BG_PIDS=()
@@ -67,7 +68,7 @@ if [ ${#POSITIONAL_ARGS[@]} -gt 1 ]; then
 fi
 
 # Arguments
-LOGS_DIR="${POSITIONAL_ARGS[0]:-$BOOM_REPO_ROOT/logs/boom}"
+LOGS_DIR="${POSITIONAL_ARGS[0]:-$BOOM_REPO_ROOT/logs/boom_benchmark}"
 
 # A function that returns the current date and time
 current_datetime() {
@@ -75,11 +76,13 @@ current_datetime() {
 }
 
 cleanup() {
+    trap '' INT TERM # Ignore further signals during cleanup
     echo "$(current_datetime) - Cleaning up background processes"
     if [ ${#BG_PIDS[@]} -gt 0 ]; then
         kill "${BG_PIDS[@]}" 2>/dev/null || true
         wait "${BG_PIDS[@]}" 2>/dev/null || true
     fi
+    stop_all_instances
 }
 
 trap cleanup EXIT INT TERM
@@ -91,10 +94,11 @@ stop_all_instances() {
   fi
   echo -e "$(current_datetime) - ${GREEN}Shutting down BOOM services${END}"
   if [ "$APPTAINER" == "true" ]; then
-    apptainer instance stop benchmark_boom
-    apptainer instance stop benchmark_kafka
-    apptainer instance stop benchmark_valkey
-    apptainer instance stop benchmark_mongo
+    apptainer instance stop benchmark_boom || true
+    apptainer instance stop benchmark_kafka || true
+    apptainer instance stop benchmark_valkey || true
+    apptainer instance stop benchmark_mongo || true
+    rm -rf "$TESTS_DIR/apptainer/persistent/kafka"
   else
     docker compose "${COMPOSE_CONFIG[@]}" down
   fi
@@ -128,22 +132,26 @@ if [ "$APPTAINER" == "true" ]; then
   # Load environment variables
   # -----------------------------
   set -a
-  source "$BOOM_REPO_ROOT/.env"
+  source "$BOOM_REPO_ROOT/.env.example"
   set +a
 
   # -----------------------------
   # Start MongoDB
   # -----------------------------
   echo && echo "$(current_datetime) - Starting MongoDB"
-  apptainer instance run --bind "$LOGS_DIR/mongodb:/log" "$BENCHMARK_SIF_DIR/mongo.sif" benchmark_mongo
+  mkdir -p "$LOGS_DIR/mongodb" "$PERSISTENCE_DIR/mongodb"
+  apptainer instance run \
+    --bind "$PERSISTENCE_DIR/mongodb:/data/db" \
+    --bind "$LOGS_DIR/mongodb:/log" \
+    "$BENCHMARK_SIF_DIR/mongo.sif" benchmark_mongo
   sleep 5
-  "$SCRIPTS_DIR/mongodb-healthcheck.sh" --port "$MONGO_PORT" --instance benchmark_mongo
+  "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" --port "$MONGO_PORT" --instance benchmark_mongo
 
   echo "$(current_datetime) - Initializing MongoDB with test data"
   apptainer exec \
+      --bind "$BOOM_REPO_ROOT/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
+      --bind "$BOOM_REPO_ROOT/data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz:/boom_throughput.ZTF_alerts_aux.dump.gz" \
       --bind "$TESTS_DIR/throughput/apptainer_mongo-init.sh:/mongo-init.sh" \
-      --bind "$TESTS_DIR/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz" \
-      --bind "$TESTS_DIR/data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz:/boom_throughput.ZTF_alerts_aux.dump.gz" \
       --bind "$TESTS_DIR/throughput/cats150.filter.json:/cats150.filter.json" \
       --env DB_NAME=boom-benchmarking \
       --env DB_ADD_URI= \
@@ -156,18 +164,19 @@ if [ "$APPTAINER" == "true" ]; then
   echo && echo "$(current_datetime) - Starting Valkey"
   mkdir -p "$LOGS_DIR/valkey"
   apptainer instance run --bind "$LOGS_DIR/valkey:/log" "$BENCHMARK_SIF_DIR/valkey.sif" benchmark_valkey
-  "$SCRIPTS_DIR/valkey-healthcheck.sh" --port "$REDIS_PORT" --instance benchmark_valkey
+  "$HEALTHCHECK_DIR/valkey-healthcheck.sh" --port "$REDIS_PORT" --instance benchmark_valkey
 
   # -----------------------------
   # Start Kafka
   # -----------------------------
   echo && echo "$(current_datetime) - Starting Kafka"
-  mkdir -p "$LOGS_DIR/kafka"
+  mkdir -p "$LOGS_DIR/kafka" "$PERSISTENCE_DIR/kafka"
   apptainer instance run \
-      --bind "$BOOM_REPO_ROOT/config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro" \
+      --bind "$PERSISTENCE_DIR/kafka:/var/lib/kafka/data" \
+      --bind "$PERSISTENCE_DIR/kafka:/opt/kafka/config" \
       --bind "$LOGS_DIR/kafka:/opt/kafka/logs" \
       "$BENCHMARK_SIF_DIR/kafka.sif" benchmark_kafka
-  "$SCRIPTS_DIR/kafka-healthcheck.sh" --port "$KAFKA_PORT" --instance benchmark_kafka
+  "$HEALTHCHECK_DIR/kafka-healthcheck.sh" --port "$KAFKA_PORT" --instance benchmark_kafka
 
   # -----------------------------
   # Start Boom
@@ -175,9 +184,10 @@ if [ "$APPTAINER" == "true" ]; then
   echo && echo "$(current_datetime) - Starting BOOM instance"
   apptainer instance start \
     --env RUST_LOG=debug,ort=error \
+    --env USE_GPU=false \
     --bind "$CONFIG_FILE:/app/config.yaml" \
-    --bind "$TESTS_DIR/data/alerts:/app/data/alerts" \
-    "$BOOM_REPO_ROOT/apptainer/sif/boom.sif" benchmark_boom
+    --bind "$BOOM_REPO_ROOT/data/alerts:/app/data/alerts" \
+    "$TESTS_DIR/apptainer/sif/boom.sif" benchmark_boom
   sleep 3
 
   # -----------------------------

@@ -47,4 +47,4 @@ From: rust:1.93.1-slim-trixie
     apt-get clean
     rm -rf /app/target /app/src /app/apache-avro-macros /app/Cargo.toml /app/Cargo.lock
     rm -rf /root/.cargo /usr/local/cargo /usr/local/rustup
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    rm -rf /var/lib/apt/lists/*

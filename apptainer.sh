@@ -197,18 +197,22 @@ fi
 # Run benchmark
 # -----------------------------
 if [ "$1" == "benchmark" ]; then
-  pip install pandas pyyaml astropy confluent-kafka
-  # check if the benchmark .sif file exists
+  # If "init" is passed, install the required Python packages.
+  if [ "$2" == "init" ]; then
+    pip install pandas pyyaml astropy confluent-kafka
+  fi
   mkdir -p "$BOOM_DIR/tests/apptainer/sif"
-  if [ ! -f "$BOOM_DIR/tests/apptainer/sif/mongo.sif" ]; then
-    apptainer build tests/apptainer/sif/mongo.sif tests/apptainer/def/mongo.def
-  fi
-  if [ ! -f "$BOOM_DIR/tests/apptainer/sif/kafka.sif" ]; then
-    apptainer build tests/apptainer/sif/kafka.sif tests/apptainer/def/kafka.def
-  fi
-  if [ ! -f "$BOOM_DIR/tests/apptainer/sif/valkey.sif" ]; then
-    apptainer build tests/apptainer/sif/valkey.sif tests/apptainer/def/valkey.def
-  fi
+
+  # Build SIF files only if they don't exist, or if "force" is passed
+  for name in mongo kafka valkey boom; do
+    if [ "$2" == "force" ] || [ ! -f "tests/apptainer/sif/${name}.sif" ]; then
+      def_folder="tests/"
+      if [ "$name" == "boom" ]; then
+        def_folder=""
+      fi
+      apptainer build --force "tests/apptainer/sif/${name}.sif" "${def_folder}apptainer/def/${name}.def"
+    fi
+  done
   # Run the benchmark
   python3 "$BOOM_DIR/tests/throughput/run.py" --apptainer
   exit 0

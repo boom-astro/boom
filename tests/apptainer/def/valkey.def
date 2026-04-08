@@ -12,4 +12,4 @@ From: valkey/valkey:7.2.6
 
 %runscript
     : > /log/valkey.log
-    exec valkey-server --port 6380 --logfile /log/valkey.log --dir /data
+    exec valkey-server --port 6380 --logfile /log/valkey.log --dir /data --save ""
