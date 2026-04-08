@@ -32,6 +32,8 @@ BOOM runs on macOS and Linux. You'll need:
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
+- For native GPU inference on Linux, you need a compatible NVIDIA driver, the matching CUDA major version, and cuDNN 9 for that CUDA version. See [docs/gpu.md](docs/gpu.md) for details.
+- If the bundled ORT CUDA library does not support your GPU architecture, use an `onnxruntime-gpu` wheel or a custom `libonnxruntime.so` and set `ORT_DYLIB_PATH` before starting BOOM. See [docs/gpu.md](docs/gpu.md) for details.
 - If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
 - Kafka CLI tools, available with `brew install kafka`.
 
@@ -53,6 +55,7 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt update
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
+- If you want to use a prebuilt ORT shared library on Linux, set `ORT_DYLIB_PATH` to the ONNX Runtime library you want Boom to load at runtime. See [docs/gpu.md](docs/gpu.md) for details.
 
 ## Setup
 
@@ -97,6 +100,22 @@ code.
     ```bash
     cargo build --release
     ```
+
+### Linux GPU runtime setup
+
+For local Linux development with GPU inference, create a Python 3.13 virtual environment with `uv`, install `onnxruntime-gpu>=1.24,<1.25`, and point BOOM at the wheel's shared library directory:
+
+```bash
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install "onnxruntime-gpu>=1.24,<1.25"
+export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
+export LD_LIBRARY_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi:$LD_LIBRARY_PATH"
+```
+
+If you use Docker, the GPU image installs the matching wheel only in the builder stage, copies the four ORT shared libraries into `/opt/ort`, and sets `ORT_DYLIB_PATH` for you in the runtime image.
+
+The GPU Docker build also runs `scripts/warmup_ort_cuda.sh` once and copies the resulting `~/.nv/ComputeCache` into the runtime image, so the first enrichment worker startup avoids the CUDA compilation delay.
 
 ## Running BOOM:
 

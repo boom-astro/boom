@@ -10,7 +10,7 @@ use crate::{
     alert::ZtfCandidate,
     enrichment::{
         fetch_alert_cutouts, fetch_alerts,
-        models::{Model, SharedModels},
+        models::{AcaiModel, BtsBotModel, Model, SharedModels},
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
@@ -19,6 +19,7 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
+use std::env;
 use std::sync::Arc;
 use tracing::{instrument, trace, warn};
 
@@ -553,6 +554,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 }
 
 impl ZtfEnrichmentWorker {
+    fn env_truthy(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }
+
+    fn gpu_inference_enabled() -> bool {
+        env::var("BOOM_GPU__ENABLED")
+            .map(|v| Self::env_truthy(&v))
+            .unwrap_or(true)
+    }
+
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertForEnrichment,
@@ -675,19 +689,23 @@ impl ZtfEnrichmentWorker {
         models: &SharedModels,
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        if Self::gpu_inference_enabled() {
+            return Self::classify_gpu_batch(models, work_items);
+        }
+
+        Self::classify_per_item(models, work_items)
+    }
+
+    fn classify_per_item(
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         let mut results = Vec::with_capacity(work_items.len());
         for item in work_items {
-            // get_triplet and get_metadata only need &self (no lock needed)
-            let acai_h = models.acai_h.lock().unwrap();
-            let triplet = acai_h.get_triplet(&[&item.cutouts])?;
-            let metadata_result = acai_h.get_metadata(&[&item.alert]);
-            drop(acai_h);
-
-            let btsbot_metadata_result = models
-                .btsbot
-                .lock()
-                .unwrap()
-                .get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
+            let triplet = AcaiModel::get_triplet(&[&item.cutouts])?;
+            let metadata_result = AcaiModel::get_metadata(&[&item.alert]);
+            let btsbot_metadata_result =
+                BtsBotModel::get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
 
             let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
                 (metadata_result, btsbot_metadata_result)
@@ -719,6 +737,120 @@ impl ZtfEnrichmentWorker {
             };
             results.push(cls);
         }
+        Ok(results)
+    }
+
+    fn classify_gpu_batch(
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        let mut results = vec![None; work_items.len()];
+
+        let all_alerts: Vec<&ZtfAlertForEnrichment> = work_items.iter().map(|w| &w.alert).collect();
+        let all_cutouts: Vec<&crate::alert::AlertCutout> =
+            work_items.iter().map(|w| &w.cutouts).collect();
+        let all_band_props: Vec<AllBandsProperties> = work_items
+            .iter()
+            .map(|w| w.all_bands_properties.clone())
+            .collect();
+
+        let (triplet_indices, triplet_all) = AcaiModel::get_triplet_indexed(&all_cutouts)?;
+        let (acai_indices, acai_metadata_all) = AcaiModel::get_metadata_indexed(&all_alerts)?;
+        let (bts_indices, bts_metadata_all) =
+            BtsBotModel::get_metadata_indexed(&all_alerts, &all_band_props)?;
+
+        let triplet_pos: std::collections::HashMap<usize, usize> = triplet_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, idx)| (*idx, pos))
+            .collect();
+        let acai_pos: std::collections::HashMap<usize, usize> = acai_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, idx)| (*idx, pos))
+            .collect();
+        let bts_pos: std::collections::HashMap<usize, usize> = bts_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, idx)| (*idx, pos))
+            .collect();
+
+        let mut selected_indices: Vec<usize> = Vec::new();
+        for idx in 0..work_items.len() {
+            if triplet_pos.contains_key(&idx)
+                && acai_pos.contains_key(&idx)
+                && bts_pos.contains_key(&idx)
+            {
+                selected_indices.push(idx);
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    work_items[idx].candid
+                );
+            }
+        }
+
+        if selected_indices.is_empty() {
+            return Ok(results);
+        }
+
+        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 63, 63, 3));
+        let mut metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+        let mut btsbot_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+
+        for (row, idx) in selected_indices.iter().enumerate() {
+            let tpos = *triplet_pos.get(idx).expect("triplet position missing");
+            let apos = *acai_pos.get(idx).expect("acai position missing");
+            let bpos = *bts_pos.get(idx).expect("bts position missing");
+
+            triplet
+                .slice_mut(ndarray::s![row, .., .., ..])
+                .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
+            metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
+            btsbot_metadata
+                .row_mut(row)
+                .assign(&bts_metadata_all.row(bpos));
+        }
+
+        let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+        let btsbot_scores = models
+            .btsbot
+            .lock()
+            .unwrap()
+            .predict(&btsbot_metadata, &triplet)?;
+
+        let expected = selected_indices.len();
+        for (name, got) in [
+            ("acai_h", acai_h_scores.len()),
+            ("acai_n", acai_n_scores.len()),
+            ("acai_v", acai_v_scores.len()),
+            ("acai_o", acai_o_scores.len()),
+            ("acai_b", acai_b_scores.len()),
+            ("btsbot", btsbot_scores.len()),
+        ] {
+            if got != expected {
+                return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                    "model {} returned {} scores for {} inputs",
+                    name, got, expected
+                )));
+            }
+        }
+
+        for (batch_idx, &item_idx) in selected_indices.iter().enumerate() {
+            results[item_idx] = Some(ZtfAlertClassifications {
+                acai_h: acai_h_scores[batch_idx],
+                acai_n: acai_n_scores[batch_idx],
+                acai_v: acai_v_scores[batch_idx],
+                acai_o: acai_o_scores[batch_idx],
+                acai_b: acai_b_scores[batch_idx],
+                btsbot: btsbot_scores[batch_idx],
+            });
+        }
+
         Ok(results)
     }
 }

@@ -2,6 +2,7 @@ volumes:
   mongodb:
   valkey:
   kafka_data:
+  nvidia_compute_cache:
 
 networks:
   boom:
@@ -260,6 +261,7 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
       - ${PWD}/data/models:/app/data/models:ro
       - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+      - nvidia_compute_cache:/root/.nv/ComputeCache
     command:
       - /app/scheduler
       - ztf
@@ -286,6 +288,7 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
       - ${PWD}/data/models:/app/data/models:ro
       - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+      - nvidia_compute_cache:/root/.nv/ComputeCache
     command:
       - /app/scheduler
       - lsst

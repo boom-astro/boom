@@ -29,7 +29,7 @@ jsonwebtoken = "9.3.1"
 lettre = "0.11"
 moc = "0.19.1"
 mongodb = "3.3.0"
-ndarray = "0.16.1"
+ndarray = "0.17.2"
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
 opentelemetry_sdk = "0.31.0"
@@ -59,11 +59,11 @@ zune-inflate = { version = "0.2", default-features = false, features = [
 
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
+ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
 
 # otherwise, install ort with the cuda feature
 [target.'cfg(target_os = "linux")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
+ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic"] }
 
 [workspace]
 members = ["apache-avro-macros"]

@@ -137,6 +137,26 @@ if [ "${LOW_STORAGE:-}" = "true" ]; then
     rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
 fi
 
+# If GPU support is enabled, we wait until the warmup phase is finished. We should see one of:
+# - "CUDA compute cache already populated; skipping warmup" (if the cache was already populated)
+# - "ONNX CUDA warmup completed and cache populated" (if the warmup ran and populated the cache)
+if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
+    echo "$(current_datetime) - GPU support is enabled; waiting for ONNX CUDA warmup to complete"
+    START_TIME=$(date +%s)
+    while ! grep -q "ONNX CUDA warmup completed and cache populated\|CUDA compute cache already populated; skipping warmup" < <(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler); do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+        if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+            echo "$(current_datetime) - Timeout reached while waiting for ONNX CUDA warmup to complete"
+            exit 1
+        fi
+        sleep 1
+    done
+    END_TIME=$(date +%s)
+    WARMUP_TIME=$((END_TIME - START_TIME))
+    echo "$(current_datetime) - ONNX CUDA warmup completed in $WARMUP_TIME seconds"
+fi
+
 # Wait until we see all alerts
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)

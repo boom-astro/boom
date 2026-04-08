@@ -1,6 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
-    enrichment::models::SharedModelPool,
+    enrichment::models::{BtsBotModel, Model, SharedModelPool},
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -13,13 +13,69 @@ use boom::{
     },
 };
 
+use ndarray::Array;
 use std::time::Duration;
+use std::{env, path::Path};
 
 use clap::Parser;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
+
+fn env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn cache_has_files(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                let entry_path = entry.path();
+                entry_path.is_file() || cache_has_files(&entry_path)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn warmup_onnx_cuda_cache_if_needed() -> Result<(), Box<dyn std::error::Error>> {
+    let gpu_enabled = env::var("BOOM_GPU__ENABLED")
+        .map(|v| env_truthy(&v))
+        .unwrap_or(true);
+    if !gpu_enabled {
+        info!("BOOM_GPU__ENABLED is false; skipping ONNX CUDA warmup");
+        return Ok(());
+    }
+
+    let home_dir = env::var("HOME").unwrap_or_else(|_| String::from("/root"));
+    let cache_path =
+        env::var("CUDA_CACHE_PATH").unwrap_or_else(|_| format!("{}/.nv/ComputeCache", home_dir));
+    let cache_dir = Path::new(&cache_path);
+    if cache_dir.exists() && cache_has_files(cache_dir) {
+        info!(cache_path = %cache_path, "CUDA compute cache already populated; skipping warmup");
+        return Ok(());
+    }
+
+    info!(cache_path = %cache_path, "warming ONNX CUDA cache via BTSBot startup inference");
+    let mut model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
+    let metadata = Array::from_shape_vec((1, 25), vec![0.5; 25])?;
+    let triplet = Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
+    let _ = model.predict(&metadata, &triplet)?;
+
+    if !(cache_dir.exists() && cache_has_files(cache_dir)) {
+        return Err(format!(
+            "CUDA warmup ran but cache was not populated at {}",
+            cache_path
+        )
+        .into());
+    }
+
+    info!(cache_path = %cache_path, "ONNX CUDA warmup completed and cache populated");
+    Ok(())
+}
 
 #[derive(Parser)]
 struct Cli {
@@ -67,6 +123,10 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     initialize_survey_indexes(&args.survey, &db)
         .await
         .expect("could not initialize indexes");
+
+    if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+        warmup_onnx_cuda_cache_if_needed().expect("failed to warm ONNX CUDA cache");
+    }
 
     // Spawn sigint handler task
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
