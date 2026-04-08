@@ -22,27 +22,20 @@ The pre-provisioned dashboard is:
 
 Prometheus is also available locally at <http://prometheus.localhost> or any local port mapping provided by your dev override.
 
+Prometheus retention, i.e., the window for which we save metrics,
+can be adjusted with `PROMETHEUS_RETENTION_TIME` in your compose environment.
+
 ## Generate traffic for dashboards
 
-To make charts move, produce alerts and run the scheduler/consumer path.
-
-### Preferred Makefile targets
-
-Produce a deterministic ZTF batch used in dev:
+To make charts move, produce alerts and run the scheduler/consumer path,
+you can produce a deterministic ZTF batch used in dev:
 
 ```sh
 make produce-ztf
 ```
 
-### Custom producer invocation
-
-For custom dates, limits, or options, using the binary directly is fine:
-
-```sh
-cargo run --bin kafka_producer ztf 20240617 public --limit 500 --server-url localhost:9092 --force
-```
-
-You can switch date/program/flags as needed for local load tests.
+Other batches of alerts can be sent to the system using the `kafka_producer`
+app, the usage for which is described in the README.
 
 ## What to watch in Grafana
 
@@ -77,8 +70,6 @@ The BOOM dashboard already includes the most operationally useful queries.
   - DB growth and object/index counts
 - **Container CPU usage by container** and **Container memory usage by container**
   - container-level resource usage joined against Docker metadata for readable names
-- **Prometheus / OTEL Collector / Kafka Exporter**
-  - `up` checks for observability dependencies
 
 ## Monitoring real deployments behind Traefik
 
@@ -88,28 +79,3 @@ Current compose labels route Grafana and Prometheus to subdomains:
 
 - Grafana: `https://grafana.<your-domain>`
 - Prometheus: `https://prometheus.<your-domain>`
-
-### Subdomain model (recommended)
-
-Use dedicated hosts per service (current default). This is usually simplest for auth, TLS, and link sharing.
-
-### Sub-path model (if you need one domain)
-
-If you expose Grafana as a sub-URL (for example `/grafana`), ensure both Traefik and Grafana are configured for sub-path serving:
-
-- Traefik router rule uses `PathPrefix(`/grafana`)`
-- Grafana has `GF_SERVER_ROOT_URL` set to include `/grafana`
-- Grafana has `GF_SERVER_SERVE_FROM_SUB_PATH=true`
-
-Without these settings, redirects and static assets can break.
-
-## Operational checklist
-
-1. Verify dependency health first (`Prometheus`, `OTEL Collector`, `Kafka Exporter` panels).
-2. Check worker liveness in `Scheduler workers` against configured counts.
-3. Compare throughput across consumer/alert/enrichment/filter stages for bottlenecks.
-4. Watch queue depth to detect sustained backlog.
-5. Use error ratio by reason to identify failure mode shifts.
-6. Confirm output publication rate (`Kafka messages produced`) matches expectations.
-
-Prometheus retention can be adjusted with `PROMETHEUS_RETENTION_TIME` in your compose environment.
