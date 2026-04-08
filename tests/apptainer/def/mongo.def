@@ -4,4 +4,4 @@ From: mongo:8.0
 %runscript
     export MONGO_INITDB_ROOT_USERNAME=mongoadmin
     export MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
-    exec mongod --port 27018 --logpath /log/mongo.log
+    exec docker-entrypoint.sh mongod --port 27018 --logpath /log/mongo.log
