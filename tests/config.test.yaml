@@ -20,6 +20,9 @@ api:
     admin_username: admin
     admin_password: adminsecret
     admin_email: admin@example.com
+lightcurve_fitting:
+  nonparametric: false
+  parametric: false
 redis:
   host: localhost
   port: 6379

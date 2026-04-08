@@ -5,6 +5,7 @@ use crate::{
         run_enrichment_worker, LsstEnrichmentWorker, ZtfEnrichmentWorker,
     },
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
+    gpu::GpuPool,
     utils::{
         enums::Survey,
         o11y::logging::{as_error, INFO},
@@ -70,6 +71,7 @@ pub struct ThreadPool {
     config_path: String,
     workers: Vec<Worker>,
     shared_model_pool: Option<Arc<SharedModelPool>>,
+    gpu_pool: Option<Arc<GpuPool>>,
 }
 
 /// Threadpool
@@ -82,13 +84,14 @@ impl ThreadPool {
     /// size: number of workers initially inside of threadpool
     /// survey_name: source stream. e.g. 'ztf'
     /// config_path: path to config file
-    #[instrument(skip(config_path, shared_model_pool))]
+    #[instrument(skip(config_path, shared_model_pool, gpu_pool))]
     pub fn new(
         worker_type: WorkerType,
         size: usize,
         survey_name: Survey,
         config_path: String,
         shared_model_pool: Option<Arc<SharedModelPool>>,
+        gpu_pool: Option<Arc<GpuPool>>,
     ) -> Self {
         debug!(?config_path);
         let mut thread_pool = ThreadPool {
@@ -97,6 +100,7 @@ impl ThreadPool {
             config_path,
             workers: Vec::new(),
             shared_model_pool,
+            gpu_pool,
         };
         for _ in 0..size {
             thread_pool.add_worker();
@@ -160,6 +164,7 @@ impl ThreadPool {
             self.survey_name.clone(),
             self.config_path.clone(),
             shared_models,
+            self.gpu_pool.clone(),
         ));
     }
 
@@ -206,12 +211,13 @@ impl Worker {
     /// receiver: receiver by which the owning threadpool communicates with the worker
     /// stream_name: name of the stream worker from. e.g. 'ZTF' or 'WINTER'
     /// config_path: path to the config file we are working with
-    #[instrument(skip(shared_models))]
+    #[instrument(skip(shared_models, gpu_pool))]
     fn new(
         worker_type: WorkerType,
         survey_name: Survey,
         config_path: String,
         shared_models: Option<Arc<SharedModels>>,
+        gpu_pool: Option<Arc<GpuPool>>,
     ) -> Worker {
         let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(1);
@@ -266,7 +272,7 @@ impl Worker {
                             return;
                         }
                     };
-                    run(receiver, &config_path, id, shared_models)
+                    run(receiver, &config_path, id, shared_models, gpu_pool)
                         .unwrap_or_else(as_error!("enrichment worker failed"));
                 })
             }),
