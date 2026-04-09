@@ -5,7 +5,7 @@ use crate::{
 use ndarray::{Array, Dim};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use std::env;
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ModelError {
@@ -56,19 +56,23 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if use_gpu {
-        // if CUDA or Apple's CoreML aren't available,
-        // it will fall back to CPU execution provider
+        // Disable CPU fallback to make sure we only use the GPUs as instructed.
+        // We only do this on Linux as Apple's CoreML EP does need to fallback
+        // to the CPU for some operators of the ONNX runtime.
+        #[cfg(target_os = "linux")]
+        builder.with_disable_cpu_fallback()?;
+
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let dev = device_id.unwrap_or(0);
-        builder = builder
-            .with_disable_cpu_fallback()?
-            .with_execution_providers([
-                #[cfg(target_os = "linux")]
-                ort::ep::CUDAExecutionProvider::default()
-                    .with_device_id(dev)
-                    .build(),
-                #[cfg(target_os = "macos")]
-                ort::ep::CoreMLExecutionProvider::default().build(),
-            ])?;
+
+        builder = builder.with_execution_providers([
+            #[cfg(target_os = "linux")]
+            ort::ep::CUDAExecutionProvider::default()
+                .with_device_id(dev)
+                .build(),
+            #[cfg(target_os = "macos")]
+            ort::ep::CoreMLExecutionProvider::default().build(),
+        ])?;
     } else {
         builder =
             builder.with_execution_providers([ort::ep::CPUExecutionProvider::default().build()])?;

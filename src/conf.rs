@@ -409,7 +409,9 @@ pub struct WorkerConfig {
     pub n_workers: usize,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+use serde::{de, Deserializer};
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GpuConfig {
     /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
     /// Models are loaded once at startup and shared across all enrichment workers
@@ -421,8 +423,49 @@ pub struct GpuConfig {
     /// ONNX models are loaded on the first device. Additional devices are
     /// available for the GPU pool (future lightcurve fitting).
     /// Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
-    #[serde(default = "default_gpu_device_ids")]
+    #[serde(
+        default = "default_gpu_device_ids",
+        deserialize_with = "deserialize_device_ids"
+    )]
     pub device_ids: Vec<i32>,
+}
+
+fn deserialize_device_ids<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DeviceIdsVisitor;
+    impl<'de> de::Visitor<'de> for DeviceIdsVisitor {
+        type Value = Vec<i32>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list of integers or a comma-separated string")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let ids = v
+                .split(',')
+                .map(|s| s.trim().parse::<i32>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| E::custom("invalid integer in device_ids string"))?;
+            Ok(ids)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut ids = Vec::new();
+            while let Some(val) = seq.next_element()? {
+                ids.push(val);
+            }
+            Ok(ids)
+        }
+    }
+    deserializer.deserialize_any(DeviceIdsVisitor)
 }
 
 impl Default for GpuConfig {
