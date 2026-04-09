@@ -14,6 +14,20 @@ pub enum Survey {
     Decam,
 }
 
+impl Survey {
+    /// Observatory UTC offset in hours.
+    ///
+    /// - ZTF  (Palomar, CA):      UTC−7
+    /// - LSST (Cerro Pachón, CL): UTC−3
+    pub fn observatory_utc_offset(&self) -> f64 {
+        match self {
+            Survey::Ztf => -7.0,
+            Survey::Lsst => -3.0,
+            _ => 0.0,
+        }
+    }
+}
+
 impl std::fmt::Display for Survey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
