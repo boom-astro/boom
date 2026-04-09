@@ -49,7 +49,7 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
 
     #[cfg(target_os = "linux")]
     if use_gpu && env::var_os("ORT_DYLIB_PATH").is_none() {
-        warn!(
+        tracing::warn!(
             "ORT_DYLIB_PATH is not set; BOOM is using the default ONNX Runtime library. If you hit cudaErrorNoKernelImageForDevice on a newer GPU, point ORT_DYLIB_PATH at a custom libonnxruntime.so built for that GPU architecture."
         );
     }
