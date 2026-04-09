@@ -34,3 +34,18 @@ configs:
 			config.yaml "$$dir/overrides.yaml" >> "$$out"; \
 		echo "Generated $$out"; \
 	done
+
+.PHONY: check-configs
+check-configs: configs
+	@echo "Validating generated deployment configs"
+	@set -e; \
+	found=0; \
+	for cfg in config/prod/*/config.yaml; do \
+		[ -f "$$cfg" ] || continue; \
+		found=1; \
+		cargo run --bin check_config -- "$$cfg"; \
+	done; \
+	if [ "$$found" -eq 0 ]; then \
+		echo "No generated configs found at config/prod/*/config.yaml"; \
+		exit 1; \
+	fi

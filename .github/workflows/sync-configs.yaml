@@ -19,8 +19,14 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
 
-      - name: Generate configs
-        run: make configs
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Create and check prod configs
+        run: make check-configs
 
       - name: Commit generated configs
         if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository

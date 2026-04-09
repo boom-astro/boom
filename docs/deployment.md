@@ -194,6 +194,10 @@ For pull requests opened from branches in this repository, it commits any
 generated config changes back to the PR branch automatically.
 For fork-based pull requests, GitHub does not safely allow that write-back, so
 the workflow fails if generated configs are stale.
+The same workflow also runs `make check-configs`, which validates every
+generated config at `config/prod/*/config.yaml` via the BOOM parser.
+Under the hood, it calls `check_config {path}` for each generated config and
+fails if any config is invalid.
 
 At minimum, the production GitHub environment should define these variables in
 addition to the usual secrets used by the deploy workflow:
