@@ -22,13 +22,10 @@ use tracing::{info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
-fn validate_linux_gpu_runtime_preconditions(
-    survey: &Survey,
-    config: &AppConfig,
-) -> Result<(), &'static str> {
+fn validate_linux_gpu_runtime_preconditions() -> Result<(), &'static str> {
     // fail fast if the runtime library path is not explicitly configured.
     if std::env::var("ORT_DYLIB_PATH").map_or(true, |v| v.trim().is_empty()) {
-        return Err("GPU is enabled for ZTF but ORT_DYLIB_PATH is not set. \
+        return Err("GPU is enabled but ORT_DYLIB_PATH is not set. \
 Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting scheduler.");
     }
 
@@ -39,7 +36,7 @@ Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting scheduler."
 fn warmup_onnx_cuda_cache_if_needed(device_ids: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
     info!("Warming up ONNX models: running one inference per configured CUDA device");
 
-    use enrichment::models::{BtsBotModel, Model};
+    use boom::enrichment::models::{BtsBotModel, Model};
     for &device_id in device_ids {
         info!(device_id, "Running BTSBotModel inference on device");
         let mut model = BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", device_id)?;
@@ -100,8 +97,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     #[cfg(target_os = "linux")]
     {
         if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
-            validate_linux_gpu_runtime_preconditions(&args.survey, &config)
-                .expect("GPU runtime preconditions not met");
+            validate_linux_gpu_runtime_preconditions().expect("GPU runtime preconditions not met");
             warmup_onnx_cuda_cache_if_needed(&config.gpu.device_ids)
                 .expect("failed to warm ONNX CUDA cache");
         }
