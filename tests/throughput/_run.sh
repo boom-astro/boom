@@ -128,12 +128,6 @@ mongo_count() {
 }
 
 if [ "$APPTAINER" == "true" ]; then
-  # -----------------------------
-  # Load environment variables
-  # -----------------------------
-  set -a
-  source "$BOOM_REPO_ROOT/.env.example"
-  set +a
 
   # -----------------------------
   # Start MongoDB

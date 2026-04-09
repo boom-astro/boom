@@ -4,4 +4,17 @@ From: mongo:8.0
 %runscript
     export MONGO_INITDB_ROOT_USERNAME=mongoadmin
     export MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret
-    exec docker-entrypoint.sh mongod --port 27018 --logpath /log/mongo.log
+    # If first start (no users), create admin user without auth, then restart with auth
+    mongod --port 27018 --bind_ip 127.0.0.1 --logpath /log/mongo-init.log --fork
+    if ! mongosh --port 27018 --quiet --eval "db.getSiblingDB('admin').getUser('$MONGO_INITDB_ROOT_USERNAME')" | grep -q "$MONGO_INITDB_ROOT_USERNAME"; then
+        mongosh --port 27018 --quiet --eval "
+            db.getSiblingDB('admin').createUser({
+                user: '$MONGO_INITDB_ROOT_USERNAME',
+                pwd: '$MONGO_INITDB_ROOT_PASSWORD',
+                roles: [{role: 'root', db: 'admin'}]
+            });
+        "
+    fi
+    mongosh --port 27018 --quiet --eval "db.getSiblingDB('admin').shutdownServer()" || true
+    sleep 1
+    exec mongod --auth --port 27018 --logpath /log/mongo.log
