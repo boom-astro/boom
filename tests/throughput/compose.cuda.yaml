@@ -5,8 +5,10 @@ services:
     image: boom-astro/boom-gpu:latest
     build:
       target: app-gpu
+    runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     deploy:
       resources:
         reservations:
