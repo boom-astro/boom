@@ -185,10 +185,10 @@ configure secrets for the environment variables you need,
 the same ones described above, including `SECRET_KEY`, etc.
 Follow the [official GitHub guide for setting repository secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository).
 
-See [.github/workflows/deploy.yaml](/Users/pete/dev/boom/.github/workflows/deploy.yaml)
+See [.github/workflows/deploy.yaml](/.github/workflows/deploy.yaml)
 for the secrets and GitHub environment variables that should be set.
 
-For generated production configs, [sync-configs workflow](/Users/pete/dev/boom/.github/workflows/sync-configs.yaml)
+For generated production configs, [sync-configs workflow](/.github/workflows/sync-configs.yaml)
 runs `make configs` on every pull request.
 For pull requests opened from branches in this repository, it commits any
 generated config changes back to the PR branch automatically.
