@@ -19,7 +19,6 @@ use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
-use std::env;
 use std::sync::Arc;
 use tracing::{instrument, trace, warn};
 
@@ -395,6 +394,7 @@ pub struct ZtfEnrichmentWorker {
     /// Shared ONNX models (loaded once, shared across all enrichment workers via Arc).
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
+    gpu_enabled: bool,
 }
 
 #[async_trait::async_trait]
@@ -437,6 +437,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
             babamul,
+            gpu_enabled: config.gpu.enabled,
         })
     }
 
@@ -505,7 +506,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // Run ML classification using shared models
         let classifications_list: Vec<Option<ZtfAlertClassifications>> =
             if let Some(ref models) = self.models {
-                Self::classify(&models, &work_items)?
+                self.classify(&models, &work_items)?
             } else {
                 vec![None; work_items.len()]
             };
@@ -554,19 +555,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 }
 
 impl ZtfEnrichmentWorker {
-    fn env_truthy(value: &str) -> bool {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
-    fn gpu_inference_enabled() -> bool {
-        env::var("BOOM_GPU__ENABLED")
-            .map(|v| Self::env_truthy(&v))
-            .unwrap_or(true)
-    }
-
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertForEnrichment,
@@ -686,10 +674,11 @@ impl ZtfEnrichmentWorker {
     /// Run ONNX classification using shared models.
     /// Each model is locked individually to minimize contention.
     fn classify(
+        &self,
         models: &SharedModels,
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
-        if Self::gpu_inference_enabled() {
+        if self.gpu_enabled {
             return Self::classify_gpu_batch(models, work_items);
         }
 
