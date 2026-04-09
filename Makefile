@@ -16,3 +16,21 @@ format:
 test-api:
 	@echo "Running API tests"
 	cargo test --test test_api
+
+YQ_IMAGE := mikefarah/yq:4.47.1
+
+.PHONY: configs
+configs:
+	@set -e; \
+	for dir in config/prod/*/; do \
+		dir=$${dir%/}; \
+		[ -f "$$dir/overrides.yaml" ] || continue; \
+		out="$$dir/config.yaml"; \
+		printf '%s\n%s\n\n' \
+			'# AUTO-GENERATED FILE. DO NOT EDIT DIRECTLY.' \
+			"# Edit config.yaml or $$dir/overrides.yaml, then run 'make configs'." > "$$out"; \
+		docker run --rm -v "$$PWD:/workdir" -w /workdir $(YQ_IMAGE) \
+			eval-all '. as $$item ireduce ({}; . * $$item)' \
+			config.yaml "$$dir/overrides.yaml" >> "$$out"; \
+		echo "Generated $$out"; \
+	done

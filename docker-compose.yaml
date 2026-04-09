@@ -31,7 +31,7 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=${BOOM_DATABASE__USERNAME:-mongoadmin}
       - MONGO_INITDB_ROOT_PASSWORD=${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set and non-empty}
     volumes:
-      - mongodb:/data/db
+      - ${BOOM_DATA_MONGODB_PATH:-mongodb}:/data/db
     restart: always
     networks:
       - boom
@@ -46,7 +46,7 @@ services:
       - ALLOW_EMPTY_PASSWORD=yes
       - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
     volumes:
-      - valkey:/data
+      - ${BOOM_DATA_VALKEY_PATH:-valkey}:/data
     restart: always
     networks:
       - boom
@@ -89,7 +89,7 @@ services:
       KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
       KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf -Djava.security.egd=file:/dev/./urandom"
     volumes:
-      - kafka_data:/var/lib/kafka/data
+      - ${BOOM_DATA_KAFKA_PATH:-kafka_data}:/var/lib/kafka/data
       - ./config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
     healthcheck:
       # Match wait_for_kafka checks: cluster-id, metadata quorum, configs API, and ACLs
@@ -159,7 +159,7 @@ services:
       - boom
       - traefik-public
     volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     profiles:
       - prod
       - api
@@ -206,7 +206,7 @@ services:
     profiles:
       - prod
     volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     command:
       - /app/kafka_consumer
       - ztf
@@ -231,7 +231,7 @@ services:
     profiles:
       - prod
     volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     command:
       - /app/kafka_consumer
       - lsst
@@ -254,7 +254,7 @@ services:
     profiles:
       - prod
     volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
       - ${PWD}/data/models:/app/data/models:ro
       - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:
@@ -279,7 +279,7 @@ services:
     profiles:
       - prod
     volumes:
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
       - ${PWD}/data/models:/app/data/models:ro
       - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:

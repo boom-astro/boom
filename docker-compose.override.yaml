@@ -81,7 +81,7 @@ services:
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - target:/app/target
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     ports:
       - "4000:4000"
   otel-collector:
