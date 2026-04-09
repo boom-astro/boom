@@ -60,7 +60,9 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         // We only do this on Linux as Apple's CoreML EP does need to fallback
         // to the CPU for some operators of the ONNX runtime.
         #[cfg(target_os = "linux")]
-        builder.with_disable_cpu_fallback()?;
+        {
+            builder = builder.with_disable_cpu_fallback()?;
+        }
 
         #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let dev = device_id.unwrap_or(0);
