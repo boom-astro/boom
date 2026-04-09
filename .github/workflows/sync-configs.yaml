@@ -19,6 +19,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
 
+      - name: Setup system dependencies
+        run: sudo apt-get install -y libsasl2-dev
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
