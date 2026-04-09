@@ -33,8 +33,8 @@ Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting scheduler."
 }
 
 #[cfg(target_os = "linux")]
-fn warmup_onnx_cuda_cache_if_needed(device_ids: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Warming up ONNX models: running one inference per configured CUDA device");
+fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Validating GPU inference: running one inference per configured CUDA device");
 
     use boom::enrichment::models::{BtsBotModel, Model};
     for &device_id in device_ids {
@@ -98,8 +98,9 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     {
         if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
             validate_linux_gpu_runtime_preconditions().expect("GPU runtime preconditions not met");
-            warmup_onnx_cuda_cache_if_needed(&config.gpu.device_ids)
-                .expect("failed to warm ONNX CUDA cache");
+            validate_gpu_inference(&config.gpu.device_ids)
+                .expect("failed to validate GPU inference");
+            info!("Confirmed GPU runtime preconditions and validated GPU inference successfully");
         }
     }
 

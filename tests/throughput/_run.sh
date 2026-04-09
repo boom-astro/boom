@@ -137,17 +137,18 @@ if [ "${LOW_STORAGE:-}" = "true" ]; then
     rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
 fi
 
-# If GPU support is enabled, we wait until the warmup phase is finished. We should see one of:
-# - "CUDA compute cache already populated; skipping warmup" (if the cache was already populated)
-# - "ONNX CUDA warmup completed and cache populated" (if the warmup ran and populated the cache)
+# If GPU support is enabled, we wait until we have confirmed that GPU inference is working.
+# On some architectures (recent GPUs, mostly) we may have to wait for CUDA to compile
+# some kernels and populate the cache before we see successful GPU inference,
+# so we wait until we see logs indicating that the ONNX CUDA warmup has completed.
 if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
-    echo "$(current_datetime) - GPU support is enabled; waiting for ONNX CUDA warmup to complete"
+    echo "$(current_datetime) - GPU support is enabled; waiting for GPUs to be inference-ready"
     START_TIME=$(date +%s)
-    while ! grep -q "ONNX CUDA warmup completed and cache populated\|CUDA compute cache already populated; skipping warmup" < <(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler); do
+    while ! grep -q "Confirmed GPU runtime preconditions and validated GPU inference successfully" < <(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler); do
         CURRENT_TIME=$(date +%s)
         ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
         if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-            echo "$(current_datetime) - Timeout reached while waiting for ONNX CUDA warmup to complete"
+            echo "$(current_datetime) - Timeout reached while waiting for GPU inference to be validated"
             exit 1
         fi
         sleep 1
