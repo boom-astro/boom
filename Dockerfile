@@ -99,10 +99,12 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 ## Final CPU application image (default target)
 FROM base AS app
 
+# Copy the built executables from the builder stage
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
 COPY --from=builder /app/target/release/api /app/boom-api
+# Migration script binaries
 COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 
@@ -133,14 +135,14 @@ ENV PATH="/opt/kafka/bin:/usr/local/cuda/bin:${PATH}"
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
 ENV LD_LIBRARY_PATH=/opt/ort:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib:${LD_LIBRARY_PATH}
 
-# Copy the built executables from the builder stage
+# Copy the built executables from the builder-gpu stage
 COPY --from=builder-gpu /app/target/release/scheduler /app/scheduler
 COPY --from=builder-gpu /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder-gpu /app/target/release/kafka_producer /app/kafka_producer
 COPY --from=builder-gpu /app/target/release/api /app/boom-api
+# Migration script binaries
 COPY --from=builder-gpu /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder-gpu /app/target/release/migrate_snr /app/migrate_snr
-COPY --from=builder-gpu /app/target/release/warmup_ort_cuda /app/warmup_ort_cuda
 
 # Copy the warmed ORT runtime files and the CUDA compute cache
 COPY --from=builder-gpu /opt/ort /opt/ort

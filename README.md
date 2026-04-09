@@ -32,10 +32,7 @@ BOOM runs on macOS and Linux. You'll need:
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- For native GPU inference on Linux, you need a compatible NVIDIA driver, the matching CUDA major version, and cuDNN 9 for that CUDA version. See [docs/gpu.md](docs/gpu.md) for details.
-- If the bundled ORT CUDA library does not support your GPU architecture, use an `onnxruntime-gpu` wheel or a custom `libonnxruntime.so` and set `ORT_DYLIB_PATH` before starting BOOM. See [docs/gpu.md](docs/gpu.md) for details.
-- If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
-- Kafka CLI tools, available with `brew install kafka`.
+- For native GPU inference on Linux, you need a compatible NVIDIA driver, the matching CUDA major version, cuDNN 9 for that CUDA version, and the ONNX Runtime with CUDA enabled. See the [Linux Installation steps](#linux) below for details.
 
 ### Installation steps:
 
@@ -55,7 +52,7 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt update
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
-- If you want to use a prebuilt ORT shared library on Linux, set `ORT_DYLIB_PATH` to the ONNX Runtime library you want Boom to load at runtime. See [docs/gpu.md](docs/gpu.md) for details.
+- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. The specific versions required will depend on your GPU and the version of ONNX Runtime you are using. See the [Linux GPU runtime setup](#linux-gpu-runtime-setup) section below for more details.
 
 ## Setup
 
@@ -80,7 +77,7 @@ to send Babamul account activation codes,
 the email related environmental variables in `.env.example` must be set.
 
 If email is not configured or disabled,
-Babmul activation codes will be printed to the console logs instead,
+Babamul activation codes will be printed to the console logs instead,
 and users will need to contact an administrator to retrieve their activation
 code.
 
@@ -103,19 +100,18 @@ code.
 
 ### Linux GPU runtime setup
 
-For local Linux development with GPU inference, create a Python 3.13 virtual environment with `uv`, install `onnxruntime-gpu>=1.24,<1.25`, and point BOOM at the wheel's shared library directory:
+For native Linux development with GPU inference, `ORT_DYLIB_PATH` must be set before starting BOOM, so `ort` can find the necessary ONNX Runtime shared library with GPU support.
+The recommended flow is to create a Python 3.13 virtual environment (we recommend [uv](https://docs.astral.sh/uv/getting-started/installation/)), install `onnxruntime-gpu>=1.24,<1.25`, and point BOOM to that wheel's ONNX Runtime shared library:
 
 ```bash
-uv venv --python 3.13 .venv
+uv venv --python 3.13
 source .venv/bin/activate
 uv pip install "onnxruntime-gpu>=1.24,<1.25"
 export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
-export LD_LIBRARY_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi:$LD_LIBRARY_PATH"
 ```
 
-If you use Docker, the GPU image installs the matching wheel only in the builder stage, copies the four ORT shared libraries into `/opt/ort`, and sets `ORT_DYLIB_PATH` for you in the runtime image.
-
-The GPU Docker build also runs `scripts/warmup_ort_cuda.sh` once and copies the resulting `~/.nv/ComputeCache` into the runtime image, so the first enrichment worker startup avoids the CUDA compilation delay.
+You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or simply add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
+See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
 
 ## Running BOOM:
 

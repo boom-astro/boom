@@ -1,6 +1,6 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
-    enrichment::models::{BtsBotModel, Model, SharedModelPool},
+    enrichment::models::SharedModelPool,
     scheduler::ThreadPool,
     utils::{
         db::initialize_survey_indexes,
@@ -13,7 +13,6 @@ use boom::{
     },
 };
 
-use ndarray::Array;
 use std::time::Duration;
 
 use clap::Parser;
@@ -22,13 +21,30 @@ use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+fn validate_linux_gpu_runtime_preconditions(
+    survey: &Survey,
+    config: &AppConfig,
+) -> Result<(), &'static str> {
+    // fail fast if the runtime library path is not explicitly configured.
+    if std::env::var("ORT_DYLIB_PATH").map_or(true, |v| v.trim().is_empty()) {
+        return Err("GPU is enabled for ZTF but ORT_DYLIB_PATH is not set. \
+Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting scheduler.");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn warmup_onnx_cuda_cache_if_needed(device_ids: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
     info!("Warming up ONNX models: running one inference per configured CUDA device");
+
+    use enrichment::models::{BtsBotModel, Model};
     for &device_id in device_ids {
         info!(device_id, "Running BTSBotModel inference on device");
         let mut model = BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", device_id)?;
-        let metadata = Array::from_shape_vec((1, 25), vec![0.5; 25])?;
-        let triplet = Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
+        let metadata = ndarray::Array::from_shape_vec((1, 25), vec![0.5; 25])?;
+        let triplet = ndarray::Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
         let _ = model.predict(&metadata, &triplet)?;
     }
     Ok(())
@@ -81,9 +97,14 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .await
         .expect("could not initialize indexes");
 
-    if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
-        warmup_onnx_cuda_cache_if_needed(&config.gpu.device_ids)
-            .expect("failed to warm ONNX CUDA cache");
+    #[cfg(target_os = "linux")]
+    {
+        if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+            validate_linux_gpu_runtime_preconditions(&args.survey, &config)
+                .expect("GPU runtime preconditions not met");
+            warmup_onnx_cuda_cache_if_needed(&config.gpu.device_ids)
+                .expect("failed to warm ONNX CUDA cache");
+        }
     }
 
     // Spawn sigint handler task
