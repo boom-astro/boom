@@ -1,6 +1,8 @@
 # AUTO-GENERATED FILE. DO NOT EDIT DIRECTLY.
 # Edit config.yaml or config/prod/caltech/overrides.yaml, then run 'make configs'.
 
+# This is a commit to test the auto-commit functionality
+
 database:
   host: localhost
   port: 27017
