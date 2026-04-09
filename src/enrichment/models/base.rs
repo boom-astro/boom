@@ -59,14 +59,16 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         // if CUDA or Apple's CoreML aren't available,
         // it will fall back to CPU execution provider
         let dev = device_id.unwrap_or(0);
-        builder = builder.with_execution_providers([
-            #[cfg(target_os = "linux")]
-            ort::ep::CUDAExecutionProvider::default()
-                .with_device_id(dev)
-                .build(),
-            #[cfg(target_os = "macos")]
-            ort::ep::CoreMLExecutionProvider::default().build(),
-        ])?;
+        builder = builder
+            .with_disable_cpu_fallback()?
+            .with_execution_providers([
+                #[cfg(target_os = "linux")]
+                ort::ep::CUDAExecutionProvider::default()
+                    .with_device_id(dev)
+                    .build(),
+                #[cfg(target_os = "macos")]
+                ort::ep::CoreMLExecutionProvider::default().build(),
+            ])?;
     } else {
         builder =
             builder.with_execution_providers([ort::ep::CPUExecutionProvider::default().build()])?;
