@@ -288,13 +288,25 @@ Kafka bind mounts need one extra check. The Kafka container user must be able
 to write to `BOOM_DATA_KAFKA_PATH`. If you see permission errors during broker
 startup, fix ownership or permissions on the host directory.
 
-For quick testing only, a permissive workaround is:
+Recommended options:
+
+1. Prefer Docker named volumes (`kafka_data`) when possible, which avoids host
+   filesystem permission management entirely.
+2. If using a bind mount on a separate drive, pre-provision the target
+   directory with ownership and permissions that match the Kafka container's
+   runtime user and group.
+3. Automate that host-path setup in infrastructure provisioning (cloud-init,
+   Ansible, Terraform, etc.) so deploys stay repeatable.
+
+As a last resort for unblocking a deploy when you cannot control host ownership
+or run provisioning tooling:
 
 ```bash
 sudo chmod 777 /srv/boom/kafka
 ```
 
-That is acceptable for short-term testing, but production should use the exact
-UID/GID or a tighter permission model instead of leaving the directory world-writable.
+This works but leaves the directory world-writable, meaning any process on
+the host can read or corrupt Kafka data. Replace it with proper ownership as
+soon as access allows.
 
 That's it. Now BOOM will deploy to production on each GitHub release.
