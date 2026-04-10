@@ -106,6 +106,17 @@ crossmatch:
         Qpct: 1
         ra: 1
         dec: 1
+    - catalog: AllWISE
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
     - catalog: NED
       radius: 300.0 # 300 arcseconds
       use_distance: true
