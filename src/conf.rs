@@ -409,9 +409,15 @@ pub struct WorkerConfig {
     pub n_workers: usize,
 }
 
+fn default_filter_refresh_interval_minutes() -> u64 {
+    15
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct SurveyWorkerConfig {
     pub command_interval: u64,
+    #[serde(default = "default_filter_refresh_interval_minutes")]
+    pub filter_refresh_interval_minutes: u64,
     pub alert: WorkerConfig,
     pub enrichment: WorkerConfig,
     pub filter: WorkerConfig,
