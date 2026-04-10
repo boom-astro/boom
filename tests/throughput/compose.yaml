@@ -95,7 +95,7 @@ services:
       interval: 10s
   # Run the Kafka producer just once
   producer:
-    image: boom/boom-benchmarking:latest
+    image: boom-astro/boom:latest
     hostname: producer
     build:
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile

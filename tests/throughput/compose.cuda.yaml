@@ -4,7 +4,8 @@ services:
   scheduler:
     image: boom-astro/boom-gpu:latest
     build:
-      target: app-gpu
+      context: ${BOOM_REPO_ROOT:?Variable not set}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile.gpu
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all

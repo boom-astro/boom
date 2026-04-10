@@ -5,7 +5,8 @@ services:
   scheduler-ztf:
     image: boom-astro/boom-gpu:latest
     build:
-      target: app-gpu
+      context: .
+      dockerfile: Dockerfile.gpu
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -20,7 +21,8 @@ services:
   scheduler-lsst:
     image: boom-astro/boom-gpu:latest
     build:
-      target: app-gpu
+      context: .
+      dockerfile: Dockerfile.gpu
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: all
