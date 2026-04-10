@@ -12,8 +12,8 @@ env:
   # are deleted before we start processing to save storage space.
   # This is useful for CI environments where storage is limited.
   LOW_STORAGE: true
-  # If true, the test will be run with GPU support (if available).
-  BOOM_GPU__ENABLED: ${{ env.BOOM_GPU__ENABLED || 'false' }}
+  # GPU is never available on CI runners; always run CPU-only.
+  BOOM_GPU__ENABLED: 'false'
 
 jobs:
   test:
