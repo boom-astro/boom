@@ -1,22 +1,12 @@
-ARG KAFKA_VERSION=4.1.1
-ARG SCALA_VERSION=2.13
-
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS base
-
-ARG KAFKA_VERSION
-ARG SCALA_VERSION
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates curl bash tar xz-utils gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config python3 python3-pip python3-venv && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal && \
-    curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
-    tar -xzf /tmp/kafka.tgz -C /opt && \
-    ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
-    rm -f /tmp/kafka.tgz
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
 
-ENV PATH="/root/.cargo/bin:/opt/kafka/bin:/usr/local/cuda/bin:${PATH}"
+ENV PATH="/root/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib"
 ENV LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib"
 
@@ -51,7 +41,7 @@ RUN cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_sn
 
 FROM base as app
 
-ENV PATH="/opt/kafka/bin:/usr/local/cuda/bin:${PATH}"
+ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
 ENV LD_LIBRARY_PATH=/opt/ort:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib:${LD_LIBRARY_PATH}
 
