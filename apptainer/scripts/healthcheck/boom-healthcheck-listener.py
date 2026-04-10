@@ -19,14 +19,20 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.respond(200, "ok\n")
-        elif self.path == "/consumer_health":
-            status = check_process("/app/kafka_consumer")
+        elif self.path.startswith("/consumer_health"):
+            survey = self.path.removeprefix("/consumer_health").strip("/")
+            process = f"/app/kafka_consumer {survey}" if survey else "/app/kafka_consumer"
+            label = f"consumer {survey}" if survey else "consumer"
+            status = check_process(process)
             self.respond(200 if status else 503,
-                         f"consumer {'is healthy' if status else 'unhealthy'}\n")
-        elif self.path == "/scheduler_health":
-            status = check_process("/app/scheduler")
+                         f"{label} {'is healthy' if status else 'unhealthy'}\n")
+        elif self.path.startswith("/scheduler_health"):
+            survey = self.path.removeprefix("/scheduler_health").strip("/")
+            process = f"/app/scheduler {survey}" if survey else "/app/scheduler"
+            label = f"scheduler {survey}" if survey else "scheduler"
+            status = check_process(process)
             self.respond(200 if status else 503,
-                         f"scheduler {'is healthy' if status else 'unhealthy'}\n")
+                         f"{label} {'is healthy' if status else 'unhealthy'}\n")
         elif self.path == "/otel_health":
             status = check_process("/otelcol")
             self.respond(200 if status else 503,
