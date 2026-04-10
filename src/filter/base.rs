@@ -868,7 +868,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let idle_poll_interval = Duration::from_secs(30);
     let mut next_filter_refresh = Instant::now() + filter_refresh_interval;
 
-    let command_interval: usize = 500;
+    let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());

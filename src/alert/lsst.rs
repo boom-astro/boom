@@ -889,7 +889,6 @@ struct AlertAuxForUpdate {
 }
 
 pub struct LsstAlertWorker {
-    stream_name: String,
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
@@ -1091,7 +1090,6 @@ impl AlertWorker for LsstAlertWorker {
             db.collection(&decam::ALERT_AUX_COLLECTION);
 
         let worker = LsstAlertWorker {
-            stream_name: STREAM_NAME.to_string(),
             schema_registry: SchemaRegistry::new(
                 Survey::Lsst,
                 schema_registry_url,
@@ -1109,16 +1107,16 @@ impl AlertWorker for LsstAlertWorker {
         Ok(worker)
     }
 
-    fn stream_name(&self) -> String {
-        self.stream_name.clone()
+    fn survey() -> Survey {
+        Survey::Lsst
     }
 
     fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", self.stream_name)
+        format!("{}_alerts_packets_queue", LsstAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_enrichment_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", LsstAlertWorker::survey())
     }
 
     #[instrument(skip_all, err)]

@@ -3,6 +3,7 @@ use crate::{
     conf::{self, AppConfig},
     enrichment::models::ModelError,
     utils::{
+        enums::Survey,
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
@@ -64,6 +65,8 @@ pub enum EnrichmentWorkerError {
     Redis(#[from] redis::RedisError),
     #[error("failed to read config")]
     ReadConfigError(#[from] conf::BoomConfigError),
+    #[error("worker config missing for survey: {0}")]
+    WorkerConfigMissing(Survey),
     #[error("failed to run model")]
     RunModelError(#[from] ModelError),
     #[error("could not access cutout images")]
@@ -93,6 +96,7 @@ pub trait EnrichmentWorker {
     async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError>
     where
         Self: Sized;
+    fn survey() -> Survey;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
     async fn process_alerts(
@@ -199,12 +203,18 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let mut enrichment_worker = T::new(config_path).await?;
 
     let config = AppConfig::from_path(config_path)?;
+    let survey = T::survey();
+    let worker_config = config
+        .workers
+        .get(&survey)
+        .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey.clone()))?;
+
     let mut con = config.build_redis().await?;
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
 
-    let command_interval: usize = 500;
+    let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
