@@ -2,7 +2,6 @@ pub mod alerts;
 pub mod cutouts;
 pub mod objects;
 pub mod schemas;
-pub mod stats;
 
 pub use alerts::cone_search_alerts;
 pub use alerts::get_alerts;
@@ -14,4 +13,3 @@ pub use objects::get_objects;
 pub use objects::get_objects_xmatches;
 pub use schemas::get_babamul_schema;
 pub use schemas::BabamulAvroSchemas;
-pub use stats::get_stats;

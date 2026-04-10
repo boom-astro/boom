@@ -1,3 +1,4 @@
+pub mod stats;
 pub mod surveys;
 pub mod tokens;
 
