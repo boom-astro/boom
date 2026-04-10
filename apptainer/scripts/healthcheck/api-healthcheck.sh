@@ -55,10 +55,11 @@ cpt=0
 while true; do
   output=$(curl -sf --max-time 3 "http://localhost:${PORT}/" 2>&1)
   if echo "$output" | grep -q "BOOM"; then
-    log "API is healthy (port ${PORT})" "$GREEN"
+    log "API is healthy" "$GREEN"
+    echo "                      port ${PORT}"
     exit 0
   else
-    log "API unhealthy (port ${PORT})" "$RED"
+    log "API unhealthy in port ${PORT}" "$RED"
   fi
 
   if [ -n "$NB_RETRIES" ] && [ "$cpt" -ge "$NB_RETRIES" ]; then

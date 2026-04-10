@@ -185,6 +185,7 @@ if [ "$1" == "health" ]; then
   "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/valkey-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/kafka-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/api-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/boom-healthcheck.sh"
   "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/process-healthcheck.sh" "/otelcol" otel-collector
