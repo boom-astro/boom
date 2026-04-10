@@ -116,7 +116,7 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop prometheus
   fi
   if stop_service "api" "$target"; then
-    apptainer instance stop "boom_api"
+    apptainer instance stop api
   fi
   if stop_service "boom" "$target"; then
     if [ "$target" = "boom" ] && [ -n "$3" ]; then

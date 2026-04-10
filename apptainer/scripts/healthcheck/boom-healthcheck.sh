@@ -9,17 +9,6 @@ RED="\e[31m"
 END="\e[0m"
 
 display_consumers_and_schedulers() {
-  if [ "$1" == "api" ]; then
-    pid=$(pgrep -f "/app/boom-api")
-    if [ -n "$pid" ]; then
-      listen=$(ss -tlnp 2>/dev/null | grep "pid=$pid" | awk '{print $4}' | head -1)
-      echo "                      API running on ${listen:-?}"
-    else
-      echo -e "${RED}                      no API${END}"
-    fi
-    return
-  fi
-
   local survey="$1"
   consumers=$(pgrep -f "/app/kafka_consumer ${survey}")
   if [ -n "$consumers" ]; then
@@ -48,7 +37,8 @@ display_consumers_and_schedulers() {
 if apptainer instance list | awk '{print $1}' | grep -q "^boom"; then
   for instance in $(apptainer instance list | awk '{print $1}' | grep "^boom"); do
     echo -e "${GREEN}$(current_datetime) - $instance is healthy${END}"
-    display_consumers_and_schedulers "${instance#boom_}"
+    survey="${instance#boom_}"
+    display_consumers_and_schedulers "$survey"
   done
 else
   echo -e "${RED}$(current_datetime) - boom instance unhealthy${END}"

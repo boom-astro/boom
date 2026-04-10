@@ -2,7 +2,7 @@ Bootstrap: docker
 From: rust:1.93.1-slim-trixie
 
 %environment
-    export PATH=/app:/opt/kafka/bin:$PATH
+    export PATH=/app:$PATH
     # Optional overrides
     export BOOM_DATABASE__HOST=localhost
 
@@ -15,30 +15,17 @@ From: rust:1.93.1-slim-trixie
     src /app/src
 
 %post
-    KAFKA_VERSION=4.1.1
-    SCALA_VERSION=2.13
     apt-get update && \
     apt-get install -y --no-install-recommends \
       curl gcc g++ libhdf5-dev libclang-dev perl \
       make libsasl2-dev pkg-config \
-      libsasl2-2 ca-certificates \
-      openjdk-25-jre-headless tar && \
+      libsasl2-2 ca-certificates && \
     apt-get autoremove && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    # Install Kafka CLI tools
-    curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
-    tar -xzf /tmp/kafka.tgz -C /opt && \
-    ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
-    rm -f /tmp/kafka.tgz
-
     cd /app || exit 1
-    cargo build --release
+    cargo build --release --bin api
 
-    cp /app/target/release/kafka_producer /app/kafka_producer
-    cp /app/target/release/kafka_consumer /app/kafka_consumer
-    cp /app/target/release/scheduler /app/scheduler
-    cp /app/target/release/migrate_fp_flux /app/migrate_fp_flux
-    cp /app/target/release/migrate_snr /app/migrate_snr
+    cp /app/target/release/api /app/boom-api
 
     # Cleanup: remove build deps and artifacts to reduce image size
     apt-get purge -y gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config

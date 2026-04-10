@@ -25,7 +25,7 @@ build() {
     apptainer build --force apptainer/sif/"$1".sif "${2:-apptainer/def/$1.def}"
 }
 
-declare -a services=("mongo" "valkey" "kafka" "boom")
+declare -a services=("mongo" "valkey" "kafka" "boom" "api")
 for service in "${services[@]}"; do
   if start_service "$service" "$1"; then
     build "$service"
