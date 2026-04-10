@@ -150,6 +150,59 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
+Each scheduler instance exposes two HTTP endpoints for monitoring:
+
+**Health endpoint** (lightweight, for liveness checks):
+```bash
+curl http://localhost:4001/health
+```
+Response includes: service, status, ready, instance_id, survey, uptime_seconds, timestamp.
+
+**Status endpoint** (full operational snapshot):
+```bash
+curl http://localhost:4001/status
+```
+Response includes: all health fields plus per-pool metrics:
+- `pools.{alert,enrichment,filter}`: configured_workers, live_workers, total_workers, status, input_queue_depth
+
+**Worker scaling endpoints** (dynamically add or remove workers):
+
+List workers in a pool:
+```bash
+curl http://localhost:4001/workers/alert
+```
+
+Response includes: pool_type, survey, total_workers, live_workers, and a `workers` array.
+Each worker entry currently includes: `id`, `thread_id`, `is_finished`, `has_join_handle`.
+
+Add workers to a pool:
+```bash
+curl -X POST http://localhost:4001/workers/alert/add \
+  -H "Content-Type: application/json" \
+  -d '{"count": 2}'
+```
+
+Remove workers from a pool:
+```bash
+curl -X POST http://localhost:4001/workers/alert/remove \
+  -H "Content-Type: application/json" \
+  -d '{"count": 1}'
+```
+
+Response includes: success, message, pool_type, survey, action, count (workers added/removed), new_total_workers.
+
+Valid pool types: `alert`, `enrichment`, `filter`.
+The scheduler survey is implicit from the running scheduler process and is still returned in responses.
+
+By default, it binds to `BOOM_API__DOMAIN` and `BOOM_API__PORT + 1`.
+You can override this with either CLI flags or environment variables:
+```bash
+cargo run --release --bin scheduler -- ztf --scheduler-api-host 0.0.0.0 --scheduler-api-port 4100
+```
+```bash
+BOOM_SCHEDULER_API_HOST=0.0.0.0 BOOM_SCHEDULER_API_PORT=4100 cargo run --release --bin scheduler -- ztf
+```
+
 The scheduler prints a variety of messages to your terminal, e.g.:
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
 - You should then see some `received alerts len: <nb_alerts>` messages, which means that the enrichment worker is processing the alerts successfully.

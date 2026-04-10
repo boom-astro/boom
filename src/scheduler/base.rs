@@ -11,6 +11,7 @@ use crate::{
 
 use std::thread;
 
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, error, info, instrument, span, warn};
@@ -20,6 +21,14 @@ use uuid::Uuid;
 pub enum SchedulerError {
     #[error("error from config")]
     Config(#[from] config::ConfigError),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkerSnapshot {
+    pub id: String,
+    pub thread_id: Option<String>,
+    pub is_finished: bool,
+    pub has_join_handle: bool,
 }
 
 // get num worker from config file, by stream name and worker type
@@ -141,12 +150,76 @@ impl ThreadPool {
 
     /// Add a new worker to the thread pool
     #[instrument(skip(self))]
-    fn add_worker(&mut self) {
+    pub fn add_worker(&mut self) {
         self.workers.push(Worker::new(
             self.worker_type,
             self.survey_name.clone(),
             self.config_path.clone(),
         ));
+    }
+
+    /// Remove a worker from the thread pool by gracefully terminating it.
+    /// Returns true if a worker was removed, false if no workers are available to remove.
+    /// This method waits for the worker to finish after sending the termination signal.
+    #[instrument(skip(self))]
+    pub async fn remove_worker(&mut self) -> bool {
+        // First, try to find and remove a finished worker without signaling
+        if let Some(worker) = self.workers.iter_mut().find_map(|w| {
+            if w.handle.as_ref().map(|h| h.is_finished()).unwrap_or(false) {
+                Some(w)
+            } else {
+                None
+            }
+        }) {
+            debug!("removing finished worker");
+            if let Some(handle) = worker.handle.take() {
+                match handle.join() {
+                    Ok(_) => debug!("successfully reaped finished worker"),
+                    Err(_) => warn!("finished worker had panicked"),
+                }
+            }
+            if let Some(pos) = self.workers.iter().position(|w| w.handle.is_none()) {
+                self.workers.remove(pos);
+            }
+            return true;
+        }
+
+        // If no finished workers, gracefully terminate the first live worker
+        if !self.workers.is_empty() {
+            debug!("no finished workers, gracefully terminating first live worker");
+            let worker = &mut self.workers[0];
+
+            // Send termination signal
+            worker.terminate().await.unwrap_or_else(|_| {
+                warn!("failed to send termination signal to worker");
+            });
+
+            // Wait for the worker thread to actually finish
+            if let Some(handle) = worker.handle.take() {
+                let tid = handle.thread().id();
+                match handle.join() {
+                    Ok(_) => debug!(?tid, "successfully shut down worker"),
+                    Err(_) => warn!(?tid, "worker panicked during shutdown"),
+                }
+            }
+
+            // Now remove it from the pool
+            self.workers.remove(0);
+            return true;
+        }
+
+        debug!("no workers available to remove");
+        false
+    }
+
+    /// Get the worker type for this pool
+    pub fn worker_type(&self) -> WorkerType {
+        self.worker_type
+    }
+
+    /// Get the survey name for this pool
+    pub fn survey_name(&self) -> &Survey {
+        &self.survey_name
     }
 
     /// Get the number of live (non-finished) workers in the pool.
@@ -161,6 +234,22 @@ impl ThreadPool {
     /// Get the total number of workers in the pool (including finished ones).
     pub fn total_worker_count(&self) -> usize {
         self.workers.len()
+    }
+
+    /// Build a snapshot of all workers currently tracked in this pool.
+    pub fn worker_snapshots(&self) -> Vec<WorkerSnapshot> {
+        self.workers
+            .iter()
+            .map(|worker| {
+                let handle = worker.handle.as_ref();
+                WorkerSnapshot {
+                    id: worker.id.to_string(),
+                    thread_id: handle.map(|h| format!("{:?}", h.thread().id())),
+                    is_finished: handle.map(|h| h.is_finished()).unwrap_or(true),
+                    has_join_handle: handle.is_some(),
+                }
+            })
+            .collect()
     }
 }
 
@@ -181,7 +270,7 @@ pub struct Worker {
     // Needs to be Option because JoinHandle::join() consumes the handle.
     handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<WorkerCmd>,
-    _id: Uuid,
+    id: Uuid,
 }
 
 impl Worker {
@@ -256,7 +345,7 @@ impl Worker {
         Worker {
             handle: Some(handle),
             sender,
-            _id: id,
+            id,
         }
     }
 
