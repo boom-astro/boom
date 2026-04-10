@@ -32,7 +32,7 @@ BOOM runs on macOS and Linux. You'll need:
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- For native GPU inference on Linux, you need a compatible NVIDIA driver, the matching CUDA major version, cuDNN 9 for that CUDA version, and the ONNX Runtime with CUDA enabled. See the [Linux Installation steps](#linux) below for details.
+- On Linux, you need to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
 
 ### Installation steps:
 
@@ -52,7 +52,7 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt update
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
-- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. The specific versions required will depend on your GPU and the version of ONNX Runtime you are using. See the [Linux GPU runtime setup](#linux-gpu-runtime-setup) section below for more details.
+- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference-linux) subsection below for more details.
 
 ## Setup
 
@@ -98,19 +98,55 @@ code.
     cargo build --release
     ```
 
-### Linux GPU runtime setup
+### Linux ONNX Runtime setup
 
-For native Linux development with GPU inference, `ORT_DYLIB_PATH` must be set before starting BOOM, so `ort` can find the necessary ONNX Runtime shared library with GPU support.
-The recommended flow is to create a Python 3.13 virtual environment (we recommend [uv](https://docs.astral.sh/uv/getting-started/installation/)), install `onnxruntime-gpu>=1.24,<1.25`, and point BOOM to that wheel's ONNX Runtime shared library:
+On Linux, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use GPU inference or not. You must set this variable before running any BOOM binary natively.
+
+The easiest way is to install the Python wheel and point to the bundled `.so` file. We recommend [uv](https://docs.astral.sh/uv/getting-started/installation/):
+
+**CPU-only:**
 
 ```bash
-uv venv --python 3.13
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install "onnxruntime>=1.24,<1.25"
+export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
+```
+
+Adjust the version number (`1.24.4`) to match the file actually present in `.venv`:
+
+```bash
+ls .venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.*
+```
+
+You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
+
+### GPU inference (Linux) {#gpu-inference-linux}
+
+For GPU inference on Linux you need, in addition to the above:
+
+1. NVIDIA driver installed and working.
+2. A CUDA major version compatible with your driver (we recommend CUDA 12.8).
+3. cuDNN 9 for that CUDA major version.
+
+And the GPU variant of the ONNX Runtime wheel instead of the CPU one:
+
+```bash
+uv venv --python 3.13 .venv
 source .venv/bin/activate
 uv pip install "onnxruntime-gpu>=1.24,<1.25"
 export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
 ```
 
-You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or simply add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
+Then enable GPU inference in your BOOM config:
+
+```yaml
+# config.yaml
+gpu:
+  enabled: true
+  device_ids: [0]
+```
+
 See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
 
 ## Running BOOM:
