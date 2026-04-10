@@ -1,40 +1,69 @@
-# GPU Acceleration
+# Linux ONNX Runtime Setup & GPU Acceleration
 
-This page covers practical GPU setup for BOOM and is aligned with the current Dockerfile and compose files.
+This page covers ONNX Runtime setup on Linux and GPU acceleration for BOOM.
 
-**If you want to use GPU hardware acceleration on MacOS, simply set `gpu.enabled` to true in `config.yaml` or `BOOM_GPU__ENABLED=true` in the environment, no additional setup is needed!**. It's only on Linux that you need to worry about the ONNX Runtime shared library and CUDA dependencies.
+**On macOS, no ONNX Runtime setup is needed** — simply set `gpu.enabled: true` in `config.yaml` (or `BOOM_GPU__ENABLED=true`) when you want GPU inference, and BOOM handles the rest.
+
+**On Linux**, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use a GPU or not.
 
 ## Quick summary
 
-- Native Linux GPU runs: you must set `ORT_DYLIB_PATH` in the shell before starting BOOM.
+- Native Linux (CPU or GPU): you **must** set `ORT_DYLIB_PATH` before starting BOOM.
 - Docker GPU runs: `ORT_DYLIB_PATH` is already set inside the GPU image.
 - BOOM GPU behavior is controlled by `gpu.enabled`/`gpu.device_ids` in `config.yaml` or `BOOM_GPU__*` env vars.
 
-## Native Linux GPU setup
+## Native Linux setup
 
-Use this when running BOOM directly on your host (not via container image).
+### ONNX Runtime (required on all Linux installs)
 
-Requirements:
+Whether or not you use GPU inference, you need to install the ONNX Runtime shared library and tell BOOM where to find it via `ORT_DYLIB_PATH`.
 
-1. NVIDIA driver installed and working.
-2. CUDA major version compatible with your driver. We recommend 12.8 (which is what we tested at the time of writing), but check ONNX Runtime GPU wheel requirements for your version if you run into issues.
-3. cuDNN 9 for that CUDA major version.
-4. A CUDA-enabled ONNX Runtime shared library, pointed to by `ORT_DYLIB_PATH`. See below for how to get this via the `onnxruntime-gpu` Python wheel.
+The easiest way is to install the Python wheel and point to the bundled `.so` file. We recommend using [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage a small virtual environment for this:
 
-Recommended setup (matches project defaults), using a Python virtual environment to manage the ONNX Runtime GPU installation:
+**CPU-only (no GPU):**
+
+```bash
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install "onnxruntime>=1.24,<1.25"
+export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
+```
+
+**GPU (CUDA):** — see [GPU inference](#gpu-inference) below for additional system requirements, then use:
 
 ```bash
 uv venv --python 3.13 .venv
 source .venv/bin/activate
 uv pip install "onnxruntime-gpu>=1.24,<1.25"
-export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.<version>"
+export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
 ```
 
-where `<version>` is the actual version number of the ONNX Runtime wheel you installed (e.g. `libonnxruntime.so.1.24.1`).
-Note that `ORT_DYLIB_PATH` must point to the actual `libonnxruntime.so.*` file, not just the directory.
-Set it in every shell/session where you run BOOM natively, or simply add the export line to your shell profile (e.g. `~/.bashrc`).
+In both cases, `ORT_DYLIB_PATH` must point to the versioned `libonnxruntime.so.*` file (e.g. `libonnxruntime.so.1.24.4`), not just the directory. Adjust the version number to match the actual file present after installation:
 
-Then, you can run BOOM's scheduler or API as usual, with the addition of GPU config as described in [BOOM GPU config](#boom-gpu-config) below.
+```bash
+ls .venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.*
+```
+
+Set `ORT_DYLIB_PATH` in every shell or session where you run BOOM natively, or add the export line to your shell profile (e.g. `~/.bashrc`) so it is picked up automatically.
+
+### GPU inference
+
+GPU inference requires additional system software beyond the ONNX Runtime wheel. You also need:
+
+1. NVIDIA driver installed and working.
+2. CUDA major version compatible with your driver. We recommend 12.8 (which is what we tested at the time of writing), but check ONNX Runtime GPU wheel requirements for your version if you run into issues.
+3. cuDNN 9 for that CUDA major version.
+
+Then install the GPU wheel as shown above, enable GPU inference in BOOM config, and run as usual:
+
+```yaml
+# config.yaml
+gpu:
+  enabled: true
+  device_ids: [0]
+```
+
+See [BOOM GPU config](#boom-gpu-config) for all available settings.
 
 ## Docker GPU setup
 
