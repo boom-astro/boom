@@ -39,7 +39,7 @@ RUN mkdir -p /app/src && \
 COPY ./src /app/src
 RUN cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr
 
-FROM base as app
+FROM base AS app
 
 ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
