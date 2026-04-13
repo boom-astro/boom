@@ -3,8 +3,13 @@ use crate::api::models::response;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
 use chrono::{Datelike, NaiveDate, Utc};
-use mongodb::{bson::doc, Collection, Database};
+use futures::TryStreamExt;
+use mongodb::{
+    bson::{doc, Document},
+    Collection, Database,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,162 +111,216 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
 pub async fn get_nightly_stats(
     query: web::Query<StatsQuery>,
     db: web::Data<Database>,
-) -> Result<HttpResponse, actix_web::Error> {
+) -> HttpResponse {
     let surveys = match query.survey.as_deref() {
         Some("ztf") => vec![Survey::Ztf],
         Some("lsst") => vec![Survey::Lsst],
         Some(_) => {
-            return Ok(response::bad_request(
-                "Invalid survey, expected 'ztf' or 'lsst'",
-            ))
+            return response::bad_request("Invalid survey, expected 'ztf' or 'lsst'");
         }
         None => vec![Survey::Ztf, Survey::Lsst],
     };
 
     let start_date = match NaiveDate::parse_from_str(&query.start_date, "%Y-%m-%d") {
         Ok(d) => d,
-        Err(_) => {
-            return Ok(response::bad_request(
-                "Invalid start_date, expected YYYY-MM-DD",
-            ))
-        }
+        Err(_) => return response::bad_request("Invalid start_date, expected YYYY-MM-DD"),
     };
     let end_date = match NaiveDate::parse_from_str(&query.end_date, "%Y-%m-%d") {
         Ok(d) => d,
-        Err(_) => {
-            return Ok(response::bad_request(
-                "Invalid end_date, expected YYYY-MM-DD",
-            ))
-        }
+        Err(_) => return response::bad_request("Invalid end_date, expected YYYY-MM-DD"),
     };
     if end_date < start_date {
-        return Ok(response::bad_request("end_date must be >= start_date"));
+        return response::bad_request("end_date must be >= start_date");
     }
     if (end_date - start_date).num_days() > 365 {
-        return Ok(response::bad_request(
-            "Date range too large, maximum is 365 days",
-        ));
+        return response::bad_request("Date range too large, maximum is 365 days");
     }
 
     let today = Utc::now().date_naive();
     let now_ts = Utc::now().timestamp() as f64;
 
     let stats_collection: Collection<NightlyStatCache> = db.collection(STATS_COLLECTION);
+
+    let mut all_dates: Vec<NaiveDate> = Vec::new();
+    let mut d = start_date;
+    while d <= end_date {
+        all_dates.push(d);
+        d += chrono::Duration::days(1);
+    }
+
+    // Read all relevant cache entries in a single query
+    let cache_keys: Vec<String> = surveys
+        .iter()
+        .flat_map(|s| {
+            all_dates
+                .iter()
+                .map(move |d| format!("{}_{}", s, d.format("%Y-%m-%d")))
+        })
+        .collect();
+
+    let mut cache_counts: HashMap<String, u64> = HashMap::new();
+    if let Ok(cursor) = stats_collection
+        .find(doc! { "_id": { "$in": &cache_keys } })
+        .await
+    {
+        if let Ok(docs) = cursor.try_collect::<Vec<_>>().await {
+            for doc in docs {
+                if doc.cache_until > now_ts {
+                    cache_counts.insert(doc.id, doc.n_alerts);
+                }
+            }
+        }
+    }
+
+    // For each survey, run one aggregation covering every missing date in the range
+    let mut fresh_counts: HashMap<String, u64> = HashMap::new();
+    for survey in &surveys {
+        let missing: Vec<NaiveDate> = all_dates
+            .iter()
+            .copied()
+            .filter(|d| {
+                let key = format!("{}_{}", survey, d.format("%Y-%m-%d"));
+                !cache_counts.contains_key(&key)
+            })
+            .collect();
+
+        if missing.is_empty() {
+            continue;
+        }
+
+        let min_missing = *missing.first().unwrap();
+        let max_missing = *missing.last().unwrap();
+        let base_jd = date_to_jd_local_noon(&min_missing, survey);
+        let end_jd = date_to_jd_local_noon(&(max_missing + chrono::Duration::days(1)), survey);
+
+        let mut match_doc = doc! {
+            "candidate.jd": { "$gte": base_jd, "$lt": end_jd }
+        };
+        if *survey == Survey::Ztf {
+            match_doc.insert("candidate.programid", 1);
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_doc },
+            doc! {
+                "$group": {
+                    "_id": { "$toInt": { "$floor": { "$subtract": ["$candidate.jd", base_jd] } } },
+                    "count": { "$sum": 1i64 }
+                }
+            },
+        ];
+
+        let alerts_collection = db.collection::<Document>(&format!("{}_alerts", survey));
+        let cursor = match alerts_collection.aggregate(pipeline).await {
+            Ok(c) => c,
+            Err(e) => {
+                return response::internal_error(&format!(
+                    "Error aggregating alerts for {}: {}",
+                    survey, e
+                ));
+            }
+        };
+        let docs: Vec<Document> = match cursor.try_collect().await {
+            Ok(d) => d,
+            Err(e) => {
+                return response::internal_error(&format!(
+                    "Error collecting aggregation for {}: {}",
+                    survey, e
+                ));
+            }
+        };
+
+        let mut index_counts: HashMap<i64, u64> = HashMap::new();
+        for doc in docs {
+            let idx = doc
+                .get("_id")
+                .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(|i| i as i64)))
+                .unwrap_or(-1);
+            let count = doc
+                .get("count")
+                .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(|i| i as i64)))
+                .unwrap_or(0)
+                .max(0) as u64;
+            index_counts.insert(idx, count);
+        }
+
+        // Fill counts for every missing date (0 when no alerts were returned)
+        for date in &missing {
+            let idx = (*date - min_missing).num_days();
+            let count = *index_counts.get(&idx).unwrap_or(&0);
+            let key = format!("{}_{}", survey, date.format("%Y-%m-%d"));
+            fresh_counts.insert(key, count);
+        }
+    }
+
+    // Upsert fresh counts into the cache in parallel
+    let upserts: Vec<_> = fresh_counts
+        .iter()
+        .filter_map(|(key, count)| {
+            let parts: Vec<&str> = key.splitn(2, '_').collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            let date = NaiveDate::parse_from_str(parts[1], "%Y-%m-%d").ok()?;
+            let cache_secs = cache_duration_secs(&date, &today);
+            let cache_doc = NightlyStatCache {
+                id: key.clone(),
+                survey: parts[0].to_string(),
+                date: parts[1].to_string(),
+                n_alerts: *count,
+                updated_at: now_ts,
+                cache_until: now_ts + cache_secs,
+            };
+            let coll = stats_collection.clone();
+            let key_owned = key.clone();
+            Some(async move {
+                let _ = coll
+                    .replace_one(doc! { "_id": key_owned }, &cache_doc)
+                    .upsert(true)
+                    .await;
+            })
+        })
+        .collect();
+    futures::future::join_all(upserts).await;
+
     let has_ztf = surveys.contains(&Survey::Ztf);
     let has_lsst = surveys.contains(&Survey::Lsst);
-
-    let mut results: Vec<NightlyStat> = Vec::new();
-    let mut date = start_date;
-
-    while date <= end_date {
+    let mut results: Vec<NightlyStat> = Vec::with_capacity(all_dates.len());
+    for date in &all_dates {
         let date_str = date.format("%Y-%m-%d").to_string();
-
         let ztf = if has_ztf {
+            let key = format!("{}_{}", Survey::Ztf, date_str);
             Some(
-                fetch_night_count(
-                    &stats_collection,
-                    &db,
-                    &Survey::Ztf,
-                    &date,
-                    &date_str,
-                    now_ts,
-                    &today,
-                )
-                .await?,
+                *cache_counts
+                    .get(&key)
+                    .or_else(|| fresh_counts.get(&key))
+                    .unwrap_or(&0),
             )
         } else {
             None
         };
-
         let lsst = if has_lsst {
+            let key = format!("{}_{}", Survey::Lsst, date_str);
             Some(
-                fetch_night_count(
-                    &stats_collection,
-                    &db,
-                    &Survey::Lsst,
-                    &date,
-                    &date_str,
-                    now_ts,
-                    &today,
-                )
-                .await?,
+                *cache_counts
+                    .get(&key)
+                    .or_else(|| fresh_counts.get(&key))
+                    .unwrap_or(&0),
             )
         } else {
             None
         };
-
         results.push(NightlyStat {
             date: date_str,
             ztf,
             lsst,
         });
-
-        date += chrono::Duration::days(1);
     }
 
-    Ok(response::ok(
+    response::ok(
         &format!("nightly stats for {} nights", results.len()),
         serde_json::json!(results),
-    ))
-}
-
-async fn fetch_night_count(
-    stats_collection: &Collection<NightlyStatCache>,
-    db: &Database,
-    survey: &Survey,
-    date: &NaiveDate,
-    date_str: &str,
-    now_ts: f64,
-    today: &NaiveDate,
-) -> Result<u64, actix_web::Error> {
-    let cache_key = format!("{}_{}", survey, date_str);
-
-    // Try to serve from cache
-    if let Ok(Some(doc)) = stats_collection.find_one(doc! { "_id": &cache_key }).await {
-        if doc.cache_until > now_ts {
-            return Ok(doc.n_alerts);
-        }
-    }
-
-    // Count alerts for this night: local noon → next local noon
-    let jd_start = date_to_jd_local_noon(date, survey);
-    let jd_end = jd_start + 1.0;
-
-    let mut filter = doc! {
-        "candidate.jd": { "$gte": jd_start, "$lt": jd_end }
-    };
-    if *survey == Survey::Ztf {
-        filter.insert("candidate.programid", 1);
-    }
-
-    let alerts_collection = db.collection::<mongodb::bson::Document>(&format!("{}_alerts", survey));
-
-    let count = alerts_collection
-        .count_documents(filter)
-        .await
-        .map_err(|e| {
-            actix_web::error::ErrorInternalServerError(format!(
-                "Error counting alerts for {}: {}",
-                date_str, e
-            ))
-        })?;
-
-    // Upsert into cache
-    let cache_secs = cache_duration_secs(date, today);
-    let cache_doc = NightlyStatCache {
-        id: cache_key.clone(),
-        survey: survey.to_string(),
-        date: date_str.to_string(),
-        n_alerts: count,
-        updated_at: now_ts,
-        cache_until: now_ts + cache_secs,
-    };
-    let _ = stats_collection
-        .replace_one(doc! { "_id": &cache_key }, &cache_doc)
-        .upsert(true)
-        .await;
-
-    Ok(count)
+    )
 }
 
 #[cfg(test)]
