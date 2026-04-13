@@ -22,6 +22,9 @@ use tracing::{info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
+const ZTF_MIN_FREE_VRAM_MIB: u64 = 10 * 1024;
+
+#[cfg(target_os = "linux")]
 fn validate_linux_gpu_runtime_preconditions() -> Result<(), &'static str> {
     // fail fast if the runtime library path is not explicitly configured.
     if std::env::var("ORT_DYLIB_PATH").map_or(true, |v| v.trim().is_empty()) {
@@ -44,6 +47,98 @@ fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::
         let triplet = ndarray::Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
         let _ = model.predict(&metadata, &triplet)?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_nvidia_smi_memory_free_output(
+    output: &str,
+) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    let mut values = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = trimmed.parse::<u64>().map_err(|e| {
+            std::io::Error::other(format!(
+                "failed to parse nvidia-smi free memory value '{trimmed}': {e}"
+            ))
+        })?;
+        values.push(value);
+    }
+
+    if values.is_empty() {
+        return Err(std::io::Error::other("nvidia-smi returned no GPU free-memory values").into());
+    }
+
+    Ok(values)
+}
+
+#[cfg(target_os = "linux")]
+fn query_nvidia_smi_free_memory_mib() -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .map_err(|e| {
+            std::io::Error::other(format!(
+                "failed to execute nvidia-smi for GPU memory validation: {e}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(std::io::Error::other(format!(
+            "nvidia-smi failed while validating free GPU memory: {}",
+            stderr.trim()
+        ))
+        .into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_nvidia_smi_memory_free_output(&stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_gpu_free_vram(
+    device_ids: &[i32],
+    min_free_vram_mib: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let free_by_gpu = query_nvidia_smi_free_memory_mib()?;
+
+    for &device_id in device_ids {
+        if device_id < 0 {
+            return Err(std::io::Error::other(format!(
+                "invalid CUDA device id {device_id}; device ids must be >= 0"
+            ))
+            .into());
+        }
+
+        let index = device_id as usize;
+        let Some(&free_mib) = free_by_gpu.get(index) else {
+            return Err(std::io::Error::other(format!(
+                "configured CUDA device id {device_id} is out of range; nvidia-smi reported {} device(s)",
+                free_by_gpu.len()
+            ))
+            .into());
+        };
+
+        if free_mib < min_free_vram_mib {
+            return Err(std::io::Error::other(format!(
+                "configured CUDA device {device_id} has only {free_mib} MiB free VRAM; ZTF enrichment requires at least {min_free_vram_mib} MiB ({:.1} GiB) free per device",
+                min_free_vram_mib as f64 / 1024.0
+            ))
+            .into());
+        }
+
+        info!(
+            device_id,
+            free_vram_mib = free_mib,
+            min_required_mib = min_free_vram_mib,
+            "validated free GPU VRAM for ZTF enrichment"
+        );
+    }
+
     Ok(())
 }
 
@@ -98,9 +193,11 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     {
         if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
             validate_linux_gpu_runtime_preconditions().expect("GPU runtime preconditions not met");
+            validate_gpu_free_vram(&config.gpu.device_ids, ZTF_MIN_FREE_VRAM_MIB)
+                .expect("configured GPU(s) do not have enough free VRAM for ZTF enrichment");
             validate_gpu_inference(&config.gpu.device_ids)
                 .expect("failed to validate GPU inference");
-            info!("Confirmed GPU runtime preconditions and validated GPU inference successfully");
+            info!("Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference");
         }
     }
 
@@ -202,4 +299,27 @@ async fn main() {
     .expect("failed to initialize metrics");
 
     run(args, meter_provider).await;
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::parse_nvidia_smi_memory_free_output;
+
+    #[test]
+    /// Verifies that the `nvidia-smi` parsing helper accepts the exact
+    /// newline-separated MiB output format we rely on at startup.
+    fn parses_memory_free_output_lines() {
+        let parsed = parse_nvidia_smi_memory_free_output("12288\n8192\n").unwrap();
+        assert_eq!(parsed, vec![12288, 8192]);
+    }
+
+    #[test]
+    /// Verifies that malformed `nvidia-smi` output fails fast with a parse
+    /// error instead of silently accepting bad VRAM data.
+    fn rejects_invalid_memory_free_output() {
+        let err = parse_nvidia_smi_memory_free_output("12288\nabc\n").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("failed to parse nvidia-smi free memory value"));
+    }
 }

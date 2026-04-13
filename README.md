@@ -128,6 +128,9 @@ For GPU inference on Linux you need, in addition to the above:
 1. NVIDIA driver installed and working.
 2. A CUDA major version compatible with your driver (we recommend CUDA 12.8).
 3. cuDNN 9 for that CUDA major version.
+4. At least 10 GiB (10240 MiB) of free VRAM on each configured CUDA device for ZTF enrichment.
+
+BOOM validates this requirement at scheduler startup when running ZTF with GPU enabled, and exits early if a configured device is below the threshold.
 
 And the GPU variant of the ONNX Runtime wheel instead of the CPU one:
 

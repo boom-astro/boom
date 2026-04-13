@@ -41,7 +41,7 @@ pub fn load_dotenv() {
     // Try current directory first
     if std::path::Path::new(".env").exists() {
         match dotenvy::dotenv() {
-            Ok(_) => info!("Loaded environment variables from .env file"),
+            Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
         }
         return;
@@ -50,14 +50,14 @@ pub fn load_dotenv() {
     // Try parent directory (useful when running from subdirectories like api/)
     if std::path::Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
-            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
         }
         return;
     }
 
     // No .env file found - this is fine, environment variables may be set by the system
-    debug!("No .env file found, using system environment variables only");
+    info!("No .env file found, using system environment variables only");
 }
 
 #[instrument(err)]
@@ -595,7 +595,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
         return Err(BoomConfigError::InvalidSecretError(e));
     }
 
-    info!("Configuration loaded successfully");
+    debug!("Configuration loaded successfully");
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
     debug!("Admin username: {}", app_config.api.auth.admin_username);
