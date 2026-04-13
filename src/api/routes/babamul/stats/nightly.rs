@@ -39,6 +39,10 @@ pub struct StatsQuery {
     pub survey: Option<String>,
 }
 
+fn cache_id(survey: &Survey, date: &NaiveDate) -> String {
+    format!("nightly_stats_{}_{}", survey, date.format("%Y-%m-%d"))
+}
+
 /// Convert a calendar date to Julian Date at **local noon** for the survey's
 /// observatory.
 ///
@@ -151,37 +155,39 @@ pub async fn get_nightly_stats(
     // Read all relevant cache entries in a single query
     let cache_keys: Vec<String> = surveys
         .iter()
-        .flat_map(|s| {
-            all_dates
-                .iter()
-                .map(move |d| format!("{}_{}", s, d.format("%Y-%m-%d")))
-        })
+        .flat_map(|s| all_dates.iter().map(move |d| cache_id(s, d)))
         .collect();
 
-    let mut cache_counts: HashMap<String, u64> = HashMap::new();
+    let mut cache_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
     if let Ok(cursor) = stats_collection
         .find(doc! { "_id": { "$in": &cache_keys } })
         .await
     {
         if let Ok(docs) = cursor.try_collect::<Vec<_>>().await {
             for doc in docs {
-                if doc.cache_until > now_ts {
-                    cache_counts.insert(doc.id, doc.n_alerts);
+                if doc.cache_until <= now_ts {
+                    continue;
                 }
+                let survey = match doc.survey.as_str() {
+                    "ZTF" => Survey::Ztf,
+                    "LSST" => Survey::Lsst,
+                    _ => continue,
+                };
+                let Ok(date) = NaiveDate::parse_from_str(&doc.date, "%Y-%m-%d") else {
+                    continue;
+                };
+                cache_counts.insert((survey, date), doc.n_alerts);
             }
         }
     }
 
     // For each survey, run one aggregation covering every missing date in the range
-    let mut fresh_counts: HashMap<String, u64> = HashMap::new();
+    let mut fresh_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
     for survey in &surveys {
         let missing: Vec<NaiveDate> = all_dates
             .iter()
             .copied()
-            .filter(|d| {
-                let key = format!("{}_{}", survey, d.format("%Y-%m-%d"));
-                !cache_counts.contains_key(&key)
-            })
+            .filter(|d| !cache_counts.contains_key(&(survey.clone(), *d)))
             .collect();
 
         if missing.is_empty() {
@@ -248,37 +254,31 @@ pub async fn get_nightly_stats(
         for date in &missing {
             let idx = (*date - min_missing).num_days();
             let count = *index_counts.get(&idx).unwrap_or(&0);
-            let key = format!("{}_{}", survey, date.format("%Y-%m-%d"));
-            fresh_counts.insert(key, count);
+            fresh_counts.insert((survey.clone(), *date), count);
         }
     }
 
     // Upsert fresh counts into the cache in parallel
     let upserts: Vec<_> = fresh_counts
         .iter()
-        .filter_map(|(key, count)| {
-            let parts: Vec<&str> = key.splitn(2, '_').collect();
-            if parts.len() != 2 {
-                return None;
-            }
-            let date = NaiveDate::parse_from_str(parts[1], "%Y-%m-%d").ok()?;
-            let cache_secs = cache_duration_secs(&date, &today);
+        .map(|((survey, date), count)| {
+            let cache_secs = cache_duration_secs(date, &today);
+            let id = cache_id(survey, date);
             let cache_doc = NightlyStatCache {
-                id: key.clone(),
-                survey: parts[0].to_string(),
-                date: parts[1].to_string(),
+                id: id.clone(),
+                survey: survey.to_string(),
+                date: date.format("%Y-%m-%d").to_string(),
                 n_alerts: *count,
                 updated_at: now_ts,
                 cache_until: now_ts + cache_secs,
             };
             let coll = stats_collection.clone();
-            let key_owned = key.clone();
-            Some(async move {
+            async move {
                 let _ = coll
-                    .replace_one(doc! { "_id": key_owned }, &cache_doc)
+                    .replace_one(doc! { "_id": id }, &cache_doc)
                     .upsert(true)
                     .await;
-            })
+            }
         })
         .collect();
     futures::future::join_all(upserts).await;
@@ -287,31 +287,17 @@ pub async fn get_nightly_stats(
     let has_lsst = surveys.contains(&Survey::Lsst);
     let mut results: Vec<NightlyStat> = Vec::with_capacity(all_dates.len());
     for date in &all_dates {
-        let date_str = date.format("%Y-%m-%d").to_string();
-        let ztf = if has_ztf {
-            let key = format!("{}_{}", Survey::Ztf, date_str);
-            Some(
-                *cache_counts
-                    .get(&key)
-                    .or_else(|| fresh_counts.get(&key))
-                    .unwrap_or(&0),
-            )
-        } else {
-            None
+        let lookup = |survey: Survey| {
+            let key = (survey, *date);
+            *cache_counts
+                .get(&key)
+                .or_else(|| fresh_counts.get(&key))
+                .unwrap_or(&0)
         };
-        let lsst = if has_lsst {
-            let key = format!("{}_{}", Survey::Lsst, date_str);
-            Some(
-                *cache_counts
-                    .get(&key)
-                    .or_else(|| fresh_counts.get(&key))
-                    .unwrap_or(&0),
-            )
-        } else {
-            None
-        };
+        let ztf = has_ztf.then(|| lookup(Survey::Ztf));
+        let lsst = has_lsst.then(|| lookup(Survey::Lsst));
         results.push(NightlyStat {
-            date: date_str,
+            date: date.format("%Y-%m-%d").to_string(),
             ztf,
             lsst,
         });
