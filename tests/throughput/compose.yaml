@@ -5,7 +5,6 @@ networks:
 
 volumes:
   mongodb:
-  nvidia_compute_cache:
 
 services:
   mongo:
@@ -172,4 +171,3 @@ services:
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
       - ${BOOM_REPO_ROOT:?Variable not set}/data/models:/app/data/models:ro
       - ${BOOM_REPO_ROOT:?Variable not set}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
-      - nvidia_compute_cache:/root/.nv/ComputeCache

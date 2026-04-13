@@ -1,6 +1,9 @@
 # GPU override — use with: docker compose -f docker-compose.yaml -f docker-compose.cuda.yaml up
 # Requires NVIDIA Container Toolkit on the host.
 
+volumes:
+  nvidia_compute_cache:
+
 services:
   scheduler-ztf:
     image: boom-astro/boom-gpu:latest
@@ -18,6 +21,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    volumes:
+      - nvidia_compute_cache:/root/.nv/ComputeCache
   scheduler-lsst:
     image: boom-astro/boom-gpu:latest
     build:
@@ -34,3 +39,5 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    volumes:
+      - nvidia_compute_cache:/root/.nv/ComputeCache
