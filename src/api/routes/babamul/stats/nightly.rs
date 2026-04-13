@@ -75,10 +75,10 @@ fn date_to_jd_local_noon(date: &NaiveDate, survey: &Survey) -> f64 {
 /// Cache duration (in seconds) grows with the age of the night.
 ///
 /// - Today (age 0): 5 min — the night is still in progress, count changes fast.
-/// - Yesterday: 30 min — final count might still get a late ingest.
+/// - Yesterday: 30 min — might still get a late ingest.
 /// - 2–7 days: 2 hours.
 /// - 8–30 days: 12 hours.
-/// - >30 days: 30 days — count is effectively frozen.
+/// - >30 days: 30 days
 fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
     let age_days = (*today - *date).num_days();
     match age_days {
