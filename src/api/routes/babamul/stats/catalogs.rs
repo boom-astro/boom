@@ -3,6 +3,7 @@ use crate::api::db::PROTECTED_COLLECTION_NAMES;
 use crate::api::models::response;
 use actix_web::{get, web, HttpResponse};
 use chrono::Utc;
+use futures::StreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -118,11 +119,12 @@ pub async fn get_catalog_stats(
         .collect();
     catalog_names.sort();
 
+    let fetch_details = include_count || include_size;
     let mut catalogs = Vec::new();
     for name in &catalog_names {
-        let count = if include_count {
+        let (count, size_bytes) = if fetch_details {
             let collection = db.collection::<mongodb::bson::Document>(name);
-            match collection.estimated_document_count().await {
+            let count = match collection.estimated_document_count().await {
                 Ok(c) => Some(c),
                 Err(e) => {
                     return response::internal_error(&format!(
@@ -130,25 +132,29 @@ pub async fn get_catalog_stats(
                         name, e
                     ));
                 }
-            }
-        } else {
-            None
-        };
-
-        let size_bytes = if include_size {
-            match db.run_command(doc! { "collStats": name }).await {
-                Ok(doc) => Some(match doc.get("storageSize") {
-                    Some(bson) => bson
-                        .as_i64()
-                        .or_else(|| bson.as_i32().map(|i| i as i64))
-                        .or_else(|| bson.as_f64().map(|f| f as i64))
+            };
+            let size_bytes = match collection
+                .aggregate(vec![doc! { "$collStats": { "storageStats": {} } }])
+                .await
+            {
+                Ok(mut cursor) => Some(match cursor.next().await {
+                    Some(Ok(d)) => d
+                        .get_document("storageStats")
+                        .ok()
+                        .and_then(|s| s.get("storageSize"))
+                        .and_then(|bson| {
+                            bson.as_i64()
+                                .or_else(|| bson.as_i32().map(|i| i as i64))
+                                .or_else(|| bson.as_f64().map(|f| f as i64))
+                        })
                         .unwrap_or(0) as u64,
-                    None => 0,
+                    _ => 0,
                 }),
                 Err(_) => Some(0),
-            }
+            };
+            (count, size_bytes)
         } else {
-            None
+            (None, None)
         };
 
         catalogs.push(CatalogEntry {
@@ -158,8 +164,8 @@ pub async fn get_catalog_stats(
         });
     }
 
-    // Upsert into cache when we computed counts/sizes
-    if include_count || include_size {
+    // Upsert full details into cache
+    if fetch_details {
         let stats_collection: Collection<CatalogStatsCacheEntry> = db.collection(STATS_COLLECTION);
         let cache_entry = CatalogStatsCacheEntry {
             id: CATALOG_STATS_CACHE_KEY.to_string(),
@@ -173,6 +179,15 @@ pub async fn get_catalog_stats(
             .upsert(true)
             .await;
     }
+
+    let catalogs: Vec<CatalogEntry> = catalogs
+        .into_iter()
+        .map(|c| CatalogEntry {
+            name: c.name,
+            count: if include_count { c.count } else { None },
+            size_bytes: if include_size { c.size_bytes } else { None },
+        })
+        .collect();
 
     let stats = CatalogStats {
         n_catalogs: catalogs.len(),
