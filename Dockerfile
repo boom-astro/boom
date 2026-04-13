@@ -51,6 +51,8 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 FROM base AS app
 
+ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
+
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
