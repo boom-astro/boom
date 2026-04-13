@@ -137,7 +137,7 @@ pub async fn get_catalog_stats(
                 .aggregate(vec![doc! { "$collStats": { "storageStats": {} } }])
                 .await
             {
-                Ok(mut cursor) => Some(match cursor.next().await {
+                Ok(mut cursor) => match cursor.next().await {
                     Some(Ok(d)) => d
                         .get_document("storageStats")
                         .ok()
@@ -147,10 +147,24 @@ pub async fn get_catalog_stats(
                                 .or_else(|| bson.as_i32().map(|i| i as i64))
                                 .or_else(|| bson.as_f64().map(|f| f as i64))
                         })
-                        .unwrap_or(0) as u64,
-                    _ => 0,
-                }),
-                Err(_) => Some(0),
+                        .map(|v| v as u64)
+                        .or_else(|| {
+                            tracing::warn!("Missing or invalid storageSize for catalog {}", name);
+                            None
+                        }),
+                    Some(Err(e)) => {
+                        tracing::warn!("Error reading $collStats for catalog {}: {}", name, e);
+                        None
+                    }
+                    None => {
+                        tracing::warn!("Empty $collStats result for catalog {}", name);
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Error running $collStats on catalog {}: {}", name, e);
+                    None
+                }
             };
             (count, size_bytes)
         } else {
