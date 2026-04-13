@@ -112,7 +112,7 @@ fn list_babamul_topics(
         let mut n_alerts: u64 = 0;
         for p in topic.partitions() {
             if let Ok((low, high)) = consumer.fetch_watermarks(name, p.id(), KAFKA_TIMEOUT_SECS) {
-                n_alerts += (high - low) as u64;
+                n_alerts += if high > low { (high - low) as u64 } else { 0 };
             }
         }
 
