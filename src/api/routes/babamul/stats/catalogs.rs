@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 const CATALOG_STATS_CACHE_KEY: &str = "catalog_stats";
-/// Cache catalog stats for 5 days — reference catalogs rarely change.
+/// Cache catalog stats for 5 days
 const CATALOG_STATS_CACHE_SECS: f64 = 5.0 * 24.0 * 3600.0;
 
 #[derive(Debug, Serialize, Deserialize)]
