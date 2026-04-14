@@ -195,7 +195,7 @@ if start_service "boom" "$2" || start_service "consumer" "$2" || start_service "
       echo && echo "$(current_datetime) - Starting boom instance"
       apptainer instance start --env-file .env \
         --bind "$CONFIG_FILE:/app/config.yaml" \
-        "$SIF_DIR/boom.sif" "boom"
+        "$SIF_DIR/boom.sif" boom
     fi
     echo -e "${YELLOW}$(current_datetime) - Survey name not provided, consumer or scheduler cannot be started.${END}"
   elif [ -z "$survey" ]; then
@@ -271,22 +271,22 @@ fi
 # Api
 # -----------------------------
 if start_service "api" "$2"; then
-  if apptainer instance list | awk '{print $1}' | grep -xq "boom_api"; then
-    echo && echo -e "${YELLOW}$(current_datetime) - Boom_api instance is already running${END}"
+  if apptainer instance list | awk '{print $1}' | grep -xq "api"; then
+    echo && echo -e "${YELLOW}$(current_datetime) - API instance is already running${END}"
   else
-    echo && echo "$(current_datetime) - Starting Boom_api instance"
+    echo && echo "$(current_datetime) - Starting API instance"
     apptainer instance start --env-file .env \
       --bind "$CONFIG_FILE:/app/config.yaml" \
-      "$SIF_DIR/boom.sif" "boom_api"
+      "$SIF_DIR/api.sif" api
     sleep 3
   fi
 
   if pgrep -f "/app/boom-api" > /dev/null; then
     echo -e "${YELLOW}Boom API already running.${END}"
   else
-    apptainer exec --pwd /app "instance://boom_api" /app/boom-api \
+    apptainer exec --pwd /app "instance://api" /app/boom-api \
       > "$LOGS_DIR/api.log" 2>&1 &
-    echo -e "${GREEN}Boom API started.${END}"
+    "$HEALTHCHECK_DIR/api-healthcheck.sh"
   fi
 fi
 

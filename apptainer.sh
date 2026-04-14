@@ -116,7 +116,7 @@ if [ "$1" == "stop" ]; then
     apptainer instance stop prometheus
   fi
   if stop_service "api" "$target"; then
-    apptainer instance stop "boom_api"
+    apptainer instance stop api
   fi
   if stop_service "boom" "$target"; then
     if [ "$target" = "boom" ] && [ -n "$3" ]; then
@@ -185,6 +185,7 @@ if [ "$1" == "health" ]; then
   "$HEALTHCHECK_DIR/mongodb-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/valkey-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/kafka-healthcheck.sh" 0
+  "$HEALTHCHECK_DIR/api-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/boom-healthcheck.sh"
   "$HEALTHCHECK_DIR/prometheus-healthcheck.sh" 0
   "$HEALTHCHECK_DIR/process-healthcheck.sh" "/otelcol" otel-collector
