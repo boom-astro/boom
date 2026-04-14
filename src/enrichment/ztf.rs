@@ -620,7 +620,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // is true). Otherwise `villar_inputs` is empty and we skip the entire block.
         #[cfg(feature = "gpu")]
         if let Some(gpu_ctx) = self.gpu_ctx.as_ref() {
-            // Build a NaN document with the same keys as a successful fit
+            // Document whose keys match a successful fit's keys but with all values NaN.
+            // Written whenever a fit can't be produced (bad photometry or GPU failure).
             let nan_set_doc = {
                 let mut d = doc! { "villar_fit.reduced_chi2": f64::NAN };
                 for filt in villar_pso::FILTERS {
@@ -631,86 +632,73 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 d
             };
 
-            let mut villar_sources: Vec<(i64, SourceData)> = Vec::new();
-            let mut villar_nan_updates: Vec<WriteModel> = Vec::new();
+            let alert_collection = &self.alert_collection;
+            let build_update = |candid: i64, set_doc: Document| {
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(alert_collection.namespace())
+                        .filter(doc! { "_id": candid })
+                        .update(doc! { "$set": set_doc })
+                        .build(),
+                )
+            };
+
+            // Preprocess each lightcurve; split into fittable sources and
+            // NaN-update-only candids that failed preprocessing.
+            let mut villar_updates: Vec<WriteModel> = Vec::new();
+            let mut fittable: Vec<(i64, SourceData)> = Vec::new();
             for (candid, lc) in &villar_inputs {
                 let villar_lc: Vec<villar_pso::PhotometryMag> =
                     lc.iter().filter_map(to_villar_photometry).collect();
                 match villar_pso::preprocess_from_photometry(&villar_lc) {
-                    Ok(preproc) => {
-                        villar_sources.push((
-                            *candid,
-                            SourceData {
-                                name: candid.to_string(),
-                                data: preproc,
-                            },
-                        ));
-                    }
+                    Ok(preproc) => fittable.push((
+                        *candid,
+                        SourceData {
+                            name: candid.to_string(),
+                            data: preproc,
+                        },
+                    )),
                     Err(e) => {
                         trace!(candid, "skipping Villar fit: {}", e);
-                        villar_nan_updates.push(WriteModel::UpdateOne(
-                            UpdateOneModel::builder()
-                                .namespace(self.alert_collection.namespace())
-                                .filter(doc! { "_id": *candid })
-                                .update(doc! { "$set": nan_set_doc.clone() })
-                                .build(),
-                        ));
+                        villar_updates.push(build_update(*candid, nan_set_doc.clone()));
                     }
                 }
             }
 
-            if !villar_sources.is_empty() {
-                let sources: Vec<&SourceData> =
-                    villar_sources.iter().map(|(_, s)| s).collect();
-                let candids_for_fit: Vec<i64> =
-                    villar_sources.iter().map(|(c, _)| *c).collect();
+            // Run GPU batch fit on the fittable sources.
+            if !fittable.is_empty() {
+                let (candids, sources): (Vec<i64>, Vec<SourceData>) =
+                    fittable.into_iter().unzip();
+                let source_refs: Vec<&SourceData> = sources.iter().collect();
+                let pso_config = villar_pso::PsoConfig::default();
 
-                let fit_updates: Vec<WriteModel> = match GpuBatchData::new(&sources)
-                    .and_then(|batch_data| {
-                        let pso_config = villar_pso::PsoConfig::default();
-                        gpu_ctx.batch_pso_multi_seed(&batch_data, &sources, &pso_config)
-                    }) {
-                    Ok(results) => results
-                        .iter()
-                        .zip(candids_for_fit.iter())
-                        .map(|(result, candid)| {
-                            let named = result.params_unnorm.to_named_map();
+                match GpuBatchData::new(&source_refs).and_then(|batch| {
+                    gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
+                }) {
+                    Ok(results) => {
+                        for (result, candid) in results.iter().zip(candids) {
                             let mut set_doc = doc! {
                                 "villar_fit.reduced_chi2": result.reduced_chi2,
                             };
-                            for (key, val) in &named {
+                            for (key, val) in &result.params_unnorm.to_named_map() {
                                 set_doc.insert(format!("villar_fit.{}", key), *val);
                             }
-                            WriteModel::UpdateOne(
-                                UpdateOneModel::builder()
-                                    .namespace(self.alert_collection.namespace())
-                                    .filter(doc! { "_id": *candid })
-                                    .update(doc! { "$set": set_doc })
-                                    .build(),
-                            )
-                        })
-                        .collect(),
+                            villar_updates.push(build_update(candid, set_doc));
+                        }
+                    }
                     Err(e) => {
                         warn!("GPU Villar batch fitting failed: {}", e);
-                        candids_for_fit
-                            .iter()
-                            .map(|candid| {
-                                WriteModel::UpdateOne(
-                                    UpdateOneModel::builder()
-                                        .namespace(self.alert_collection.namespace())
-                                        .filter(doc! { "_id": *candid })
-                                        .update(doc! { "$set": nan_set_doc.clone() })
-                                        .build(),
-                                )
-                            })
-                            .collect()
+                        villar_updates.extend(
+                            candids
+                                .into_iter()
+                                .map(|c| build_update(c, nan_set_doc.clone())),
+                        );
                     }
-                };
-                villar_nan_updates.extend(fit_updates);
+                }
             }
 
-            if !villar_nan_updates.is_empty() {
-                if let Err(e) = self.client.bulk_write(villar_nan_updates).await {
+            if !villar_updates.is_empty() {
+                if let Err(e) = self.client.bulk_write(villar_updates).await {
                     warn!("failed to write Villar fit results: {}", e);
                 }
             }
