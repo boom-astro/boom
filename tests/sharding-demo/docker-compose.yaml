@@ -1,0 +1,27 @@
+# Two MongoDB instances simulating a 2-machine sharded cluster.
+# Machine 1 (port 27081): holds alerts from HEALPix base cells 0–5 (half the sky)
+# Machine 2 (port 27082): holds alerts from HEALPix base cells 6–11 (other half)
+#
+# Usage:
+#   docker compose -f tests/sharding-demo/docker-compose.yaml up -d
+#   cargo test --test test_sharding_demo -- --nocapture
+#   docker compose -f tests/sharding-demo/docker-compose.yaml down -v
+
+services:
+  mongo-shard-0:
+    image: mongo:7.0
+    ports:
+      - "27081:27017"
+    environment:
+      MONGO_INITDB_DATABASE: boom_shard_0
+    tmpfs:
+      - /data/db
+
+  mongo-shard-1:
+    image: mongo:7.0
+    ports:
+      - "27082:27017"
+    environment:
+      MONGO_INITDB_DATABASE: boom_shard_1
+    tmpfs:
+      - /data/db

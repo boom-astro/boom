@@ -94,5 +94,18 @@ jobs:
         docker compose logs kafka-acl-init || true
         docker compose logs broker || true
         exit 1
+    - name: Start sharding demo (2 MongoDB instances)
+      run: |
+        docker compose -f tests/sharding-demo/docker-compose.yaml up -d
+        echo "Waiting for shard instances..."
+        for i in {1..30}; do
+          if docker compose -f tests/sharding-demo/docker-compose.yaml exec -T mongo-shard-0 mongosh --quiet --eval "db.runCommand('ping').ok" >/dev/null 2>&1 && \
+             docker compose -f tests/sharding-demo/docker-compose.yaml exec -T mongo-shard-1 mongosh --quiet --eval "db.runCommand('ping').ok" >/dev/null 2>&1; then
+            echo "Both shard instances ready!"
+            break
+          fi
+          echo "Attempt $i/30..."
+          sleep 2
+        done
     - name: Test BOOM
       run: PATH=/opt/kafka/bin:$PATH cargo test --release

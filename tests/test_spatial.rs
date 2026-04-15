@@ -28,16 +28,17 @@ async fn test_xmatch() {
 }
 
 /// Integration test: explicitly shard alerts into separate MongoDB collections
-/// at NSIDE=4 (depth 2, 192 pixels). Each collection simulates a separate
-/// database machine for Argus-scale processing (~100M alerts/night).
+/// using HEALPix depth 0 (12 base cells). Each collection simulates a separate
+/// database machine — 12 machines is a realistic cluster size for Argus-scale
+/// processing (~100M alerts/night).
 ///
 /// The test:
 /// 1. Scatters 1000 alerts across the sky
-/// 2. Routes each into a per-shard collection (like separate machines)
+/// 2. Routes each into one of 12 shard collections (like separate machines)
 /// 3. Runs a cone search that identifies which shards to query
-/// 4. Verifies it only touches a few shards and finds all matches
+/// 4. Verifies it only touches 1–2 shards and finds all matches
 #[tokio::test]
-async fn test_healpix_sharded_collections_nside4() {
+async fn test_healpix_sharded_collections_12_machines() {
     let config = AppConfig::from_test_config().unwrap();
     let db = match config.build_db().await {
         Ok(db) => db,
@@ -52,10 +53,11 @@ async fn test_healpix_sharded_collections_nside4() {
     }
 
     // --- Configuration ---
-    // NSIDE=4 → depth=2 → 192 shard pixels.
-    // Each shard pixel gets its own collection, simulating a separate machine.
-    let shard_depth: u8 = 2; // NSIDE = 2^2 = 4
-    let n_shard_pixels = 12 * 4u64.pow(shard_depth as u32); // 192
+    // Depth 0 → NSIDE=1 → 12 base cells (the HEALPix "diamonds").
+    // Each base cell gets its own collection, simulating a separate machine.
+    // 12 machines is a realistic cluster size for Argus-scale processing.
+    let shard_depth: u8 = 0;
+    let n_shard_pixels = 12 * 4u64.pow(shard_depth as u32); // 12
     let test_prefix = format!("test_shard_{}", uuid::Uuid::new_v4());
 
     // Helper: collection name for a given shard pixel
@@ -109,13 +111,13 @@ async fn test_healpix_sharded_collections_nside4() {
 
     let n_populated_shards = created_collections.len();
     eprintln!(
-        "Inserted {} alerts into {} shard collections (of {} possible at NSIDE=4)",
+        "Inserted {} alerts into {} shard collections (of {} possible)",
         n_alerts, n_populated_shards, n_shard_pixels
     );
-    assert!(
-        n_populated_shards > 50,
-        "expected many shards populated, got {}",
-        n_populated_shards
+    assert_eq!(
+        n_populated_shards as u64, n_shard_pixels,
+        "with 1000 alerts all {} shards should be populated",
+        n_shard_pixels
     );
 
     // --- Step 2: Cone search — find which shards to query ---

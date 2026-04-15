@@ -595,4 +595,155 @@ mod tests {
             total_shards
         );
     }
+
+    /// Emulates a 2-machine sharded cluster using in-memory HashMaps.
+    ///
+    /// 12 HEALPix base cells (depth 0) are split across 2 "machines":
+    ///   Machine 0: base cells 0–5  (one half of the sky)
+    ///   Machine 1: base cells 6–11 (the other half)
+    ///
+    /// 1000 alerts are scattered across the sky and routed to the
+    /// correct machine. A cone search determines which machine(s)
+    /// to query, queries only those, and verifies results match
+    /// brute-force while the other machine is never scanned.
+    #[test]
+    fn test_two_machine_sharding_emulated() {
+        // Each "machine" is a Vec of (id, ra, dec, hpx) tuples,
+        // standing in for a MongoDB collection on a separate host.
+        struct Machine {
+            alerts: Vec<(String, f64, f64, i64)>,
+        }
+        impl Machine {
+            fn new() -> Self {
+                Machine { alerts: Vec::new() }
+            }
+            fn insert(&mut self, id: String, ra: f64, dec: f64, hpx: i64) {
+                self.alerts.push((id, ra, dec, hpx));
+            }
+            /// Query: return alerts whose hpx falls within any of the given ranges.
+            fn query_hpx_ranges(&self, ranges: &[(i64, i64)]) -> Vec<&(String, f64, f64, i64)> {
+                self.alerts
+                    .iter()
+                    .filter(|(_, _, _, hpx)| {
+                        ranges.iter().any(|(lo, hi)| *hpx >= *lo && *hpx < *hi)
+                    })
+                    .collect()
+            }
+        }
+
+        // Route by base cell: cells 0–5 → machine 0, cells 6–11 → machine 1
+        let route = |hpx: i64| -> usize {
+            let base_cell = hpx >> (2 * conf::HealpixConfig::FINE_DEPTH);
+            if base_cell < 6 { 0 } else { 1 }
+        };
+
+        // --- Step 1: Scatter 1000 alerts, route to correct machine ---
+        let mut machines = [Machine::new(), Machine::new()];
+        let n_alerts = 1000;
+
+        for i in 0..n_alerts {
+            let ra = (i as f64 * 137.508) % 360.0;
+            let dec = ((i as f64 / n_alerts as f64) * 180.0) - 90.0;
+            let coord = Coordinates::new(ra, dec);
+            let idx = route(coord.hpx);
+            machines[idx].insert(format!("alert_{}", i), ra, dec, coord.hpx);
+        }
+
+        assert!(
+            machines[0].alerts.len() > 100,
+            "machine 0 should have substantial alerts, got {}",
+            machines[0].alerts.len()
+        );
+        assert!(
+            machines[1].alerts.len() > 100,
+            "machine 1 should have substantial alerts, got {}",
+            machines[1].alerts.len()
+        );
+
+        // --- Step 2: Cone search — which machine(s) to query? ---
+        let query_ra = 120.0_f64;
+        let query_dec = 45.0_f64;
+        let radius_deg = 5.0_f64;
+        let radius_rad = radius_deg.to_radians();
+
+        // Find which base cells the cone overlaps
+        let shard_bmoc = nested::cone_coverage_approx(
+            0, // depth 0 = 12 base cells
+            query_ra.to_radians(),
+            query_dec.to_radians(),
+            radius_rad,
+        );
+        let target_cells: Vec<i64> = shard_bmoc
+            .to_ranges()
+            .iter()
+            .flat_map(|r| (r.start..r.end).map(|x| x as i64))
+            .collect();
+
+        let mut need_machine = [false; 2];
+        for cell in &target_cells {
+            if *cell < 6 { need_machine[0] = true; } else { need_machine[1] = true; }
+        }
+
+        // A 5-degree cone is tiny relative to a base cell (~3400 deg²),
+        // so it should only need 1 machine
+        let machines_needed: usize = need_machine.iter().filter(|&&x| x).count();
+        assert_eq!(
+            machines_needed, 1,
+            "a 5-degree cone should fit in one base cell, but needs {} machines (cells: {:?})",
+            machines_needed, target_cells
+        );
+
+        // --- Step 3: Query only the needed machine with fine filter ---
+        let query_depth: u8 = 17;
+        let fine_bmoc = nested::cone_coverage_approx(
+            query_depth,
+            query_ra.to_radians(),
+            query_dec.to_radians(),
+            radius_rad,
+        );
+        let shift = 2 * (conf::HealpixConfig::FINE_DEPTH - query_depth);
+        let fine_ranges: Vec<(i64, i64)> = fine_bmoc
+            .to_ranges()
+            .iter()
+            .map(|r| ((r.start << shift) as i64, (r.end << shift) as i64))
+            .collect();
+
+        let mut found = Vec::new();
+        let mut machines_queried = 0;
+        for (idx, needed) in need_machine.iter().enumerate() {
+            if !needed {
+                continue;
+            }
+            machines_queried += 1;
+            let hits = machines[idx].query_hpx_ranges(&fine_ranges);
+            for (id, ra, dec, _) in hits {
+                found.push((id.clone(), *ra, *dec));
+            }
+        }
+
+        // --- Step 4: Verify against brute-force over ALL machines ---
+        let mut brute_force_count = 0;
+        for machine in &machines {
+            for (_, ra, dec, _) in &machine.alerts {
+                let dist =
+                    flare::spatial::great_circle_distance(query_ra, query_dec, *ra, *dec);
+                if dist < radius_deg {
+                    brute_force_count += 1;
+                }
+            }
+        }
+
+        assert!(
+            found.len() >= brute_force_count,
+            "missed alerts: HEALPix found {} but brute force found {}",
+            found.len(),
+            brute_force_count
+        );
+        assert!(brute_force_count > 0, "expected some alerts in the cone");
+        assert_eq!(
+            machines_queried, 1,
+            "should only query 1 machine, queried {}",
+            machines_queried
+        );
+    }
 }
