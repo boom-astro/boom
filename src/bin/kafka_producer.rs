@@ -31,11 +31,6 @@ struct Cli {
         help = "URL of the Kafka broker to produce to, defaults to localhost:9092"
     )]
     server_url: Option<String>,
-    #[arg(
-        long,
-        help = "Force production even if the topic already has messages (non-destructive append mode)"
-    )]
-    force: bool,
 }
 
 #[tokio::main]
@@ -63,11 +58,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.survey {
         Survey::Ztf => {
             let producer = ZtfAlertProducer::new(date, limit, program_id, &server_url, true);
-            producer.produce(None, args.force).await?;
+            producer.produce(None).await?;
         }
         Survey::Decam => {
             let producer = DecamAlertProducer::new(date, limit, &server_url, true);
-            producer.produce(None, args.force).await?;
+            producer.produce(None).await?;
         }
         _ => {
             error!("Unsupported survey for producing alerts: {}", args.survey);
