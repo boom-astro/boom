@@ -73,6 +73,54 @@ impl Coordinates {
     }
 }
 
+/// Build a MongoDB filter document that matches documents whose `coordinates.hpx`
+/// falls within the HEALPix covering of a cone on the sky.
+///
+/// Uses `cone_coverage_approx` at `query_depth` and scales the ranges to depth 29
+/// to match the stored `hpx` values. Lower `query_depth` = fewer `$or` clauses
+/// (faster query planning) but slightly overinclusive. Depth 17 is a good default.
+pub fn cone_to_hpx_filter(
+    ra_deg: f64,
+    dec_deg: f64,
+    radius_rad: f64,
+    query_depth: u8,
+) -> mongodb::bson::Document {
+    use cdshealpix::nested;
+
+    let bmoc = nested::cone_coverage_approx(
+        query_depth,
+        ra_deg.to_radians(),
+        dec_deg.to_radians(),
+        radius_rad,
+    );
+    let ranges = bmoc.to_ranges();
+    let shift = 2 * (conf::HealpixConfig::FINE_DEPTH - query_depth);
+
+    // If covering is a single range, use a simple $gte/$lt (no $or overhead)
+    if ranges.len() == 1 {
+        return doc! {
+            "coordinates.hpx": {
+                "$gte": (ranges[0].start << shift) as i64,
+                "$lt": (ranges[0].end << shift) as i64,
+            }
+        };
+    }
+
+    let or_clauses: Vec<mongodb::bson::Document> = ranges
+        .iter()
+        .map(|r| {
+            doc! {
+                "coordinates.hpx": {
+                    "$gte": (r.start << shift) as i64,
+                    "$lt": (r.end << shift) as i64,
+                }
+            }
+        })
+        .collect();
+
+    doc! { "$or": or_clauses }
+}
+
 fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
     let value = match doc.get(key) {
         Some(mongodb::bson::Bson::Double(v)) => *v,
