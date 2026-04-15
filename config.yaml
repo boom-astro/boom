@@ -20,6 +20,11 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+healpix:
+  # HEALPix depth for the coarse shard key used for database-level spatial partitioning.
+  # Default is 4 (NSIDE=16, 3072 pixels, ~13.4 deg² each).
+  # The fine index is always depth 29 (matching healpix-alchemy's HPX_MAX_ORDER).
+  shard_depth: 4
 redis:
   host: localhost
   port: 6379

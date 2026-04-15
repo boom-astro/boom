@@ -1,4 +1,5 @@
 use crate::{conf, utils::o11y::logging::as_error};
+use cdshealpix::nested::get;
 use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
 use itertools::Itertools;
@@ -34,11 +35,25 @@ pub struct Coordinates {
     radec_geojson: GeoJsonPoint,
     l: Option<f64>,
     b: Option<f64>,
+    /// HEALPix NESTED index at depth 29 (healpix-alchemy's HPX_MAX_ORDER).
+    /// Used for fine-grained spatial queries (cone search, cross-match).
+    #[serde(default)]
+    pub hpx: i64,
+    /// HEALPix NESTED index at a configurable coarse depth (default depth 4 / NSIDE=16).
+    /// Used as a shard key for database-level spatial partitioning.
+    #[serde(default)]
+    pub hpx_shard: i32,
 }
 
 impl Coordinates {
-    pub fn new(ra: f64, dec: f64) -> Self {
+    /// Create new Coordinates with HEALPix indices at both fine (depth 29)
+    /// and coarse (shard_depth) resolution.
+    pub fn new(ra: f64, dec: f64, shard_depth: u8) -> Self {
         let (l, b) = radec2lb(ra, dec);
+        let ra_rad = ra.to_radians();
+        let dec_rad = dec.to_radians();
+        let hpx = get(conf::HealpixConfig::FINE_DEPTH).hash(ra_rad, dec_rad) as i64;
+        let hpx_shard = get(shard_depth).hash(ra_rad, dec_rad) as i32;
         Coordinates {
             radec_geojson: GeoJsonPoint {
                 r#type: "Point".to_string(),
@@ -46,7 +61,15 @@ impl Coordinates {
             },
             l: Some(l),
             b: Some(b),
+            hpx,
+            hpx_shard,
         }
+    }
+
+    /// Create new Coordinates using the default shard depth.
+    /// Convenience method for tests and contexts where config is not available.
+    pub fn new_default(ra: f64, dec: f64) -> Self {
+        Self::new(ra, dec, conf::HealpixConfig::default().shard_depth)
     }
 
     /// Get RA and Dec from the stored GeoJSON coordinates (formatting RA back to [0, 360])
