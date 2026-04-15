@@ -40,6 +40,8 @@ services:
     networks:
       - traefik-public
       - default
+  # Overrides to run the scheduler for ZTF in dev mode with cargo-watch, which
+  # automatically rebuilds and restarts the container when source files change.
   scheduler-ztf:
     env_file:
       - .env
@@ -99,6 +101,8 @@ services:
       # Increase timeouts for slower CI environments
       KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: 30000
       KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: 60000
+  # Overrides to run the API in dev mode with cargo-watch, which automatically
+  # rebuilds and restarts the container when source files change.
   api:
     env_file:
       - .env
@@ -133,6 +137,8 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
     ports:
       - "4000:4000"
+  # Run consumer in dev mode with cargo-watch, which automatically rebuilds and
+  # restarts the container when source files change.
   consumer-ztf:
     env_file:
       - .env
