@@ -78,7 +78,7 @@ async fn test_produce_and_consume_from_archive() {
     );
 
     // Verify that the producer runs and reports the correct count:
-    let result = producer.produce(Some(topic.clone()), false).await;
+    let result = producer.produce(Some(topic.clone())).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap().unwrap(), expected_count as i64);
 
@@ -179,7 +179,7 @@ async fn produce_ztf_in_dir(
     // Produce the alerts and verify the message count
     // (test_produce_and_consume_from_archive does a more detailed check):
     let message_count = producer
-        .produce(Some(topic.to_string()), false)
+        .produce(Some(topic.to_string()))
         .await
         .unwrap()
         .unwrap();
@@ -205,7 +205,7 @@ async fn test_skip_producing_when_counts_match() {
 
     // Try again: the message count matches the avro count, so no more messages
     // will be produced:
-    let option = producer.produce(Some(topic.clone()), false).await.unwrap();
+    let option = producer.produce(Some(topic.clone())).await.unwrap();
     assert!(option.is_none()); // Reported count is None, i.e., no messages were produced
 
     // Verify the topic still has the correct number of messages:
@@ -242,7 +242,7 @@ async fn test_produce_when_counts_do_not_match() {
     // produces whatever it finds in the data directory, and now there is one
     // fewer alert than before:
     let message_count = producer
-        .produce(Some(topic.clone()), false)
+        .produce(Some(topic.clone()))
         .await
         .unwrap()
         .unwrap();
@@ -271,7 +271,7 @@ async fn test_produce_when_topic_does_not_exist() {
 
     // Try again: the topic doesn't exist, so should produce as usual:
     let message_count = producer
-        .produce(Some(topic.clone()), false)
+        .produce(Some(topic.clone()))
         .await
         .unwrap()
         .unwrap();
@@ -304,7 +304,7 @@ async fn test_produce_when_data_does_not_exist() {
     // Try again: the data doesn't exist, so there's no avro count to verify
     // that the message count is correct. Should produce as usual:
     let message_count = producer
-        .produce(Some(topic.clone()), false)
+        .produce(Some(topic.clone()))
         .await
         .unwrap()
         .unwrap();
