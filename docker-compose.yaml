@@ -41,6 +41,19 @@ services:
       test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
       interval: 10s
       start_period: 20s
+  mongodb-exporter:
+    image: percona/mongodb_exporter:0.44.0
+    hostname: mongodb-exporter
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command:
+      - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
+      - --collector.dbstats
+      - --web.listen-address=:9216
+    networks:
+      - boom
+    restart: always
   valkey:
     image: valkey/valkey:7.2.6
     environment:
@@ -66,49 +79,6 @@ services:
     command:
       - --redis.addr=redis://valkey:6379
       - --check-keys=*_queue*
-    networks:
-      - boom
-    restart: always
-  mongodb-exporter:
-    image: percona/mongodb_exporter:0.44.0
-    hostname: mongodb-exporter
-    depends_on:
-      mongo:
-        condition: service_healthy
-    command:
-      - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
-      - --collector.dbstats
-      - --web.listen-address=:9216
-    networks:
-      - boom
-    restart: always
-  cadvisor:
-    image: ghcr.io/google/cadvisor:0.56.2
-    hostname: cadvisor
-    command:
-      - --store_container_labels=true
-    privileged: true
-    devices:
-      - /dev/kmsg:/dev/kmsg
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    networks:
-      - boom
-    restart: always
-  docker-metadata-exporter:
-    image: python:3.12-alpine
-    hostname: docker-metadata-exporter
-    command:
-      - python
-      - /scripts/docker_metadata_exporter.py
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./scripts/docker_metadata_exporter.py:/scripts/docker_metadata_exporter.py:ro
     networks:
       - boom
     restart: always
@@ -364,6 +334,36 @@ services:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     networks:
       - boom
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.56.2
+    hostname: cadvisor
+    command:
+      - --store_container_labels=true
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - boom
+    restart: always
+  docker-metadata-exporter:
+    image: python:3.12-alpine
+    hostname: docker-metadata-exporter
+    command:
+      - python
+      - /scripts/docker_metadata_exporter.py
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./scripts/docker_metadata_exporter.py:/scripts/docker_metadata_exporter.py:ro
+    networks:
+      - boom
+    restart: always
   prometheus:
     image: prom/prometheus:latest
     command:
