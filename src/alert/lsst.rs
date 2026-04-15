@@ -892,7 +892,6 @@ pub struct LsstAlertWorker {
     stream_name: String,
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
-    healpix_shard_depth: u8,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
@@ -1099,7 +1098,6 @@ impl AlertWorker for LsstAlertWorker {
                 Some(github_fallback_url.to_string()),
             ),
             xmatch_configs,
-            healpix_shard_depth: config.healpix.shard_depth,
             db,
             alert_collection,
             alert_aux_collection,
@@ -1195,7 +1193,7 @@ impl AlertWorker for LsstAlertWorker {
                 is_sso: ss_object_id.is_some(),
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec, self.healpix_shard_depth),
+                coordinates: Coordinates::new(ra, dec),
                 created_at: now,
                 updated_at: now,
             };
@@ -1225,7 +1223,7 @@ impl AlertWorker for LsstAlertWorker {
             object_id: object_id.clone(),
             ss_object_id: ss_object_id,
             candidate,
-            coordinates: Coordinates::new(ra, dec, self.healpix_shard_depth),
+            coordinates: Coordinates::new(ra, dec),
             created_at: now,
             updated_at: now,
         };

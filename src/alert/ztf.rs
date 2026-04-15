@@ -698,7 +698,6 @@ struct AlertAuxForUpdate {
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
-    healpix_shard_depth: u8,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
@@ -925,7 +924,6 @@ impl AlertWorker for ZtfAlertWorker {
         let worker = ZtfAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
-            healpix_shard_depth: config.healpix.shard_depth,
             db,
             alert_collection,
             alert_aux_collection,
@@ -1027,7 +1025,7 @@ impl AlertWorker for ZtfAlertWorker {
                 fp_hists,
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec, self.healpix_shard_depth),
+                coordinates: Coordinates::new(ra, dec),
                 created_at: now,
                 updated_at: now,
             };
@@ -1057,7 +1055,7 @@ impl AlertWorker for ZtfAlertWorker {
             candid,
             object_id: object_id.clone(),
             candidate,
-            coordinates: Coordinates::new(ra, dec, self.healpix_shard_depth),
+            coordinates: Coordinates::new(ra, dec),
             created_at: now,
             updated_at: now,
         };

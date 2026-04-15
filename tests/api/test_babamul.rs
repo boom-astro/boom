@@ -1924,7 +1924,7 @@ mod tests {
 
         let test_object = boom::alert::ZtfObject {
             object_id: test_object_id.clone(),
-            coordinates: Coordinates::new_default(124.5, -12.3),
+            coordinates: Coordinates::new(124.5, -12.3),
             prv_candidates: vec![],
             prv_nondetections: vec![],
             fp_hists: vec![],
@@ -2025,7 +2025,7 @@ mod tests {
         let test_objects = vec![
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj001_{}", unique_suffix),
-                coordinates: Coordinates::new_default(125.0, -12.0),
+                coordinates: Coordinates::new(125.0, -12.0),
                 prv_candidates: vec![],
                 prv_nondetections: vec![],
                 fp_hists: vec![],
@@ -2055,7 +2055,7 @@ mod tests {
             },
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj002_{}", unique_suffix),
-                coordinates: Coordinates::new_default(126.0, -11.5),
+                coordinates: Coordinates::new(126.0, -11.5),
                 prv_candidates: vec![],
                 prv_nondetections: vec![],
                 fp_hists: vec![],
@@ -2183,7 +2183,7 @@ mod tests {
         let test_objects = vec![
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj001_{}", unique_suffix),
-                coordinates: Coordinates::new_default(125.0, -12.0),
+                coordinates: Coordinates::new(125.0, -12.0),
                 prv_candidates: vec![],
                 prv_nondetections: vec![],
                 fp_hists: vec![],
@@ -2194,7 +2194,7 @@ mod tests {
             },
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj002_{}", unique_suffix),
-                coordinates: Coordinates::new_default(126.0, -11.5),
+                coordinates: Coordinates::new(126.0, -11.5),
                 prv_candidates: vec![],
                 prv_nondetections: vec![],
                 fp_hists: vec![],

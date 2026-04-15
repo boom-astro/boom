@@ -1141,7 +1141,7 @@ async fn test_babamul_lsst_with_ztf_match() {
             lsst: Vec::new(),
             decam: Vec::new(),
         }),
-        coordinates: Coordinates::new_default(180.0, 0.0),
+        coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
         updated_at: now,
     };
@@ -1193,7 +1193,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         object_id: lsst_object_id.clone(),
         ss_object_id: None,
         candidate: lsst_candidate.clone(),
-        coordinates: Coordinates::new_default(180.0, 0.0),
+        coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
         updated_at: now,
     };
@@ -1250,7 +1250,7 @@ async fn test_babamul_lsst_with_ztf_match() {
             ztf: vec![ztf_match_id.clone()],
             decam: Vec::new(),
         }),
-        coordinates: Coordinates::new_default(180.0, 0.0),
+        coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
         updated_at: now,
     };
@@ -1486,7 +1486,7 @@ async fn test_babamul_ztf_with_lsst_match() {
             ztf: Vec::new(),
             decam: Vec::new(),
         }),
-        coordinates: boom::utils::spatial::Coordinates::new_default(180.0, 0.0),
+        coordinates: boom::utils::spatial::Coordinates::new(180.0, 0.0),
         created_at: now,
         updated_at: now,
     };

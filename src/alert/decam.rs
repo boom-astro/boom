@@ -207,7 +207,6 @@ struct AlertAuxForUpdate {
 pub struct DecamAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
-    healpix_shard_depth: u8,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
@@ -384,7 +383,6 @@ impl AlertWorker for DecamAlertWorker {
         let worker = DecamAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
-            healpix_shard_depth: config.healpix.shard_depth,
             db,
             alert_collection,
             alert_aux_collection,
@@ -469,7 +467,7 @@ impl AlertWorker for DecamAlertWorker {
                 fp_hists,
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec, self.healpix_shard_depth),
+                coordinates: Coordinates::new(ra, dec),
                 created_at: now,
                 updated_at: now,
             };
@@ -498,7 +496,7 @@ impl AlertWorker for DecamAlertWorker {
             candid,
             object_id: object_id.clone(),
             candidate: avro_alert.candidate,
-            coordinates: Coordinates::new(ra, dec, self.healpix_shard_depth),
+            coordinates: Coordinates::new(ra, dec),
             created_at: now,
             updated_at: now,
         };

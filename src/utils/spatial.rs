@@ -36,24 +36,18 @@ pub struct Coordinates {
     l: Option<f64>,
     b: Option<f64>,
     /// HEALPix NESTED index at depth 29 (healpix-alchemy's HPX_MAX_ORDER).
-    /// Used for fine-grained spatial queries (cone search, cross-match).
+    /// Used for spatial queries and sharding. The coarse shard pixel can be
+    /// derived with a bit shift: `hpx >> (2 * (29 - shard_depth))`.
     #[serde(default)]
     pub hpx: i64,
-    /// HEALPix NESTED index at a configurable coarse depth (default depth 4 / NSIDE=16).
-    /// Used as a shard key for database-level spatial partitioning.
-    #[serde(default)]
-    pub hpx_shard: i32,
 }
 
 impl Coordinates {
-    /// Create new Coordinates with HEALPix indices at both fine (depth 29)
-    /// and coarse (shard_depth) resolution.
-    pub fn new(ra: f64, dec: f64, shard_depth: u8) -> Self {
+    pub fn new(ra: f64, dec: f64) -> Self {
         let (l, b) = radec2lb(ra, dec);
         let ra_rad = ra.to_radians();
         let dec_rad = dec.to_radians();
         let hpx = get(conf::HealpixConfig::FINE_DEPTH).hash(ra_rad, dec_rad) as i64;
-        let hpx_shard = get(shard_depth).hash(ra_rad, dec_rad) as i32;
         Coordinates {
             radec_geojson: GeoJsonPoint {
                 r#type: "Point".to_string(),
@@ -62,14 +56,7 @@ impl Coordinates {
             l: Some(l),
             b: Some(b),
             hpx,
-            hpx_shard,
         }
-    }
-
-    /// Create new Coordinates using the default shard depth.
-    /// Convenience method for tests and contexts where config is not available.
-    pub fn new_default(ra: f64, dec: f64) -> Self {
-        Self::new(ra, dec, conf::HealpixConfig::default().shard_depth)
     }
 
     /// Get RA and Dec from the stored GeoJSON coordinates (formatting RA back to [0, 360])
@@ -77,6 +64,12 @@ impl Coordinates {
         let ra = self.radec_geojson.coordinates[0] + 180.0;
         let dec = self.radec_geojson.coordinates[1];
         (ra, dec)
+    }
+
+    /// Derive the coarse shard pixel from the depth-29 HEALPix index.
+    /// This is a single bit shift — no need to store it separately.
+    pub fn hpx_shard(&self, shard_depth: u8) -> i64 {
+        self.hpx >> (2 * (conf::HealpixConfig::FINE_DEPTH - shard_depth))
     }
 }
 
@@ -338,4 +331,268 @@ pub async fn xmatch(
     }
 
     Ok(xmatch_results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cdshealpix::nested;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_hpx_computed_at_depth_29() {
+        let coord = Coordinates::new(180.0, 45.0);
+        // hpx should be nonzero — a valid depth-29 NESTED index
+        assert_ne!(coord.hpx, 0);
+
+        // Recompute independently and verify
+        let expected = get(29).hash(180.0_f64.to_radians(), 45.0_f64.to_radians()) as i64;
+        assert_eq!(coord.hpx, expected);
+    }
+
+    #[test]
+    fn test_shard_is_bit_shift_of_hpx() {
+        // Verify that hpx_shard() is equivalent to computing the hash
+        // directly at the shard depth — the NESTED scheme guarantees this.
+        let coord = Coordinates::new(123.456, -30.789);
+        for shard_depth in [0, 1, 2, 4, 8, 14] {
+            let from_shift = coord.hpx_shard(shard_depth);
+            let from_direct = get(shard_depth)
+                .hash(123.456_f64.to_radians(), (-30.789_f64).to_radians())
+                as i64;
+            assert_eq!(
+                from_shift, from_direct,
+                "shard mismatch at depth {}: shift={} direct={}",
+                shard_depth, from_shift, from_direct
+            );
+        }
+    }
+
+    #[test]
+    fn test_sky_halves_separated_by_shard() {
+        // At depth 0, HEALPix has 12 base cells. We pick points from
+        // two opposite sides of the sky and show they land in different
+        // base cells (shard pixels).
+        //
+        // Northern galactic cap vs southern galactic cap:
+        //   - (RA=0, Dec=+60) → near north galactic pole
+        //   - (RA=0, Dec=-60) → near south galactic pole
+        let north = Coordinates::new(0.0, 60.0);
+        let south = Coordinates::new(0.0, -60.0);
+
+        // At depth 0, they must be in different base cells
+        let north_cell = north.hpx_shard(0);
+        let south_cell = south.hpx_shard(0);
+        assert_ne!(
+            north_cell, south_cell,
+            "opposite sky points should be in different base cells"
+        );
+
+        // At depth 4 (the default shard depth, NSIDE=16), they must also differ
+        let north_shard = north.hpx_shard(4);
+        let south_shard = south.hpx_shard(4);
+        assert_ne!(north_shard, south_shard);
+    }
+
+    #[test]
+    fn test_nearby_points_share_shard() {
+        // Two points 1 arcsecond apart should share the same coarse shard pixel.
+        // To avoid hitting a pixel boundary, we find the center of a depth-8
+        // pixel and offset from there.
+        let test_depth: u8 = 8;
+        let center = get(test_depth).center(42); // center of pixel 42 at depth 8
+        let center_ra = center.0.to_degrees();
+        let center_dec = center.1.to_degrees();
+
+        let p1 = Coordinates::new(center_ra, center_dec);
+        let p2 = Coordinates::new(center_ra + 1.0 / 3600.0, center_dec); // 1 arcsec east
+
+        // Same shard at depth 4 (~13.4 deg² pixels)
+        assert_eq!(p1.hpx_shard(4), p2.hpx_shard(4));
+
+        // Same pixel at depth 8 (~50 arcmin pixels) since we started at center
+        assert_eq!(p1.hpx_shard(test_depth), p2.hpx_shard(test_depth));
+
+        // But at depth 29 (~0.4 mas pixels) they should differ
+        assert_ne!(p1.hpx, p2.hpx);
+    }
+
+    #[test]
+    fn test_shard_bins_sky_into_expected_count() {
+        // Scatter points across the sky and verify the number of distinct
+        // shard pixels matches expectations.
+        let shard_depth: u8 = 4;
+        let expected_max_pixels = 12 * 4u64.pow(shard_depth as u32); // 3072
+
+        let mut seen_shards: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // Grid the sky
+        for ra_idx in 0..36 {
+            for dec_idx in 0..18 {
+                let ra = ra_idx as f64 * 10.0 + 5.0; // 5, 15, ..., 355
+                let dec = dec_idx as f64 * 10.0 - 85.0; // -85, -75, ..., 85
+                let coord = Coordinates::new(ra, dec);
+                seen_shards.insert(coord.hpx_shard(shard_depth));
+            }
+        }
+
+        // We should see many distinct shards, but never exceed the max
+        assert!(
+            seen_shards.len() > 100,
+            "should see many distinct shards from a sky grid, got {}",
+            seen_shards.len()
+        );
+        assert!(
+            (seen_shards.len() as u64) <= expected_max_pixels,
+            "shard count {} exceeds max {} for depth {}",
+            seen_shards.len(),
+            expected_max_pixels,
+            shard_depth
+        );
+    }
+
+    #[test]
+    fn test_cone_coverage_finds_point() {
+        // Place a point on the sky, then compute the depth-29 cone coverage
+        // around it. The point's hpx index should fall within one of the
+        // covering ranges — this is how cone search queries will work.
+        let point = Coordinates::new(45.0, 30.0);
+
+        // 10 arcsecond cone around the same position
+        let radius_rad = (10.0_f64 / 3600.0).to_radians();
+        let bmoc = nested::cone_coverage_approx(
+            conf::HealpixConfig::FINE_DEPTH,
+            45.0_f64.to_radians(),
+            30.0_f64.to_radians(),
+            radius_rad,
+        );
+        let ranges = bmoc.to_ranges();
+
+        // The point's hpx must be inside one of the covering ranges
+        let hpx = point.hpx as u64;
+        let inside = ranges.iter().any(|r| hpx >= r.start && hpx < r.end);
+        assert!(
+            inside,
+            "point hpx={} should be inside cone coverage ({} ranges)",
+            hpx,
+            ranges.len()
+        );
+    }
+
+    #[test]
+    fn test_cone_coverage_excludes_distant_point() {
+        // A point 1 degree away should NOT be inside a 10 arcsecond cone.
+        let distant = Coordinates::new(46.0, 30.0); // ~1 deg away
+
+        let radius_rad = (10.0_f64 / 3600.0).to_radians();
+        let bmoc = nested::cone_coverage_approx(
+            conf::HealpixConfig::FINE_DEPTH,
+            45.0_f64.to_radians(),
+            30.0_f64.to_radians(),
+            radius_rad,
+        );
+        let ranges = bmoc.to_ranges();
+
+        let hpx = distant.hpx as u64;
+        let inside = ranges.iter().any(|r| hpx >= r.start && hpx < r.end);
+        assert!(
+            !inside,
+            "distant point hpx={} should NOT be inside a 10 arcsec cone",
+            hpx
+        );
+    }
+
+    #[test]
+    fn test_shard_aware_cone_search_simulation() {
+        // Simulate what a shard-aware cone search looks like:
+        // 1. Build a "database" of alerts binned by shard pixel
+        // 2. Query a cone — compute which shards to check
+        // 3. Only scan those shards, apply a fine HEALPix filter
+        // 4. Verify we find all alerts that brute force finds
+
+        let shard_depth: u8 = 4;
+        // Use depth 17 for the fine filter in this test (~1.6 arcsec pixels).
+        // In production you'd use depth 29, but cone_coverage_approx at depth 29
+        // for a 1-degree cone is expensive; depth 17 demonstrates the same principle.
+        let fine_depth: u8 = 17;
+
+        // Insert 500 alerts across the sky into a HashMap keyed by shard
+        let mut shards: HashMap<i64, Vec<(f64, f64, u64)>> = HashMap::new();
+        for i in 0..500 {
+            let ra = (i as f64 * 137.508) % 360.0; // golden angle spacing
+            let dec = (i as f64 * 0.36) % 180.0 - 90.0;
+            let hpx = get(fine_depth).hash(ra.to_radians(), dec.to_radians());
+            let shard = (hpx >> (2 * (fine_depth - shard_depth))) as i64;
+            shards.entry(shard).or_default().push((ra, dec, hpx));
+        }
+
+        // Cone search: 1-degree radius around (RA=180, Dec=0)
+        let query_ra = 180.0_f64;
+        let query_dec = 0.0_f64;
+        let radius_rad = 1.0_f64.to_radians();
+
+        // Step 1: Find which shard pixels overlap the cone
+        let shard_bmoc = nested::cone_coverage_approx(
+            shard_depth,
+            query_ra.to_radians(),
+            query_dec.to_radians(),
+            radius_rad,
+        );
+        let shard_ranges = shard_bmoc.to_ranges();
+        let relevant_shards: Vec<i64> = shard_ranges
+            .iter()
+            .flat_map(|r| (r.start..r.end).map(|x| x as i64))
+            .collect();
+
+        // Step 2: Find which fine-depth ranges overlap the cone
+        let fine_bmoc = nested::cone_coverage_approx(
+            fine_depth,
+            query_ra.to_radians(),
+            query_dec.to_radians(),
+            radius_rad,
+        );
+        let fine_ranges = fine_bmoc.to_ranges();
+
+        // Step 3: Only scan the relevant shards, apply fine filter
+        let mut found = Vec::new();
+        let mut shards_scanned = 0;
+        for shard_id in &relevant_shards {
+            if let Some(alerts) = shards.get(shard_id) {
+                shards_scanned += 1;
+                for &(ra, dec, hpx) in alerts {
+                    if fine_ranges.iter().any(|r| hpx >= r.start && hpx < r.end) {
+                        found.push((ra, dec));
+                    }
+                }
+            }
+        }
+
+        // Brute-force check: count all alerts truly within 1 degree
+        let mut brute_force = Vec::new();
+        for alerts in shards.values() {
+            for &(ra, dec, _) in alerts {
+                let dist = flare::spatial::great_circle_distance(query_ra, query_dec, ra, dec);
+                if dist < 1.0 {
+                    brute_force.push((ra, dec));
+                }
+            }
+        }
+
+        // The HEALPix result should contain all brute-force matches
+        // (it may contain a few extras at tile boundaries — that's expected)
+        assert!(
+            found.len() >= brute_force.len(),
+            "HEALPix search found {} but brute force found {} — missed some alerts",
+            found.len(),
+            brute_force.len()
+        );
+
+        // We should have skipped most shards
+        let total_shards = shards.len();
+        assert!(
+            shards_scanned < total_shards,
+            "should skip some shards: scanned {} out of {}",
+            shards_scanned,
+            total_shards
+        );
+    }
 }
