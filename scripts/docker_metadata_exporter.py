@@ -13,9 +13,17 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import urlencode
 
+# Standard Docker Engine Unix socket path. Change to ~/.docker/run/docker.sock
+# for rootless Docker.
 DOCKER_SOCKET = "/var/run/docker.sock"
+# Docker Engine API version (v1.41 = Docker Engine 20.10). Lower values have
+# wider daemon compatibility; bump only if newer API features are needed.
 DOCKER_API_VERSION = "v1.41"
+# Prometheus community port allocation for this exporter (must match the
+# targets entry in prometheus.yaml).
 EXPORTER_PORT = 9158
+# Prometheus metric name. The _info suffix follows the convention for
+# label-only identity metrics (value is always 1).
 METRIC_NAME = "docker_container_identity_info"
 
 
