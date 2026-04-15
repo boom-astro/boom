@@ -195,6 +195,7 @@ pub async fn get_test_db_api() -> Database {
     if config.babamul.enabled {
         let collections = db.list_collection_names().await.unwrap_or_default();
         if !collections.contains(&"LSPSC".to_string()) {
+            tracing::info!("Creating LSPSC collection for test database");
             db.create_collection("LSPSC")
                 .await
                 .expect("failed to create LSPSC collection for tests");
