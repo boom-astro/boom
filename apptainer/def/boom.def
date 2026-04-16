@@ -3,6 +3,7 @@ From: rust:1.93.1-slim-trixie
 
 %environment
     export PATH=/app:/opt/kafka/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/app/target/release:$LD_LIBRARY_PATH
     # Optional overrides
     export BOOM_DATABASE__HOST=localhost
 
@@ -24,6 +25,24 @@ From: rust:1.93.1-slim-trixie
       libsasl2-2 ca-certificates \
       openjdk-25-jre-headless tar && \
     apt-get autoremove && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    # Install CUDA toolkit runtime libraries
+    CUDA_URL=https://developer.download.nvidia.com/compute/cuda/redist
+    CUDNN_URL=https://developer.download.nvidia.com/compute/cudnn/redist
+    CUDA_DIR=/usr/local/cuda/lib64
+    mkdir -p $CUDA_DIR
+    curl -fsSL ${CUDA_URL}/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz | \
+      tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*'
+
+    curl -fsSL ${CUDA_URL}/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.3.14-archive.tar.xz | \
+      tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*'
+
+    curl -fsSL ${CUDA_URL}/libcufft/linux-x86_64/libcufft-linux-x86_64-11.3.3.83-archive.tar.xz | \
+      tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*'
+
+    curl -fsSL ${CUDNN_URL}/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda12-archive.tar.xz | \
+      tar -xJf - --strip-components=2 -C $CUDA_DIR --wildcards '*/lib/*.so*'
+    ldconfig
 
     # Install Kafka CLI tools
     curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
