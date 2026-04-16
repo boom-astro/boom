@@ -45,7 +45,7 @@ To make charts move, produce alerts and run the scheduler/consumer path,
 you can produce a deterministic ZTF batch used in dev:
 
 ```sh
-make produce-ztf
+make delete-produce-ztf
 ```
 
 Other batches of alerts can be sent to the system using the `kafka_producer`

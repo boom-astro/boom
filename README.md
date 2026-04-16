@@ -107,7 +107,7 @@ This brings up the hot-reloading API, ZTF consumer, and ZTF scheduler.
 To produce alerts for testing, run:
 
 ```bash
-make produce-ztf
+make delete-produce-ztf
 ```
 
 If you change the producer date or program, make sure the consumer is reading
