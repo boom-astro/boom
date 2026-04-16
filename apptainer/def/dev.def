@@ -1,0 +1,18 @@
+Bootstrap: docker
+From: rust:1.93.1-slim-trixie
+
+%environment
+    export BOOM_DATABASE__HOST=localhost
+    export CARGO_HOME=$HOME/.cargo-apptainer
+
+%post
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      curl gcc g++ libhdf5-dev libclang-dev perl \
+      make libsasl2-dev pkg-config \
+      libsasl2-2 ca-certificates && \
+    apt-get autoremove && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+%runscript
+    echo "$APP_DIR"
+    cd "$APP_DIR" && exec "$@"
