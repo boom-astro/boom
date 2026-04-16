@@ -947,13 +947,17 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         ACTIVE.add(1, &active_attrs);
-        let alerts: Vec<String> = con
+        let alerts: Vec<String> = match con
             .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
             .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
+        {
+            Ok(alerts) => alerts,
+            Err(error) => {
                 BATCH_PROCESSED.add(1, &input_error_attrs);
-            })?;
+                ACTIVE.add(-1, &active_attrs);
+                return Err(error.into());
+            }
+        };
 
         if alerts.is_empty() {
             ACTIVE.add(-1, &active_attrs);
@@ -964,13 +968,14 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        let alerts_output = filter_worker
-            .process_alerts(&alerts)
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
+        let alerts_output = match filter_worker.process_alerts(&alerts).await {
+            Ok(alerts_output) => alerts_output,
+            Err(error) => {
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
-            })?;
+                ACTIVE.add(-1, &active_attrs);
+                return Err(error);
+            }
+        };
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(
@@ -980,16 +985,19 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
+        let mut enqueue_error = None;
         for alert in alerts_output {
-            delivery_futures.push(
-                send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
-                    .await
-                    .inspect_err(|_| {
-                        ACTIVE.add(-1, &active_attrs);
-                        ALERT_PROCESSED.add(1, &output_error_attrs);
-                    })?,
-            );
-            total_enqueued += 1;
+            match send_alert_to_kafka(&alert, &schema, &producer, &output_topic).await {
+                Ok(delivery_future) => {
+                    delivery_futures.push(delivery_future);
+                    total_enqueued += 1;
+                }
+                Err(error) => {
+                    ALERT_PROCESSED.add(1, &output_error_attrs);
+                    enqueue_error = Some(error);
+                    break;
+                }
+            }
         }
 
         debug!(
@@ -1002,7 +1010,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
         let results = futures::future::join_all(delivery_futures).await;
         for r in results {
             let result = r.map_err(|e| {
-                ACTIVE.add(-1, &active_attrs);
                 ALERT_PROCESSED.add(1, &output_error_attrs);
                 FilterWorkerError::Kafka(format!(
                     "Failed to deliver alert to Kafka topic {}: {}",
@@ -1010,7 +1017,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 ))
             })?;
             if let Err((e, _)) = result {
-                ACTIVE.add(-1, &active_attrs);
                 ALERT_PROCESSED.add(1, &output_error_attrs);
                 error!(
                     "Failed to deliver alert to Kafka topic {}: {}",
@@ -1026,6 +1032,11 @@ pub async fn run_filter_worker<T: FilterWorker>(
             "Successfully sent total of {}/{} alerts to Kafka topic {}",
             total_sent, total_enqueued, &output_topic
         );
+
+        if let Some(error) = enqueue_error {
+            ACTIVE.add(-1, &active_attrs);
+            return Err(error);
+        }
 
         ACTIVE.add(-1, &active_attrs);
     }
