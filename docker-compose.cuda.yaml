@@ -14,6 +14,7 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      BOOM_GPU__ENABLED: "true"
     deploy:
       resources:
         reservations:
@@ -32,6 +33,7 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      BOOM_GPU__ENABLED: "true"
     deploy:
       resources:
         reservations:
