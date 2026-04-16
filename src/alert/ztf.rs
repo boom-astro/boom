@@ -698,6 +698,7 @@ struct AlertAuxForUpdate {
 pub struct ZtfAlertWorker {
     stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    healpix_config: conf::HealpixConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
@@ -732,6 +733,7 @@ impl ZtfAlertWorker {
                 lsst::LSST_DEC_RANGE,
                 ZTF_LSST_XMATCH_RADIUS,
                 &self.lsst_alert_aux_collection,
+                &self.healpix_config,
             )
             .await?;
 
@@ -742,6 +744,7 @@ impl ZtfAlertWorker {
                 decam::DECAM_DEC_RANGE,
                 ZTF_DECAM_XMATCH_RADIUS,
                 &self.decam_alert_aux_collection,
+                &self.healpix_config,
             )
             .await?;
         Ok(ZtfAliases {
@@ -924,6 +927,7 @@ impl AlertWorker for ZtfAlertWorker {
         let worker = ZtfAlertWorker {
             stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
+            healpix_config: config.healpix.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1017,7 +1021,7 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db, &self.healpix_config).await?;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,

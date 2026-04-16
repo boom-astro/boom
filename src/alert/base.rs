@@ -1161,7 +1161,7 @@ pub trait AlertWorker {
             })?;
         Ok(status)
     }
-    #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
+    #[instrument(skip(self, dec_range, radius_rad, collection, healpix_config), fields(xmatch_survey = collection.name()), err)]
     async fn get_matches(
         &self,
         ra: f64,
@@ -1169,19 +1169,28 @@ pub trait AlertWorker {
         dec_range: (f64, f64),
         radius_rad: f64,
         collection: &Collection<Document>,
+        healpix_config: &conf::HealpixConfig,
     ) -> Result<Vec<String>, AlertError> {
         let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
-            let result = collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": radius_rad,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
+            let result = if healpix_config.use_healpix_queries {
+                // HEALPix path: range query on hpx, pick first match
+                use crate::utils::spatial::cone_to_hpx_filter;
+                collection
+                    .find_one(cone_to_hpx_filter(ra, dec, radius_rad, healpix_config.query_depth))
+                    .projection(doc! { "_id": 1 })
+                    .await
+            } else {
+                // 2dsphere path: $nearSphere
+                collection
+                    .find_one(doc! {
+                        "coordinates.radec_geojson": {
+                            "$nearSphere": [ra - 180.0, dec],
+                            "$maxDistance": radius_rad,
+                        },
+                    })
+                    .projection(doc! { "_id": 1 })
+                    .await
+            };
             match result {
                 Ok(Some(doc)) => {
                     let object_id = doc.get_str("_id")?;

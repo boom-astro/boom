@@ -19,7 +19,7 @@ async fn test_xmatch() {
     let ra = 323.233462;
     let dec = 14.112528;
 
-    let xmatches = spatial::xmatch(ra, dec, &catalog_xmatch_configs, &db)
+    let xmatches = spatial::xmatch(ra, dec, &catalog_xmatch_configs, &db, &config.healpix)
         .await
         .unwrap();
     assert_eq!(xmatches.len(), 4);

@@ -419,30 +419,47 @@ pub struct SurveyWorkerConfig {
 
 /// HEALPix configuration for spatial indexing and sharding.
 ///
-/// Alerts are stored with two HEALPix indices:
-/// - A fine index at depth 29 (matching healpix-alchemy's HPX_MAX_ORDER) for fast
-///   spatial queries (cone search, cross-match). This is fixed and not configurable.
-/// - A coarse "shard" index at a configurable depth for database-level sharding.
-///   The shard depth determines the granularity of spatial partitioning.
+/// Alerts are stored with a HEALPix NESTED index at depth 29
+/// (matching healpix-alchemy's HPX_MAX_ORDER) for spatial queries.
+/// The coarse shard pixel is derived via bit shift at query time.
 #[derive(Deserialize, Debug, Clone)]
 pub struct HealpixConfig {
     /// HEALPix depth for the coarse shard key. Must be in [0, 29].
     /// Default is 4 (NSIDE=16, 3072 pixels, ~13.4 deg² each).
-    /// Lower values = fewer, larger partitions. Higher values = more, smaller partitions.
     #[serde(default = "default_healpix_shard_depth")]
     pub shard_depth: u8,
+
+    /// When true, use HEALPix range queries instead of MongoDB's 2dsphere
+    /// ($geoWithin/$nearSphere) for cross-match and alert-to-object matching.
+    /// Requires catalogs to have a `coordinates.hpx` field and index.
+    /// Default: false (use 2dsphere).
+    #[serde(default)]
+    pub use_healpix_queries: bool,
+
+    /// HEALPix depth used for cone search queries. Controls the trade-off
+    /// between query selectivity and the number of $or clauses in the MongoDB
+    /// filter. Lower = fewer ranges (faster planning) but more overinclusive.
+    /// Default is 14 (~13 arcsec pixels), good for typical cross-match radii.
+    #[serde(default = "default_healpix_query_depth")]
+    pub query_depth: u8,
 }
 
 impl Default for HealpixConfig {
     fn default() -> Self {
         HealpixConfig {
             shard_depth: default_healpix_shard_depth(),
+            use_healpix_queries: false,
+            query_depth: default_healpix_query_depth(),
         }
     }
 }
 
 fn default_healpix_shard_depth() -> u8 {
     4 // NSIDE=16, 3072 pixels
+}
+
+fn default_healpix_query_depth() -> u8 {
+    14 // ~13 arcsec pixels
 }
 
 impl HealpixConfig {
@@ -456,6 +473,12 @@ impl HealpixConfig {
             return Err(format!(
                 "healpix.shard_depth must be in [0, 29], got {}",
                 self.shard_depth
+            ));
+        }
+        if self.query_depth > 29 {
+            return Err(format!(
+                "healpix.query_depth must be in [0, 29], got {}",
+                self.query_depth
             ));
         }
         Ok(())

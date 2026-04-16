@@ -139,31 +139,45 @@ fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
     Some(value)
 }
 
-#[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
+/// Build the `$match` stage for a cross-match query.
+/// Uses HEALPix range filter or 2dsphere depending on config.
+fn xmatch_match_stage(
+    ra: f64,
+    dec: f64,
+    radius_rad: f64,
+    healpix_config: &conf::HealpixConfig,
+) -> mongodb::bson::Document {
+    if healpix_config.use_healpix_queries {
+        doc! { "$match": cone_to_hpx_filter(ra, dec, radius_rad, healpix_config.query_depth) }
+    } else {
+        doc! {
+            "$match": {
+                "coordinates.radec_geojson": {
+                    "$geoWithin": {
+                        "$centerSphere": [[ra - 180.0, dec], radius_rad]
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[instrument(skip(xmatch_configs, db, healpix_config), fields(database = db.name()), err)]
 pub async fn xmatch(
     ra: f64,
     dec: f64,
     xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
     db: &mongodb::Database,
+    healpix_config: &conf::HealpixConfig,
 ) -> Result<HashMap<String, Vec<mongodb::bson::Document>>, XmatchError> {
     // TODO, make the xmatch config a hashmap for faster access
     // while looping over the xmatch results of the batched queries
     if xmatch_configs.is_empty() {
         return Ok(HashMap::new());
     }
-    let ra_geojson = ra - 180.0;
-    let dec_geojson = dec;
 
     let mut x_matches_pipeline = vec![
-        doc! {
-            "$match": {
-                "coordinates.radec_geojson": {
-                    "$geoWithin": {
-                        "$centerSphere": [[ra_geojson, dec_geojson], xmatch_configs[0].radius]
-                    }
-                }
-            }
-        },
+        xmatch_match_stage(ra, dec, xmatch_configs[0].radius, healpix_config),
         doc! {
             "$project": &xmatch_configs[0].projection
         },
@@ -190,15 +204,7 @@ pub async fn xmatch(
             "$unionWith": {
                 "coll": &xmatch_config.catalog,
                 "pipeline": [
-                    doc! {
-                        "$match": {
-                            "coordinates.radec_geojson": {
-                                "$geoWithin": {
-                                    "$centerSphere": [[ra_geojson, dec_geojson], xmatch_config.radius]
-                                }
-                            }
-                        }
-                    },
+                    xmatch_match_stage(ra, dec, xmatch_config.radius, healpix_config),
                     doc! {
                         "$project": &xmatch_config.projection
                     },
@@ -792,6 +798,70 @@ mod tests {
             machines_queried, 1,
             "should only query 1 machine, queried {}",
             machines_queried
+        );
+    }
+
+    #[test]
+    fn test_xmatch_match_stage_2dsphere() {
+        // With use_healpix_queries=false, xmatch_match_stage should produce
+        // a $geoWithin/$centerSphere filter
+        let config = conf::HealpixConfig {
+            use_healpix_queries: false,
+            ..conf::HealpixConfig::default()
+        };
+        let radius_rad = (2.0_f64 / 3600.0).to_radians();
+        let stage = xmatch_match_stage(120.0, 45.0, radius_rad, &config);
+
+        let match_doc = stage.get_document("$match").expect("should have $match");
+        assert!(
+            match_doc.get("coordinates.radec_geojson").is_some(),
+            "2dsphere path should query radec_geojson"
+        );
+    }
+
+    #[test]
+    fn test_xmatch_match_stage_healpix() {
+        // With use_healpix_queries=true, xmatch_match_stage should produce
+        // a HEALPix range filter on coordinates.hpx
+        let config = conf::HealpixConfig {
+            use_healpix_queries: true,
+            query_depth: 14,
+            ..conf::HealpixConfig::default()
+        };
+        let radius_rad = (2.0_f64 / 3600.0).to_radians();
+        let stage = xmatch_match_stage(120.0, 45.0, radius_rad, &config);
+
+        let match_doc = stage.get_document("$match").expect("should have $match");
+        // Should NOT contain radec_geojson
+        assert!(
+            match_doc.get("coordinates.radec_geojson").is_none(),
+            "healpix path should not query radec_geojson"
+        );
+        // Should contain either coordinates.hpx (single range) or $or (multiple ranges)
+        let has_hpx = match_doc.get("coordinates.hpx").is_some();
+        let has_or = match_doc.get("$or").is_some();
+        assert!(
+            has_hpx || has_or,
+            "healpix path should have coordinates.hpx or $or filter, got: {:?}",
+            match_doc
+        );
+    }
+
+    #[test]
+    fn test_cone_to_hpx_filter_single_range_optimization() {
+        // A very small cone should produce a single range (no $or overhead)
+        let radius_rad = (0.5_f64 / 3600.0).to_radians(); // 0.5 arcsec
+        let filter = cone_to_hpx_filter(120.0, 45.0, radius_rad, 10);
+
+        // Should be a simple {coordinates.hpx: {$gte, $lt}} without $or
+        assert!(
+            filter.get("coordinates.hpx").is_some(),
+            "tiny cone at coarse depth should produce single range, got: {:?}",
+            filter
+        );
+        assert!(
+            filter.get("$or").is_none(),
+            "single range should not use $or"
         );
     }
 }
