@@ -992,10 +992,9 @@ pub async fn run_filter_worker<T: FilterWorker>(
             total_enqueued += 1;
         }
 
-        tracing::debug!(
+        debug!(
             "Enqueued total of {} alerts to Kafka topic {}",
-            total_enqueued,
-            &output_topic
+            total_enqueued, &output_topic
         );
 
         // Wait for all futures to complete and check for errors
@@ -1023,11 +1022,9 @@ pub async fn run_filter_worker<T: FilterWorker>(
             }
         }
 
-        tracing::debug!(
+        debug!(
             "Successfully sent total of {}/{} alerts to Kafka topic {}",
-            total_sent,
-            total_enqueued,
-            &output_topic
+            total_sent, total_enqueued, &output_topic
         );
 
         ACTIVE.add(-1, &active_attrs);
