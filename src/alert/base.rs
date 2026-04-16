@@ -1430,7 +1430,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let survey_attr = KeyValue::new("survey", stream_name.clone());
+    let survey_attr = KeyValue::new("survey", survey.to_string());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
     let ok_added_attrs = vec![
         worker_id_attr.clone(),
