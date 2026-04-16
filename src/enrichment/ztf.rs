@@ -691,7 +691,17 @@ impl ZtfEnrichmentWorker {
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         let mut results = Vec::with_capacity(work_items.len());
         for item in work_items {
-            let triplet = AcaiModel::get_triplet(&[&item.cutouts])?;
+            let triplet = match AcaiModel::get_triplet(&[&item.cutouts]) {
+                Ok(triplet) => triplet,
+                Err(err) => {
+                    warn!(
+                        "Skipping ML inference for candid {} due to invalid cutouts: {}",
+                        item.candid, err
+                    );
+                    results.push(None);
+                    continue;
+                }
+            };
             let metadata_result = AcaiModel::get_metadata(&[&item.alert]);
             let btsbot_metadata_result =
                 BtsBotModel::get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);

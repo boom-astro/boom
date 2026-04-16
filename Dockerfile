@@ -29,9 +29,9 @@ RUN python3 -m venv /opt/ort-py && \
 
 RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as ort; print(pathlib.Path(ort.__file__).resolve().parent / "capi")')" && \
     mkdir -p /opt/ort && \
-    cp "${ORT_CAPI_DIR}/libonnxruntime.so.1.24.4" /opt/ort/ && \
+    cp "${ORT_CAPI_DIR}/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION}" /opt/ort/ && \
     cp "${ORT_CAPI_DIR}/libonnxruntime_providers_shared.so" /opt/ort/ && \
-    rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.1.24.4 /opt/ort/libonnxruntime.so
+    rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock /app/
