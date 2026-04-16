@@ -144,7 +144,7 @@ fi
 if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
     echo "$(current_datetime) - GPU support is enabled; waiting for GPUs to be inference-ready"
     START_TIME=$(date +%s)
-    while ! grep -q "Confirmed GPU runtime preconditions and validated GPU inference successfully" < <(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler); do
+    while ! grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference" < <(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler); do
         CURRENT_TIME=$(date +%s)
         ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
         if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
