@@ -1,6 +1,20 @@
 # Observability
 
-This guide covers how to run BOOM locally with telemetry, view dashboards in Grafana, generate alert traffic, and monitor deployed environments behind Traefik.
+This guide covers how to run BOOM locally with telemetry,
+view dashboards in Grafana, generate alert traffic,
+and monitor deployed environments behind Traefik.
+
+## Components and architecture
+
+BOOM itself is instrumented to send metrics to Otel Collector,
+which then exports its data to Prometheus, which serves as the time series
+database.
+cAdvisor sends container metrics, while a custom `docker-metadata-exporter`
+service maps those metrics to service names,
+otherwise they would be unintelligible container IDs.
+There are exporter services for MongoDB, Valkey, and Kafka,
+which also make their metrics available to Prometheus.
+Grafana serves as the visualization layer querying Prometheus.
 
 ## Local quick start
 
