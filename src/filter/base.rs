@@ -865,7 +865,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let schema = load_alert_schema()?;
     let filter_refresh_interval =
         Duration::from_secs(worker_config.filter_refresh_interval_minutes * 60);
-    let idle_poll_interval = Duration::from_secs(30);
     let mut next_filter_refresh = Instant::now() + filter_refresh_interval;
 
     let command_interval = worker_config.command_interval;
@@ -909,24 +908,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
             }
         }
 
-        if !filter_worker.has_filters() {
-            if should_terminate(&mut receiver) {
-                producer
-                    .flush(std::time::Duration::from_secs(10))
-                    .map_err(|e| {
-                        FilterWorkerError::Kafka(format!(
-                            "Failed to flush Kafka producer on termination: {}",
-                            e
-                        ))
-                    })?;
-                info!("termination signal received, shutting down gracefully");
-                break;
-            }
-
-            tokio::time::sleep(idle_poll_interval).await;
-            continue;
-        }
-
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 // flush the producer before terminating to avoid losing messages
@@ -938,10 +919,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
                             e
                         ))
                     })?;
-                info!("termination signal received, shutting down gracefully");
                 break;
             }
-            command_check_countdown = command_interval + 1;
+            command_check_countdown = command_interval;
+
+            if !filter_worker.has_filters() {
+                // if we don't have any active filter, we call continue to avoid
+                // pooling candids until we have filters to run them through
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
         }
 
         ACTIVE.add(1, &active_attrs);
@@ -960,6 +947,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
             continue;
         }
 
+        command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
+
         let alerts_output = filter_worker
             .process_alerts(&alerts)
             .await
@@ -967,7 +956,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
-        command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(

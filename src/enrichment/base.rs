@@ -259,6 +259,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             continue;
         }
 
+        command_check_countdown = command_check_countdown.saturating_sub(candids.len());
+
         let processed_alerts: Vec<String> = enrichment_worker
             .process_alerts(&candids)
             .await
@@ -266,7 +268,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
-        command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;

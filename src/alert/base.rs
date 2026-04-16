@@ -1461,13 +1461,13 @@ pub async fn run_alert_worker<T: AlertWorker>(
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 break;
-            } else {
-                command_check_countdown = command_interval + 1;
             }
+            command_check_countdown = command_interval;
         }
-        command_check_countdown -= 1;
 
         ACTIVE.add(1, &active_attrs);
+
+        command_check_countdown -= 1;
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
