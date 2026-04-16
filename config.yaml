@@ -43,6 +43,7 @@ kafka:
 workers:
   ztf:
     command_interval: 500
+    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 3
     enrichment:
@@ -51,6 +52,7 @@ workers:
       n_workers: 3
   lsst:
     command_interval: 500
+    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 4
     enrichment:
@@ -59,6 +61,7 @@ workers:
       n_workers: 1
   decam:
     command_interval: 500
+    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 1
     enrichment:

@@ -9,8 +9,8 @@ use crate::enrichment::{
 use crate::filter::{
     build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
     update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
-    Origin, Photometry, SurveyMatch, SurveyMatches,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
@@ -429,8 +429,10 @@ pub struct LsstFilterWorker {
     alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
+    filter_collection: mongodb::Collection<Filter>,
     input_queue: String,
     output_topic: String,
+    filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
 }
 
@@ -456,10 +458,23 @@ impl FilterWorker for LsstFilterWorker {
             alert_pipeline: create_lsst_alert_pipeline(),
             alert_collection,
             alert_cutout_collection,
+            filter_collection,
             input_queue,
             output_topic,
+            filter_ids,
             filters,
         })
+    }
+
+    async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
+        info!("refreshing LSST filters from database");
+        self.filters =
+            build_loaded_filters(&self.filter_ids, &Survey::Lsst, &self.filter_collection).await?;
+        info!(
+            "refreshed LSST filters from database; now tracking {} filters",
+            self.filters.len()
+        );
+        Ok(())
     }
 
     fn survey() -> Survey {

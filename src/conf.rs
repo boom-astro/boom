@@ -409,9 +409,64 @@ pub struct WorkerConfig {
     pub n_workers: usize,
 }
 
+fn default_filter_refresh_interval_minutes() -> u64 {
+    15
+}
+
+fn deserialize_filter_refresh_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    const MIN_INTERVAL: u64 = 1;
+    const MAX_INTERVAL: u64 = 60;
+    if value < MIN_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "filter_refresh_interval_minutes must be at least {} minutes, got {}",
+            MIN_INTERVAL, value
+        )));
+    }
+    if value > MAX_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "filter_refresh_interval_minutes must be at most {} minutes, got {}",
+            MAX_INTERVAL, value
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_command_interval<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    const MIN_INTERVAL: usize = 100;
+    const MAX_INTERVAL: usize = 60000;
+
+    if value < MIN_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "command_interval must be at least {} ms, got {}",
+            MIN_INTERVAL, value
+        )));
+    }
+    if value > MAX_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "command_interval must be at most {} ms, got {}",
+            MAX_INTERVAL, value
+        )));
+    }
+    Ok(value)
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct SurveyWorkerConfig {
-    pub command_interval: u64,
+    #[serde(deserialize_with = "deserialize_command_interval")]
+    pub command_interval: usize, // in milliseconds
+    #[serde(
+        default = "default_filter_refresh_interval_minutes",
+        deserialize_with = "deserialize_filter_refresh_interval"
+    )]
+    pub filter_refresh_interval_minutes: u64,
     pub alert: WorkerConfig,
     pub enrichment: WorkerConfig,
     pub filter: WorkerConfig,
