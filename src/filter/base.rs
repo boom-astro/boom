@@ -8,6 +8,7 @@ use crate::{
     },
 };
 
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
 use apache_avro::{serde_avro_bytes, Writer};
@@ -705,6 +706,14 @@ pub async fn build_loaded_filter(
     filter_collection: &mongodb::Collection<Filter>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
+        && filter
+            .permissions
+            .get(survey)
+            .is_none_or(|permissions| permissions.is_empty())
+    {
+        return Err(FilterError::InvalidFilterPermissions);
+    }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
     let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
@@ -760,7 +769,13 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        filters.push(build_loaded_filter(&filter_id, survey, &filter_collection).await?);
+        match build_loaded_filter(&filter_id, survey, filter_collection).await {
+            Ok(filter) => filters.push(filter),
+            Err(err) => {
+                warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);
+                continue;
+            }
+        }
     }
 
     Ok(filters)
@@ -792,6 +807,8 @@ pub enum FilterWorkerError {
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
     KafkaConfigMissing(Survey),
+    #[error("worker config missing for survey: {0}")]
+    WorkerConfigMissing(Survey),
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
     #[error("missing cutouts for candid {0}")]
@@ -812,6 +829,7 @@ pub trait FilterWorker {
     ) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
+    async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError>;
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
@@ -829,13 +847,13 @@ pub async fn run_filter_worker<T: FilterWorker>(
     debug!(?config_path);
 
     let config = AppConfig::from_path(config_path)?;
+    let survey = T::survey();
+    let worker_config = config
+        .workers
+        .get(&survey)
+        .ok_or(FilterWorkerError::WorkerConfigMissing(survey))?;
 
     let mut filter_worker = T::new(config_path, None).await?;
-
-    if !filter_worker.has_filters() {
-        info!("no filters available for processing, shutting down gracefully");
-        return Ok(());
-    }
 
     // in a never ending loop, loop over the queues
     let mut con = config.build_redis().await?;
@@ -845,8 +863,11 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
+    let filter_refresh_interval =
+        Duration::from_secs(worker_config.filter_refresh_interval_minutes * 60);
+    let mut next_filter_refresh = Instant::now() + filter_refresh_interval;
 
-    let command_interval: usize = 500;
+    let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
@@ -878,6 +899,15 @@ pub async fn run_filter_worker<T: FilterWorker>(
         KeyValue::new("reason", "kafka_send"),
     ];
     loop {
+        if Instant::now() >= next_filter_refresh {
+            filter_worker.refresh_filters().await?;
+            next_filter_refresh = Instant::now() + filter_refresh_interval;
+
+            if !filter_worker.has_filters() {
+                info!("no active filters available, waiting for the next refresh");
+            }
+        }
+
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 // flush the producer before terminating to avoid losing messages
@@ -889,10 +919,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
                             e
                         ))
                     })?;
-                info!("termination signal received, shutting down gracefully");
                 break;
             }
-            command_check_countdown = command_interval + 1;
+            command_check_countdown = command_interval;
+
+            if !filter_worker.has_filters() {
+                // if we don't have any active filter, we call continue to avoid
+                // pooling candids until we have filters to run them through
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
         }
 
         ACTIVE.add(1, &active_attrs);
@@ -911,6 +947,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
             continue;
         }
 
+        command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
+
         let alerts_output = filter_worker
             .process_alerts(&alerts)
             .await
@@ -918,7 +956,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
-        command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(

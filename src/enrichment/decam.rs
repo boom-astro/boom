@@ -2,6 +2,7 @@ use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
@@ -119,6 +120,10 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_decam_alert_pipeline(),
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Decam
     }
 
     fn input_queue_name(&self) -> String {

@@ -1069,6 +1069,8 @@ pub enum AlertWorkerError {
     Redis(#[from] redis::RedisError),
     #[error("failed to get avro bytes from the alert queue")]
     GetAvroBytesError,
+    #[error("worker config missing for survey: {0}")]
+    WorkerConfigMissing(Survey),
 }
 
 #[async_trait::async_trait]
@@ -1076,7 +1078,7 @@ pub trait AlertWorker {
     async fn new(config_path: &str) -> Result<Self, AlertWorkerError>
     where
         Self: Sized;
-    fn stream_name(&self) -> String;
+    fn survey() -> Survey;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
     #[instrument(skip(self, alert, collection), err)]
@@ -1333,10 +1335,10 @@ pub trait AlertWorker {
 }
 
 #[instrument(skip_all)]
-fn report_progress(start: &Instant, stream: &str, count: u64, message: &str) {
+fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) {
     let elapsed = start.elapsed().as_secs();
     info!(
-        stream,
+        ?stream,
         count,
         elapsed,
         average_rate = count as f64 / elapsed as f64,
@@ -1405,9 +1407,13 @@ pub async fn run_alert_worker<T: AlertWorker>(
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = AppConfig::from_path(config_path)?;
+    let survey = T::survey();
+    let worker_config = config
+        .workers
+        .get(&survey)
+        .ok_or(AlertWorkerError::WorkerConfigMissing(survey.clone()))?;
 
     let mut alert_processor = T::new(config_path).await?;
-    let stream_name = alert_processor.stream_name();
 
     let input_queue_name = alert_processor.input_queue_name();
     let temp_queue_name = format!("{}_temp", input_queue_name);
@@ -1418,7 +1424,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
 
-    let command_interval: usize = 500;
+    let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
     let mut count = 0;
 
@@ -1455,13 +1461,13 @@ pub async fn run_alert_worker<T: AlertWorker>(
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 break;
-            } else {
-                command_check_countdown = command_interval + 1;
             }
+            command_check_countdown = command_interval;
         }
-        command_check_countdown -= 1;
 
         ACTIVE.add(1, &active_attrs);
+
+        command_check_countdown -= 1;
         let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
@@ -1507,10 +1513,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         handle_result?;
         if count > 0 && count % 1000 == 0 {
-            report_progress(&start, &stream_name, count, "progress");
+            report_progress(&start, &survey, count, "progress");
         }
         count += 1;
     }
-    report_progress(&start, &stream_name, count, "summary");
+    report_progress(&start, &survey, count, "summary");
     Ok(())
 }

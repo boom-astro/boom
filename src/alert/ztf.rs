@@ -696,7 +696,6 @@ struct AlertAuxForUpdate {
 }
 
 pub struct ZtfAlertWorker {
-    stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
@@ -922,7 +921,6 @@ impl AlertWorker for ZtfAlertWorker {
             db.collection(&decam::ALERT_AUX_COLLECTION);
 
         let worker = ZtfAlertWorker {
-            stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
             db,
             alert_collection,
@@ -936,16 +934,16 @@ impl AlertWorker for ZtfAlertWorker {
         Ok(worker)
     }
 
-    fn stream_name(&self) -> String {
-        self.stream_name.clone()
+    fn survey() -> Survey {
+        Survey::Ztf
     }
 
     fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", self.stream_name)
+        format!("{}_alerts_packets_queue", ZtfAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_enrichment_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", ZtfAlertWorker::survey())
     }
 
     #[instrument(skip_all, err)]
