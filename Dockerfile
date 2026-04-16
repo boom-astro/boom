@@ -49,9 +49,23 @@ RUN cargo install --locked cargo-watch
 
 CMD ["cargo", "watch", "-x", "run --bin api"]
 
-FROM base AS app
+FROM debian:trixie-slim AS app
+
+ARG KAFKA_VERSION=4.1.1
+ARG SCALA_VERSION=2.13
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates bash libsasl2-2 default-jre-headless && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/opt/ort
+
+COPY --from=builder /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
+ENV PATH="/opt/kafka/bin:${PATH}"
+
+WORKDIR /app
 
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
@@ -60,7 +74,5 @@ COPY --from=builder /app/target/release/api /app/boom-api
 COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 COPY --from=builder /opt/ort /opt/ort
-
-RUN ldconfig
 
 CMD ["/app/scheduler"]
