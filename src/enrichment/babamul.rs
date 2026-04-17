@@ -7,6 +7,7 @@ use crate::enrichment::lsst::{
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
+use crate::scheduler::record_kafka_alert_published;
 use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
@@ -501,6 +502,13 @@ impl Babamul {
                 delivery_futures.push(result);
                 total_enqueued += 1;
             }
+
+            record_kafka_alert_published(
+                "babamul",
+                survey_from_topic(&topic_name),
+                &topic_name,
+                alerts.len() as u64,
+            );
         }
 
         tracing::debug!(
@@ -735,6 +743,16 @@ impl Babamul {
         // Send all grouped alerts using shared helper
         self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Ztf(a))
             .await
+    }
+}
+
+fn survey_from_topic(topic_name: &str) -> &'static str {
+    if topic_name.starts_with("babamul.ztf.") {
+        "ZTF"
+    } else if topic_name.starts_with("babamul.lsst.") {
+        "LSST"
+    } else {
+        "unknown"
     }
 }
 

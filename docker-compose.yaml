@@ -2,6 +2,8 @@ volumes:
   mongodb:
   valkey:
   kafka_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   boom:
@@ -39,6 +41,19 @@ services:
       test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
       interval: 10s
       start_period: 20s
+  mongodb-exporter:
+    image: percona/mongodb_exporter:0.44.0
+    hostname: mongodb-exporter
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command:
+      - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
+      - --collector.dbstats
+      - --web.listen-address=:9216
+    networks:
+      - boom
+    restart: always
   valkey:
     image: valkey/valkey:7.2.6
     environment:
@@ -55,6 +70,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+  valkey-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    hostname: valkey-exporter
+    depends_on:
+      valkey:
+        condition: service_healthy
+    command:
+      - --redis.addr=redis://valkey:6379
+      - --check-keys=*_queue*
+    networks:
+      - boom
+    restart: always
   broker:
     image: apache/kafka:4.1.1
     hostname: broker
@@ -132,6 +159,17 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    hostname: kafka-exporter
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks:
+      - boom
+    command:
+      - --kafka.server=broker:29092
+    restart: always
   api:
     image: boom-astro/boom:latest
     hostname: api
@@ -145,6 +183,7 @@ services:
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides (these have defaults in config.yaml)
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
       BOOM_DATABASE__HOST: mongo
@@ -162,7 +201,7 @@ services:
       - ${PWD}/config.yaml:/app/config.yaml
     profiles:
       - prod
-      - api
+      - dev
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
@@ -197,6 +236,7 @@ services:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -222,6 +262,7 @@ services:
       BOOM_KAFKA__CONSUMER__LSST__GROUP_ID: ${BOOM_KAFKA__CONSUMER__LSST__GROUP_ID:?BOOM_KAFKA__CONSUMER__LSST__GROUP_ID must be set}
       BOOM_KAFKA__CONSUMER__LSST__USERNAME: ${BOOM_KAFKA__CONSUMER__LSST__USERNAME:?BOOM_KAFKA__CONSUMER__LSST__USERNAME must be set}
       BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${BOOM_KAFKA__CONSUMER__LSST__PASSWORD:?BOOM_KAFKA__CONSUMER__LSST__PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -244,6 +285,7 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -269,6 +311,7 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -291,13 +334,76 @@ services:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     networks:
       - boom
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    hostname: docker-socket-proxy
+    environment:
+      CONTAINERS: 1
+      EVENTS: 0
+      PING: 1
+      VERSION: 1
+      POST: 0
+      TIMEOUT_CLIENT: 30s
+      TIMEOUT_CONNECT: 5s
+      TIMEOUT_SERVER: 30s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/docker-socket-proxy/haproxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
+    tmpfs:
+      - /var/lib/haproxy
+    networks:
+      - boom
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: always
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.56.2
+    hostname: cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /sys:/sys:ro
+    networks:
+      - boom
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: always
+  docker-metadata-exporter:
+    image: python:3.12-alpine
+    hostname: docker-metadata-exporter
+    command:
+      - python
+      - /scripts/docker_metadata_exporter.py
+    environment:
+      DOCKER_API_BASE: http://docker-socket-proxy:2375
+    volumes:
+      - ./scripts/docker_metadata_exporter.py:/scripts/docker_metadata_exporter.py:ro
+    networks:
+      - boom
+    depends_on:
+      - docker-socket-proxy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: always
   prometheus:
     image: prom/prometheus:latest
     command:
       - --web.enable-otlp-receiver # [^2]
       - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
     volumes:
       - ./config/prometheus.yaml:/etc/prometheus/prometheus.yaml
+      - prometheus_data:/prometheus
     expose:
       - "9090"
     networks:
@@ -319,6 +425,45 @@ services:
       # Basic auth middleware
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-prometheus-auth.basicauth.users=${PROMETHEUS_USER:?PROMETHEUS_USER must be set}:${PROMETHEUS_HASHED_PASSWORD:?PROMETHEUS_HASHED_PASSWORD must be set}
       - traefik.http.routers.${STACK_NAME?Variable not set}-prometheus-https.middlewares=${STACK_NAME?Variable not set}-prometheus-auth
+    restart: always
+  grafana:
+    image: grafana/grafana:11.5.2
+    entrypoint:
+      - bash
+      - /scripts/grafana-dashboard-provisioning.sh
+    command:
+      - /run.sh
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_USERS_ALLOW_SIGN_UP: false
+      GF_AUTH_ANONYMOUS_ENABLED: false
+      # Dashboards are read-only by default in production; set to true in docker-compose.override.yaml for dev
+      GRAFANA_DASHBOARD_EDITABLE: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # Keep provisioning read-only in the container; the entrypoint script
+      # skips rewriting dashboards.yaml when this mount is not writable.
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./scripts/grafana-dashboard-provisioning.sh:/scripts/grafana-dashboard-provisioning.sh:ro
+    expose:
+      - "3000"
+    networks:
+      - boom
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      - traefik.http.services.${STACK_NAME?Variable not set}-grafana.loadbalancer.server.port=3000
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-http.rule=Host(`grafana.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-http.entrypoints=http
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.rule=Host(`grafana.${DOMAIN?Variable not set}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.entrypoints=https
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.tls=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-https.tls.certresolver=le
+      - traefik.http.routers.${STACK_NAME?Variable not set}-grafana-http.middlewares=https-redirect
     restart: always
 
 # [^1]:

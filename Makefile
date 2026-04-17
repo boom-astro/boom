@@ -1,6 +1,10 @@
 .PHONY: dev
 dev:
-	docker compose --profile api up
+	docker compose --profile dev up
+
+.PHONY: delete-produce-ztf
+delete-produce-ztf: # Delete Kafka topic, data, and re-produce ZTF traffic for testing
+	@bash scripts/delete-produce-ztf-dev.sh
 
 .PHONY: api-dev
 api-dev:

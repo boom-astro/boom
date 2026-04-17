@@ -213,25 +213,38 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
+    let survey = input_queue
+        .split('_')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
 
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let active_attrs = [worker_id_attr.clone()];
-    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let survey_attr = KeyValue::new("survey", survey);
+    let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
+    let ok_attrs = [
+        worker_id_attr.clone(),
+        survey_attr.clone(),
+        KeyValue::new("status", "ok"),
+    ];
     let input_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
     let processing_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
     let output_error_attrs = [
         worker_id_attr,
+        survey_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "output_queue"),
     ];
