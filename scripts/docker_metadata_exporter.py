@@ -8,14 +8,20 @@ its Unix socket. This is intended to be joined with cAdvisor metrics in PromQL.
 from __future__ import annotations
 
 import json
+import os
 import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+from urllib.parse import urlparse
 from urllib.parse import urlencode
 
 # Standard Docker Engine Unix socket path. Change to ~/.docker/run/docker.sock
 # for rootless Docker.
 DOCKER_SOCKET = "/var/run/docker.sock"
+# Docker API base endpoint. Defaults to the local docker-socket-proxy service,
+# and can be set to a unix:// URL for direct socket access in constrained dev
+# setups.
+DOCKER_API_BASE = os.getenv("DOCKER_API_BASE", "http://docker-socket-proxy:2375")
 # Docker Engine API version (v1.41 = Docker Engine 20.10). Lower values have
 # wider daemon compatibility; bump only if newer API features are needed.
 DOCKER_API_VERSION = "v1.41"
@@ -62,6 +68,38 @@ def _http_get_unix_socket(path: str, query: dict[str, Any] | None = None) -> Any
     return json.loads(body.decode("utf-8"))
 
 
+def _http_get_tcp(path: str, query: dict[str, Any] | None = None) -> Any:
+    parsed = urlparse(DOCKER_API_BASE)
+    if parsed.scheme not in ("http", "https"):
+        raise RuntimeError(f"Unsupported DOCKER_API_BASE scheme: {parsed.scheme}")
+
+    if query:
+        path = f"{path}?{urlencode(query)}"
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    host = parsed.hostname
+    if not host:
+        raise RuntimeError("DOCKER_API_BASE must include a hostname")
+
+    if parsed.scheme == "https":
+        import http.client
+
+        conn = http.client.HTTPSConnection(host, port, timeout=5)
+    else:
+        import http.client
+
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+
+    conn.request("GET", path, headers={"Accept": "application/json"})
+    response = conn.getresponse()
+    body = response.read()
+    status = response.status
+    conn.close()
+    if status != 200:
+        raise RuntimeError(f"Docker API request failed: HTTP {status}")
+    return json.loads(body.decode("utf-8"))
+
+
 def _decode_chunked(body: bytes) -> bytes:
     out = bytearray()
     idx = 0
@@ -90,9 +128,12 @@ def _container_name(container: dict[str, Any]) -> str:
 
 
 def render_metrics() -> str:
-    containers = _http_get_unix_socket(
-        f"/{DOCKER_API_VERSION}/containers/json", {"all": 1}
-    )
+    if DOCKER_API_BASE.startswith("unix://"):
+        containers = _http_get_unix_socket(
+            f"/{DOCKER_API_VERSION}/containers/json", {"all": 1}
+        )
+    else:
+        containers = _http_get_tcp(f"/{DOCKER_API_VERSION}/containers/json", {"all": 1})
 
     lines = [
         f"# HELP {METRIC_NAME} Docker container identity metadata.",

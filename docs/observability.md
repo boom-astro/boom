@@ -16,6 +16,11 @@ There are exporter services for MongoDB, Valkey, and Kafka,
 which also make their metrics available to Prometheus.
 Grafana serves as the visualization layer querying Prometheus.
 
+BOOM runs `docker-metadata-exporter` through a restricted
+`docker-socket-proxy` (containers list/read endpoints only), and both
+`docker-metadata-exporter` and `cadvisor` run with a reduced security surface
+(`read_only`, `no-new-privileges`, dropped Linux capabilities).
+
 ## Local quick start
 
 Start the full local dev stack (Mongo, Valkey, Kafka, cAdvisor, OTel Collector, Prometheus, Grafana, API, and dev worker services):

@@ -334,23 +334,43 @@ services:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     networks:
       - boom
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    hostname: docker-socket-proxy
+    environment:
+      CONTAINERS: 1
+      EVENTS: 0
+      PING: 1
+      VERSION: 1
+      POST: 0
+      TIMEOUT_CLIENT: 30s
+      TIMEOUT_CONNECT: 5s
+      TIMEOUT_SERVER: 30s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/docker-socket-proxy/haproxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
+    tmpfs:
+      - /var/lib/haproxy
+    networks:
+      - boom
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: always
   cadvisor:
     image: ghcr.io/google/cadvisor:0.56.2
     hostname: cadvisor
-    command:
-      - --store_container_labels=true
-    privileged: true
-    devices:
-      - /dev/kmsg:/dev/kmsg
     volumes:
       - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
     networks:
       - boom
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
   docker-metadata-exporter:
     image: python:3.12-alpine
@@ -358,11 +378,21 @@ services:
     command:
       - python
       - /scripts/docker_metadata_exporter.py
+    environment:
+      DOCKER_API_BASE: http://docker-socket-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./scripts/docker_metadata_exporter.py:/scripts/docker_metadata_exporter.py:ro
     networks:
       - boom
+    depends_on:
+      - docker-socket-proxy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
   prometheus:
     image: prom/prometheus:latest
