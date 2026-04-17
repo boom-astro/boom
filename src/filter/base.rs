@@ -1011,6 +1011,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
         for r in results {
             let result = r.map_err(|e| {
                 ALERT_PROCESSED.add(1, &output_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
                 FilterWorkerError::Kafka(format!(
                     "Failed to deliver alert to Kafka topic {}: {}",
                     &output_topic, e
