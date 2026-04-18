@@ -14,12 +14,8 @@ const KAFKA_TOPICS_CACHE_KEY: &str = "kafka_topics";
 /// Cache Kafka topic stats for 5 minutes.
 const KAFKA_TOPICS_CACHE_SECS: f64 = 5.0 * 60.0;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct KafkaTopicStat {
-    pub name: String,
-    pub n_alerts: u64,
-}
-
+/// MongoDB cache document storing all Kafka topic stats under a single well-known
+/// `_id`, along with the expiration timestamp.
 #[derive(Debug, Serialize, Deserialize)]
 struct KafkaTopicsCacheEntry {
     #[serde(rename = "_id")]
@@ -27,6 +23,14 @@ struct KafkaTopicsCacheEntry {
     topics: Vec<KafkaTopicStat>,
     updated_at: f64,
     cache_until: f64,
+}
+
+/// Per-topic Kafka stats entry: topic name and the number of messages currently
+/// available in the topic.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct KafkaTopicStat {
+    pub name: String,
+    pub n_alerts: u64,
 }
 
 /// List Babamul Kafka topics with their current message counts.

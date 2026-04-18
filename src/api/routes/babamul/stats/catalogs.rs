@@ -12,6 +12,8 @@ const CATALOG_STATS_CACHE_KEY: &str = "catalog_stats";
 /// Cache catalog stats for 5 days
 const CATALOG_STATS_CACHE_SECS: f64 = 5.0 * 24.0 * 3600.0;
 
+/// MongoDB cache document storing the full catalog stats payload (with counts and sizes)
+/// under a single well-known `_id`, along with the expiration timestamp.
 #[derive(Debug, Serialize, Deserialize)]
 struct CatalogStatsCacheEntry {
     #[serde(rename = "_id")]
@@ -22,6 +24,8 @@ struct CatalogStatsCacheEntry {
     cache_until: f64,
 }
 
+/// Per-catalog stats entry. `count` and `size_bytes` are populated only when the
+/// corresponding query flag is set; otherwise they are omitted from the response.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CatalogEntry {
     pub name: String,
@@ -32,6 +36,8 @@ pub struct CatalogEntry {
     pub size_bytes: Option<u64>,
 }
 
+/// Query parameters controlling which optional details are included in the catalog
+/// stats response.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CatalogStatsQuery {
     /// Include document counts per catalog.
@@ -40,6 +46,8 @@ pub struct CatalogStatsQuery {
     pub size: Option<bool>,
 }
 
+/// Response payload for `/babamul/stats/catalogs`: the catalog count and per-catalog
+/// entries.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CatalogStats {
     pub n_catalogs: usize,
@@ -48,7 +56,7 @@ pub struct CatalogStats {
 
 /// Get catalog statistics.
 ///
-/// By default returns just the list of catalog names. Use `count=true` and/or
+/// By default, returns just the list of catalog names. Use `count=true` and/or
 /// `size=true` query parameters to include document counts and storage sizes.
 /// Results with counts/sizes are cached for 5 days since reference catalogs rarely change.
 #[utoipa::path(
