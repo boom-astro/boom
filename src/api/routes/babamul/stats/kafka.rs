@@ -25,12 +25,13 @@ struct KafkaTopicsCacheEntry {
     cache_until: f64,
 }
 
-/// Per-topic Kafka stats entry: topic name and the number of messages currently
-/// available in the topic.
+/// Per-topic Kafka stats entry: topic name, the number of messages currently
+/// available in the topic, and the configured retention period in days.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct KafkaTopicStat {
     pub name: String,
     pub n_alerts: u64,
+    pub retention_days: u32,
 }
 
 /// List Babamul Kafka topics with their current message counts.
@@ -69,15 +70,17 @@ pub async fn get_kafka_stats(
 
     // Cache miss — query Kafka
     let bootstrap_servers = config.kafka.producer.server.clone();
-    let topics = match web::block(move || list_babamul_topics(&bootstrap_servers)).await {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            return response::internal_error(&format!("Kafka error: {}", e));
-        }
-        Err(e) => {
-            return response::internal_error(&format!("Blocking error: {}", e));
-        }
-    };
+    let retention_days = config.babamul.retention_days;
+    let topics =
+        match web::block(move || list_babamul_topics(&bootstrap_servers, retention_days)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                return response::internal_error(&format!("Kafka error: {}", e));
+            }
+            Err(e) => {
+                return response::internal_error(&format!("Blocking error: {}", e));
+            }
+        };
 
     // Upsert cache
     let cache_entry = KafkaTopicsCacheEntry {
@@ -99,6 +102,7 @@ pub async fn get_kafka_stats(
 
 fn list_babamul_topics(
     bootstrap_servers: &str,
+    retention_days: u32,
 ) -> Result<Vec<KafkaTopicStat>, rdkafka::error::KafkaError> {
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
@@ -123,6 +127,7 @@ fn list_babamul_topics(
         topics.push(KafkaTopicStat {
             name: name.to_string(),
             n_alerts,
+            retention_days,
         });
     }
 
