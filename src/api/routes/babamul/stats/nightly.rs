@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
+/// MongoDB cache document storing the alert count for a single survey/night,
+/// keyed by `_id` (`nightly_stats_<survey>_<date>`) with the expiration timestamp.
 #[derive(Debug, Serialize, Deserialize)]
 struct NightlyStatCache {
     #[serde(rename = "_id")]
@@ -23,6 +25,17 @@ struct NightlyStatCache {
     cache_until: f64,
 }
 
+/// One row of the nightly aggregation: `_id` is the day offset from the query's
+/// minimum missing date (0-based), `count` is the number of alerts for that day.
+#[derive(Debug, Deserialize)]
+struct NightlyAlertsCount {
+    #[serde(rename = "_id")]
+    day_index: i64,
+    count: i64,
+}
+
+/// Per-night alert counts returned by the `/babamul/stats/nightly` endpoint.
+/// Survey fields are populated only when the corresponding survey is requested.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct NightlyStat {
     pub date: String,
@@ -32,6 +45,8 @@ pub struct NightlyStat {
     pub lsst: Option<u64>,
 }
 
+/// Query parameters for the nightly stats endpoint: the date range (inclusive)
+/// and an optional survey filter (`ztf` or `lsst`).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct StatsQuery {
     pub start_date: String,
@@ -213,7 +228,11 @@ pub async fn get_nightly_stats(
         ];
 
         let alerts_collection = db.collection::<Document>(&format!("{}_alerts", survey));
-        let cursor = match alerts_collection.aggregate(pipeline).await {
+        let cursor = match alerts_collection
+            .aggregate(pipeline)
+            .with_type::<NightlyAlertsCount>()
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 return response::internal_error(&format!(
@@ -222,7 +241,7 @@ pub async fn get_nightly_stats(
                 ));
             }
         };
-        let docs: Vec<Document> = match cursor.try_collect().await {
+        let docs: Vec<NightlyAlertsCount> = match cursor.try_collect().await {
             Ok(d) => d,
             Err(e) => {
                 return response::internal_error(&format!(
@@ -232,19 +251,10 @@ pub async fn get_nightly_stats(
             }
         };
 
-        let mut index_counts: HashMap<i64, u64> = HashMap::new();
-        for doc in docs {
-            let idx = doc
-                .get("_id")
-                .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(|i| i as i64)))
-                .unwrap_or(-1);
-            let count = doc
-                .get("count")
-                .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(|i| i as i64)))
-                .unwrap_or(0)
-                .max(0) as u64;
-            index_counts.insert(idx, count);
-        }
+        let index_counts: HashMap<i64, u64> = docs
+            .into_iter()
+            .map(|d| (d.day_index, d.count.max(0) as u64))
+            .collect();
 
         // Fill counts for every missing date (0 when no alerts were returned)
         for date in &missing {
