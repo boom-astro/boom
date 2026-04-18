@@ -25,15 +25,6 @@ struct NightlyStatCache {
     cache_until: f64,
 }
 
-/// One row of the nightly aggregation: `_id` is the day offset from the query's
-/// minimum missing date (0-based), `count` is the number of alerts for that day.
-#[derive(Debug, Deserialize)]
-struct NightlyAlertsCount {
-    #[serde(rename = "_id")]
-    day_index: i64,
-    count: i64,
-}
-
 /// Per-night alert counts returned by the `/babamul/stats/nightly` endpoint.
 /// Survey fields are populated only when the corresponding survey is requested.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -192,7 +183,9 @@ pub async fn get_nightly_stats(
         }
     }
 
-    // For each survey, run one aggregation covering every missing date in the range
+    // For each missing (survey, night), count alerts in parallel.
+    // Relies on a compound index on (candidate.programid, candidate.jd) for ZTF
+    // and on candidate.jd for LSST so Mongo can satisfy the count via COUNT_SCAN.
     let mut fresh_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
     for survey in &surveys {
         let missing: Vec<NaiveDate> = all_dates
@@ -205,62 +198,36 @@ pub async fn get_nightly_stats(
             continue;
         }
 
-        let min_missing = *missing.first().unwrap();
-        let max_missing = *missing.last().unwrap();
-        let base_jd = date_to_jd_local_noon(&min_missing, survey);
-        let end_jd = date_to_jd_local_noon(&(max_missing + chrono::Duration::days(1)), survey);
-
-        let mut match_doc = doc! {
-            "candidate.jd": { "$gte": base_jd, "$lt": end_jd }
-        };
-        if *survey == Survey::Ztf {
-            match_doc.insert("candidate.programid", 1);
-        }
-
-        let pipeline = vec![
-            doc! { "$match": match_doc },
-            doc! {
-                "$group": {
-                    "_id": { "$toInt": { "$floor": { "$subtract": ["$candidate.jd", base_jd] } } },
-                    "count": { "$sum": 1i64 }
-                }
-            },
-        ];
-
         let alerts_collection = db.collection::<Document>(&format!("{}_alerts", survey));
-        let cursor = match alerts_collection
-            .aggregate(pipeline)
-            .with_type::<NightlyAlertsCount>()
-            .await
-        {
-            Ok(c) => c,
+        let count_futures = missing.into_iter().map(|date| {
+            let start_jd = date_to_jd_local_noon(&date, survey);
+            let end_jd = date_to_jd_local_noon(&(date + chrono::Duration::days(1)), survey);
+            let mut filter = doc! {
+                "candidate.jd": { "$gte": start_jd, "$lt": end_jd }
+            };
+            if *survey == Survey::Ztf {
+                filter.insert("candidate.programid", 1);
+            }
+            let coll = alerts_collection.clone();
+            let survey = survey.clone();
+            async move {
+                coll.count_documents(filter)
+                    .await
+                    .map(|c| (survey, date, c))
+            }
+        });
+
+        let results = match futures::future::try_join_all(count_futures).await {
+            Ok(r) => r,
             Err(e) => {
                 return response::internal_error(&format!(
-                    "Error aggregating alerts for {}: {}",
+                    "Error counting alerts for {}: {}",
                     survey, e
                 ));
             }
         };
-        let docs: Vec<NightlyAlertsCount> = match cursor.try_collect().await {
-            Ok(d) => d,
-            Err(e) => {
-                return response::internal_error(&format!(
-                    "Error collecting aggregation for {}: {}",
-                    survey, e
-                ));
-            }
-        };
-
-        let index_counts: HashMap<i64, u64> = docs
-            .into_iter()
-            .map(|d| (d.day_index, d.count.max(0) as u64))
-            .collect();
-
-        // Fill counts for every missing date (0 when no alerts were returned)
-        for date in &missing {
-            let idx = (*date - min_missing).num_days();
-            let count = *index_counts.get(&idx).unwrap_or(&0);
-            fresh_counts.insert((survey.clone(), *date), count);
+        for (survey, date, count) in results {
+            fresh_counts.insert((survey, date), count);
         }
     }
 
