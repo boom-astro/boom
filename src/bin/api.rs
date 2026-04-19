@@ -4,10 +4,13 @@ use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
 use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
+use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::o11y::metrics::init_metrics;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
+use uuid::Uuid;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -17,6 +20,9 @@ async fn main() -> std::io::Result<()> {
     let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
     let port = config.api.port;
+    let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or_else(|_| "dev".to_string());
+    let _meter_provider = init_metrics(String::from("api"), Uuid::new_v4(), deployment_env)
+        .expect("failed to initialize metrics");
 
     // Initialize email service
     let email_service = EmailService::new();
@@ -40,7 +46,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
-            .app_data(web::Data::new(email_service.clone()));
+            .app_data(web::Data::new(email_service.clone()))
+            .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {

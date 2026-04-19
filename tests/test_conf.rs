@@ -45,6 +45,7 @@ fn test_load_workers_config() {
     assert_eq!(ztf_worker_config.enrichment.n_workers, 1);
     assert_eq!(ztf_worker_config.filter.n_workers, 1);
     assert_eq!(ztf_worker_config.command_interval, 500);
+    assert_eq!(ztf_worker_config.filter_refresh_interval_minutes, 15);
 }
 
 #[test]

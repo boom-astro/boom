@@ -38,6 +38,13 @@ pub static PRODUCER_METER: LazyLock<Meter> =
 pub static SCHEDULER_METER: LazyLock<Meter> =
     LazyLock::new(|| opentelemetry::global::meter("boom-scheduler-meter"));
 
+/// Global OTel meter used to create instruments throughout the API
+/// application.
+///
+/// Only available after calling `init_metrics`.
+pub static API_METER: LazyLock<Meter> =
+    LazyLock::new(|| opentelemetry::global::meter("boom-api-meter"));
+
 /// The error type returned when initializing metrics.
 #[derive(Debug, thiserror::Error)]
 pub enum InitMetricsError {
@@ -56,14 +63,16 @@ pub enum InitMetricsError {
 /// This function is responsible for creating an exporter for OTel metrics, a
 /// meter provider based on that exporter, and then some global meters used to
 /// create instruments for different applications. The meters can be accessed
-/// from the static items `CONSUMER_METER`, `PRODUCER_METER`, and
-/// `SCHEDULER_METER`, which are only available after this function completes.
+/// from the static items `CONSUMER_METER`, `PRODUCER_METER`, `SCHEDULER_METER`,
+/// and `API_METER`, which are only available after this function completes.
 ///
 /// The exporter is an OTLP exporter designed to send metrics every 60 s over
-/// gRPC to the OTel Collector at `localhost:4317`. It uses cumulative
-/// temporality, which is more natural for Prometheus. (Prometheus support for
-/// delta temporality is still experimental. Cumulative temporality is just fine
-/// as long as attribute cardinality doesn't explode.)
+/// gRPC to the OTel Collector. The endpoint can be overridden with the standard
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable, falling back to
+/// `http://localhost:4317` for local non-containerized development. It uses
+/// cumulative temporality, which is more natural for Prometheus. (Prometheus
+/// support for delta temporality is still experimental. Cumulative temporality
+/// is just fine as long as attribute cardinality doesn't explode.)
 ///
 /// The meter provider is returned so it can be cloned if needed (cloning
 /// providers is cheap), to have finer control of how/when it's dropped, or so
@@ -73,6 +82,9 @@ pub fn init_metrics(
     instance_id: uuid::Uuid,
     deployment_env: String,
 ) -> Result<SdkMeterProvider, InitMetricsError> {
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+
     // From the OTel docs, "A resource represents the entity producing
     // telemetry...". In this case the entity is the app itself.
     let resource = Resource::builder()
@@ -89,7 +101,7 @@ pub fn init_metrics(
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_temporality(Temporality::Cumulative)
         .with_tonic()
-        .with_endpoint("https://localhost:4317/v1/metrics")
+        .with_endpoint(endpoint)
         .build()?;
 
     // From the OTel docs, "... a Meter Provider is initialized once and its
