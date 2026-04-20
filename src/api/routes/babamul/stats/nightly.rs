@@ -3,7 +3,7 @@ use crate::api::models::response;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
 use chrono::{Datelike, NaiveDate, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, Document},
     Collection, Database,
@@ -217,7 +217,11 @@ pub async fn get_nightly_stats(
             }
         });
 
-        let results = match futures::future::try_join_all(count_futures).await {
+        let results: Vec<(Survey, NaiveDate, u64)> = match futures::stream::iter(count_futures)
+            .buffer_unordered(30)
+            .try_collect()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 return response::internal_error(&format!(
