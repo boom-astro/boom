@@ -1,6 +1,6 @@
-mod catalogs;
-mod kafka;
-mod nightly;
+pub mod catalogs;
+pub mod kafka;
+pub mod nightly;
 
 pub const STATS_COLLECTION: &str = "stats";
 
