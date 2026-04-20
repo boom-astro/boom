@@ -316,20 +316,24 @@ mod tests {
         // Today -> 5 min
         assert_eq!(cache_duration_secs(&today, &today), 300.0);
 
-        // Yesterday -> 30 min
+        // Yesterday -> 1h
         let yesterday = NaiveDate::from_ymd_opt(2024, 6, 14).unwrap();
-        assert_eq!(cache_duration_secs(&yesterday, &today), 1800.0);
+        assert_eq!(cache_duration_secs(&yesterday, &today), 3600.0);
 
-        // 5 days ago -> 2h
+        // 5 days ago -> 1h
         let five_ago = NaiveDate::from_ymd_opt(2024, 6, 10).unwrap();
-        assert_eq!(cache_duration_secs(&five_ago, &today), 7200.0);
+        assert_eq!(cache_duration_secs(&five_ago, &today), 3600.0);
 
-        // 15 days ago -> 12h
+        // 7 days ago -> 1h (upper bound of the 1–7 day window)
+        let seven_ago = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
+        assert_eq!(cache_duration_secs(&seven_ago, &today), 3600.0);
+
+        // 15 days ago -> 1 year
         let fifteen_ago = NaiveDate::from_ymd_opt(2024, 5, 31).unwrap();
-        assert_eq!(cache_duration_secs(&fifteen_ago, &today), 43200.0);
+        assert_eq!(cache_duration_secs(&fifteen_ago, &today), 31536000.0);
 
-        // 60 days ago -> 30 days
+        // 60 days ago -> 1 year
         let sixty_ago = NaiveDate::from_ymd_opt(2024, 4, 16).unwrap();
-        assert_eq!(cache_duration_secs(&sixty_ago, &today), 2592000.0);
+        assert_eq!(cache_duration_secs(&sixty_ago, &today), 31536000.0);
     }
 }
