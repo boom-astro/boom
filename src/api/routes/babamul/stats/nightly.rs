@@ -80,14 +80,14 @@ fn date_to_jd_local_noon(date: &NaiveDate, survey: &Survey) -> f64 {
 
 /// Cache duration (in seconds) grows with the age of the night.
 ///
-/// - Today (age 0): 5 min — the night is still in progress, count changes fast.
-/// - 1–7 days: 1 hour.
+/// - Today (age 0): 1 hour — the night is still in progress, count changes fast.
+/// - 1–7 days: 1 day.
 /// - >7 days: 1 year.
 fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
     let age_days = (*today - *date).num_days();
     match age_days {
-        ..=0 => 5.0 * 60.0,
-        1..=7 => 1.0 * 3600.0,
+        ..=0 => 1.0 * 3600.0,
+        1..=7 => 24.0 * 3600.0,
         _ => 365.0 * 24.0 * 3600.0,
     }
 }
@@ -313,20 +313,20 @@ mod tests {
     fn test_cache_duration() {
         let today = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
 
-        // Today -> 5 min
-        assert_eq!(cache_duration_secs(&today, &today), 300.0);
+        // Today -> 1h
+        assert_eq!(cache_duration_secs(&today, &today), 3600.0);
 
-        // Yesterday -> 1h
+        // Yesterday -> 1 day
         let yesterday = NaiveDate::from_ymd_opt(2024, 6, 14).unwrap();
-        assert_eq!(cache_duration_secs(&yesterday, &today), 3600.0);
+        assert_eq!(cache_duration_secs(&yesterday, &today), 86400.0);
 
-        // 5 days ago -> 1h
+        // 5 days ago -> 1 day
         let five_ago = NaiveDate::from_ymd_opt(2024, 6, 10).unwrap();
-        assert_eq!(cache_duration_secs(&five_ago, &today), 3600.0);
+        assert_eq!(cache_duration_secs(&five_ago, &today), 86400.0);
 
-        // 7 days ago -> 1h (upper bound of the 1–7 day window)
+        // 7 days ago -> 1 day (upper bound of the 1–7 day window)
         let seven_ago = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
-        assert_eq!(cache_duration_secs(&seven_ago, &today), 3600.0);
+        assert_eq!(cache_duration_secs(&seven_ago, &today), 86400.0);
 
         // 15 days ago -> 1 year
         let fifteen_ago = NaiveDate::from_ymd_opt(2024, 5, 31).unwrap();
