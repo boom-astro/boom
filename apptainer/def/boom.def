@@ -3,7 +3,7 @@ From: rust:1.93.1-slim-trixie
 
 %environment
     export PATH=/app:/opt/kafka/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/app/target/release:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/app/lib:$LD_LIBRARY_PATH
     # Optional overrides
     export BOOM_DATABASE__HOST=localhost
 
@@ -58,6 +58,10 @@ From: rust:1.93.1-slim-trixie
     cp /app/target/release/scheduler /app/scheduler
     cp /app/target/release/migrate_fp_flux /app/migrate_fp_flux
     cp /app/target/release/migrate_snr /app/migrate_snr
+
+    # Preserve ONNX Runtime shared libraries needed at runtime
+    mkdir -p /app/lib
+    cp /app/target/release/libonnxruntime*.so* /app/lib/
 
     # Cleanup: remove build deps and artifacts to reduce image size
     apt-get purge -y gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config
