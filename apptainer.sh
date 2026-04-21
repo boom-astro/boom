@@ -172,8 +172,9 @@ fi
 # Restart services
 # -----------------------------
 if [ "$1" == "restart" ]; then
-  "$0" stop "$2"
-  "$0" start "$2" "$3" "$4" "$5" "$6"
+  shift
+  "$0" stop "$@"
+  "$0" start "$@"
   exit 0
 fi
 
