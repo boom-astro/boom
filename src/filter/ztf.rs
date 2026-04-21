@@ -11,8 +11,8 @@ use crate::enrichment::{
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
     parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, Alert, Classification, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
+    FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
@@ -580,8 +580,10 @@ pub struct ZtfFilterWorker {
     alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_collection: mongodb::Collection<Document>,
+    filter_collection: mongodb::Collection<Filter>,
     input_queue: String,
     output_topic: String,
+    filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
     filters_by_permission: HashMap<i32, Vec<String>>,
 }
@@ -607,17 +609,7 @@ impl FilterWorker for ZtfFilterWorker {
         // Create a hashmap of filters per programid (permissions)
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
-            let ztf_permissions = match filter.permissions.get(&Survey::Ztf) {
-                Some(perms) => perms,
-                None => {
-                    warn!(
-                        "Filter {} running on ZTF alerts has no ZTF permissions set, skipping",
-                        filter.id
-                    );
-                    continue;
-                }
-            };
-            for permission in ztf_permissions {
+            for permission in filter.permissions.get(&Survey::Ztf).into_iter().flatten() {
                 let entry = filters_by_permission
                     .entry(*permission)
                     .or_insert(Vec::new());
@@ -629,11 +621,39 @@ impl FilterWorker for ZtfFilterWorker {
             alert_pipeline: create_ztf_alert_pipeline(true),
             alert_collection,
             alert_cutout_collection,
+            filter_collection,
             input_queue,
             output_topic,
+            filter_ids,
             filters,
             filters_by_permission,
         })
+    }
+
+    async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
+        info!("refreshing ZTF filters from database");
+        let filters =
+            build_loaded_filters(&self.filter_ids, &Survey::Ztf, &self.filter_collection).await?;
+
+        let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
+        for filter in &filters {
+            for permission in filter.permissions.get(&Survey::Ztf).into_iter().flatten() {
+                let entry = filters_by_permission
+                    .entry(*permission)
+                    .or_insert(Vec::new());
+                entry.push(filter.id.clone());
+            }
+        }
+
+        self.filters = filters;
+        self.filters_by_permission = filters_by_permission;
+
+        info!(
+            "refreshed ZTF filters from database; now tracking {} filters",
+            self.filters.len()
+        );
+
+        Ok(())
     }
 
     fn survey() -> Survey {

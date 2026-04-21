@@ -4,7 +4,7 @@ receivers:
   otlp: # [^1]
     protocols:
       grpc:
-        endpoint: otel-collector:4317
+        endpoint: 0.0.0.0:4317
 
 processors:
   batch:
@@ -17,12 +17,23 @@ exporters:
 
 extensions:
   health_check:
-    endpoint: otel-collector:13133
+    endpoint: 0.0.0.0:13133
   zpages:
-    endpoint: otel-collector:55679
+    endpoint: 0.0.0.0:55679
 
 service:
   extensions: [health_check, zpages]
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+                without_type_suffix: true
+                without_units: true
   pipelines:
     metrics:
       receivers: [otlp]

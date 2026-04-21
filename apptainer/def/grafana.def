@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: prom/prometheus:latest
+From: grafana/grafana:11.5.2
 
 %startscript
     exec /bin/prometheus --web.enable-otlp-receiver \

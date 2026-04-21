@@ -30,7 +30,7 @@ FROM builder AS dev
 ARG KAFKA_VERSION=4.1.1
 ARG SCALA_VERSION=2.13
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsasl2-2 ca-certificates openjdk-25-jre-headless curl bash tar \
+    libsasl2-2 ca-certificates openjdk-25-jre-headless curl bash tar clang libclang-dev \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz \
     && tar -xzf /tmp/kafka.tgz -C /opt \
@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /tmp/kafka.tgz
 
 ENV PATH="/opt/kafka/bin:${PATH}"
+ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 
 RUN cargo install --locked cargo-watch
 

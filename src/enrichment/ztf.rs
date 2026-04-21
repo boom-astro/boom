@@ -2,6 +2,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
 use crate::enrichment::LsstMatch;
 use crate::utils::db::mongify;
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
     PhotometryMag, ZTF_ZP,
@@ -449,6 +450,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ciderphotometry_model,
             babamul,
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Ztf
     }
 
     fn input_queue_name(&self) -> String {

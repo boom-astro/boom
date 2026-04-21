@@ -14,7 +14,7 @@ use apache_avro::{
 };
 use async_trait::async_trait;
 use mongodb::bson::doc;
-use rand::Rng;
+use rand::RngExt;
 use redis::AsyncCommands;
 use std::fs;
 use std::io::Read;

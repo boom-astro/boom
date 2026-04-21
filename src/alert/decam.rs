@@ -205,7 +205,6 @@ struct AlertAuxForUpdate {
 }
 
 pub struct DecamAlertWorker {
-    stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
@@ -381,7 +380,6 @@ impl AlertWorker for DecamAlertWorker {
             db.collection(&lsst::ALERT_AUX_COLLECTION);
 
         let worker = DecamAlertWorker {
-            stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
             db,
             alert_collection,
@@ -395,16 +393,16 @@ impl AlertWorker for DecamAlertWorker {
         Ok(worker)
     }
 
-    fn stream_name(&self) -> String {
-        self.stream_name.clone()
+    fn survey() -> Survey {
+        Survey::Decam
     }
 
     fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", self.stream_name)
+        format!("{}_alerts_packets_queue", DecamAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_enrichment_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", DecamAlertWorker::survey())
     }
 
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
