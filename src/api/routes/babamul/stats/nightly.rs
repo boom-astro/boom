@@ -138,9 +138,6 @@ pub async fn get_nightly_stats(
     if end_date < start_date {
         return response::bad_request("end_date must be >= start_date");
     }
-    if (end_date - start_date).num_days() > 365 {
-        return response::bad_request("Date range too large, maximum is 365 days");
-    }
 
     let today = Utc::now().date_naive();
     let now_ts = Utc::now().timestamp() as f64;
