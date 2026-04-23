@@ -352,10 +352,6 @@ impl CutoutStorageBackend for MongoCutoutStorage {
         &self,
         candids: &[i64],
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
-        error!(
-            "Retrieving multiple cutouts for candids: {:?} (from MongoDB)",
-            candids
-        );
         let filter = mongodb::bson::doc! { "_id": { "$in": candids } };
         let mut cursor = self
             .collection

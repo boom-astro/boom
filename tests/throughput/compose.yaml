@@ -49,9 +49,6 @@ services:
     expose:
       - "9000"
       - "9001"
-    ports:
-      - "9000:9000" # For local testing; remove in production
-      - "9001:9001" # For local testing; remove in production
     environment:
       - RUSTFS_STORAGE_PATH=/data
       - RUSTFS_ACCESS_KEY=rustfsadmin

@@ -71,7 +71,10 @@ config["kafka"]["producer"]["server"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
+config["cutouts_storage"]["host"] = "mongo"
 config["cutouts_storage"]["name"] = "boom-benchmarking"
+config["cutouts_storage"]["username"] = "mongoadmin"
+config["cutouts_storage"]["password"] = "mongoadminsecret"
 config["babamul"]["enabled"] = True
 with open(
     os.path.join(args.boom_repo_dir, "tests", "throughput", "config.yaml"), "w"
