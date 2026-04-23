@@ -565,9 +565,9 @@ async fn build_test_filter_pipeline(
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
-    if candid_ids.len() > 100000 {
+    if candid_ids.len() > 100_000 {
         return Err(FilterError::InvalidFilterPipeline(
-            "maximum of 100000 candids allowed for filter test".to_string(),
+            "maximum of 100,000 candids allowed for filter test".to_string(),
         ));
     }
     if !candid_ids.is_empty() {
@@ -629,10 +629,11 @@ pub struct FilterTestRequest {
     pub end_jd: Option<f64>,
     #[schema(max_items = 1000)]
     pub object_ids: Option<Vec<String>>,
-    #[schema(max_items = 100000)]
+    #[schema(max_items = 100_000)]
     pub candids: Option<Vec<String>>,
     pub sort_by: Option<String>,
     pub sort_order: Option<SortOrder>,
+    #[schema(minimum = 1, maximum = 100_000)]
     pub limit: Option<u32>,
 }
 
@@ -721,8 +722,10 @@ pub async fn post_filter_test(
 
     // Add limit stage if specified, at the very end of the pipeline
     if let Some(limit) = body.limit {
-        if limit == 0 {
-            return response::bad_request("limit must be greater than 0");
+        if limit <= 0 || limit > 100_000 {
+            return response::bad_request(
+                "Limit must be a positive integer less than or equal to 100,000",
+            );
         }
         let limit_stage = doc! { "$limit": limit as i64 };
         test_pipeline.push(limit_stage);
