@@ -489,11 +489,9 @@ mod tests {
             .await
             .expect("Failed to build ZTF cutout storage");
         let test_candid = uuid::Uuid::new_v4().as_u128() as i64;
-        let test_object_id = format!("test_object_{}", test_candid);
 
         let cutouts = AlertCutout {
             candid: test_candid,
-            object_id: test_object_id.clone(),
             science: vec![1, 2, 3],
             template: vec![4, 5, 6],
             difference: vec![7, 8, 9],

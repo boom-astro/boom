@@ -108,8 +108,7 @@ pub fn insert_lsst_aux_pipeline_if_needed(
 /// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
 /// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
 /// * `alert_collection` - The MongoDB collection containing LSST alert documents.
-/// * `alert_cutout_collection` - The MongoDB collection containing LSST alert cutout documents.
-///
+/// * `alert_cutout_storage` -  The storage for LSST alert cutouts.
 /// # Returns
 /// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
@@ -146,8 +145,7 @@ pub async fn build_lsst_alerts(
 
     let mut candid_to_cutouts = alert_cutout_storage
         .retrieve_multiple_cutouts(&candids)
-        .await
-        .unwrap();
+        .await?;
 
     if candid_to_cutouts.len() != alerts.len() {
         let mut missing_cutouts_candids: Vec<&i64> = alerts
@@ -266,7 +264,9 @@ pub async fn build_lsst_alerts(
             });
         }
 
-        let cutouts = candid_to_cutouts.remove(&candid).unwrap();
+        let cutouts = candid_to_cutouts
+            .remove(&candid)
+            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let alert = Alert {
             candid: alert.candid,

@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use boom::{
     alert::{
         AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
@@ -52,7 +53,6 @@ async fn test_process_ztf_alert() {
     let cutout_storage = get_test_cutout_storage(&Survey::Ztf).await;
     let cutouts = cutout_storage.retrieve_cutouts(candid).await.unwrap();
     assert_eq!(cutouts.candid, candid);
-    assert_eq!(cutouts.object_id, object_id);
 
     // check that the aux collection was inserted
     let aux_collection_name = "ZTF_alerts_aux";

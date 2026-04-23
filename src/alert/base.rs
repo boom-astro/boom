@@ -1123,7 +1123,6 @@ pub trait AlertWorker {
     ) -> Result<ProcessAlertStatus, AlertError> {
         let cutouts = AlertCutout {
             candid: candid,
-            object_id: object_id.to_string(),
             science: cutout_science,
             template: cutout_template,
             difference: cutout_difference,

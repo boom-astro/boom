@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and s3 client
 use apache_avro::AvroSchema;
 use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
@@ -1215,7 +1216,6 @@ async fn test_babamul_lsst_with_ztf_match() {
     // Insert cutouts for the alert
     let cutouts = AlertCutout {
         candid: lsst_alert_id,
-        object_id: lsst_object_id.clone(),
         science: vec![1, 2, 3, 4, 5],
         template: vec![6, 7, 8, 9, 10],
         difference: vec![11, 12, 13, 14, 15],

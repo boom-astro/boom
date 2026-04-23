@@ -152,7 +152,7 @@ pub struct ZtfAlertEnriched {
 /// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
 /// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
 /// * `alert_collection` - The MongoDB collection containing ZTF alert documents.
-/// * `alert_cutout_storage` - The storage for ZTF alert cutout documents.
+/// * `alert_cutout_storage` - The storage for ZTF alert cutouts.
 
 ///
 /// # Returns
@@ -190,8 +190,7 @@ pub async fn build_ztf_alerts(
 
     let mut candid_to_cutouts = alert_cutout_storage
         .retrieve_multiple_cutouts(&candids)
-        .await
-        .unwrap();
+        .await?;
 
     if candid_to_cutouts.len() != alerts.len() {
         let mut missing_cutouts_candids: Vec<&i64> = alerts
@@ -366,7 +365,9 @@ pub async fn build_ztf_alerts(
             });
         }
 
-        let cutouts = candid_to_cutouts.remove(&candid).unwrap();
+        let cutouts = candid_to_cutouts
+            .remove(&candid)
+            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let alert = Alert {
             candid: alert.candid,

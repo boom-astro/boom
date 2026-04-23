@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus, LSST_ZTF_XMATCH_RADIUS, ZTF_DEC_RANGE},
     conf::{get_test_cutout_storage, get_test_db},
@@ -49,7 +50,6 @@ async fn test_process_lsst_alert() {
     let cutout_storage = get_test_cutout_storage(&Survey::Lsst).await;
     let cutouts = cutout_storage.retrieve_cutouts(candid).await.unwrap();
     assert_eq!(cutouts.candid, candid);
-    assert_eq!(cutouts.object_id, object_id);
 
     // check that the aux collection was inserted
     let aux_collection_name = "LSST_alerts_aux";

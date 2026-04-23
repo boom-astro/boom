@@ -1,6 +1,8 @@
 use crate::utils::enums::Survey;
 use futures::stream::{self, StreamExt};
 use serde::{de::Deserializer, Deserialize, Serialize};
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use std::collections::HashMap;
 use tracing::{debug, error, instrument, warn};
 
@@ -18,21 +20,22 @@ pub enum CutoutStorageError {
     CutoutRetrieveFailed,
     #[error("cutout delete failed")]
     CutoutDeleteFailed,
-    #[error("bincode serialization error: {0}")]
-    BincodeError(#[from] bincode::error::EncodeError),
-    #[error("bincode deserialization error: {0}")]
-    BincodeDecodeError(#[from] bincode::error::DecodeError),
+    #[error("json serialization error: {0}")]
+    JsonError(#[from] serde_json::Error),
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AlertCutout {
     pub candid: i64,
-    pub object_id: String,
-    #[serde(with = "serde_bytes")]
+    #[serde(rename = "cutoutScience")]
+    #[serde_as(as = "Base64")]
     pub science: Vec<u8>,
-    #[serde(with = "serde_bytes")]
+    #[serde(rename = "cutoutTemplate")]
+    #[serde_as(as = "Base64")]
     pub template: Vec<u8>,
-    #[serde(with = "serde_bytes")]
+    #[serde(rename = "cutoutDifference")]
+    #[serde_as(as = "Base64")]
     pub difference: Vec<u8>,
 }
 
@@ -40,8 +43,6 @@ pub struct AlertCutout {
 pub struct MongoAlertCutout {
     #[serde(rename = "_id")]
     pub candid: i64,
-    #[serde(rename = "objectId")]
-    pub object_id: String,
     #[serde(rename = "cutoutScience")]
     #[serde(serialize_with = "serialize_cutout")]
     #[serde(deserialize_with = "deserialize_cutout")]
@@ -80,7 +81,6 @@ impl From<MongoAlertCutout> for AlertCutout {
     fn from(mongo_cutout: MongoAlertCutout) -> Self {
         AlertCutout {
             candid: mongo_cutout.candid,
-            object_id: mongo_cutout.object_id,
             science: mongo_cutout.cutout_science,
             template: mongo_cutout.cutout_template,
             difference: mongo_cutout.cutout_difference,
@@ -93,7 +93,6 @@ impl From<AlertCutout> for MongoAlertCutout {
     fn from(cutout: AlertCutout) -> Self {
         MongoAlertCutout {
             candid: cutout.candid,
-            object_id: cutout.object_id,
             cutout_science: cutout.science,
             cutout_template: cutout.template,
             cutout_difference: cutout.difference,
@@ -146,10 +145,9 @@ async fn insert_alert_cutouts(
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
     let candid = cutouts.candid;
-    let key = format!("{}.cutouts", candid);
+    let key = format!("{}.json", candid);
 
-    // Serialize using bincode
-    let encoded = bincode::serde::encode_to_vec(cutouts, bincode::config::standard())?;
+    let encoded = serde_json::to_vec(&cutouts)?;
     let body = aws_sdk_s3::primitives::ByteStream::from(encoded);
 
     match s3_client
@@ -174,7 +172,7 @@ async fn retrieve_alert_cutouts(
     bucket_name: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<AlertCutout, CutoutStorageError> {
-    let key = format!("{}.cutouts", candid);
+    let key = format!("{}.json", candid);
 
     let resp = s3_client
         .get_object()
@@ -190,8 +188,7 @@ async fn retrieve_alert_cutouts(
         .await
         .map_err(|_| CutoutStorageError::CutoutRetrieveFailed)?;
     let bytes = data.into_bytes();
-    let (cutout_data, _): (AlertCutout, _) =
-        bincode::serde::decode_from_slice(&bytes, bincode::config::standard())?;
+    let cutout_data: AlertCutout = serde_json::from_slice(&bytes)?;
     Ok(cutout_data)
 }
 
@@ -201,7 +198,7 @@ async fn delete_alert_cutouts(
     bucket_name: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
-    let key = format!("{}.cutouts", candid);
+    let key = format!("{}.json", candid);
 
     match s3_client
         .delete_object()
