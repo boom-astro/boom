@@ -492,9 +492,9 @@ mod tests {
 
         let cutouts = AlertCutout {
             candid: test_candid,
-            science: vec![1, 2, 3],
-            template: vec![4, 5, 6],
-            difference: vec![7, 8, 9],
+            cutout_science: vec![1, 2, 3],
+            cutout_template: vec![4, 5, 6],
+            cutout_difference: vec![7, 8, 9],
         };
 
         ztf_cutouts_storage

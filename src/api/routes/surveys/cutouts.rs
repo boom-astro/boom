@@ -50,9 +50,9 @@ pub async fn get_cutouts(
         };
         let resp = serde_json::json!({
             "candid": candid,
-            "cutoutScience": BASE64_STANDARD.encode(&cutouts.science),
-            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.template),
-            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.difference),
+            "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
+            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
+            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
         });
         return response::ok(&format!("cutouts found for candid: {}", candid), resp);
     }
@@ -111,9 +111,9 @@ pub async fn get_cutouts(
 
         let resp = serde_json::json!({
             "candid": candid,
-            "cutoutScience": BASE64_STANDARD.encode(&cutouts.science),
-            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.template),
-            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.difference),
+            "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
+            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
+            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
         });
         return response::ok(&format!("cutouts found for objectId: {}", object_id), resp);
     }

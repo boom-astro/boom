@@ -1123,9 +1123,9 @@ pub trait AlertWorker {
     ) -> Result<ProcessAlertStatus, AlertError> {
         let cutouts = AlertCutout {
             candid: candid,
-            science: cutout_science,
-            template: cutout_template,
-            difference: cutout_difference,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
         };
         match cutout_storage.insert_cutouts(cutouts).await {
             Ok(_) => Ok(ProcessAlertStatus::Added(candid)),

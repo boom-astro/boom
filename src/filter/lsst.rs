@@ -280,9 +280,9 @@ pub async fn build_lsst_alerts(
                 .unwrap_or_else(Vec::new),
             classifications,
             photometry,
-            cutout_science: cutouts.science,
-            cutout_template: cutouts.template,
-            cutout_difference: cutouts.difference,
+            cutout_science: cutouts.cutout_science,
+            cutout_template: cutouts.cutout_template,
+            cutout_difference: cutouts.cutout_difference,
             survey: Survey::Lsst,
             survey_matches,
         };

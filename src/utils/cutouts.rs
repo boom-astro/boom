@@ -26,21 +26,21 @@ pub enum CutoutStorageError {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
-pub struct AlertCutout {
+pub struct S3AlertCutout {
     pub candid: i64,
+    #[serde_as(as = "Base64")]
     #[serde(rename = "cutoutScience")]
+    pub cutout_science: Vec<u8>,
     #[serde_as(as = "Base64")]
-    pub science: Vec<u8>,
     #[serde(rename = "cutoutTemplate")]
+    pub cutout_template: Vec<u8>,
     #[serde_as(as = "Base64")]
-    pub template: Vec<u8>,
     #[serde(rename = "cutoutDifference")]
-    #[serde_as(as = "Base64")]
-    pub difference: Vec<u8>,
+    pub cutout_difference: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct MongoAlertCutout {
+pub struct AlertCutout {
     #[serde(rename = "_id")]
     pub candid: i64,
     #[serde(rename = "cutoutScience")]
@@ -76,26 +76,26 @@ where
     binary.serialize(serializer)
 }
 
-// implement From for MongoAlertCutout to AlertCutout
-impl From<MongoAlertCutout> for AlertCutout {
-    fn from(mongo_cutout: MongoAlertCutout) -> Self {
+// implement From for S3AlertCutout to AlertCutout
+impl From<S3AlertCutout> for AlertCutout {
+    fn from(s3_cutout: S3AlertCutout) -> Self {
         AlertCutout {
-            candid: mongo_cutout.candid,
-            science: mongo_cutout.cutout_science,
-            template: mongo_cutout.cutout_template,
-            difference: mongo_cutout.cutout_difference,
+            candid: s3_cutout.candid,
+            cutout_science: s3_cutout.cutout_science,
+            cutout_template: s3_cutout.cutout_template,
+            cutout_difference: s3_cutout.cutout_difference,
         }
     }
 }
 
-// implement From for AlertCutout to MongoAlertCutout
-impl From<AlertCutout> for MongoAlertCutout {
+// implement From for AlertCutout to S3AlertCutout
+impl From<AlertCutout> for S3AlertCutout {
     fn from(cutout: AlertCutout) -> Self {
-        MongoAlertCutout {
+        S3AlertCutout {
             candid: cutout.candid,
-            cutout_science: cutout.science,
-            cutout_template: cutout.template,
-            cutout_difference: cutout.difference,
+            cutout_science: cutout.cutout_science,
+            cutout_template: cutout.cutout_template,
+            cutout_difference: cutout.cutout_difference,
         }
     }
 }
@@ -147,7 +147,7 @@ async fn insert_alert_cutouts(
     let candid = cutouts.candid;
     let key = format!("{}.json", candid);
 
-    let encoded = serde_json::to_vec(&cutouts)?;
+    let encoded = serde_json::to_vec(&S3AlertCutout::from(cutouts))?;
     let body = aws_sdk_s3::primitives::ByteStream::from(encoded);
 
     match s3_client
@@ -188,8 +188,8 @@ async fn retrieve_alert_cutouts(
         .await
         .map_err(|_| CutoutStorageError::CutoutRetrieveFailed)?;
     let bytes = data.into_bytes();
-    let cutout_data: AlertCutout = serde_json::from_slice(&bytes)?;
-    Ok(cutout_data)
+    let s3_cutout_data: S3AlertCutout = serde_json::from_slice(&bytes)?;
+    Ok(AlertCutout::from(s3_cutout_data))
 }
 
 #[instrument(skip_all, err)]
@@ -301,13 +301,13 @@ impl CutoutStorageBackend for S3CutoutStorage {
 
 pub struct MongoCutoutStorage {
     // Placeholder for MongoDB client and collection
-    collection: mongodb::Collection<MongoAlertCutout>,
+    collection: mongodb::Collection<AlertCutout>,
 }
 
 impl MongoCutoutStorage {
     pub fn new(db: mongodb::Database, survey: &Survey) -> Self {
         let collection_name = format!("{}_alerts_cutouts", survey);
-        let collection = db.collection::<MongoAlertCutout>(&collection_name);
+        let collection = db.collection::<AlertCutout>(&collection_name);
         Self { collection }
     }
 }
@@ -318,11 +318,7 @@ impl CutoutStorageBackend for MongoCutoutStorage {
     async fn insert_cutouts(&self, cutouts: AlertCutout) -> Result<(), CutoutStorageError> {
         let candid = cutouts.candid;
 
-        match self
-            .collection
-            .insert_one(MongoAlertCutout::from(cutouts))
-            .await
-        {
+        match self.collection.insert_one(AlertCutout::from(cutouts)).await {
             Ok(_) => Ok(()),
             Err(e) => match *e.kind {
                 mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
