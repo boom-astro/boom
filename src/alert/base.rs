@@ -1,4 +1,5 @@
 use crate::conf::AppConfig;
+use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
 use crate::utils::worker::WorkerCmd;
 use crate::{
@@ -1118,19 +1119,16 @@ pub trait AlertWorker {
         cutout_science: Vec<u8>,
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
-        // collection: &Collection<AlertCutout>,
         cutout_storage: &CutoutStorage,
     ) -> Result<ProcessAlertStatus, AlertError> {
-        match cutout_storage
-            .insert_cutouts(
-                candid,
-                object_id,
-                cutout_science,
-                cutout_template,
-                cutout_difference,
-            )
-            .await
-        {
+        let cutouts = AlertCutout {
+            candid: candid,
+            object_id: object_id.to_string(),
+            science: cutout_science,
+            template: cutout_template,
+            difference: cutout_difference,
+        };
+        match cutout_storage.insert_cutouts(cutouts).await {
             Ok(_) => Ok(ProcessAlertStatus::Added(candid)),
             Err(CutoutStorageError::CutoutAlreadyExists(_)) => {
                 Ok(ProcessAlertStatus::Exists(candid))

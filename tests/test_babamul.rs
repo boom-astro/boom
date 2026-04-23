@@ -1207,27 +1207,22 @@ async fn test_babamul_lsst_with_ztf_match() {
         .await
         .expect("Failed to insert LSST alert");
 
+    let cutout_storage = config
+        .build_cutout_storage(&boom::utils::enums::Survey::Lsst)
+        .await
+        .expect("Failed to build cutout storage");
+
     // Insert cutouts for the alert
-    let cutout_doc = AlertCutout {
+    let cutouts = AlertCutout {
         candid: lsst_alert_id,
         object_id: lsst_object_id.clone(),
         science: vec![1, 2, 3, 4, 5],
         template: vec![6, 7, 8, 9, 10],
         difference: vec![11, 12, 13, 14, 15],
     };
-    let cutout_storage = config
-        .build_cutout_storage(&boom::utils::enums::Survey::Lsst)
-        .await
-        .expect("Failed to build cutout storage");
 
     cutout_storage
-        .insert_cutouts(
-            lsst_alert_id,
-            &lsst_object_id,
-            cutout_doc.science,
-            cutout_doc.template,
-            cutout_doc.difference,
-        )
+        .insert_cutouts(cutouts)
         .await
         .expect("Failed to insert LSST cutout");
 

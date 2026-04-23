@@ -88,6 +88,19 @@ impl From<MongoAlertCutout> for AlertCutout {
     }
 }
 
+// implement From for AlertCutout to MongoAlertCutout
+impl From<AlertCutout> for MongoAlertCutout {
+    fn from(cutout: AlertCutout) -> Self {
+        MongoAlertCutout {
+            candid: cutout.candid,
+            object_id: cutout.object_id,
+            cutout_science: cutout.science,
+            cutout_template: cutout.template,
+            cutout_difference: cutout.difference,
+        }
+    }
+}
+
 // have a function that creates a bucket, if it doesn't exist yet
 async fn create_bucket_if_not_exists(
     bucket_name: &str,
@@ -128,27 +141,15 @@ async fn create_bucket_if_not_exists(
 
 #[instrument(skip_all, err)]
 async fn insert_alert_cutouts(
-    candid: i64,
-    object_id: &str,
-    cutout_science: Vec<u8>,
-    cutout_template: Vec<u8>,
-    cutout_difference: Vec<u8>,
-    // cutout_storage: &CutoutStorage,
+    cutouts: AlertCutout,
     bucket_name: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
-    let alert_cutout = AlertCutout {
-        candid,
-        object_id: object_id.to_string(),
-        science: cutout_science,
-        template: cutout_template,
-        difference: cutout_difference,
-    };
-
-    let key = format!("{}.cutouts", alert_cutout.candid);
+    let candid = cutouts.candid;
+    let key = format!("{}.cutouts", candid);
 
     // Serialize using bincode
-    let encoded = bincode::serde::encode_to_vec(alert_cutout, bincode::config::standard())?;
+    let encoded = bincode::serde::encode_to_vec(cutouts, bincode::config::standard())?;
     let body = aws_sdk_s3::primitives::ByteStream::from(encoded);
 
     match s3_client
@@ -219,14 +220,7 @@ async fn delete_alert_cutouts(
 
 #[async_trait::async_trait]
 pub trait CutoutStorageBackend {
-    async fn insert_cutouts(
-        &self,
-        candid: i64,
-        object_id: &str,
-        cutout_science: Vec<u8>,
-        cutout_template: Vec<u8>,
-        cutout_difference: Vec<u8>,
-    ) -> Result<(), CutoutStorageError>;
+    async fn insert_cutouts(&self, cutouts: AlertCutout) -> Result<(), CutoutStorageError>;
 
     async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError>;
 
@@ -265,24 +259,8 @@ impl S3CutoutStorage {
 #[async_trait::async_trait]
 impl CutoutStorageBackend for S3CutoutStorage {
     #[instrument(skip_all, err)]
-    async fn insert_cutouts(
-        &self,
-        candid: i64,
-        object_id: &str,
-        cutout_science: Vec<u8>,
-        cutout_template: Vec<u8>,
-        cutout_difference: Vec<u8>,
-    ) -> Result<(), CutoutStorageError> {
-        insert_alert_cutouts(
-            candid,
-            object_id,
-            cutout_science,
-            cutout_template,
-            cutout_difference,
-            &self.bucket_name,
-            &self.s3_client,
-        )
-        .await
+    async fn insert_cutouts(&self, cutouts: AlertCutout) -> Result<(), CutoutStorageError> {
+        insert_alert_cutouts(cutouts, &self.bucket_name, &self.s3_client).await
     }
 
     #[instrument(skip_all, err)]
@@ -340,23 +318,14 @@ impl MongoCutoutStorage {
 #[async_trait::async_trait]
 impl CutoutStorageBackend for MongoCutoutStorage {
     #[instrument(skip_all, err)]
-    async fn insert_cutouts(
-        &self,
-        candid: i64,
-        object_id: &str,
-        cutout_science: Vec<u8>,
-        cutout_template: Vec<u8>,
-        cutout_difference: Vec<u8>,
-    ) -> Result<(), CutoutStorageError> {
-        let alert_cutout = MongoAlertCutout {
-            candid,
-            object_id: object_id.to_string(),
-            cutout_science,
-            cutout_template,
-            cutout_difference,
-        };
+    async fn insert_cutouts(&self, cutouts: AlertCutout) -> Result<(), CutoutStorageError> {
+        let candid = cutouts.candid;
 
-        match self.collection.insert_one(alert_cutout).await {
+        match self
+            .collection
+            .insert_one(MongoAlertCutout::from(cutouts))
+            .await
+        {
             Ok(_) => Ok(()),
             Err(e) => match *e.kind {
                 mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
@@ -437,37 +406,10 @@ pub enum CutoutStorage {
 }
 
 impl CutoutStorage {
-    pub async fn insert_cutouts(
-        &self,
-        candid: i64,
-        object_id: &str,
-        cutout_science: Vec<u8>,
-        cutout_template: Vec<u8>,
-        cutout_difference: Vec<u8>,
-    ) -> Result<(), CutoutStorageError> {
+    pub async fn insert_cutouts(&self, cutouts: AlertCutout) -> Result<(), CutoutStorageError> {
         match self {
-            CutoutStorage::S3(storage) => {
-                storage
-                    .insert_cutouts(
-                        candid,
-                        object_id,
-                        cutout_science,
-                        cutout_template,
-                        cutout_difference,
-                    )
-                    .await
-            }
-            CutoutStorage::Mongo(storage) => {
-                storage
-                    .insert_cutouts(
-                        candid,
-                        object_id,
-                        cutout_science,
-                        cutout_template,
-                        cutout_difference,
-                    )
-                    .await
-            }
+            CutoutStorage::S3(storage) => storage.insert_cutouts(cutouts).await,
+            CutoutStorage::Mongo(storage) => storage.insert_cutouts(cutouts).await,
         }
     }
     pub async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {

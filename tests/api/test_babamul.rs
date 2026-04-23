@@ -11,6 +11,7 @@ mod tests {
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
+    use boom::utils::cutouts::AlertCutout;
     use boom::utils::enums::Survey;
     use boom::utils::testing::{
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
@@ -490,14 +491,16 @@ mod tests {
         let test_candid = uuid::Uuid::new_v4().as_u128() as i64;
         let test_object_id = format!("test_object_{}", test_candid);
 
+        let cutouts = AlertCutout {
+            candid: test_candid,
+            object_id: test_object_id.clone(),
+            science: vec![1, 2, 3],
+            template: vec![4, 5, 6],
+            difference: vec![7, 8, 9],
+        };
+
         ztf_cutouts_storage
-            .insert_cutouts(
-                test_candid,
-                &test_object_id,
-                vec![1, 2, 3],
-                vec![4, 5, 6],
-                vec![7, 8, 9],
-            )
+            .insert_cutouts(cutouts)
             .await
             .expect("Failed to store test cutout");
 
