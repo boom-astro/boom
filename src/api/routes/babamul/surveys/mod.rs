@@ -5,6 +5,7 @@ pub mod schemas;
 
 pub use alerts::cone_search_alerts;
 pub use alerts::get_alerts;
+pub use alerts::moc_search_alerts;
 pub use cutouts::get_cutouts;
 pub use objects::cone_search_objects;
 pub use objects::get_object;
