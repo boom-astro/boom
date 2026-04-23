@@ -5,9 +5,10 @@ use boom::{
     },
     conf::{get_test_cutout_storage, get_test_db},
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
-    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, ZtfFilterWorker},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, Origin, ZtfFilterWorker},
     utils::{
         enums::Survey,
+        lightcurves::{flux2mag, ZTF_ZP},
         testing::{
             decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
             remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
@@ -444,6 +445,58 @@ async fn test_filter_ztf_alert() {
     assert_eq!(alert.object_id, object_id);
     assert_eq!(alert.photometry.len(), 21); // prv_candidates + prv_nondetections + fp_hists
 
+    // let's validate that the photometry points were correctly parsed, and that the flux and flux_err values are consistent with the original values in the alert
+    let fp_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460447.9202778 && p.origin == Origin::ForcedPhot)
+        .unwrap();
+    assert!(fp_point.flux.is_some());
+    let flux = fp_point.flux.unwrap();
+    assert!(flux < 0.0); // the first point is a negative detection, so the flux should be negative
+    let flux_err = fp_point.flux_err;
+    let band = &fp_point.band;
+    assert_eq!(band, "ztfg");
+
+    // we compute magpsf and magpsf_err from the flux values from the alert packet
+    let magzpsci = 26.1352;
+    let forcediffimflux = -11859.88;
+    let forcediffimfluxunc = 25.300741;
+    let (magpsf_forcediffimflux, magpsf_err) =
+        flux2mag(-forcediffimflux, forcediffimfluxunc, magzpsci);
+
+    // then we compute magpsf and magpsf_err from the flux and flux_err values
+    // we compute in the alert worker (at a fixed ZP)
+    let (magpsf, magpsf_err_from_flux) =
+        flux2mag(-flux as f32 * 1e-9, flux_err as f32 * 1e-9, ZTF_ZP);
+
+    // they should be consistent within a small tolerance
+    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
+    assert!((magpsf_err - magpsf_err_from_flux).abs() < 1e-6);
+
+    // let's do a similar validation for the first prv_candidates point, where the ZP is fixed at ZTF_ZP
+    let alert_points = alert
+        .photometry
+        .iter()
+        .filter(|p| p.origin == Origin::Alert && p.flux.is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        !alert_points.is_empty(),
+        "No Alert photometry points with flux found"
+    );
+    let prv_candidate_point = alert
+        .photometry
+        .iter()
+        .find(|p| p.jd == 2460423.9562384 && p.origin == Origin::Alert && p.flux.is_some())
+        .unwrap();
+    assert!(prv_candidate_point.flux.is_some());
+    let flux = prv_candidate_point.flux.unwrap();
+    let flux_err = prv_candidate_point.flux_err;
+    let (magpsf_prv_candidate, magpsf_err_prv_candidate) =
+        flux2mag((flux.abs() * 1e-9) as f32, (flux_err * 1e-9) as f32, ZTF_ZP);
+    assert!((magpsf_prv_candidate - 16.8002).abs() < 1e-4);
+    assert!((magpsf_err_prv_candidate - 0.1788).abs() < 1e-4);
+
     let filter_passed = alert
         .filters
         .iter()
@@ -452,9 +505,108 @@ async fn test_filter_ztf_alert() {
     assert_eq!(filter_passed.annotations, "{\"mag_now\":14.91}");
 
     let classifications = &alert.classifications;
-    assert_eq!(classifications.len(), 6);
+    // the 5 ACAI scores, the BTSBot score, rb, drb, sgscore = 9 values in total
+    assert_eq!(classifications.len(), 9);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Ztf);
+
+    // verify cutouts are non-empty
+    assert!(
+        !alert.cutout_science.is_empty(),
+        "cutout_science should not be empty"
+    );
+    assert!(
+        !alert.cutout_template.is_empty(),
+        "cutout_template should not be empty"
+    );
+    assert!(
+        !alert.cutout_difference.is_empty(),
+        "cutout_difference should not be empty"
+    );
 
     // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert_with_lsst_match() {
+    // Place the ZTF alert within the LSST observable dec range so cross-survey
+    // matching is attempted.
+    let ztf_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Ztf).dec(LSST_DEC_RANGE.1 - 10.0);
+
+    let (candid, object_id, ra, dec, bytes_content) = ztf_alert_randomizer.clone().get().await;
+
+    // Insert an LSST alert close enough to the ZTF alert to trigger an alias.
+    let mut lsst_worker = lsst_alert_worker().await;
+    let (_, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec + 0.9 * ZTF_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+    lsst_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
+    // Process the ZTF alert – it should pick up the LSST alias.
+    let mut alert_worker = ztf_alert_worker().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    // Enrich the ZTF alert to satisfy the filter's prv_candidates requirement.
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let enrichment_output = enrichment_worker.process_alerts(&[candid]).await.unwrap();
+    assert_eq!(enrichment_output.len(), 1);
+    let candid_programid_str = &enrichment_output[0];
+
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[candid_programid_str.clone()])
+        .await;
+
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    assert!(result.is_ok(), "Filter failed: {:?}", result.err());
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, candid);
+    assert_eq!(alert.object_id, object_id);
+
+    // The LSST survey match must be populated.
+    let lsst_match = alert
+        .survey_matches
+        .lsst
+        .as_ref()
+        .expect("survey_matches.lsst should be Some when an LSST alias exists");
+    assert_eq!(lsst_match.object_id, lsst_object_id);
+    // LSST test data has 1 prv_candidate and 0 fp_hists → 1 photometry point.
+    assert_eq!(lsst_match.photometry.len(), 1);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Ztf);
+
+    // verify cutouts are non-empty
+    assert!(
+        !alert.cutout_science.is_empty(),
+        "cutout_science should not be empty"
+    );
+    assert!(
+        !alert.cutout_template.is_empty(),
+        "cutout_template should not be empty"
+    );
+    assert!(
+        !alert.cutout_difference.is_empty(),
+        "cutout_difference should not be empty"
+    );
+
+    // verify the alert serialises cleanly to Avro
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 }

@@ -2,6 +2,7 @@ use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
@@ -121,6 +122,10 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         })
     }
 
+    fn survey() -> Survey {
+        Survey::Decam
+    }
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }
@@ -149,6 +154,8 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             return Ok(vec![]);
         }
 
+        let now = flare::Time::now().to_jd();
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -161,6 +168,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             let update_alert_document = doc! {
                 "$set": {
                     "properties": mongify(&properties),
+                    "updated_at": now,
                 }
             };
 

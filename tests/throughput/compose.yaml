@@ -5,7 +5,6 @@ networks:
 
 volumes:
   mongodb:
-  kafka_data:
 
 services:
   mongo:
@@ -33,9 +32,10 @@ services:
     networks:
       - boom
     volumes:
-      - ${PWD}/tests/throughput/mongo-init.sh:/mongo-init.sh
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/mongo-init.sh:/mongo-init.sh
       - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
-      - ${PWD}/tests/throughput/cats150.filter.json:/cats150.filter.json
+      - ${PWD}/data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz:/boom_throughput.ZTF_alerts_aux.dump.gz
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/cats150.filter.json:/cats150.filter.json
     environment:
       - DB_NAME=boom-benchmarking
       - DB_ADD_URI=
@@ -116,12 +116,10 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
-      KAFKA_NUM_PARTITIONS: 15
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-15}
       # Limit heap + use G1GC with fewer threads (auto-tuned based on heap size)
       KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
       KAFKA_OPTS: "-Djava.security.egd=file:/dev/./urandom"
-    volumes:
-      - kafka_data:/var/lib/kafka/data
     healthcheck:
       test: /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:9092
       interval: 10s
@@ -130,8 +128,8 @@ services:
     image: boom/boom-benchmarking:latest
     hostname: producer
     build:
-      dockerfile: ${PWD}/Dockerfile
-      context: ${PWD}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
+      context: ${BOOM_REPO_ROOT:?Variable not set}
       pull: false
     command:
       - /app/kafka_producer
@@ -150,18 +148,18 @@ services:
     # Mount local data directory so we don't need to redownload
     volumes:
       - ${PWD}/data/alerts:/app/data/alerts
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   consumer:
     image: boom-astro/boom:latest
     hostname: consumer
     build:
-      dockerfile: ${PWD}/Dockerfile
-      context: ${PWD}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
+      context: ${BOOM_REPO_ROOT:?Variable not set}
       pull: false
     networks:
       - boom
     # have it sleep 5 seconds to allow kafka to finish producing
-    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 public"]
+    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public"]
     environment:
       RUST_LOG: debug,ort=error
     depends_on:
@@ -174,13 +172,13 @@ services:
       mongo-init:
         condition: service_completed_successfully
     volumes:
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   scheduler:
     image: boom-astro/boom:latest
     hostname: scheduler
     build:
-      dockerfile: ${PWD}/Dockerfile
-      context: ${PWD}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
+      context: ${BOOM_REPO_ROOT:?Variable not set}
       pull: false
     command:
       - /app/scheduler
@@ -201,6 +199,6 @@ services:
       rustfs:
         condition: service_healthy
     volumes:
-      - ${PWD}/tests/throughput/config.yaml:/app/config.yaml
-      - ${PWD}/data/models:/app/data/models:ro
-      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+      - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
+      - ${BOOM_REPO_ROOT:?Variable not set}/data/models:/app/data/models:ro
+      - ${BOOM_REPO_ROOT:?Variable not set}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro

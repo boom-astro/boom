@@ -130,7 +130,7 @@ pub fn doc2json(docs: Vec<Document>) -> Vec<serde_json::Value> {
         .filter_map(|doc| match serde_json::to_value(doc) {
             Ok(value) => Some(value),
             Err(e) => {
-                println!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+                tracing::error!("Serialization error: {}", e); // TODO: replace with tracing once integrated
                 None
             }
         })

@@ -1,17 +1,18 @@
+use mongodb::bson::{doc, Document};
+use std::collections::HashMap;
+use tracing::{info, instrument, warn};
+
 use crate::conf::AppConfig;
+use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment};
 use crate::filter::{
     build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
     update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Classification, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
-    Origin, Photometry,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
-use crate::utils::db::{fetch_timeseries_op, get_array_dict_element, get_array_element};
+use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
-use futures::stream::StreamExt;
-use mongodb::bson::{doc, Document};
-use std::collections::HashMap;
-use tracing::{info, instrument};
 
 /// For a filter running on another survey (e.g., ZTF), determine if we need to
 /// fetch LSST auxiliary data (prv_candidates, fp_hists) based on the fields
@@ -105,144 +106,174 @@ pub fn insert_lsst_aux_pipeline_if_needed(
 ///
 /// # Arguments
 /// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
+/// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
 /// * `alert_collection` - The MongoDB collection containing LSST alert documents.
+/// * `alert_cutout_collection` - The MongoDB collection containing LSST alert cutout documents.
 ///
 /// # Returns
 /// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
 pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
+    alert_pipeline: &Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
     alert_cutout_storage: &CutoutStorage,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
-    let pipeline = vec![
-        doc! {
-            "$match": {
-                "_id": { "$in": &candids }
-            }
-        },
-        doc! {
-            "$project": {
-                "objectId": 1,
-                "jd": "$candidate.jd",
-                "ra": "$candidate.ra",
-                "dec": "$candidate.dec",
-                "reliability": "$candidate.reliability",
-            }
-        },
-        doc! {
-            "$lookup": {
-                "from": "LSST_alerts_aux",
-                "localField": "objectId",
-                "foreignField": "_id",
-                "as": "aux"
-            }
-        },
-        doc! {
-            "$project": {
-                "objectId": 1,
-                "jd": 1,
-                "ra": 1,
-                "dec": 1,
-                "prv_candidates": get_array_element("aux.prv_candidates"),
-                "fp_hists": get_array_element("aux.fp_hists"),
-            }
-        },
-    ];
+    if candids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let alerts: Vec<LsstAlertForEnrichment> =
+        fetch_alerts(&candids, &alert_pipeline, alert_collection)
+            .await
+            .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
+
+    if alerts.len() != candids.len() {
+        let nb_total = candids.len();
+        let mut missing_candids: Vec<&i64> = candids
+            .iter()
+            .filter(|c| !alerts.iter().any(|a| a.candid == **c))
+            .collect();
+        missing_candids.sort();
+        warn!(
+            "Only fetched {} alerts from {} candids. Missing candids: {:?}",
+            alerts.len(),
+            nb_total,
+            missing_candids
+        );
+    }
 
     let mut candid_to_cutouts = alert_cutout_storage
         .retrieve_multiple_cutouts(&candids)
         .await
         .unwrap();
 
-    // Execute the aggregation pipeline
-    let mut cursor = alert_collection.aggregate(pipeline).await?;
+    if candid_to_cutouts.len() != alerts.len() {
+        let mut missing_cutouts_candids: Vec<&i64> = alerts
+            .iter()
+            .filter(|a| !candid_to_cutouts.contains_key(&a.candid))
+            .map(|a| &a.candid)
+            .collect();
+        missing_cutouts_candids.sort();
+        warn!(
+            "Only fetched cutouts for {} alerts from {} candids. Missing cutouts for candids: {:?}",
+            candid_to_cutouts.len(),
+            alerts.len(),
+            missing_cutouts_candids
+        );
+        return Err(FilterWorkerError::MissingCutoutsBatch(
+            missing_cutouts_candids.len(),
+        ));
+    }
 
     let mut alerts_output = Vec::new();
-    while let Some(alert_document) = cursor.next().await {
-        let alert_document = alert_document?;
-        let candid = alert_document.get_i64("_id")?;
-        let object_id = alert_document.get_str("objectId")?.to_string();
-        let jd = alert_document.get_f64("jd")?;
-        let ra = alert_document.get_f64("ra")?;
-        let dec = alert_document.get_f64("dec")?;
+    for alert in alerts {
+        let candid = alert.candid;
 
-        // let's create the array of photometry
+        let mut classifications = Vec::new();
+        if let Some(reliability) = alert.candidate.dia_source.reliability {
+            classifications.push(Classification {
+                classifier: "reliability".to_string(),
+                score: reliability as f32,
+                distance_arcsec: None,
+            });
+        }
 
         let mut photometry = Vec::new();
-        for doc in alert_document.get_array("prv_candidates")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            let flux = doc.get_f64("psfFlux")?; // in nJy
-            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
-            let band = doc.get_str("band")?.to_string();
-            let ra = doc.get_f64("ra").ok(); // optional, might not be present
-            let dec = doc.get_f64("dec").ok(); // optional, might not be present
-
+        for doc in alert.prv_candidates.iter() {
             photometry.push(Photometry {
-                jd,
-                flux: Some(flux),
-                flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
+                jd: doc.jd,
+                flux: doc.flux,
+                flux_err: doc.flux_err,
+                band: format!("lsst{}", doc.band),
                 origin: Origin::Alert,
                 programid: 1, // only one public stream for LSST
                 survey: Survey::Lsst,
-                ra,
-                dec,
+                ra: doc.ra,
+                dec: doc.dec,
             });
         }
-
-        for doc in alert_document.get_array("fp_hists")?.iter() {
-            let doc = match doc.as_document() {
-                Some(doc) => doc,
-                None => continue, // skip if not a document
-            };
-            let jd = doc.get_f64("jd")?;
-            // flux may be None in forced photometry
-            let flux = doc.get_f64("psfFlux").ok(); // in nJy
-            let flux_err = doc.get_f64("psfFluxErr")?; // in nJy
-            let band = doc.get_str("band")?.to_string();
-            let ra = doc.get_f64("ra").ok(); // optional, might not be present
-            let dec = doc.get_f64("dec").ok(); // optional, might not be present
-
+        for doc in alert.fp_hists.iter() {
             photometry.push(Photometry {
-                jd,
-                flux,
-                flux_err,
-                band: format!("lsst{}", band),
-                zero_point: 8.9,
+                jd: doc.jd,
+                flux: doc.flux,
+                flux_err: doc.flux_err,
+                band: format!("lsst{}", doc.band),
                 origin: Origin::ForcedPhot,
                 programid: 1, // only one public stream for LSST
                 survey: Survey::Lsst,
-                ra,
-                dec,
+                ra: doc.ra,
+                dec: doc.dec,
             });
         }
 
-        // sort the photometry by jd ascending
         photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
-        let mut classifications = Vec::new();
-        if let Some(rb) = alert_document.get_f64("reliability").ok() {
-            classifications.push(Classification {
-                classifier: "reliability".to_string(),
-                score: rb,
+        let mut survey_matches = SurveyMatches {
+            ztf: None,
+            lsst: None,
+        };
+        if let Some(ztf_match) = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref()) {
+            let mut ztf_photometry = Vec::new();
+            for doc in ztf_match.prv_candidates.iter() {
+                ztf_photometry.push(Photometry {
+                    jd: doc.jd,
+                    flux: doc.flux,
+                    flux_err: doc.flux_err,
+                    band: format!("ztf{}", doc.band),
+                    origin: Origin::Alert,
+                    programid: doc.programid,
+                    survey: Survey::Ztf,
+                    ra: doc.ra,
+                    dec: doc.dec,
+                });
+            }
+            for doc in ztf_match.prv_nondetections.iter() {
+                ztf_photometry.push(Photometry {
+                    jd: doc.jd,
+                    flux: None,
+                    flux_err: doc.flux_err,
+                    band: format!("ztf{}", doc.band),
+                    origin: Origin::Alert,
+                    programid: doc.programid,
+                    survey: Survey::Ztf,
+                    ra: None,
+                    dec: None,
+                });
+            }
+            for doc in ztf_match.fp_hists.iter() {
+                ztf_photometry.push(Photometry {
+                    jd: doc.jd,
+                    flux: doc.flux,
+                    flux_err: doc.flux_err,
+                    band: format!("ztf{}", doc.band),
+                    origin: Origin::ForcedPhot,
+                    programid: doc.programid,
+                    survey: Survey::Ztf,
+                    ra: None,
+                    dec: None,
+                });
+            }
+
+            ztf_photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+
+            survey_matches.ztf = Some(SurveyMatch {
+                object_id: ztf_match.object_id.clone(),
+                ra: ztf_match.ra,
+                dec: ztf_match.dec,
+                photometry: ztf_photometry,
             });
         }
 
         let cutouts = candid_to_cutouts.remove(&candid).unwrap();
 
         let alert = Alert {
-            candid,
-            object_id,
-            jd,
-            ra,
-            dec,
+            candid: alert.candid,
+            object_id: alert.object_id,
+            jd: alert.candidate.jd,
+            ra: alert.candidate.dia_source.ra,
+            dec: alert.candidate.dia_source.dec,
             filters: alerts_with_filter_results
                 .get(&candid)
                 .cloned()
@@ -253,12 +284,10 @@ pub async fn build_lsst_alerts(
             cutout_template: cutouts.template,
             cutout_difference: cutouts.difference,
             survey: Survey::Lsst,
+            survey_matches,
         };
-        alerts_output.push(alert);
-    }
 
-    if candids.len() != alerts_output.len() {
-        return Err(FilterWorkerError::AlertNotFound);
+        alerts_output.push(alert);
     }
 
     Ok(alerts_output)
@@ -396,10 +425,13 @@ pub async fn build_lsst_filter_pipeline(
 }
 
 pub struct LsstFilterWorker {
+    alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
+    filter_collection: mongodb::Collection<Filter>,
     input_queue: String,
     output_topic: String,
+    filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
 }
 
@@ -422,12 +454,26 @@ impl FilterWorker for LsstFilterWorker {
         let filters = build_loaded_filters(&filter_ids, &Survey::Lsst, &filter_collection).await?;
 
         Ok(LsstFilterWorker {
+            alert_pipeline: create_lsst_alert_pipeline(),
             alert_collection,
             alert_cutout_storage,
+            filter_collection,
             input_queue,
             output_topic,
+            filter_ids,
             filters,
         })
+    }
+
+    async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
+        info!("refreshing LSST filters from database");
+        self.filters =
+            build_loaded_filters(&self.filter_ids, &Survey::Lsst, &self.filter_collection).await?;
+        info!(
+            "refreshed LSST filters from database; now tracking {} filters",
+            self.filters.len()
+        );
+        Ok(())
     }
 
     fn survey() -> Survey {
@@ -499,6 +545,7 @@ impl FilterWorker for LsstFilterWorker {
 
         let alerts = build_lsst_alerts(
             &results_map,
+            &self.alert_pipeline,
             &self.alert_collection,
             &self.alert_cutout_storage,
         )

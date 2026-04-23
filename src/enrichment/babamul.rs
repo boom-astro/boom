@@ -4,129 +4,281 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
-    IS_STELLAR_DISTANCE_THRESH_ARCSEC,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
-use crate::enrichment::{EnrichmentWorkerError, LsstPhotometry, ZtfPhotometry};
-use crate::utils::derive_avro_schema::SerdavroWriter;
+use crate::enrichment::EnrichmentWorkerError;
+use crate::scheduler::record_kafka_alert_published;
+use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
-use std::collections::HashMap;
-use tracing::{info, instrument};
+use rdkafka::admin::{
+    AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
+};
+use rdkafka::client::DefaultClientContext;
+use rdkafka::error::RDKafkaErrorCode;
+use rdkafka::producer::Producer;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tracing::instrument;
 
-// Wrapper around cutout bytes, so we can implement
-// AvroSchemaComponent for it, to serialize as bytes in Avro
-#[derive(Debug, serde::Deserialize)]
-pub struct CutoutBytes(Vec<u8>);
+const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
+const LSST_MIN_RELIABILITY: f32 = 0.0; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
+const ZTF_MIN_DRB: f32 = 0.2;
 
-// Wrapper for cross_matches that implements AvroSchemaComponent as a no-op
-// since we don't want to serialize it to Avro
-#[derive(Debug, Clone, Default)]
-pub struct CrossMatchesWrapper(
-    pub Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
-);
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlertPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: f64, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+    pub ra: f64,
+    pub dec: f64,
+}
 
-impl apache_avro::schema::derive::AvroSchemaComponent for CrossMatchesWrapper {
-    fn get_schema_in_ctxt(
-        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
-        _enclosing_namespace: &apache_avro::schema::Namespace,
-    ) -> apache_avro::Schema {
-        // Return null schema since this field is never serialized
-        apache_avro::Schema::Null
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NonDetectionPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForcedPhotometry {
+    pub jd: f64,
+    #[serde(rename = "psfFlux")]
+    pub flux: Option<f64>, // in nJy
+    #[serde(rename = "psfFluxErr")]
+    pub flux_err: f64, // in nJy
+    pub band: Band,
+}
+
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct BabamulSurveyMatch {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub prv_nondetections: Vec<NonDetectionPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
+}
+
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct BabamulSurveyMatches {
+    pub ztf: Option<BabamulSurveyMatch>,
+    pub lsst: Option<BabamulSurveyMatch>,
+}
+
+impl Default for BabamulSurveyMatches {
+    fn default() -> Self {
+        BabamulSurveyMatches {
+            ztf: None,
+            lsst: None,
+        }
     }
 }
 
-impl apache_avro::schema::derive::AvroSchemaComponent for CutoutBytes {
-    fn get_schema_in_ctxt(
-        _named_schemas: &mut HashMap<apache_avro::schema::Name, apache_avro::schema::Schema>,
-        _enclosing_namespace: &apache_avro::schema::Namespace,
-    ) -> apache_avro::Schema {
-        apache_avro::Schema::Bytes
+impl From<crate::enrichment::ztf::ZtfMatch> for BabamulSurveyMatch {
+    fn from(ztf_match: crate::enrichment::ztf::ZtfMatch) -> Self {
+        BabamulSurveyMatch {
+            object_id: ztf_match.object_id,
+            ra: ztf_match.ra,
+            dec: ztf_match.dec,
+            prv_candidates: ztf_match
+                .prv_candidates
+                .into_iter()
+                .filter(|p| {
+                    p.programid == 1 && p.flux.is_some() && p.ra.is_some() && p.dec.is_some()
+                })
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: ztf_match
+                .prv_nondetections
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| NonDetectionPhotometry {
+                    jd: p.jd,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+            fp_hists: ztf_match
+                .fp_hists
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| ForcedPhotometry {
+                    jd: p.jd,
+                    flux: p.flux,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+        }
     }
 }
 
-impl serde::Serialize for CutoutBytes {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        apache_avro::serde_avro_bytes::serialize(&self.0, serializer)
+impl From<crate::enrichment::lsst::LsstMatch> for BabamulSurveyMatch {
+    fn from(lsst_match: crate::enrichment::lsst::LsstMatch) -> Self {
+        BabamulSurveyMatch {
+            object_id: lsst_match.object_id,
+            ra: lsst_match.ra,
+            dec: lsst_match.dec,
+            prv_candidates: lsst_match
+                .prv_candidates
+                .into_iter()
+                // Only include measurements with valid flux and coordinates (should always be true for prv_candidates)
+                .filter(|p| p.flux.is_some() && p.ra.is_some() && p.dec.is_some())
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: vec![], // LSST matches don't have nondetections
+            fp_hists: lsst_match
+                .fp_hists
+                .into_iter()
+                .map(|p| ForcedPhotometry {
+                    jd: p.jd,
+                    flux: p.flux,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<Option<crate::enrichment::lsst::LsstSurveyMatches>> for BabamulSurveyMatches {
+    fn from(opt: Option<crate::enrichment::lsst::LsstSurveyMatches>) -> Self {
+        match opt {
+            Some(lsst_matches) => {
+                // for ztf matches, if we are left with an empty prv_candidates after filtering,
+                // then it means we have no public alert to share for that match and we should not include it in Babamul
+                BabamulSurveyMatches {
+                    ztf: lsst_matches
+                        .ztf
+                        .map(|m| m.into())
+                        .filter(|m: &BabamulSurveyMatch| !m.prv_candidates.is_empty()),
+                    lsst: None, // Naturally, no LSST match for an LSST alert
+                }
+            }
+            None => BabamulSurveyMatches::default(),
+        }
+    }
+}
+
+impl From<Option<crate::enrichment::ztf::ZtfSurveyMatches>> for BabamulSurveyMatches {
+    fn from(opt: Option<crate::enrichment::ztf::ZtfSurveyMatches>) -> Self {
+        match opt {
+            Some(ztf_matches) => BabamulSurveyMatches {
+                ztf: None, // Naturally, no ZTF match for a ZTF alert
+                lsst: ztf_matches.lsst.map(|m| m.into()),
+            },
+            None => BabamulSurveyMatches::default(),
+        }
     }
 }
 
 /// Enriched LSST alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct EnrichedLsstAlert {
-    #[serde(rename = "_id")]
+pub struct BabamulLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
-    pub prv_candidates: Vec<LsstPhotometry>,
-    pub fp_hists: Vec<LsstPhotometry>,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: LsstAlertProperties,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<CutoutBytes>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<CutoutBytes>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<CutoutBytes>,
-    pub survey_matches: Option<crate::enrichment::lsst::LsstSurveyMatches>,
-    // Not serialized - kept in memory for category computation only
-    #[serde(skip)]
-    #[allow(dead_code)] // Would show up unused erroneously
-    pub cross_matches: CrossMatchesWrapper,
+    pub survey_matches: BabamulSurveyMatches,
 }
 
-impl EnrichedLsstAlert {
-    pub fn from_alert_properties_and_cutouts(
+impl BabamulLsstAlert {
+    pub fn from_alert_and_properties(
         alert: LsstAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
         properties: LsstAlertProperties,
-    ) -> Self {
-        let cross_matches = CrossMatchesWrapper(alert.cross_matches);
-        EnrichedLsstAlert {
-            candid: alert.candid,
-            object_id: alert.object_id,
-            candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            fp_hists: alert.fp_hists,
-            properties,
-            cutout_science: cutout_science.map(CutoutBytes),
-            cutout_template: cutout_template.map(CutoutBytes),
-            cutout_difference: cutout_difference.map(CutoutBytes),
-            survey_matches: alert.survey_matches,
-            cross_matches,
-        }
+    ) -> (
+        Self,
+        std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) {
+        (
+            BabamulLsstAlert {
+                candid: alert.candid,
+                object_id: alert.object_id,
+                candidate: alert.candidate,
+                prv_candidates: alert
+                    .prv_candidates
+                    .into_iter()
+                    // Only include measurements with valid flux and coordinates (should always be true for prv_candidates)
+                    .filter(|p| p.flux.is_some() && p.ra.is_some() && p.dec.is_some())
+                    .map(|p| AlertPhotometry {
+                        jd: p.jd,
+                        flux: p.flux.unwrap(),
+                        flux_err: p.flux_err,
+                        band: p.band,
+                        ra: p.ra.unwrap(),
+                        dec: p.dec.unwrap(),
+                    })
+                    .collect(),
+                fp_hists: alert
+                    .fp_hists
+                    .into_iter()
+                    .map(|p| ForcedPhotometry {
+                        jd: p.jd,
+                        flux: p.flux,
+                        flux_err: p.flux_err,
+                        band: p.band,
+                    })
+                    .collect(),
+                properties,
+                survey_matches: alert.survey_matches.into(),
+            },
+            alert.cross_matches.unwrap_or_default(),
+        )
     }
 
-    pub fn compute_babamul_category(&self) -> String {
+    pub fn compute_babamul_category(
+        &self,
+        cross_matches: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+    ) -> String {
         // If we have a ZTF match, category starts with "ztf-match."
         // Otherwise, "no-ztf-match."
-        let category = match &self.survey_matches {
-            Some(survey_matches) => match &survey_matches.ztf {
-                Some(_) => "ztf-match.".to_string(),
-                None => "no-ztf-match.".to_string(),
-            },
-            None => "no-ztf-match.".to_string(),
+        let category = if self.survey_matches.ztf.is_some() {
+            "ztf-match.".to_string()
+        } else {
+            "no-ztf-match.".to_string()
         };
 
-        // already classified as stellar (by the enrichment worker), return that
-        if self.properties.star.unwrap_or(false) {
+        // The enrichment worker already uses the LSPSC matches to classify stars
+        // by creating 2 properties: star (bool) and near_brightstar (bool)
+        if self.properties.star.unwrap_or(false) || self.properties.near_brightstar.unwrap_or(false)
+        {
             return category + "stellar";
         }
 
         // Check if we have LSPSC cross-matches
         let empty_vec = vec![];
-        let lspsc_matches = self
-            .cross_matches
-            .0
-            .as_ref()
-            .and_then(|xmatches| xmatches.get("LSPSC"))
-            .unwrap_or(&empty_vec);
+        let lspsc_matches = cross_matches.get("LSPSC").unwrap_or(&empty_vec);
 
         // No matches: check if in footprint
         if lspsc_matches.is_empty() {
@@ -137,22 +289,18 @@ impl EnrichedLsstAlert {
             };
         }
 
-        // Evaluate matches (stellar > hosted > hostless)
+        // Evaluate matches (hosted > hostless).
+        // Stellar was already evaluated in the enrichment worker
+        // and used above to break early with "stellar" classification.
         let mut label = "hostless";
         for m in lspsc_matches {
-            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
-                Some(d) => d,
-                None => continue,
-            };
             let score = match m.get("score").and_then(|v| v.as_f64()) {
                 Some(s) => s,
                 None => continue,
             };
-            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
-                label = "stellar";
-                break;
-            } else if score < IS_HOSTED_SCORE_THRESH {
+            if score <= IS_HOSTED_SCORE_THRESH {
                 label = "hosted";
+                break;
             }
         }
         category + label
@@ -162,57 +310,119 @@ impl EnrichedLsstAlert {
 /// Enriched ZTF alert
 #[serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct EnrichedZtfAlert {
+pub struct BabamulZtfAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
-    pub prv_candidates: Vec<ZtfPhotometry>,
-    pub prv_nondetections: Vec<ZtfPhotometry>,
-    pub fp_hists: Vec<ZtfPhotometry>,
+    pub prv_candidates: Vec<AlertPhotometry>,
+    pub prv_nondetections: Vec<NonDetectionPhotometry>,
+    pub fp_hists: Vec<ForcedPhotometry>,
     pub properties: ZtfAlertProperties,
-    pub survey_matches: Option<crate::enrichment::ztf::ZtfSurveyMatches>,
-    #[serde(rename = "cutoutScience")]
-    pub cutout_science: Option<CutoutBytes>,
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Option<CutoutBytes>,
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Option<CutoutBytes>,
+    pub survey_matches: BabamulSurveyMatches,
 }
 
-impl EnrichedZtfAlert {
-    pub fn from_alert_properties_and_cutouts(
+impl BabamulZtfAlert {
+    pub fn from_alert_and_properties(
         alert: ZtfAlertForEnrichment,
-        cutout_science: Option<Vec<u8>>,
-        cutout_template: Option<Vec<u8>>,
-        cutout_difference: Option<Vec<u8>>,
         properties: ZtfAlertProperties,
     ) -> Self {
-        EnrichedZtfAlert {
-            survey_matches: alert.survey_matches,
+        BabamulZtfAlert {
             candid: alert.candid,
             object_id: alert.object_id,
             candidate: alert.candidate,
-            prv_candidates: alert.prv_candidates,
-            prv_nondetections: alert.prv_nondetections,
-            fp_hists: alert.fp_hists,
+            // for prv_candidates, prv_nondetections, and fp_hists, we only include entries with programid=1 (public ZTF data)
+            prv_candidates: alert
+                .prv_candidates
+                .into_iter()
+                // Only include measurements with valid flux and coordinates (should always be true for prv_candidates)
+                .filter(|p| {
+                    p.programid == 1 && p.flux.is_some() && p.ra.is_some() && p.dec.is_some()
+                })
+                .map(|p| AlertPhotometry {
+                    jd: p.jd,
+                    flux: p.flux.unwrap(),
+                    flux_err: p.flux_err,
+                    band: p.band,
+                    ra: p.ra.unwrap(),
+                    dec: p.dec.unwrap(),
+                })
+                .collect(),
+            prv_nondetections: alert
+                .prv_nondetections
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| NonDetectionPhotometry {
+                    jd: p.jd,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
+            fp_hists: alert
+                .fp_hists
+                .into_iter()
+                .filter(|p| p.programid == 1)
+                .map(|p| ForcedPhotometry {
+                    jd: p.jd,
+                    flux: p.flux,
+                    flux_err: p.flux_err,
+                    band: p.band,
+                })
+                .collect(),
             properties,
-            cutout_science: cutout_science.map(CutoutBytes),
-            cutout_template: cutout_template.map(CutoutBytes),
-            cutout_difference: cutout_difference.map(CutoutBytes),
+            survey_matches: alert.survey_matches.into(),
         }
+    }
+
+    pub fn compute_babamul_category(&self) -> String {
+        // If we have an LSST match, category starts with "lsst-match."
+        // Otherwise, "no-lsst-match."
+        let category = if self.survey_matches.lsst.is_some() {
+            "lsst-match.".to_string()
+        } else {
+            "no-lsst-match.".to_string()
+        };
+
+        // Already classified as stellar (by the enrichment worker), return that
+        if self.properties.star || self.properties.near_brightstar {
+            return category + "stellar";
+        }
+
+        // Check star-galaxy scores (sgscore1, sgscore2, sgscore3) to determine if hosted
+        // TODO: Confirm the catalog has full ZTF footprint coverage
+        // Scores <= 0.5 (and >= 0) indicate galaxy-like objects (hosted transients)
+        // Negative values (-99, etc.) are ZTF pipeline placeholders for "no match"
+        let sgscores = [
+            self.candidate.candidate.sgscore1,
+            self.candidate.candidate.sgscore2,
+            self.candidate.candidate.sgscore3,
+        ];
+
+        for score in sgscores.iter().flatten() {
+            // Only consider valid scores (>= 0)
+            if *score >= 0.0 && *score <= ZTF_HOSTED_SG_SCORE_THRESH {
+                return category + "hosted";
+            }
+        }
+
+        // Not a star and no valid sgscores, so classify as hostless
+        category + "hostless"
     }
 }
 
 enum EnrichedAlert<'a> {
-    Lsst(&'a EnrichedLsstAlert),
-    Ztf(&'a EnrichedZtfAlert),
+    Lsst(&'a BabamulLsstAlert),
+    Ztf(&'a BabamulZtfAlert),
 }
 
 pub struct Babamul {
     kafka_producer: rdkafka::producer::FutureProducer,
     lsst_avro_schema: Schema,
     ztf_avro_schema: Schema,
+    kafka_admin_client: AdminClient<DefaultClientContext>,
+    topic_retention_ms: i64,
+    // A cache for Kafka topics we've checked exist and match retention policy
+    checked_topics: Mutex<HashSet<String>>,
 }
 
 impl Babamul {
@@ -227,25 +437,39 @@ impl Babamul {
                 // .set("debug", "broker,topic,msg")
                 .set("bootstrap.servers", &kafka_producer_host)
                 .set("message.timeout.ms", "5000")
-                // it's best to increase batch.size if the cluster
-                // is running on another machine. Locally, lower means less
-                // latency, since we are not limited by network speed anyways
-                .set("batch.size", "16384")
-                .set("linger.ms", "5")
+                // generally, lower batch size means lower latency but also lower throughput
+                // here we use 1MB batch size to optimize for throughput since the enriched alerts can be
+                // quite large and we want to avoid splitting them across multiple batches if possible
+                .set("batch.size", "1048576")
+                .set("linger.ms", "50")
                 .set("acks", "1")
                 .set("max.in.flight.requests.per.connection", "5")
                 .set("retries", "3")
+                .set("compression.type", "zstd")
                 .create()
                 .expect("Failed to create Babamul Kafka producer");
 
         // Generate Avro schemas
-        let lsst_avro_schema = EnrichedLsstAlert::get_schema();
-        let ztf_avro_schema = EnrichedZtfAlert::get_schema();
+        let lsst_avro_schema = BabamulLsstAlert::get_schema();
+        let ztf_avro_schema = BabamulZtfAlert::get_schema();
+
+        // Create Kafka Admin client
+        let admin_client: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", &kafka_producer_host)
+            .create()
+            .expect("Failed to create Babamul Kafka admin client");
+
+        // Compute retention in milliseconds from config (days)
+        let babamul_retention_ms: i64 =
+            (config.babamul.retention_days as i64) * 24 * 60 * 60 * 1000;
 
         Babamul {
             kafka_producer,
             lsst_avro_schema,
             ztf_avro_schema,
+            kafka_admin_client: admin_client,
+            topic_retention_ms: babamul_retention_ms,
+            checked_topics: Mutex::new(HashSet::new()),
         }
     }
 
@@ -254,46 +478,74 @@ impl Babamul {
         &self,
         alerts_by_topic: HashMap<String, Vec<T>>,
         to_enriched: F,
-    ) -> Result<(), EnrichmentWorkerError>
+    ) -> Result<usize, EnrichmentWorkerError>
     where
         for<'a> F: Fn(&'a T) -> EnrichedAlert<'a>,
     {
+        let nb_topics = alerts_by_topic.len();
+        let mut total_enqueued: usize = 0;
+        let mut delivery_futures = Vec::new();
         for (topic_name, alerts) in alerts_by_topic {
-            tracing::info!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+            tracing::debug!("Sending {} alerts to topic {}", alerts.len(), topic_name);
+
+            // Check topic exists with the desired retention policy
+            self.check_topic(&topic_name).await?;
 
             // Convert alerts to Avro payloads
-            let mut payloads = Vec::new();
             for alert in &alerts {
                 let payload = self.alert_to_avro_bytes(to_enriched(alert))?;
-                payloads.push(payload);
-            }
-
-            info!(
-                "Prepared {} payloads for topic {}",
-                payloads.len(),
-                topic_name
-            );
-
-            // Send all messages to Kafka without awaiting immediately (allow batching)
-            let mut send_futures = Vec::new();
-            for payload in &payloads {
                 let record: rdkafka::producer::FutureRecord<'_, (), Vec<u8>> =
-                    rdkafka::producer::FutureRecord::to(&topic_name).payload(payload);
-                let future = self
-                    .kafka_producer
-                    .send(record, std::time::Duration::from_secs(15));
-                send_futures.push(future);
+                    rdkafka::producer::FutureRecord::to(&topic_name).payload(&payload);
+                let result = self.kafka_producer.send_result(record).map_err(|(e, _)| {
+                    EnrichmentWorkerError::Kafka(format!("Failed to enqueue Kafka record: {}", e))
+                })?;
+                delivery_futures.push(result);
+                total_enqueued += 1;
             }
 
-            // Await all sends and map errors
-            for send_result in send_futures {
-                send_result.await.map_err(|(e, _)| {
-                    EnrichmentWorkerError::Kafka(format!("Failed to send to Kafka: {}", e))
-                })?;
+            record_kafka_alert_published(
+                "babamul",
+                survey_from_topic(&topic_name),
+                &topic_name,
+                alerts.len() as u64,
+            );
+        }
+
+        tracing::debug!(
+            "Enqueued total of {} alerts to {} topics",
+            total_enqueued,
+            nb_topics
+        );
+
+        // Wait for all futures to complete and check for errors
+        let mut total_sent = 0;
+        let results = futures::future::join_all(delivery_futures).await;
+        for r in results {
+            let result = r.map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Failed to send Kafka record: {}", e))
+            })?;
+            if let Err((e, _)) = result {
+                tracing::error!("Failed to deliver Kafka record: {}", e);
+            } else {
+                total_sent += 1;
             }
         }
 
-        Ok(())
+        tracing::debug!(
+            "Successfully sent {}/{} alerts to {} topics",
+            total_sent,
+            total_enqueued,
+            nb_topics
+        );
+
+        Ok(total_sent)
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn flush(&self, timeout: Duration) -> Result<(), EnrichmentWorkerError> {
+        self.kafka_producer
+            .flush(timeout)
+            .map_err(|e| EnrichmentWorkerError::Kafka(format!("Kafka flush failed: {}", e)))
     }
 
     #[instrument(skip_all, err)]
@@ -303,7 +555,7 @@ impl Babamul {
                 let mut writer = Writer::with_codec(
                     &self.lsst_avro_schema,
                     Vec::new(),
-                    apache_avro::Codec::Snappy,
+                    apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
                 );
                 writer
                     .append_serdavro(a)
@@ -316,7 +568,7 @@ impl Babamul {
                 let mut writer = Writer::with_codec(
                     &self.ztf_avro_schema,
                     Vec::new(),
-                    apache_avro::Codec::Snappy,
+                    apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
                 );
                 writer
                     .append_serdavro(a)
@@ -328,29 +580,95 @@ impl Babamul {
         }
     }
 
+    /// Ensure the given topic exists with the desired retention policy
+    #[instrument(skip_all, err)]
+    async fn check_topic(&self, topic_name: &str) -> Result<(), EnrichmentWorkerError> {
+        // Fast-path: skip if already checked in this process
+        {
+            let checked = self.checked_topics.lock().await;
+            if checked.contains(topic_name) {
+                return Ok(());
+            }
+        }
+
+        // Create topic with retention if it does not exist; ignore "already exists" errors
+        let retention_ms_string = self.topic_retention_ms.to_string();
+        let nb_partitions: i32 = std::env::var("KAFKA_NUM_PARTITIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
+        let new_topic = NewTopic::new(topic_name, nb_partitions, TopicReplication::Fixed(1))
+            .set("retention.ms", &retention_ms_string)
+            .set("cleanup.policy", "delete");
+
+        let opts = AdminOptions::new();
+        let results: Vec<Result<String, (String, RDKafkaErrorCode)>> = self
+            .kafka_admin_client
+            .create_topics(&[new_topic], &opts)
+            .await
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Admin create_topics error: {}", e))
+            })?;
+
+        for r in results.into_iter() {
+            match r {
+                Ok(_created) => (),
+                Err((_topic, code)) => {
+                    if code == RDKafkaErrorCode::TopicAlreadyExists {
+                        // Continue to alter configs below
+                        continue;
+                    }
+                    return Err(EnrichmentWorkerError::Kafka(format!(
+                        "Failed to ensure topic {} with retention (code: {:?})",
+                        topic_name, code
+                    )));
+                }
+            }
+        }
+        // Apply or update retention policy even if topic already existed
+        let mut entries: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        entries.insert("retention.ms", &retention_ms_string);
+        entries.insert("cleanup.policy", "delete");
+        let alter = AlterConfig {
+            specifier: ResourceSpecifier::Topic(topic_name),
+            entries,
+        };
+        let alter_results = self
+            .kafka_admin_client
+            .alter_configs(&[alter], &opts)
+            .await
+            .map_err(|e| {
+                EnrichmentWorkerError::Kafka(format!("Admin alter_configs error: {}", e))
+            })?;
+        for res in alter_results {
+            if let Err((_spec, code)) = res {
+                return Err(EnrichmentWorkerError::Kafka(format!(
+                    "Failed to set retention for {} (code: {:?})",
+                    topic_name, code
+                )));
+            }
+        }
+
+        // Record that we've checked this topic during this process lifetime
+        let mut checked = self.checked_topics.lock().await;
+        checked.insert(topic_name.to_string());
+        Ok(())
+    }
+
     #[instrument(skip_all, err)]
     pub async fn process_lsst_alerts(
         &self,
-        alerts: Vec<EnrichedLsstAlert>,
-    ) -> Result<(), EnrichmentWorkerError> {
+        alerts: Vec<(
+            BabamulLsstAlert,
+            std::collections::HashMap<String, Vec<serde_json::Value>>,
+        )>,
+    ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
-        let mut alerts_by_topic: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
-
-        // Determine if this alert is worth sending to Babamul
-        let min_reliability = 0.5;
+        let mut alerts_by_topic: HashMap<String, Vec<BabamulLsstAlert>> = HashMap::new();
 
         // Iterate over the alerts
-        for mut alert in alerts {
-            // Filter ZTF matches to only include public (programid=1)
-            if let Some(ref mut survey_matches) = alert.survey_matches {
-                if let Some(ref mut ztf_match) = survey_matches.ztf {
-                    ztf_match.prv_candidates.retain(|p| p.programid == 1);
-                    ztf_match.prv_nondetections.retain(|p| p.programid == 1);
-                    ztf_match.fp_hists.retain(|p| p.programid == 1);
-                }
-            }
-
-            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < min_reliability
+        for (alert, cross_matches) in alerts {
+            if alert.candidate.dia_source.reliability.unwrap_or(0.0) < LSST_MIN_RELIABILITY
                 || alert.candidate.dia_source.pixel_flags.unwrap_or(false)
                 || alert.properties.rock
             {
@@ -359,7 +677,7 @@ impl Babamul {
             }
 
             // Compute the category for this alert to determine the topic
-            let category = alert.compute_babamul_category();
+            let category = alert.compute_babamul_category(&cross_matches);
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
@@ -367,10 +685,14 @@ impl Babamul {
                 .push(alert);
         }
 
+        for (topic_name, alerts) in &alerts_by_topic {
+            tracing::debug!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
+        }
+
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No LSST alerts to send to Babamul");
-            return Ok(());
+            tracing::debug!("No LSST alerts to send to Babamul");
+            return Ok(0);
         }
 
         // Send all grouped alerts using shared helper
@@ -381,31 +703,26 @@ impl Babamul {
     #[instrument(skip_all, err)]
     pub async fn process_ztf_alerts(
         &self,
-        alerts: Vec<EnrichedZtfAlert>,
-    ) -> Result<(), EnrichmentWorkerError> {
+        alerts: Vec<BabamulZtfAlert>,
+    ) -> Result<usize, EnrichmentWorkerError> {
         // Create a hash map for alerts to send to each topic
         // For now, we will just send all alerts to "babamul.none"
         // In the future, we will determine the topic based on the alert properties
-        let mut alerts_by_topic: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
+        let mut alerts_by_topic: HashMap<String, Vec<BabamulZtfAlert>> = HashMap::new();
 
         // Iterate over the alerts
-        for mut alert in alerts {
-            // Only send public ZTF alerts (programid=1) to Babamul
-            if alert.candidate.candidate.programid != 1 || alert.properties.rock {
+        for alert in alerts {
+            // Only send public ZTF alerts (programid=1), non-rocks, and with sufficient DRB to Babamul
+            if alert.candidate.candidate.programid != 1
+                || alert.properties.rock
+                || alert.candidate.candidate.drb.unwrap_or(0.0) < ZTF_MIN_DRB
+            {
                 // Skip this alert, it doesn't meet the criteria
                 continue;
             }
 
-            // Filter photometry to only include public (programid=1)
-            alert.prv_candidates.retain(|p| p.programid == 1);
-            alert.prv_nondetections.retain(|p| p.programid == 1);
-            alert.fp_hists.retain(|p| p.programid == 1);
-
             // Determine which topic this alert should go to
-            // Is it a star, galaxy, or none, and does it have an LSST crossmatch?
-            // TODO: Get this implemented
-            // For now, all ZTF alerts go to "babamul.ztf.none"
-            let category: String = "none".to_string();
+            let category: String = alert.compute_babamul_category();
             let topic_name = format!("babamul.ztf.{}", category);
             alerts_by_topic
                 .entry(topic_name)
@@ -414,17 +731,37 @@ impl Babamul {
         }
 
         for (topic_name, alerts) in &alerts_by_topic {
-            info!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
+            tracing::debug!("Prepared {} alerts for topic {}", alerts.len(), topic_name);
         }
 
         // If there is nothing to send, return early
         if alerts_by_topic.is_empty() {
-            info!("No ZTF alerts to send to Babamul");
-            return Ok(());
+            tracing::debug!("No ZTF alerts to send to Babamul");
+            return Ok(0);
         }
 
         // Send all grouped alerts using shared helper
         self.send_alerts_by_topic(alerts_by_topic, |a| EnrichedAlert::Ztf(a))
             .await
+    }
+}
+
+fn survey_from_topic(topic_name: &str) -> &'static str {
+    if topic_name.starts_with("babamul.ztf.") {
+        "ZTF"
+    } else if topic_name.starts_with("babamul.lsst.") {
+        "LSST"
+    } else {
+        "unknown"
+    }
+}
+
+impl Drop for Babamul {
+    fn drop(&mut self) {
+        // Best-effort flush to reduce message loss if Babamul is dropped unexpectedly.
+        // The explicit worker shutdown path also calls flush and should be preferred.
+        if let Err(e) = self.flush(Duration::from_secs(10)) {
+            tracing::warn!("Babamul drop flush failed: {}", e);
+        }
     }
 }

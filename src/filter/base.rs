@@ -8,21 +8,23 @@ use crate::{
     },
 };
 
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::Schema;
 use apache_avro::{serde_avro_bytes, Writer};
+use apache_avro::{AvroSchema, Schema};
+use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
 use mongodb::bson::{doc, Document};
 use opentelemetry::{
     metrics::{Counter, UpDownCounter},
     KeyValue,
 };
-use rdkafka::producer::FutureProducer;
+use rdkafka::producer::{DeliveryFuture, FutureProducer, Producer};
 use rdkafka::{config::ClientConfig, producer::FutureRecord};
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -57,69 +59,6 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
-
-// This is the schema of the avro object that we will send to kafka
-// that includes the alert data and filter results
-const ALERT_SCHEMA: &str = r#"
-{
-    "type": "record",
-    "name": "Alert",
-    "fields": [
-        {"name": "candid", "type": "long"},
-        {"name": "objectId", "type": "string"},
-        {"name": "jd", "type": "double"},
-        {"name": "ra", "type": "double"},
-        {"name": "dec", "type": "double"},
-        {"name":"survey","type":{"type":"enum","name":"Survey","symbols":["ZTF","LSST","DECAM"]}},
-        {"name": "filters", "type": {
-            "type": "array",
-            "items": {
-                "type": "record",
-                "name": "FilterResults",
-                "fields": [
-                    {"name": "filter_id", "type": "string"},
-                    {"name": "filter_name", "type": "string"},
-                    {"name": "passed_at", "type": "double"},
-                    {"name": "annotations", "type": "string"}
-                ]
-            }
-        }},
-        {"name": "classifications", "type": {
-            "type": "array",
-            "items": {
-                "type": "record",
-                "name": "Classification",
-                "fields": [
-                    {"name": "classifier", "type": "string"},
-                    {"name": "score", "type": "double"}
-                ]
-            }
-        }},
-        {"name": "photometry", "type": {
-            "type": "array",
-            "items": {
-                "type": "record",
-                "name": "Photometry",
-                "fields": [
-                    {"name": "jd", "type": "double"},
-                    {"name": "flux",  "type": ["null", "double"], "doc": "in nJy"},
-                    {"name": "flux_err",  "type":"double", "doc": "in nJy"},
-                    {"name":"band","type":"string"},
-                    {"name":"zero_point","type":"double"},
-                    {"name":"origin","type":{"type":"enum","name":"Origin","symbols":["Alert","ForcedPhot"]}},
-                    {"name":"programid","type":"int"},
-                    {"name":"survey","type": "Survey"},
-                    {"name":"ra","type":["null","double"]},
-                    {"name":"dec","type":["null","double"]}
-                ]
-            }
-        }},
-        {"name":"cutoutScience","type":{"type":"bytes"}},
-        {"name":"cutoutTemplate","type":{"type":"bytes"}},
-        {"name":"cutoutDifference","type":{"type":"bytes"}}
-    ]
-}
-"#;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
@@ -165,19 +104,20 @@ pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
     None
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Origin {
     Alert,
     ForcedPhot,
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Photometry {
     pub jd: f64,
     pub flux: Option<f64>, // in nJy
     pub flux_err: f64,     // in nJy
     pub band: String,
-    pub zero_point: f64,
     pub origin: Origin,
     pub programid: i32,
     pub survey: Survey,
@@ -185,20 +125,41 @@ pub struct Photometry {
     pub dec: Option<f64>,
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Classification {
     pub classifier: String,
-    pub score: f64,
+    pub score: f32,
+    pub distance_arcsec: Option<f32>,
 }
 
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResults {
     pub filter_id: String,
     pub filter_name: String,
-    pub passed_at: f64, // timestamp in seconds
+    pub passed_at: f64, // UNIX timestamp in milliseconds
     pub annotations: String,
 }
 
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct SurveyMatch {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub photometry: Vec<Photometry>,
+}
+
+#[serdavro]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct SurveyMatches {
+    pub ztf: Option<SurveyMatch>,
+    pub lsst: Option<SurveyMatch>,
+}
+
+#[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Alert {
     pub candid: i64,
@@ -217,6 +178,7 @@ pub struct Alert {
     pub cutout_template: Vec<u8>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
+    pub survey_matches: SurveyMatches,
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
@@ -227,7 +189,7 @@ pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
 }
 
 pub fn load_alert_schema() -> Result<Schema, FilterWorkerError> {
-    load_schema(ALERT_SCHEMA)
+    Ok(Alert::get_schema())
 }
 
 #[instrument(skip_all, err)]
@@ -235,7 +197,11 @@ pub fn to_avro_bytes<T>(value: &T, schema: &Schema) -> Result<Vec<u8>, FilterWor
 where
     T: serde::Serialize,
 {
-    let mut writer = Writer::with_codec(schema, Vec::new(), apache_avro::Codec::Snappy);
+    let mut writer = Writer::with_codec(
+        schema,
+        Vec::new(),
+        apache_avro::Codec::Null, // Compressed at the Kafka level instead (zstd)
+    );
     writer.append_ser(value).inspect_err(|e| {
         error!("Failed to serialize alert to Avro: {}", e);
     })?;
@@ -266,15 +232,14 @@ pub async fn create_producer(
         // .set("debug", "broker,topic,msg")
         .set("bootstrap.servers", &kafka_producer_config.server)
         .set("message.timeout.ms", "5000")
-        // it's best to increase batch.size if the cluster
-        // is running on another machine. Locally, lower means less
-        // latency, since we are not limited by network speed anyways
-        .set("batch.size", "16384")
-        .set("linger.ms", "5")
+        .set("batch.size", "1048576")
+        .set("linger.ms", "50")
         .set("acks", "1")
         .set("max.in.flight.requests.per.connection", "5")
         .set("retries", "3")
-        .create()?;
+        .set("compression.type", "zstd")
+        .create()
+        .map_err(|e| FilterWorkerError::Kafka(format!("Failed to create Kafka producer: {}", e)))?;
 
     Ok(producer)
 }
@@ -288,27 +253,25 @@ pub async fn create_producer(
 /// * `topic` - The Kafka topic to which the alert will be sent.
 ///
 /// # Returns
-/// * `Result<(), FilterWorkerError>` - Returns Ok(()) if the alert is sent successfully, otherwise returns a FilterWorkerError.
+/// * `Result<DeliveryFuture, FilterWorkerError>` - Returns Ok(DeliveryFuture) if the alert is enqueued successfully, otherwise returns a FilterWorkerError.
 #[instrument(skip(alert, schema, producer), fields(candid = alert.candid, object_id = alert.object_id), err)]
 pub async fn send_alert_to_kafka(
     alert: &Alert,
     schema: &Schema,
     producer: &FutureProducer,
     topic: &str,
-) -> Result<(), FilterWorkerError> {
-    let encoded = alert_to_avro_bytes(alert, schema)?;
+) -> Result<DeliveryFuture, FilterWorkerError> {
+    let payload = alert_to_avro_bytes(alert, schema)?;
+    let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&payload);
+    let result = producer.send_result(record).map_err(|(e, _)| {
+        warn!("Failed to enqueue alert in Kafka topic {}: {}", topic, e);
+        FilterWorkerError::Kafka(format!(
+            "Failed to enqueue alert in Kafka topic {}: {}",
+            topic, e
+        ))
+    })?;
 
-    let record: FutureRecord<'_, (), Vec<u8>> = FutureRecord::to(&topic).payload(&encoded);
-
-    producer
-        .send(record, std::time::Duration::from_secs(30))
-        .await
-        .map_err(|(e, _)| {
-            warn!("Failed to send filter result to Kafka: {}", e);
-            e
-        })?;
-
-    Ok(())
+    Ok(result)
 }
 
 /// Recursively checks if a given field is used in a MongoDB aggregation stage.
@@ -573,10 +536,10 @@ pub async fn run_filter(
     mut pipeline: Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
 ) -> Result<Vec<Document>, FilterError> {
-    if candids.len() == 0 {
+    if candids.is_empty() {
         return Ok(vec![]);
     }
-    if pipeline.len() == 0 {
+    if pipeline.is_empty() {
         return Err(FilterError::InvalidFilterPipeline(
             "filter pipeline is empty".to_string(),
         ));
@@ -743,6 +706,14 @@ pub async fn build_loaded_filter(
     filter_collection: &mongodb::Collection<Filter>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
+        && filter
+            .permissions
+            .get(survey)
+            .is_none_or(|permissions| permissions.is_empty())
+    {
+        return Err(FilterError::InvalidFilterPermissions);
+    }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
     let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
@@ -798,7 +769,13 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        filters.push(build_loaded_filter(&filter_id, survey, &filter_collection).await?);
+        match build_loaded_filter(&filter_id, survey, filter_collection).await {
+            Ok(filter) => filters.push(filter),
+            Err(err) => {
+                warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);
+                continue;
+            }
+        }
     }
 
     Ok(filters)
@@ -810,8 +787,8 @@ pub enum FilterWorkerError {
     Avro(#[from] apache_avro::Error),
     #[error("value access error from bson")]
     BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
-    #[error("error from kafka")]
-    Kafka(#[from] rdkafka::error::KafkaError),
+    #[error("kafka error: {0}")]
+    Kafka(String),
     #[error("error from mongo")]
     Mongodb(#[from] mongodb::error::Error),
     #[error("error from redis")]
@@ -830,6 +807,18 @@ pub enum FilterWorkerError {
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
     KafkaConfigMissing(Survey),
+    #[error("worker config missing for survey: {0}")]
+    WorkerConfigMissing(Survey),
+    #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
+    MissingFluxPSF,
+    #[error("missing cutouts for candid {0}")]
+    MissingCutouts(i64),
+    #[error("missing cutouts for {0} alerts")]
+    MissingCutoutsBatch(usize),
+    #[error("failed to fetch cutouts: {0}")]
+    FetchCutoutsError(String),
+    #[error("failed to fetch alerts: {0}")]
+    FetchAlertsError(String),
 }
 
 #[async_trait::async_trait]
@@ -840,6 +829,7 @@ pub trait FilterWorker {
     ) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
+    async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError>;
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
@@ -857,70 +847,117 @@ pub async fn run_filter_worker<T: FilterWorker>(
     debug!(?config_path);
 
     let config = AppConfig::from_path(config_path)?;
+    let survey = T::survey();
+    let worker_config = config
+        .workers
+        .get(&survey)
+        .ok_or(FilterWorkerError::WorkerConfigMissing(survey))?;
 
     let mut filter_worker = T::new(config_path, None).await?;
-
-    if !filter_worker.has_filters() {
-        info!("no filters available for processing");
-        return Ok(());
-    }
 
     // in a never ending loop, loop over the queues
     let mut con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
+    let survey = input_queue
+        .split('_')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
 
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
+    let filter_refresh_interval =
+        Duration::from_secs(worker_config.filter_refresh_interval_minutes * 60);
+    let mut next_filter_refresh = Instant::now() + filter_refresh_interval;
 
-    let command_interval: usize = 500;
+    let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let active_attrs = [worker_id_attr.clone()];
-    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let survey_attr = KeyValue::new("survey", survey.clone());
+    let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
+    let ok_attrs = [
+        worker_id_attr.clone(),
+        survey_attr.clone(),
+        KeyValue::new("status", "ok"),
+    ];
     let ok_included_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "included"),
     ];
     let ok_excluded_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "excluded"),
     ];
     let input_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
     let processing_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
     let output_error_attrs = [
         worker_id_attr,
+        survey_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "kafka_send"),
     ];
     loop {
+        if Instant::now() >= next_filter_refresh {
+            filter_worker.refresh_filters().await?;
+            next_filter_refresh = Instant::now() + filter_refresh_interval;
+
+            if !filter_worker.has_filters() {
+                info!("no active filters available, waiting for the next refresh");
+            }
+        }
+
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
+                // flush the producer before terminating to avoid losing messages
+                producer
+                    .flush(std::time::Duration::from_secs(10))
+                    .map_err(|e| {
+                        FilterWorkerError::Kafka(format!(
+                            "Failed to flush Kafka producer on termination: {}",
+                            e
+                        ))
+                    })?;
                 break;
             }
-            command_check_countdown = command_interval + 1;
+            command_check_countdown = command_interval;
+
+            if !filter_worker.has_filters() {
+                // if we don't have any active filter, we call continue to avoid
+                // pooling candids until we have filters to run them through
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
         }
 
         ACTIVE.add(1, &active_attrs);
-        let alerts: Vec<String> = con
+        let alerts: Vec<String> = match con
             .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
             .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
+        {
+            Ok(alerts) => alerts,
+            Err(error) => {
                 BATCH_PROCESSED.add(1, &input_error_attrs);
-            })?;
+                ACTIVE.add(-1, &active_attrs);
+                return Err(error.into());
+            }
+        };
 
         if alerts.is_empty() {
             ACTIVE.add(-1, &active_attrs);
@@ -929,37 +966,77 @@ pub async fn run_filter_worker<T: FilterWorker>(
             continue;
         }
 
-        let alerts_output = filter_worker
-            .process_alerts(&alerts)
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, &processing_error_attrs);
-            })?;
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
+
+        let alerts_output = match filter_worker.process_alerts(&alerts).await {
+            Ok(alerts_output) => alerts_output,
+            Err(error) => {
+                BATCH_PROCESSED.add(1, &processing_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                return Err(error);
+            }
+        };
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(
             (alerts.len() - alerts_output.len()) as u64,
             &ok_excluded_attrs,
         );
+
+        let mut total_enqueued = 0;
+        let mut delivery_futures = Vec::new();
+        let mut enqueue_error = None;
         for alert in alerts_output {
-            send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
-                .await
-                .inspect_err(|_| {
-                    let attributes = &output_error_attrs;
-                    ACTIVE.add(-1, &active_attrs);
-                    BATCH_PROCESSED.add(1, attributes);
-                    ALERT_PROCESSED.add(1, attributes);
-                })?;
-            trace!(
-                "Sent alert with candid {} to Kafka topic {}",
-                &alert.candid,
-                &output_topic
-            );
-            // Incrementing by alerts_output.len() outside this loop may be more
-            // efficient, but incrementing by 1 here is more accurate.
-            ALERT_PROCESSED.add(1, &ok_included_attrs);
+            match send_alert_to_kafka(&alert, &schema, &producer, &output_topic).await {
+                Ok(delivery_future) => {
+                    delivery_futures.push(delivery_future);
+                    total_enqueued += 1;
+                }
+                Err(error) => {
+                    ALERT_PROCESSED.add(1, &output_error_attrs);
+                    enqueue_error = Some(error);
+                    break;
+                }
+            }
+        }
+
+        debug!(
+            "Enqueued total of {} alerts to Kafka topic {}",
+            total_enqueued, &output_topic
+        );
+
+        // Wait for all futures to complete and check for errors
+        let mut total_sent = 0;
+        let results = futures::future::join_all(delivery_futures).await;
+        for r in results {
+            let result = r.map_err(|e| {
+                ALERT_PROCESSED.add(1, &output_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                FilterWorkerError::Kafka(format!(
+                    "Failed to deliver alert to Kafka topic {}: {}",
+                    &output_topic, e
+                ))
+            })?;
+            if let Err((e, _)) = result {
+                ALERT_PROCESSED.add(1, &output_error_attrs);
+                error!(
+                    "Failed to deliver alert to Kafka topic {}: {}",
+                    &output_topic, e
+                );
+            } else {
+                total_sent += 1;
+                ALERT_PROCESSED.add(1, &ok_included_attrs);
+            }
+        }
+
+        debug!(
+            "Successfully sent total of {}/{} alerts to Kafka topic {}",
+            total_sent, total_enqueued, &output_topic
+        );
+
+        if let Some(error) = enqueue_error {
+            ACTIVE.add(-1, &active_attrs);
+            return Err(error);
         }
 
         ACTIVE.add(-1, &active_attrs);
@@ -1027,6 +1104,10 @@ mod tests {
             cutout_science: vec![],
             cutout_template: vec![],
             cutout_difference: vec![],
+            survey_matches: SurveyMatches {
+                ztf: None,
+                lsst: None,
+            },
         };
         let schema = load_alert_schema().unwrap();
         let avro_bytes = to_avro_bytes(&alert, &schema);
@@ -1059,6 +1140,10 @@ mod tests {
             cutout_science: vec![],
             cutout_template: vec![],
             cutout_difference: vec![],
+            survey_matches: SurveyMatches {
+                ztf: None,
+                lsst: None,
+            },
         };
         let schema = load_alert_schema().unwrap();
         // generate a random topic name

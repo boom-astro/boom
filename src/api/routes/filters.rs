@@ -87,7 +87,7 @@ async fn run_test_pipeline(
         },
         None => None,
     };
-    if candid.is_some() {
+    if let Some(candid) = candid {
         match pipeline.get_mut(0) {
             Some(first_stage) => {
                 if first_stage.get("$match").is_none() {
@@ -95,7 +95,7 @@ async fn run_test_pipeline(
                         "first stage of pipeline must be a $match stage".to_string(),
                     ));
                 }
-                first_stage.insert("$match", doc! { "_id": candid.as_ref().unwrap() });
+                first_stage.insert("$match", doc! { "_id": candid });
             }
             None => {
                 return Err(FilterError::InvalidFilterPipeline(
@@ -149,7 +149,12 @@ pub async fn post_filter_version(
     body: web::Json<FilterVersionPost>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
 
     let filter_id = filter_id.into_inner();
     let collection: Collection<Filter> = db.collection("filters");
@@ -246,7 +251,12 @@ pub async fn post_filter(
     body: web::Json<FilterPost>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     let body = body.clone();
 
     let survey = body.survey;
@@ -275,7 +285,15 @@ pub async fn post_filter(
     let filter_version: String = Uuid::new_v4().to_string();
     let filter_collection: Collection<Filter> = db.collection("filters");
     // Pipeline needs to be a string
-    let pipeline_json = serde_json::to_string(&pipeline).unwrap();
+    let pipeline_json = match serde_json::to_string(&pipeline) {
+        Ok(json) => json,
+        Err(e) => {
+            return response::internal_error(&format!(
+                "failed to serialize filter pipeline to JSON. error: {}",
+                e
+            ));
+        }
+    };
     let now = Time::now().to_jd();
     let filter = Filter {
         name: body.name,
@@ -296,9 +314,9 @@ pub async fn post_filter(
         updated_at: now,
     };
     match filter_collection.insert_one(&filter).await {
-        Ok(_) => response::ok(
+        Ok(_) => response::ok_ser(
             "successfully created new filter",
-            serde_json::to_value(FilterPublic::from(filter)).unwrap(),
+            FilterPublic::from(filter),
         ),
         Err(e) => response::internal_error(&format!(
             "failed to insert filter into database. error: {}",
@@ -322,7 +340,7 @@ struct FilterPatch {
     path = "/filters/{filter_id}",
     request_body = FilterPatch,
     responses(
-        (status = 200, description = "Filter updated successfully"),
+        (status = 200, description = "Filter updated successfully", body = FilterPublic),
         (status = 400, description = "Invalid filter update submitted"),
         (status = 500, description = "Internal server error")
     ),
@@ -335,7 +353,12 @@ pub async fn patch_filter(
     body: web::Json<FilterPatch>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
 
     let filter_id = filter_id.into_inner();
     let collection: Collection<Filter> = db.collection("filters");
@@ -417,7 +440,12 @@ pub async fn get_filters(
     db: web::Data<Database>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
 
     let filter_collection: Collection<FilterPublic> = db.collection("filters");
     let filter_query = if current_user.is_admin {
@@ -440,10 +468,7 @@ pub async fn get_filters(
                     }
                 }
             }
-            response::ok(
-                "retrieved filters successfully",
-                serde_json::to_value(&filter_list).unwrap(),
-            )
+            response::ok_ser("retrieved filters successfully", filter_list)
         }
         Err(e) => response::internal_error(&format!("failed to query filters: {}", e)),
     }
@@ -466,7 +491,12 @@ pub async fn get_filter(
     path: web::Path<String>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let current_user = current_user.unwrap();
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
 
     let filter_id = path.into_inner();
     let filter_query = if current_user.is_admin {
@@ -477,10 +507,7 @@ pub async fn get_filter(
     let filter_collection: Collection<FilterPublic> = db.collection("filters");
 
     match filter_collection.find_one(filter_query).await {
-        Ok(Some(filter)) => response::ok(
-            "retrieved filter successfully",
-            serde_json::to_value(filter).unwrap(),
-        ),
+        Ok(Some(filter)) => response::ok_ser("retrieved filter successfully", filter),
         Ok(None) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
         Err(e) => response::internal_error(&format!("failed to query filter: {}", e)),
     }
@@ -642,7 +669,12 @@ pub async fn post_filter_test(
     body: web::Json<FilterTestRequest>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let _current_user = current_user.unwrap();
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
@@ -771,7 +803,12 @@ pub async fn post_filter_test_count(
     body: web::Json<FilterTestCountRequest>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let _current_user = current_user.unwrap();
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;

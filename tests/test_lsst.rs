@@ -212,9 +212,96 @@ async fn test_filter_lsst_alert() {
     assert_eq!(filter_passed.annotations, "{\"mag_now\":23.67}");
 
     let classifications = &alert.classifications;
-    assert_eq!(classifications.len(), 0);
+    // only the alert's reliability score for now
+    assert_eq!(classifications.len(), 1);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Lsst);
+
+    // verify cutouts are non-empty
+    assert!(
+        !alert.cutout_science.is_empty(),
+        "cutout_science should not be empty"
+    );
+    assert!(
+        !alert.cutout_template.is_empty(),
+        "cutout_template should not be empty"
+    );
+    assert!(
+        !alert.cutout_difference.is_empty(),
+        "cutout_difference should not be empty"
+    );
 
     // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_lsst_alert_with_ztf_match() {
+    // Place the LSST alert within the ZTF observable dec range so cross-survey
+    // matching is attempted.
+    let lsst_alert_randomizer =
+        AlertRandomizer::new_randomized(Survey::Lsst).dec(ZTF_DEC_RANGE.1 - 10.0);
+
+    let (candid, object_id, ra, dec, bytes_content) = lsst_alert_randomizer.clone().get().await;
+
+    // Insert a ZTF alert close enough to the LSST alert to trigger an alias.
+    let mut ztf_worker = ztf_alert_worker().await;
+    let (_, ztf_object_id, _, _, ztf_bytes_content) = AlertRandomizer::new_randomized(Survey::Ztf)
+        .ra(ra)
+        .dec(dec + 0.9 * LSST_ZTF_XMATCH_RADIUS.to_degrees())
+        .get()
+        .await;
+    ztf_worker.process_alert(&ztf_bytes_content).await.unwrap();
+
+    // Process the LSST alert – it should pick up the ZTF alias.
+    let mut alert_worker = lsst_alert_worker().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
+
+    remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
+    assert!(result.is_ok(), "Filter failed: {:?}", result.err());
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, candid);
+    assert_eq!(&alert.object_id, &object_id);
+
+    // The ZTF survey match must be populated.
+    let ztf_match = alert
+        .survey_matches
+        .ztf
+        .as_ref()
+        .expect("survey_matches.ztf should be Some when a ZTF alias exists");
+    assert_eq!(ztf_match.object_id, ztf_object_id);
+    // ZTF test data has 8 prv_candidates + 3 prv_nondetections + 10 fp_hists = 21 photometry points.
+    assert_eq!(ztf_match.photometry.len(), 21);
+
+    // verify the survey field is correct
+    assert_eq!(alert.survey, Survey::Lsst);
+
+    // verify cutouts are non-empty
+    assert!(
+        !alert.cutout_science.is_empty(),
+        "cutout_science should not be empty"
+    );
+    assert!(
+        !alert.cutout_template.is_empty(),
+        "cutout_template should not be empty"
+    );
+    assert!(
+        !alert.cutout_difference.is_empty(),
+        "cutout_difference should not be empty"
+    );
+
+    // verify the alert serialises cleanly to Avro
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 }

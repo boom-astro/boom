@@ -1,7 +1,7 @@
-FROM rust:1.91.1-slim-trixie AS builder
+FROM rust:1.93.1-slim-trixie AS builder
 
 RUN apt-get update && \
-    apt-get install -y curl gcc g++ libhdf5-dev perl make libsasl2-dev pkg-config && \
+    apt-get install -y curl gcc g++ libhdf5-dev libclang-dev perl make libsasl2-dev pkg-config && \
     apt-get autoremove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -30,7 +30,7 @@ FROM builder AS dev
 ARG KAFKA_VERSION=4.1.1
 ARG SCALA_VERSION=2.13
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsasl2-2 ca-certificates openjdk-25-jre-headless curl bash tar \
+    libsasl2-2 ca-certificates openjdk-25-jre-headless curl bash tar clang libclang-dev \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz \
     && tar -xzf /tmp/kafka.tgz -C /opt \
@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /tmp/kafka.tgz
 
 ENV PATH="/opt/kafka/bin:${PATH}"
+ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 
 RUN cargo install --locked cargo-watch
 
@@ -69,6 +70,8 @@ COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
 COPY --from=builder /app/target/release/api /app/boom-api
+COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
+COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 
 # Set the entrypoint, though this will be overridden
 CMD ["/app/scheduler"]
