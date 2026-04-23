@@ -891,6 +891,7 @@ struct AlertAuxForUpdate {
 pub struct LsstAlertWorker {
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    healpix_config: conf::HealpixConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
@@ -910,6 +911,7 @@ impl LsstAlertWorker {
                 ztf::ZTF_DEC_RANGE,
                 LSST_ZTF_XMATCH_RADIUS,
                 &self.ztf_alert_aux_collection,
+                &self.healpix_config,
             )
             .await?;
 
@@ -920,6 +922,7 @@ impl LsstAlertWorker {
                 decam::DECAM_DEC_RANGE,
                 LSST_DECAM_XMATCH_RADIUS,
                 &self.decam_alert_aux_collection,
+                &self.healpix_config,
             )
             .await?;
 
@@ -1096,6 +1099,7 @@ impl AlertWorker for LsstAlertWorker {
                 Some(github_fallback_url.to_string()),
             ),
             xmatch_configs,
+            healpix_config: config.healpix.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1183,7 +1187,7 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db, &self.healpix_config).await?;
             let obj = LsstObject {
                 object_id: object_id.clone(),
                 prv_candidates,

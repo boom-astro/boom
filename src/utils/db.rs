@@ -69,6 +69,14 @@ pub async fn initialize_survey_indexes(
     create_index(&alerts_collection, index.clone(), false).await?;
     create_index(&alerts_aux_collection, index, false).await?;
 
+    // create HEALPix index for spatial queries and sharding.
+    // Depth 29 (healpix-alchemy HPX_MAX_ORDER). Coarse shard pixels are derived
+    // via bit shift: hpx >> (2 * (29 - shard_depth)), so range-based sharding
+    // on this single field gives spatial partitioning at any granularity.
+    let hpx_index = doc! { "coordinates.hpx": 1 };
+    create_index(&alerts_collection, hpx_index.clone(), false).await?;
+    create_index(&alerts_aux_collection, hpx_index, false).await?;
+
     // create a simple index on the objectId field of the alerts collection
     let index = doc! {
         "objectId": 1,

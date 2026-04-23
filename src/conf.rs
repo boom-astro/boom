@@ -472,6 +472,79 @@ pub struct SurveyWorkerConfig {
     pub filter: WorkerConfig,
 }
 
+/// HEALPix configuration for spatial indexing and sharding.
+///
+/// Alerts are stored with a HEALPix NESTED index at depth 29
+/// (matching healpix-alchemy's HPX_MAX_ORDER) for spatial queries.
+/// The coarse shard pixel is derived via bit shift at query time.
+#[derive(Deserialize, Debug, Clone)]
+pub struct HealpixConfig {
+    /// HEALPix depth for the coarse shard key. Must be in [0, 29].
+    /// Default is 4 (NSIDE=16, 3072 pixels, ~13.4 deg² each).
+    #[serde(default = "default_healpix_shard_depth")]
+    pub shard_depth: u8,
+
+    /// When true, use HEALPix range queries instead of MongoDB's 2dsphere
+    /// ($geoWithin/$nearSphere) for cross-match and alert-to-object matching.
+    /// Requires catalogs to have a `coordinates.hpx` field and index.
+    /// Default: false (use 2dsphere).
+    #[serde(default)]
+    pub use_healpix_queries: bool,
+
+    /// HEALPix depth used for cone search queries. Controls the trade-off
+    /// between query selectivity and the number of $or clauses in the MongoDB
+    /// filter. Lower = fewer ranges (faster planning) but more overinclusive.
+    /// Default is 14 (~13 arcsec pixels), good for typical cross-match radii.
+    #[serde(default = "default_healpix_query_depth")]
+    pub query_depth: u8,
+}
+
+impl Default for HealpixConfig {
+    fn default() -> Self {
+        HealpixConfig {
+            shard_depth: default_healpix_shard_depth(),
+            use_healpix_queries: false,
+            query_depth: default_healpix_query_depth(),
+        }
+    }
+}
+
+fn default_healpix_shard_depth() -> u8 {
+    4 // NSIDE=16, 3072 pixels
+}
+
+fn default_healpix_query_depth() -> u8 {
+    14 // ~13 arcsec pixels
+}
+
+impl HealpixConfig {
+    /// The fine HEALPix depth used for spatial query indexes.
+    /// Fixed at 29 to match healpix-alchemy's HPX_MAX_ORDER.
+    pub const FINE_DEPTH: u8 = 29;
+
+    /// Validate the config values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.shard_depth > 29 {
+            return Err(format!(
+                "healpix.shard_depth must be in [0, 29], got {}",
+                self.shard_depth
+            ));
+        }
+        if self.query_depth > 29 {
+            return Err(format!(
+                "healpix.query_depth must be in [0, 29], got {}",
+                self.query_depth
+            ));
+        }
+        Ok(())
+    }
+
+    /// Number of shard pixels (12 * 4^shard_depth).
+    pub fn n_shard_pixels(&self) -> u64 {
+        12 * 4u64.pow(self.shard_depth as u32)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -485,6 +558,8 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
+    #[serde(default)]
+    pub healpix: HealpixConfig,
 }
 
 impl AppConfig {
@@ -576,7 +651,19 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
         return Err(BoomConfigError::InvalidSecretError(e));
     }
 
+    // Validate healpix config
+    if let Err(e) = app_config.healpix.validate() {
+        return Err(BoomConfigError::InvalidSecretError(e));
+    }
+
     info!("Configuration loaded successfully");
+    info!(
+        "HEALPix: fine_depth={}, shard_depth={} (NSIDE={}, {} pixels)",
+        HealpixConfig::FINE_DEPTH,
+        app_config.healpix.shard_depth,
+        1u64 << app_config.healpix.shard_depth,
+        app_config.healpix.n_shard_pixels()
+    );
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
     debug!("Admin username: {}", app_config.api.auth.admin_username);

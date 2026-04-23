@@ -206,6 +206,7 @@ struct AlertAuxForUpdate {
 
 pub struct DecamAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    healpix_config: conf::HealpixConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
@@ -226,6 +227,7 @@ impl DecamAlertWorker {
                 ztf::ZTF_DEC_RANGE,
                 DECAM_ZTF_XMATCH_RADIUS,
                 &self.ztf_alert_aux_collection,
+                &self.healpix_config,
             )
             .await?;
 
@@ -236,6 +238,7 @@ impl DecamAlertWorker {
                 lsst::LSST_DEC_RANGE,
                 DECAM_LSST_XMATCH_RADIUS,
                 &self.lsst_alert_aux_collection,
+                &self.healpix_config,
             )
             .await?;
         Ok(DecamAliases {
@@ -381,6 +384,7 @@ impl AlertWorker for DecamAlertWorker {
 
         let worker = DecamAlertWorker {
             xmatch_configs,
+            healpix_config: config.healpix.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -458,7 +462,7 @@ impl AlertWorker for DecamAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db, &self.healpix_config).await?;
             let obj = DecamObject {
                 object_id: object_id.clone(),
                 prv_candidates,
