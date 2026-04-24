@@ -163,9 +163,8 @@ async fn build_cutout_storage(
     survey: &Survey,
     conf: &AppConfig,
 ) -> Result<CutoutStorage, BoomConfigError> {
-    match &conf.cutouts_storage {
+    let storage = match &conf.cutouts_storage {
         CutoutsStorage::S3(s3_conf) => {
-            println!("Building S3 cutout storage for survey {:?}", survey);
             let credentials_static_str = string_to_static_str(s3_conf.credentials_provider.clone());
             let credentials = aws_sdk_s3::config::Credentials::new(
                 s3_conf.access_key.clone(),
@@ -190,17 +189,23 @@ async fn build_cutout_storage(
                     .build(),
             );
             let bucket_name = format!("{}-cutouts", survey.to_string().to_lowercase());
-            let storage = CutoutStorage::from_s3(rustfs_client, bucket_name, None)
+
+            let redis_conn = build_redis(conf).await.inspect_err(as_error!(
+                "failed to build redis connection for cutout storage"
+            ))?;
+
+            CutoutStorage::from_s3(rustfs_client, bucket_name, None)
                 .await
-                .inspect_err(as_error!("failed to create cutout storage"))?;
-            Ok(storage)
+                .inspect_err(as_error!("failed to create cutout storage"))?
+                .with_cache(redis_conn, 30)
         }
         CutoutsStorage::Mongo(mongo_conf) => {
             let db = _build_db(&mongo_conf).await?;
-            let storage = CutoutStorage::from_mongo(db, survey).await;
-            Ok(storage)
+            CutoutStorage::from_mongo(db, survey).await
         }
-    }
+    };
+
+    Ok(storage)
 }
 
 #[derive(Debug, Clone)]

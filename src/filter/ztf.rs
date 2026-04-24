@@ -758,6 +758,8 @@ impl FilterWorker for ZtfFilterWorker {
             )
             .await?;
             alerts_output.extend(alerts);
+
+            self.alert_cutout_storage.evict_from_cache(&candids).await;
         }
 
         Ok(alerts_output)
