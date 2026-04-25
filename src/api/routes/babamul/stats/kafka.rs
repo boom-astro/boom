@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(10);
-const KAFKA_TOPICS_CACHE_KEY: &str = "kafka_topics";
+const BABAMUL_KAFKA_TOPICS_CACHE_KEY: &str = "babamul_kafka_topics";
 /// Cache Kafka topic stats for 5 minutes.
-const KAFKA_TOPICS_CACHE_SECS: f64 = 5.0 * 60.0;
+const BABAMUL_KAFKA_TOPICS_CACHE_SECS: f64 = 5.0 * 60.0;
 
 /// MongoDB cache document storing all Kafka topic stats under a single well-known
 /// `_id`, along with the expiration timestamp.
@@ -57,7 +57,7 @@ pub async fn get_kafka_stats(
 
     // Try cache first
     if let Ok(Some(cached)) = stats_collection
-        .find_one(doc! { "_id": KAFKA_TOPICS_CACHE_KEY })
+        .find_one(doc! { "_id": BABAMUL_KAFKA_TOPICS_CACHE_KEY })
         .await
     {
         if cached.cache_until > now_ts {
@@ -84,13 +84,13 @@ pub async fn get_kafka_stats(
 
     // Upsert cache
     let cache_entry = KafkaTopicsCacheEntry {
-        id: KAFKA_TOPICS_CACHE_KEY.to_string(),
+        id: BABAMUL_KAFKA_TOPICS_CACHE_KEY.to_string(),
         topics: topics.clone(),
         updated_at: now_ts,
-        cache_until: now_ts + KAFKA_TOPICS_CACHE_SECS,
+        cache_until: now_ts + BABAMUL_KAFKA_TOPICS_CACHE_SECS,
     };
     let _ = stats_collection
-        .replace_one(doc! { "_id": KAFKA_TOPICS_CACHE_KEY }, &cache_entry)
+        .replace_one(doc! { "_id": BABAMUL_KAFKA_TOPICS_CACHE_KEY }, &cache_entry)
         .upsert(true)
         .await;
 
