@@ -43,31 +43,37 @@ kafka:
 workers:
   ztf:
     command_interval: 500
-    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 3
     enrichment:
       n_workers: 3
     filter:
       n_workers: 3
+      refresh_interval_minutes: 15
+      # Activation check: a filter cannot be activated if it matches more than
+      # max_match_rate (out of 100) of the alerts accessible on reference_night.
+      max_match_rate: 25
+      reference_night: "2026-03-16"
   lsst:
     command_interval: 500
-    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 4
     enrichment:
       n_workers: 3
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night: "2026-02-23"
   decam:
     command_interval: 500
-    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 1
     enrichment:
       n_workers: 0
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
 crossmatch:
   ztf:
     - catalog: PS1_DR1

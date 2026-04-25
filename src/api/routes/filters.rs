@@ -8,6 +8,7 @@ use crate::{
         models::response,
         routes::users::User,
     },
+    conf::{AppConfig, FilterWorkerConfig},
     enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
@@ -21,7 +22,6 @@ use crate::{
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
-use chrono::NaiveDate;
 use flare::Time;
 use futures::stream::StreamExt;
 use mongodb::{
@@ -127,31 +127,25 @@ async fn build_and_test_filter_version(
     run_test_pipeline(db, survey, test_pipeline).await
 }
 
-const MAX_FILTER_RESULT_RATIO: f64 = 0.20;
-
-/// These are recent, well-populated nights chosen to give a representative
-/// sample of alerts when measuring how selective a filter is.
-fn activation_reference_night(survey: &Survey) -> Result<NaiveDate, String> {
-    match survey {
-        Survey::Ztf => Ok(NaiveDate::from_ymd_opt(2026, 3, 16).unwrap()),
-        Survey::Lsst => Ok(NaiveDate::from_ymd_opt(2026, 2, 23).unwrap()),
-        _ => Err(format!(
-            "filter activation validation is not supported for survey {}",
-            survey
-        )),
-    }
-}
-
 /// Validate that activating this filter is safe by running it against a
 /// reference observing night and ensuring the filter does not match more than
-/// `MAX_FILTER_RESULT_RATIO` of the alerts the filter has access to that night.
+/// `max_result_ratio_percent` of the alerts the filter has access to that night.
 async fn validate_filter_activation(
     db: &Database,
+    config: &FilterWorkerConfig,
     survey: &Survey,
     pipeline: &Vec<serde_json::Value>,
     permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<(), String> {
-    let night_date = activation_reference_night(survey)?;
+    let (night_date, max_match_rate) = match (config.reference_night, config.max_match_rate) {
+        (Some(date), Some(rate)) => (date, rate),
+        _ => {
+            return Err(format!(
+                "filter activation validation is not supported for survey {}",
+                survey
+            ));
+        }
+    };
 
     // The user's accessible alerts are restricted by permissions on surveys that
     // expose multiple program streams (ZTF). Surveys without programid (LSST)
@@ -222,16 +216,16 @@ async fn validate_filter_activation(
         None => 0,
     };
 
-    let max_allowed = (night_total as f64 * MAX_FILTER_RESULT_RATIO) as i64;
+    let max_allowed = (night_total as f64 * max_match_rate as f64 / 100.0) as i64;
     if matched > max_allowed {
         return Err(format!(
-            "filter matched {} of {} {} alerts ({:.1}%) on night {}, which exceeds the {:.0}% limit",
+            "filter matched {} of {} {} alerts ({:.1}%) on night {}, which exceeds the {}% limit",
             matched,
             night_total,
             survey,
             (matched as f64 / night_total as f64) * 100.0,
             night_date,
-            MAX_FILTER_RESULT_RATIO * 100.0,
+            max_match_rate,
         ));
     }
     Ok(())
@@ -259,6 +253,7 @@ struct FilterVersionPost {
 #[post("/filters/{filter_id}/versions")]
 pub async fn post_filter_version(
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
     filter_id: web::Path<String>,
     body: web::Json<FilterVersionPost>,
     current_user: Option<web::ReqData<User>>,
@@ -307,7 +302,18 @@ pub async fn post_filter_version(
     // If this version is going to immediately replace an active filter,
     // re-run the activation check on the new pipeline
     if set_as_active && filter.active {
-        if let Err(e) = validate_filter_activation(&db, &survey, &new_pipeline, &permissions).await
+        let filter_config = match config.workers.get(&survey).map(|w| &w.filter) {
+            Some(c) => c,
+            None => {
+                return response::internal_error(&format!(
+                    "no worker config defined for survey {}",
+                    survey
+                ));
+            }
+        };
+        if let Err(e) =
+            validate_filter_activation(&db, filter_config, &survey, &new_pipeline, &permissions)
+                .await
         {
             return response::bad_request(&e);
         }
@@ -473,6 +479,7 @@ struct FilterPatch {
 #[patch("/filters/{filter_id}")]
 pub async fn patch_filter(
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
     filter_id: web::Path<String>,
     body: web::Json<FilterPatch>,
     current_user: Option<web::ReqData<User>>,
@@ -577,8 +584,18 @@ pub async fn patch_filter(
             .permissions
             .clone()
             .unwrap_or(filter.permissions.clone());
+        let filter_config = match config.workers.get(&filter.survey).map(|w| &w.filter) {
+            Some(c) => c,
+            None => {
+                return response::internal_error(&format!(
+                    "no worker config defined for survey {}",
+                    filter.survey
+                ));
+            }
+        };
         if let Err(e) =
-            validate_filter_activation(&db, &filter.survey, &pipeline, &permissions).await
+            validate_filter_activation(&db, filter_config, &filter.survey, &pipeline, &permissions)
+                .await
         {
             return response::bad_request(&e);
         }
