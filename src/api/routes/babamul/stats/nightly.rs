@@ -248,10 +248,13 @@ pub async fn get_nightly_stats(
             };
             let coll = stats_collection.clone();
             async move {
-                let _ = coll
-                    .replace_one(doc! { "_id": id }, &cache_doc)
+                if let Err(e) = coll
+                    .replace_one(doc! { "_id": &id }, &cache_doc)
                     .upsert(true)
-                    .await;
+                    .await
+                {
+                    tracing::warn!("Failed to upsert nightly stat cache for {}: {}", id, e);
+                }
             }
         })
         .collect();

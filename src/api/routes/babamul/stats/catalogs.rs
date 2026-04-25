@@ -197,10 +197,13 @@ pub async fn get_catalog_stats(
             updated_at: now_ts,
             cache_until: now_ts + CATALOG_STATS_CACHE_SECS,
         };
-        let _ = stats_collection
+        if let Err(e) = stats_collection
             .replace_one(doc! { "_id": CATALOG_STATS_CACHE_KEY }, &cache_entry)
             .upsert(true)
-            .await;
+            .await
+        {
+            tracing::warn!("Failed to upsert catalog stats cache: {}", e);
+        }
     }
 
     let catalogs: Vec<CatalogEntry> = catalogs
