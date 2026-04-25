@@ -67,8 +67,10 @@ pub async fn count_alerts_for_night(
     let mut filter = doc! {
         "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
     };
-    if let Some(pids) = programids {
-        filter.insert("candidate.programid", doc! { "$in": to_bson(pids)? });
+    if *survey == Survey::Ztf {
+        if let Some(pids) = programids {
+            filter.insert("candidate.programid", doc! { "$in": to_bson(pids)? });
+        }
     }
     let collection: Collection<Document> = db.collection(&format!("{}_alerts", survey));
     collection.count_documents(filter).await
