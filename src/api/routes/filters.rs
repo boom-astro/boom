@@ -754,7 +754,15 @@ async fn build_test_filter_pipeline(
         ));
     }
 
-    let mut test_pipeline = build_filter_pipeline(&pipeline, &permissions, &survey).await?;
+    let mut test_pipeline = match build_filter_pipeline(&pipeline, &permissions, &survey).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(FilterError::InvalidFilterPipeline(format!(
+                "Filter build failed with error: {}",
+                e
+            )));
+        }
+    };
     match test_pipeline.get(0) {
         Some(first_stage) => {
             if first_stage.get("$match").is_none() {
