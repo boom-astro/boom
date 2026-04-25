@@ -302,7 +302,7 @@ pub async fn post_filter(
         survey,
         id: filter_id,
         user_id: current_user.id.clone(),
-        active: true,
+        active: false,
         active_fid: filter_version.clone(),
         fv: vec![FilterVersion {
             fid: filter_version,
