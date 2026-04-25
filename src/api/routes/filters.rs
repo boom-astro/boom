@@ -196,8 +196,8 @@ async fn validate_filter_activation(
     let mut match_stage = doc! {
         "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
     };
-    if let Some(pids) = pid_slice {
-        match_stage.insert("candidate.programid", doc! { "$in": pids.to_vec() });
+    if let Some(pids) = permission_programids.as_ref() {
+        match_stage.insert("candidate.programid", doc! { "$in": pids });
     }
     match test_pipeline.get_mut(0) {
         Some(first_stage) if first_stage.get("$match").is_some() => {

@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use mongodb::{
-    bson::{doc, to_document, Document},
+    bson::{doc, to_bson, to_document, Document},
     options::IndexOptions,
     Collection, Database, IndexModel,
 };
@@ -68,7 +68,7 @@ pub async fn count_alerts_for_night(
         "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
     };
     if let Some(pids) = programids {
-        filter.insert("candidate.programid", doc! { "$in": pids.to_vec() });
+        filter.insert("candidate.programid", doc! { "$in": to_bson(pids)? });
     }
     let collection: Collection<Document> = db.collection(&format!("{}_alerts", survey));
     collection.count_documents(filter).await
