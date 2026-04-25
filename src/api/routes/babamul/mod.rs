@@ -5,6 +5,7 @@ pub mod tokens;
 use crate::api::email::EmailService;
 use crate::api::models::response;
 use crate::api::{auth::AuthProvider, kafka::delete_kafka_credentials_and_acls};
+use crate::utils::enums::Survey;
 use actix_web::{delete, get, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
@@ -19,6 +20,25 @@ use aes_gcm::{
     AeadCore, Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose, Engine as _};
+
+/// Subset of [`Survey`] surfaced through the babamul API (no DECam).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum BabamulSurvey {
+    #[serde(alias = "ZTF")]
+    Ztf,
+    #[serde(alias = "LSST")]
+    Lsst,
+}
+
+impl From<BabamulSurvey> for Survey {
+    fn from(s: BabamulSurvey) -> Self {
+        match s {
+            BabamulSurvey::Ztf => Survey::Ztf,
+            BabamulSurvey::Lsst => Survey::Lsst,
+        }
+    }
+}
 
 /// Validate password complexity.
 ///

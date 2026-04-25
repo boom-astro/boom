@@ -1,3 +1,4 @@
+use super::super::BabamulSurvey;
 use super::STATS_COLLECTION;
 use crate::api::models::response;
 use crate::utils::db::count_alerts_for_night;
@@ -40,7 +41,7 @@ pub struct NightlyStat {
 pub struct StatsQuery {
     pub start_date: String,
     pub end_date: String,
-    pub survey: Option<String>,
+    pub survey: Option<BabamulSurvey>,
 }
 
 fn cache_id(survey: &Survey, date: &NaiveDate) -> String {
@@ -73,7 +74,7 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
     params(
         ("start_date" = String, Query, description = "Start date (YYYY-MM-DD)"),
         ("end_date" = String, Query, description = "End date (YYYY-MM-DD)"),
-        ("survey" = Option<String>, Query, description = "Optional survey filter (ztf or lsst)."),
+        ("survey" = Option<BabamulSurvey>, Query, description = "Optional survey filter (ztf or lsst)."),
     ),
     responses(
         (status = 200, description = "Stats retrieved", body = Vec<NightlyStat>),
@@ -87,12 +88,8 @@ pub async fn get_nightly_stats(
     query: web::Query<StatsQuery>,
     db: web::Data<Database>,
 ) -> HttpResponse {
-    let surveys = match query.survey.as_deref() {
-        Some("ztf") => vec![Survey::Ztf],
-        Some("lsst") => vec![Survey::Lsst],
-        Some(_) => {
-            return response::bad_request("Invalid survey, expected 'ztf' or 'lsst'");
-        }
+    let surveys: Vec<Survey> = match query.survey {
+        Some(s) => vec![s.into()],
         None => vec![Survey::Ztf, Survey::Lsst],
     };
 
