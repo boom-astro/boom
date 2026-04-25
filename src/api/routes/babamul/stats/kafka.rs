@@ -90,10 +90,13 @@ pub async fn get_kafka_stats(
         updated_at: now_ts,
         cache_until: now_ts + BABAMUL_KAFKA_TOPICS_CACHE_SECS,
     };
-    let _ = stats_collection
+    if let Err(e) = stats_collection
         .replace_one(doc! { "_id": BABAMUL_KAFKA_TOPICS_CACHE_KEY }, &cache_entry)
         .upsert(true)
-        .await;
+        .await
+    {
+        tracing::warn!("Failed to upsert Kafka topics cache: {}", e);
+    }
 
     response::ok(
         &format!("{} topics", topics.len()),
