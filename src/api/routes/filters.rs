@@ -134,7 +134,7 @@ const MAX_FILTER_RESULT_RATIO: f64 = 0.20;
 fn activation_reference_night(survey: &Survey) -> Result<NaiveDate, String> {
     match survey {
         Survey::Ztf => Ok(NaiveDate::from_ymd_opt(2026, 3, 16).unwrap()),
-        Survey::Lsst => Ok(NaiveDate::from_ymd_opt(2026, 3, 9).unwrap()),
+        Survey::Lsst => Ok(NaiveDate::from_ymd_opt(2026, 2, 23).unwrap()),
         _ => Err(format!(
             "filter activation validation is not supported for survey {}",
             survey
