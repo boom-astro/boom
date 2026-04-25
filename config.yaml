@@ -74,6 +74,8 @@ workers:
     filter:
       n_workers: 1
       refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
 crossmatch:
   ztf:
     - catalog: PS1_DR1
