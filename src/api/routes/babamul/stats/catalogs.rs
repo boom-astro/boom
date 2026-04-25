@@ -58,7 +58,7 @@ pub struct CatalogStats {
 ///
 /// By default, returns just the list of catalog names. Use `count=true` and/or
 /// `size=true` query parameters to include document counts and storage sizes.
-/// Results with counts/sizes are cached for 5 days since reference catalogs rarely change.
+/// Results with counts/sizes are cached for 5 days since catalogs rarely change.
 #[utoipa::path(
     get,
     path = "/babamul/stats/catalogs",
