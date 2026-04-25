@@ -278,10 +278,12 @@ mod tests {
 
         // first GET the filter and get its current active status
         let filter = get_test_filter(&filter_id, &token).await;
-        assert_eq!(filter["active"], true);
+        // newly created filters default to inactive
+        assert_eq!(filter["active"], false);
         assert_ne!(filter["active_fid"].as_str().unwrap(), active_fid_after);
 
-        // Now patch this filter
+        // Now patch this filter (keep it inactive: activation requires a
+        // real-data check against a reference night).
         let patch_data = serde_json::json!({
             "active": false,
             "active_fid": active_fid_after,
