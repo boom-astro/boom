@@ -76,7 +76,7 @@ pub enum FilterError {
     FilterNotFound,
     #[error("filter pipeline could not be parsed")]
     FilterPipelineError,
-    #[error("invalid filter pipeline")]
+    #[error("invalid filter pipeline: {0}")]
     InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
