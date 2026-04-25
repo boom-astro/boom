@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 struct NightlyStatCache {
     #[serde(rename = "_id")]
     id: String,
-    survey: String,
+    survey: Survey,
     date: String,
     n_alerts: u64,
     updated_at: f64,
@@ -136,15 +136,10 @@ pub async fn get_nightly_stats(
     {
         if let Ok(docs) = cursor.try_collect::<Vec<_>>().await {
             for doc in docs {
-                let survey = match doc.survey.as_str() {
-                    "ZTF" => Survey::Ztf,
-                    "LSST" => Survey::Lsst,
-                    _ => continue,
-                };
                 let Ok(date) = NaiveDate::parse_from_str(&doc.date, "%Y-%m-%d") else {
                     continue;
                 };
-                cache_counts.insert((survey, date), doc.n_alerts);
+                cache_counts.insert((doc.survey, date), doc.n_alerts);
             }
         }
     }
@@ -206,7 +201,7 @@ pub async fn get_nightly_stats(
             let id = cache_id(survey, date);
             let cache_doc = NightlyStatCache {
                 id: id.clone(),
-                survey: survey.to_string(),
+                survey: survey.clone(),
                 date: date.format("%Y-%m-%d").to_string(),
                 n_alerts: *count,
                 updated_at: now_ts,
