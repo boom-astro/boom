@@ -1,13 +1,11 @@
 use super::STATS_COLLECTION;
 use crate::api::models::response;
+use crate::utils::db::count_alerts_for_night;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{NaiveDate, Utc};
 use futures::{StreamExt, TryStreamExt};
-use mongodb::{
-    bson::{doc, Document},
-    Collection, Database,
-};
+use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -47,35 +45,6 @@ pub struct StatsQuery {
 
 fn cache_id(survey: &Survey, date: &NaiveDate) -> String {
     format!("nightly_stats_{}_{}", survey, date.format("%Y-%m-%d"))
-}
-
-/// Convert a calendar date to Julian Date at **local noon** for the survey's
-/// observatory.
-///
-/// An astronomical "night" for date D spans from JD(D, local noon) to
-/// JD(D+1, local noon).
-fn date_to_jd_local_noon(date: &NaiveDate, survey: &Survey) -> f64 {
-    let y = date.year() as f64;
-    let m = date.month() as f64;
-    let d = date.day() as f64;
-
-    let (y_adj, m_adj) = if m <= 2.0 {
-        (y - 1.0, m + 12.0)
-    } else {
-        (y, m)
-    };
-
-    let a = (y_adj / 100.0_f64).floor();
-    let b = 2.0_f64 - a + (a / 4.0_f64).floor();
-
-    // JD at 0h UT (midnight UTC)
-    let jd_midnight =
-        (365.25_f64 * (y_adj + 4716.0)).floor() + (30.6001_f64 * (m_adj + 1.0)).floor() + d + b
-            - 1524.5;
-
-    // Shift to local noon: local noon = (12 − utc_offset) hours UTC
-    let utc_offset = survey.observatory_utc_offset();
-    jd_midnight + (12.0 - utc_offset) / 24.0
 }
 
 /// Cache duration (in seconds) grows with the age of the night.
@@ -195,20 +164,17 @@ pub async fn get_nightly_stats(
             continue;
         }
 
-        let alerts_collection = db.collection::<Document>(&format!("{}_alerts", survey));
         let count_futures = missing.into_iter().map(|date| {
-            let start_jd = date_to_jd_local_noon(&date, survey);
-            let end_jd = date_to_jd_local_noon(&(date + chrono::Duration::days(1)), survey);
-            let mut filter = doc! {
-                "candidate.jd": { "$gte": start_jd, "$lt": end_jd }
-            };
-            if *survey == Survey::Ztf {
-                filter.insert("candidate.programid", 1);
-            }
-            let coll = alerts_collection.clone();
+            let db = db.clone();
             let survey = survey.clone();
             async move {
-                coll.count_documents(filter)
+                let pids: [i32; 1] = [1];
+                let programids = if survey == Survey::Ztf {
+                    Some(&pids[..])
+                } else {
+                    None
+                };
+                count_alerts_for_night(&db, &survey, &date, programids)
                     .await
                     .map(|c| (survey, date, c))
             }
@@ -290,28 +256,6 @@ pub async fn get_nightly_stats(
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-
-    #[test]
-    fn test_date_to_jd_local_noon_ztf() {
-        // 2000-01-01: JD at midnight UTC = 2451544.5
-        // ZTF local noon (PDT, UTC-7) = 19:00 UTC = +19/24 day
-        // Expected: 2451544.5 + 19/24 = 2451545.291666...
-        let d = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
-        let jd = date_to_jd_local_noon(&d, &Survey::Ztf);
-        let expected = 2451544.5 + 19.0 / 24.0;
-        assert!((jd - expected).abs() < 1e-6, "got {}", jd);
-    }
-
-    #[test]
-    fn test_date_to_jd_local_noon_lsst() {
-        // 2000-01-01: JD at midnight UTC = 2451544.5
-        // LSST local noon (CLST, UTC-3) = 15:00 UTC = +15/24 day
-        // Expected: 2451544.5 + 15/24 = 2451545.125
-        let d = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
-        let jd = date_to_jd_local_noon(&d, &Survey::Lsst);
-        let expected = 2451544.5 + 15.0 / 24.0;
-        assert!((jd - expected).abs() < 1e-6, "got {}", jd);
-    }
 
     #[test]
     fn test_cache_duration() {
