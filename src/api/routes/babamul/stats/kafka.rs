@@ -57,15 +57,16 @@ pub async fn get_kafka_stats(
 
     // Try cache first
     if let Ok(Some(cached)) = stats_collection
-        .find_one(doc! { "_id": BABAMUL_KAFKA_TOPICS_CACHE_KEY })
+        .find_one(doc! {
+            "_id": BABAMUL_KAFKA_TOPICS_CACHE_KEY,
+            "cache_until": { "$gt": now_ts },
+        })
         .await
     {
-        if cached.cache_until > now_ts {
-            return response::ok(
-                &format!("{} topics", cached.topics.len()),
-                serde_json::json!(cached.topics),
-            );
-        }
+        return response::ok(
+            &format!("{} topics", cached.topics.len()),
+            serde_json::json!(cached.topics),
+        );
     }
 
     // Cache miss — query Kafka

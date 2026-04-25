@@ -86,25 +86,26 @@ pub async fn get_catalog_stats(
         let stats_collection: Collection<CatalogStatsCacheEntry> = db.collection(STATS_COLLECTION);
 
         if let Ok(Some(cached)) = stats_collection
-            .find_one(doc! { "_id": CATALOG_STATS_CACHE_KEY })
+            .find_one(doc! {
+                "_id": CATALOG_STATS_CACHE_KEY,
+                "cache_until": { "$gt": now_ts },
+            })
             .await
         {
-            if cached.cache_until > now_ts {
-                let catalogs = cached
-                    .catalogs
-                    .into_iter()
-                    .map(|c| CatalogEntry {
-                        name: c.name,
-                        count: if include_count { c.count } else { None },
-                        size_bytes: if include_size { c.size_bytes } else { None },
-                    })
-                    .collect::<Vec<_>>();
-                let stats = CatalogStats {
-                    n_catalogs: catalogs.len(),
-                    catalogs,
-                };
-                return response::ok_ser("catalog stats (cached)", stats);
-            }
+            let catalogs = cached
+                .catalogs
+                .into_iter()
+                .map(|c| CatalogEntry {
+                    name: c.name,
+                    count: if include_count { c.count } else { None },
+                    size_bytes: if include_size { c.size_bytes } else { None },
+                })
+                .collect::<Vec<_>>();
+            let stats = CatalogStats {
+                n_catalogs: catalogs.len(),
+                catalogs,
+            };
+            return response::ok_ser("catalog stats (cached)", stats);
         }
     }
 

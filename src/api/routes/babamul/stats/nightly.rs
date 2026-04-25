@@ -159,14 +159,14 @@ pub async fn get_nightly_stats(
 
     let mut cache_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
     if let Ok(cursor) = stats_collection
-        .find(doc! { "_id": { "$in": &cache_keys } })
+        .find(doc! {
+            "_id": { "$in": &cache_keys },
+            "cache_until": { "$gt": now_ts },
+        })
         .await
     {
         if let Ok(docs) = cursor.try_collect::<Vec<_>>().await {
             for doc in docs {
-                if doc.cache_until <= now_ts {
-                    continue;
-                }
                 let survey = match doc.survey.as_str() {
                     "ZTF" => Survey::Ztf,
                     "LSST" => Survey::Lsst,
