@@ -72,8 +72,8 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
     get,
     path = "/babamul/stats/nightly",
     params(
-        ("start_date" = String, Query, description = "Start date (YYYY-MM-DD)"),
-        ("end_date" = String, Query, description = "End date (YYYY-MM-DD)"),
+        ("start_date" = String, Query, description = "Start date (YYYY-MM-DD); must be on or after 2018-01-01."),
+        ("end_date" = String, Query, description = "End date (YYYY-MM-DD); cannot be in the future."),
         ("survey" = Option<BabamulSurvey>, Query, description = "Optional survey filter (ztf or lsst)."),
     ),
     responses(
@@ -105,8 +105,18 @@ pub async fn get_nightly_stats(
         return response::bad_request("end_date must be >= start_date");
     }
 
+    // ZTF first light was Nov 2017, regular survey operations began Mar 2018.
+    let min_start_date = NaiveDate::from_ymd_opt(2018, 1, 1).unwrap();
+    if start_date < min_start_date {
+        return response::bad_request("start_date must be on or after 2018-01-01");
+    }
+
     let today = Utc::now().date_naive();
     let now_ts = Utc::now().timestamp() as f64;
+
+    if end_date > today {
+        return response::bad_request("end_date cannot be in the future");
+    }
 
     let stats_collection: Collection<NightlyStatCache> = db.collection(STATS_COLLECTION);
 
