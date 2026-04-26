@@ -1,4 +1,5 @@
 // Database related functionality
+use crate::api::routes::babamul::stats::STATS_COLLECTION;
 use crate::api::routes::users::User;
 use crate::conf::{AppConfig, AuthConfig, BoomConfigError};
 
@@ -7,7 +8,8 @@ use mongodb::Database;
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
-pub const PROTECTED_COLLECTION_NAMES: [&str; 4] = ["filters", "babamul_users", "users", "stats"];
+pub const PROTECTED_COLLECTION_NAMES: [&str; 4] =
+    ["filters", "babamul_users", "users", STATS_COLLECTION];
 
 async fn init_api_admin_user(
     auth_config: &AuthConfig,
