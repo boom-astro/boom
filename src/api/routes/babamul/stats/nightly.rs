@@ -134,20 +134,23 @@ pub async fn get_nightly_stats(
         .collect();
 
     let mut cache_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
-    if let Ok(cursor) = stats_collection
+    match stats_collection
         .find(doc! {
             "_id": { "$in": &cache_keys },
             "cache_until": { "$gt": now_ts },
         })
         .await
     {
-        if let Ok(docs) = cursor.try_collect::<Vec<_>>().await {
-            for doc in docs {
+        Ok(mut cursor) => {
+            while let Ok(Some(doc)) = cursor.try_next().await {
                 let Ok(date) = NaiveDate::parse_from_str(&doc.date, "%Y-%m-%d") else {
                     continue;
                 };
                 cache_counts.insert((doc.survey, date), doc.n_alerts);
             }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read nightly stat cache: {}", e);
         }
     }
 
