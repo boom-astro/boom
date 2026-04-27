@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
+const SESSIONS_PER_DEVICE: usize = 1;
+
 /// ONNX models shared across all enrichment worker threads via `Arc`.
 ///
 /// Each model is wrapped in a `Mutex` because `Session::run` requires `&mut self`.
@@ -102,10 +104,15 @@ impl SharedModelPool {
             info!("loading ONNX models on CPU");
             vec![SharedModels::load(None)?]
         } else {
-            let mut sets = Vec::with_capacity(device_ids.len());
+            let mut sets = Vec::with_capacity(device_ids.len() * SESSIONS_PER_DEVICE);
             for &id in device_ids {
-                info!(device_id = id, "loading ONNX models on GPU device");
-                sets.push(SharedModels::load(Some(id))?);
+                for session_idx in 0..SESSIONS_PER_DEVICE {
+                    info!(
+                        device_id = id,
+                        session_idx, "loading ONNX models on GPU device"
+                    );
+                    sets.push(SharedModels::load(Some(id))?);
+                }
             }
             info!(
                 n_devices = sets.len(),

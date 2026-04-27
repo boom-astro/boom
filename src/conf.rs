@@ -41,7 +41,7 @@ pub fn load_dotenv() {
     // Try current directory first
     if std::path::Path::new(".env").exists() {
         match dotenvy::dotenv() {
-            Ok(_) => info!("Loaded environment variables from .env file"),
+            Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
         }
         return;
@@ -50,14 +50,14 @@ pub fn load_dotenv() {
     // Try parent directory (useful when running from subdirectories like api/)
     if std::path::Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
-            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
         }
         return;
     }
 
     // No .env file found - this is fine, environment variables may be set by the system
-    debug!("No .env file found, using system environment variables only");
+    info!("No .env file found, using system environment variables only");
 }
 
 #[instrument(err)]
@@ -409,7 +409,9 @@ pub struct WorkerConfig {
     pub n_workers: usize,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+use serde::{de, Deserializer};
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GpuConfig {
     /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
     /// Models are loaded once at startup and shared across all enrichment workers
@@ -421,8 +423,49 @@ pub struct GpuConfig {
     /// ONNX models are loaded on the first device. Additional devices are
     /// available for the GPU pool (future lightcurve fitting).
     /// Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
-    #[serde(default = "default_gpu_device_ids")]
+    #[serde(
+        default = "default_gpu_device_ids",
+        deserialize_with = "deserialize_device_ids"
+    )]
     pub device_ids: Vec<i32>,
+}
+
+fn deserialize_device_ids<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DeviceIdsVisitor;
+    impl<'de> de::Visitor<'de> for DeviceIdsVisitor {
+        type Value = Vec<i32>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list of integers or a comma-separated string")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let ids = v
+                .split(',')
+                .map(|s| s.trim().parse::<i32>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| E::custom("invalid integer in device_ids string"))?;
+            Ok(ids)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut ids = Vec::new();
+            while let Some(val) = seq.next_element()? {
+                ids.push(val);
+            }
+            Ok(ids)
+        }
+    }
+    deserializer.deserialize_any(DeviceIdsVisitor)
 }
 
 impl Default for GpuConfig {
@@ -552,7 +595,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
         return Err(BoomConfigError::InvalidSecretError(e));
     }
 
-    info!("Configuration loaded successfully");
+    debug!("Configuration loaded successfully");
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
     debug!("Admin username: {}", app_config.api.auth.admin_username);

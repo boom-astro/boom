@@ -15,12 +15,16 @@ pub enum ModelError {
     NdarrayShape(#[from] ndarray::ShapeError),
     #[error("error from ort")]
     Ort(#[from] ort::Error),
+    #[error("error from ort session builder")]
+    OrtSessionBuilder(#[from] ort::Error<ort::session::builder::SessionBuilder>),
     #[error("error preparing cutout data")]
     PrepareCutoutError(#[from] CutoutError),
     #[error("error converting predictions to vec")]
     ModelOutputToVecError,
     #[error("missing feature in alert: {0}")]
     MissingFeature(&'static str),
+    #[error("ORT_DYLIB_PATH is not set on Linux; ONNX Runtime cannot be loaded. Please set ORT_DYLIB_PATH to the path of your libonnxruntime.so.")]
+    MissingOrtDylibPath,
 }
 
 /// Load an ONNX model, optionally on a specific CUDA device.
@@ -45,23 +49,35 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         .map(|v| env_truthy(&v))
         .unwrap_or(true);
 
+    #[cfg(target_os = "linux")]
+    if env::var_os("ORT_DYLIB_PATH").is_none() {
+        return Err(ModelError::MissingOrtDylibPath);
+    }
+
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if use_gpu {
-        // if CUDA or Apple's CoreML aren't available,
-        // it will fall back to CPU execution provider
+        // Disable CPU fallback to make sure we only use the GPUs as instructed.
+        // We only do this on Linux as Apple's CoreML EP does need to fallback
+        // to the CPU for some operators of the ONNX runtime.
+        #[cfg(target_os = "linux")]
+        {
+            builder = builder.with_disable_cpu_fallback()?;
+        }
+
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let dev = device_id.unwrap_or(0);
+
         builder = builder.with_execution_providers([
             #[cfg(target_os = "linux")]
-            ort::execution_providers::CUDAExecutionProvider::default()
+            ort::ep::CUDAExecutionProvider::default()
                 .with_device_id(dev)
                 .build(),
             #[cfg(target_os = "macos")]
-            ort::execution_providers::CoreMLExecutionProvider::default().build(),
+            ort::ep::CoreMLExecutionProvider::default().build(),
         ])?;
     } else {
-        builder = builder.with_execution_providers([
-            ort::execution_providers::CPUExecutionProvider::default().build(),
-        ])?;
+        builder =
+            builder.with_execution_providers([ort::ep::CPUExecutionProvider::default().build()])?;
     }
 
     let model = builder
@@ -78,7 +94,6 @@ pub trait Model {
         Self: Sized;
     #[instrument(skip_all, err)]
     fn get_triplet(
-        &self,
         alert_cutouts: &[&AlertCutout],
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
         let mut triplets = Array::zeros((alert_cutouts.len(), 63, 63, 3));
@@ -96,6 +111,38 @@ pub trait Model {
         }
         Ok(triplets)
     }
+
+    /// Build triplets for all valid cutouts and return the original indices kept.
+    /// Invalid cutouts are skipped.
+    fn get_triplet_indexed(
+        alert_cutouts: &[&AlertCutout],
+    ) -> Result<(Vec<usize>, Array<f32, Dim<[usize; 4]>>), ModelError> {
+        let mut kept_indices: Vec<usize> = Vec::new();
+        let mut kept_triplets: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = Vec::new();
+
+        for (idx, cutout) in alert_cutouts.iter().enumerate() {
+            if let Ok((science, template, difference)) = prepare_triplet(cutout) {
+                kept_indices.push(idx);
+                kept_triplets.push((science.to_vec(), template.to_vec(), difference.to_vec()));
+            }
+        }
+
+        if kept_indices.is_empty() {
+            return Ok((kept_indices, Array::zeros((0, 63, 63, 3))));
+        }
+
+        let mut triplets = Array::zeros((kept_indices.len(), 63, 63, 3));
+        for (i, (science, template, difference)) in kept_triplets.into_iter().enumerate() {
+            for (j, cutout) in [science, template, difference].iter().enumerate() {
+                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
+                let cutout_array = Array::from_shape_vec((63, 63), cutout.clone())?;
+                slice.assign(&cutout_array);
+            }
+        }
+
+        Ok((kept_indices, triplets))
+    }
+
     fn predict(
         &mut self,
         metadata_features: &Array<f32, Dim<[usize; 2]>>,

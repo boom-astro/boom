@@ -201,7 +201,6 @@ services:
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_REDIS__HOST: valkey
-      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-true}
     networks:
       - boom
     profiles:
@@ -227,7 +226,6 @@ services:
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_REDIS__HOST: valkey
-      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-true}
     networks:
       - boom
     profiles:
@@ -251,7 +249,8 @@ services:
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
-      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-true}
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:
       - boom
     profiles:
@@ -277,7 +276,8 @@ services:
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
-      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-true}
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:
       - boom
     profiles:
