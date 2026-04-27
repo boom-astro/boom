@@ -6,6 +6,8 @@ This page covers ONNX Runtime setup on Linux and GPU acceleration for BOOM.
 
 **On Linux**, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use a GPU or not.
 
+**Note:** On Linux, If `ORT_DYLIB_PATH` is not set, BOOM will fail to start with a clear error. This is a hard requirement due to ONNX Runtime's dynamic loading behavior.
+
 ## Quick summary
 
 - Native Linux (CPU or GPU): you **must** set `ORT_DYLIB_PATH` before starting BOOM.

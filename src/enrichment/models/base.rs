@@ -23,6 +23,8 @@ pub enum ModelError {
     ModelOutputToVecError,
     #[error("missing feature in alert: {0}")]
     MissingFeature(&'static str),
+    #[error("ORT_DYLIB_PATH is not set on Linux; ONNX Runtime cannot be loaded. Please set ORT_DYLIB_PATH to the path of your libonnxruntime.so.")]
+    MissingOrtDylibPath,
 }
 
 /// Load an ONNX model, optionally on a specific CUDA device.
@@ -48,10 +50,8 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         .unwrap_or(true);
 
     #[cfg(target_os = "linux")]
-    if use_gpu && env::var_os("ORT_DYLIB_PATH").is_none() {
-        tracing::warn!(
-            "ORT_DYLIB_PATH is not set; BOOM is using the default ONNX Runtime library. If you hit cudaErrorNoKernelImageForDevice on a newer GPU, point ORT_DYLIB_PATH at a custom libonnxruntime.so built for that GPU architecture."
-        );
+    if env::var_os("ORT_DYLIB_PATH").is_none() {
+        return Err(ModelError::MissingOrtDylibPath);
     }
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.

@@ -14,6 +14,7 @@
 ## Description
 
 BOOM is an alert broker. What sets it apart from other alert brokers is that it is written to be modular, scalable, and performant. Essentially, the pipeline is composed of multiple types of workers, each with a specific task:
+
 1. The `Kafka` consumer(s), reading alerts from astronomical surveys' `Kafka` topics to transfer them to `Redis`/`Valkey` in-memory queues.
 2. The Alert Ingestion workers, reading alerts from the `Redis`/`Valkey` queues, responsible of formatting them to BSON documents, and enriching them with crossmatches from archival astronomical catalogs and other surveys before writing the formatted alert packets to a `MongoDB` database.
 3. The enrichment workers, running alerts through a series of enrichment classifiers, and writing the results back to the `MongoDB` database.
@@ -32,9 +33,11 @@ BOOM runs on macOS and Linux. You'll need:
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- On Linux, you need to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
+- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
 
-### Installation steps:
+**Note:** On Linux, BOOM will fail to start with a clear error if `ORT_DYLIB_PATH` is not set. This is a hard requirement due to ONNX Runtime's dynamic loading behavior. The process will not run without it.
+
+### Installation steps
 
 #### macOS
 
@@ -48,10 +51,12 @@ BOOM runs on macOS and Linux. You'll need:
 - Rust: You can use [rustup](https://www.rust-lang.org/tools/install) to install Rust. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - `wget` and `tar`: Most Linux distributions come with `wget` and `tar` pre-installed. If not, you can install them with your package manager.
 - System packages are essential for compiling and linking some Rust crates. On linux, you can install them with your package manager. For example with `apt` on Ubuntu or Debian-based systems, you can run:
+
   ```bash
   sudo apt update
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
+
 - If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference-linux) subsection below for more details.
 
 ## Setup
@@ -85,15 +90,18 @@ code.
 
 1. Launch `Valkey`, `MongoDB`, `Kafka`, and the BOOM API server in dev mode
    using Docker, with the provided `docker-compose.yaml` file:
+
     ```bash
     docker compose --profile api up -d
     ```
+
     This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
     *To check if the containers are running and healthy, run `docker ps`.*
 
     **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
 2. Last but not least, build the Rust binaries. You can do this with or without the `--release` flag, but we recommend using it for better performance:
+
     ```bash
     cargo build --release
     ```
@@ -152,28 +160,33 @@ gpu:
 
 See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
 
-## Running BOOM:
+## Running BOOM
 
 ### Alert Production (not required for production use)
 
 BOOM is meant to be run in production, reading from a real-time Kafka stream of astronomical alerts. **That said, we made it possible to process ZTF alerts from the [ZTF alerts public archive](https://ztf.uw.edu/alerts/public/).**
 This is a great way to test BOOM on real data at scale, and not just using the unit tests. To start a Kafka producer, you can run the following command:
+
 ```bash
 cargo run --release --bin kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ```
 
-_To see the list of all parameters, documentation, and examples, run the following command:_
+_To see the list of all parameters, documentation, and examples, run the following command:
+
 ```bash
 cargo run --release --bin kafka_producer -- --help
 ```
 
 As an example, let's say you want to produce public ZTF alerts that were observed on `20240617` UTC. You can run the following command:
+
 ```bash
 cargo run --release --bin kafka_producer ztf 20240617 public
 ```
+
 You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
+
 ```bash
 docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
@@ -181,6 +194,7 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 ### Alert Consumption
 
 Next, you can start the `Kafka` consumer with:
+
 ```bash
 cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 ```
@@ -188,6 +202,7 @@ cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMID
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
 To continue with the previous example, you can run:
+
 ```bash
 cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ```
@@ -195,16 +210,20 @@ cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ### Alert Processing
 
 Now that alerts have been queued for processing, let's start the workers that will process them. Instead of starting each worker manually, we provide the `scheduler` binary. You can run it with:
+
 ```bash
 cargo run --release --bin scheduler <SURVEY> [CONFIG_PATH]
 ```
+
 Where `<SURVEY>` is the name of the stream you want to process.
 For example, to process ZTF alerts, you can run:
+
 ```bash
 cargo run --release --bin scheduler ztf
 ```
 
 The scheduler prints a variety of messages to your terminal, e.g.:
+
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
 - You should then see some `received alerts len: <nb_alerts>` messages, which means that the enrichment worker is processing the alerts successfully.
 - You should not see anything related to the filter worker. **This is normal, as we did not define any filters yet!** The next version of the README will include instructions on how to upload a dummy filter to the system for testing purposes.
@@ -213,10 +232,10 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 Metrics are available in the Prometheus instance at <http://localhost:9090>.
 Here some links to the Prometheus UI with useful queries already entered:
 
-* [Kakfa consumer][kafka-consumer-queries]
-* [Alert workers][alert-worker-queries]
-* [Enrichment workers][enrichment-worker-queries]
-* [Filter workers][filter-worker-queries]
+- [Kafka consumer][kafka-consumer-queries]
+- [Alert workers][alert-worker-queries]
+- [Enrichment workers][enrichment-worker-queries]
+- [Filter workers][filter-worker-queries]
 
 [kafka-consumer-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+alert+workers%0Akafka_consumer_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Airate%28kafka_consumer_alert_processed_total%5B5m%5D%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+sum+by+%28status%29+%28irate%28kafka_consumer_alert_processed_total%5B5m%5D%29%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0
 
@@ -226,10 +245,11 @@ Here some links to the Prometheus UI with useful queries already entered:
 
 [filter-worker-queries]: http://localhost:9090/query?g0.expr=%23+Total+number+of+alerts+processed+by+the+filter+workers%0Afilter_worker_alert_processed_total&g0.show_tree=0&g0.tab=table&g0.range_input=30m&g0.res_type=fixed&g0.res_step=60&g0.display_mode=lines&g0.show_exemplars=0&g1.expr=%23+Instantaneous+throughput+%28alert%2Fs%29%0Airate%28filter_worker_alert_processed_total%5B5m%5D%29&g1.show_tree=0&g1.tab=graph&g1.range_input=30m&g1.res_type=fixed&g1.res_step=60&g1.display_mode=lines&g1.show_exemplars=0&g2.expr=%23+Average+processing+time+per+alert+%28s%29%0A1+%2F+irate%28filter_worker_alert_processed_total%5B5m%5D%29&g2.show_tree=0&g2.tab=graph&g2.range_input=30m&g2.res_type=fixed&g2.res_step=60&g2.display_mode=lines&g2.show_exemplars=0&g3.expr=%23+Number+of+alerts+per+batch%2C+averaged+over+the+collection+interval%0Airate%28filter_worker_alert_processed_total%5B5m%5D%29+%2F+ignoring%28reason%29+group_left+irate%28filter_worker_batch_processed_total%5B5m%5D%29%0A%23+irate%28filter_worker_alert_processed_total%5B5m%5D%29%0A%23+irate%28filter_worker_batch_processed_total%5B5m%5D%29&g3.show_tree=0&g3.tab=graph&g3.range_input=30m&g3.res_type=fixed&g3.res_step=60&g3.display_mode=lines&g3.show_exemplars=0
 
-## Stopping BOOM:
+## Stopping BOOM
 
 To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then stop the scheduler with `CTRL+C` as well.
 You can also stop the docker containers with:
+
 ```bash
 docker compose down
 ```
