@@ -1,6 +1,6 @@
-use super::super::BabamulSurvey;
 use super::STATS_COLLECTION;
 use crate::api::models::response;
+use crate::api::routes::babamul::BabamulSurvey;
 use crate::utils::db::count_alerts_for_night;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
