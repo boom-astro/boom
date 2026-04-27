@@ -188,20 +188,29 @@ services:
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
-      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__API_ENABLED:-false}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
-      SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
     networks:
       - boom
       - traefik-public
     volumes:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    deploy:
+      resources:
+        limits:
+          memory: 128g
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${BOOM_API__PORT:-4000}/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     profiles:
       - prod
-      - dev
+      - api
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
@@ -226,16 +235,22 @@ services:
       # Enable www redirection for HTTP and HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
-  consumer-ztf:
+  consumer-ztf-public:
+    # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
+    # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)
+    # TODO: investigate further and consider merging into single consumer with multiple topics if the issue is resolved
     image: boom-astro/boom:latest
-    hostname: consumer-ztf
+    hostname: consumer-ztf-public
     build:
       context: .
       dockerfile: Dockerfile
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
-      BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: ${BOOM_KAFKA__CONSUMER__ZTF__SERVER:?BOOM_KAFKA__CONSUMER__ZTF__SERVER must be set}
+      BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-public
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
@@ -250,6 +265,66 @@ services:
     command:
       - /app/kafka_consumer
       - ztf
+      - --programids
+      - public
+  consumer-ztf-partnership:
+    image: boom-astro/boom:latest
+    hostname: consumer-ztf-partnership
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: ${BOOM_KAFKA__CONSUMER__ZTF__SERVER:?BOOM_KAFKA__CONSUMER__ZTF__SERVER must be set}
+      BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-partnership
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/kafka_consumer
+      - ztf
+      - --programids
+      - partnership
+  consumer-ztf-caltech:
+    image: boom-astro/boom:latest
+    hostname: consumer-ztf-caltech
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: ${BOOM_KAFKA__CONSUMER__ZTF__SERVER:?BOOM_KAFKA__CONSUMER__ZTF__SERVER must be set}
+      BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-caltech
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/kafka_consumer
+      - ztf
+      - --programids
+      - caltech
   consumer-lsst:
     image: boom-astro/boom:latest
     hostname: consumer-lsst
@@ -259,6 +334,8 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
       BOOM_KAFKA__CONSUMER__LSST__GROUP_ID: ${BOOM_KAFKA__CONSUMER__LSST__GROUP_ID:?BOOM_KAFKA__CONSUMER__LSST__GROUP_ID must be set}
       BOOM_KAFKA__CONSUMER__LSST__USERNAME: ${BOOM_KAFKA__CONSUMER__LSST__USERNAME:?BOOM_KAFKA__CONSUMER__LSST__USERNAME must be set}
       BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${BOOM_KAFKA__CONSUMER__LSST__PASSWORD:?BOOM_KAFKA__CONSUMER__LSST__PASSWORD must be set}
@@ -285,6 +362,8 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
@@ -311,6 +390,8 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
