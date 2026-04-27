@@ -88,10 +88,10 @@ pub async fn get_nightly_stats(
     query: web::Query<StatsQuery>,
     db: web::Data<Database>,
 ) -> HttpResponse {
-    let surveys: Vec<Survey> = match query.survey {
-        Some(s) => vec![s.into()],
-        None => vec![Survey::Ztf, Survey::Lsst],
-    };
+    let surveys: Vec<Survey> = query
+        .survey
+        .map(|s| vec![s.into()])
+        .unwrap_or(vec![Survey::Ztf, Survey::Lsst]);
 
     let start_date = match NaiveDate::parse_from_str(&query.start_date, "%Y-%m-%d") {
         Ok(d) => d,
