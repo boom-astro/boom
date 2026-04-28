@@ -52,17 +52,28 @@ pub async fn get_catalogs(
     let params = params.map(|p| p.into_inner()).unwrap_or_default();
     if params.get_details {
         for catalog in catalog_names {
-            match db
-                .run_command(doc! {
-                    "collstats": &catalog
-                })
+            let collection = db.collection::<mongodb::bson::Document>(&catalog);
+            let mut cursor = match collection
+                .aggregate(vec![doc! { "$collStats": { "storageStats": {} } }])
                 .await
             {
-                Ok(d) => catalogs.push(doc! {"name": catalog, "details": d}),
+                Ok(c) => c,
                 Err(e) => {
                     return response::internal_error(&format!("Error getting catalog info: {}", e));
                 }
             };
+            let stats = match cursor.next().await {
+                Some(Ok(d)) => d,
+                Some(Err(e)) => {
+                    return response::internal_error(&format!("Error getting catalog info: {}", e));
+                }
+                None => doc! {},
+            };
+            let details = stats
+                .get_document("storageStats")
+                .cloned()
+                .unwrap_or_default();
+            catalogs.push(doc! {"name": catalog, "details": details});
         }
     } else {
         // If no details requested, just return the names
