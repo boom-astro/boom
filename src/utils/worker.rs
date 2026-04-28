@@ -48,14 +48,11 @@ impl Copy for WorkerType {}
 
 impl fmt::Display for WorkerType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let enum_str;
-        match self {
-            WorkerType::Alert => {
-                enum_str = "Alert";
-            }
-            WorkerType::Filter => enum_str = "Filter",
-            WorkerType::Enrichment => enum_str = "Enrichment",
-        }
+        let enum_str = match self {
+            WorkerType::Alert => "Alert",
+            WorkerType::Filter => "Filter",
+            WorkerType::Enrichment => "Enrichment",
+        };
         write!(f, "{}", enum_str)
     }
 }
@@ -86,5 +83,51 @@ pub(crate) fn should_terminate(receiver: &mut Receiver<WorkerCmd>) -> bool {
             true
         }
         Err(TryRecvError::Empty) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_type_display() {
+        assert_eq!(format!("{}", WorkerType::Alert), "Alert");
+        assert_eq!(format!("{}", WorkerType::Enrichment), "Enrichment");
+        assert_eq!(format!("{}", WorkerType::Filter), "Filter");
+    }
+
+    #[test]
+    fn test_worker_type_clone_copy() {
+        let wt = WorkerType::Enrichment;
+        let wt2 = wt; // Copy
+        let wt3 = wt.clone(); // Clone
+        assert_eq!(format!("{}", wt2), "Enrichment");
+        assert_eq!(format!("{}", wt3), "Enrichment");
+    }
+
+    #[test]
+    fn test_worker_cmd_display() {
+        assert_eq!(format!("{}", WorkerCmd::TERM), "TERM");
+    }
+
+    #[tokio::test]
+    async fn test_should_terminate_on_term_signal() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(WorkerCmd::TERM).await.unwrap();
+        assert!(should_terminate(&mut rx));
+    }
+
+    #[tokio::test]
+    async fn test_should_terminate_empty_channel() {
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<WorkerCmd>(1);
+        assert!(!should_terminate(&mut rx));
+    }
+
+    #[tokio::test]
+    async fn test_should_terminate_disconnected() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WorkerCmd>(1);
+        drop(tx); // disconnect sender
+        assert!(should_terminate(&mut rx));
     }
 }
