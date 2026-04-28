@@ -8,11 +8,15 @@ use crate::{
         models::response,
         routes::users::User,
     },
+    conf::{AppConfig, FilterWorkerConfig},
     enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
-    utils::{db::mongify, enums::Survey},
+    utils::{
+        db::{count_alerts_for_night, mongify},
+        enums::Survey,
+    },
 };
 
 use actix_web::{get, patch, post, web, HttpResponse};
@@ -123,6 +127,110 @@ async fn build_and_test_filter_version(
     run_test_pipeline(db, survey, test_pipeline).await
 }
 
+/// Validate that activating this filter is safe by running it against a
+/// reference observing night and ensuring the filter does not match more than
+/// `max_result_ratio_percent` of the alerts the filter has access to that night.
+async fn validate_filter_activation(
+    db: &Database,
+    config: &FilterWorkerConfig,
+    survey: &Survey,
+    pipeline: &Vec<serde_json::Value>,
+    permissions: &HashMap<Survey, Vec<i32>>,
+) -> Result<(), String> {
+    let (night_date, max_match_rate) = match (config.reference_night, config.max_match_rate) {
+        (Some(date), Some(rate)) => (date, rate),
+        _ => {
+            return Err(format!(
+                "filter activation validation is not supported for survey {}",
+                survey
+            ));
+        }
+    };
+
+    // The user's accessible alerts are restricted by permissions on surveys that
+    // expose multiple program streams (ZTF). Surveys without programid (LSST)
+    // pass None, counting all alerts for the night.
+    let permission_programids: Option<Vec<i32>> = if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
+    {
+        match permissions.get(survey) {
+            Some(p) if !p.is_empty() => Some(p.clone()),
+            _ => {
+                return Err(format!(
+                    "filter has no permissions defined for survey {}",
+                    survey
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let pid_slice = permission_programids.as_deref();
+    let night_total = count_alerts_for_night(db, survey, &night_date, pid_slice)
+        .await
+        .map_err(|e| format!("failed to count alerts for {}: {}", night_date, e))?;
+    if night_total == 0 {
+        return Err(if pid_slice.is_some() {
+            format!(
+                "no {} alerts accessible with the given permissions on reference night {}; cannot validate filter activation",
+                survey, night_date
+            )
+        } else {
+            format!(
+                "no {} alerts on reference night {}; cannot validate filter activation",
+                survey, night_date
+            )
+        });
+    }
+
+    // Run the filter pipeline restricted to that night, count matches.
+    let (start_jd, end_jd) = survey.night_jd_window(&night_date);
+    let mut test_pipeline = build_filter_pipeline(pipeline, permissions, survey)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut match_stage = doc! {
+        "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
+    };
+    if let Some(pids) = permission_programids.as_ref() {
+        match_stage.insert("candidate.programid", doc! { "$in": pids });
+    }
+    match test_pipeline.get_mut(0) {
+        Some(first_stage) if first_stage.get("$match").is_some() => {
+            first_stage.insert("$match", match_stage);
+        }
+        _ => return Err("filter pipeline must start with a $match stage".to_string()),
+    }
+    test_pipeline.push(doc! { "$count": "count" });
+
+    let collection: Collection<Document> = db.collection(&format!("{}_alerts", survey));
+    let mut cursor = collection
+        .aggregate(test_pipeline)
+        .await
+        .map_err(|e| format!("failed to run filter on night {}: {}", night_date, e))?;
+    let matched = match cursor.next().await {
+        Some(Ok(doc)) => match doc.get("count") {
+            Some(mongodb::bson::Bson::Int32(c)) => *c as i64,
+            Some(mongodb::bson::Bson::Int64(c)) => *c,
+            _ => 0,
+        },
+        Some(Err(e)) => return Err(format!("failed to read filter result count: {}", e)),
+        None => 0,
+    };
+
+    let max_allowed = (night_total as f64 * max_match_rate as f64 / 100.0) as i64;
+    if matched > max_allowed {
+        return Err(format!(
+            "filter matched {} of {} {} alerts ({:.1}%) on night {}, which exceeds the {}% limit",
+            matched,
+            night_total,
+            survey,
+            (matched as f64 / night_total as f64) * 100.0,
+            night_date,
+            max_match_rate,
+        ));
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize, Clone, ToSchema)]
 struct FilterVersionPost {
     pipeline: Vec<serde_json::Value>,
@@ -145,6 +253,7 @@ struct FilterVersionPost {
 #[post("/filters/{filter_id}/versions")]
 pub async fn post_filter_version(
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
     filter_id: web::Path<String>,
     body: web::Json<FilterVersionPost>,
     current_user: Option<web::ReqData<User>>,
@@ -189,6 +298,27 @@ pub async fn post_filter_version(
         }
     }
 
+    let set_as_active = body.set_as_active.unwrap_or(true);
+    // If this version is going to immediately replace an active filter,
+    // re-run the activation check on the new pipeline
+    if set_as_active && filter.active {
+        let filter_config = match config.workers.get(&survey).map(|w| &w.filter) {
+            Some(c) => c,
+            None => {
+                return response::internal_error(&format!(
+                    "no worker config defined for survey {}",
+                    survey
+                ));
+            }
+        };
+        if let Err(e) =
+            validate_filter_activation(&db, filter_config, &survey, &new_pipeline, &permissions)
+                .await
+        {
+            return response::bad_request(&e);
+        }
+    }
+
     let new_pipeline_id = Uuid::new_v4().to_string();
     let mut fv_update = doc! {
         "fid": &new_pipeline_id,
@@ -203,7 +333,7 @@ pub async fn post_filter_version(
             "fv": fv_update
         },
     };
-    if body.set_as_active.unwrap_or(true) {
+    if set_as_active {
         update_doc.insert("$set", doc! { "active_fid": &new_pipeline_id });
     }
     let update_result = collection
@@ -302,7 +432,7 @@ pub async fn post_filter(
         survey,
         id: filter_id,
         user_id: current_user.id.clone(),
-        active: true,
+        active: false,
         active_fid: filter_version.clone(),
         fv: vec![FilterVersion {
             fid: filter_version,
@@ -349,6 +479,7 @@ struct FilterPatch {
 #[patch("/filters/{filter_id}")]
 pub async fn patch_filter(
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
     filter_id: web::Path<String>,
     body: web::Json<FilterPatch>,
     current_user: Option<web::ReqData<User>>,
@@ -392,15 +523,18 @@ pub async fn patch_filter(
     if let Some(active) = body.active {
         update_doc.insert("active", active);
     }
-    if let Some(active_fid) = body.active_fid.clone() {
+    let new_active_fid = if let Some(active_fid) = body.active_fid.clone() {
         // Ensure the fid exists in the filter versions
         if !filter.fv.iter().any(|fv| fv.fid == active_fid) {
             return response::bad_request(
                 "active_fid must be one of the existing filter version IDs",
             );
         }
-        update_doc.insert("active_fid", active_fid);
-    }
+        update_doc.insert("active_fid", active_fid.clone());
+        Some(active_fid)
+    } else {
+        None
+    };
     if let Some(permissions) = body.permissions.clone() {
         if permissions.get(&filter.survey).is_none()
             && SURVEYS_REQUIRING_PERMISSIONS.contains(&filter.survey)
@@ -415,6 +549,58 @@ pub async fn patch_filter(
     if update_doc.is_empty() {
         return response::bad_request("no valid fields to update");
     }
+
+    // If the filter is currently active or will be set to active,
+    // and the pipeline or permissions are changing, run the activation check to ensure
+    // the filter is not too permissive.
+    let will_be_active = body.active.unwrap_or(filter.active);
+    let exec_changed = (body.active == Some(true) && !filter.active)
+        || new_active_fid.is_some()
+        || body.permissions.is_some();
+    if will_be_active && exec_changed {
+        let active_fid = new_active_fid
+            .as_deref()
+            .unwrap_or(filter.active_fid.as_str());
+        let active_version = match filter.fv.iter().find(|fv| fv.fid == active_fid) {
+            Some(fv) => fv,
+            None => {
+                return response::internal_error(&format!(
+                    "filter {} has no version matching active_fid {}",
+                    filter_id, active_fid
+                ));
+            }
+        };
+        let pipeline =
+            match serde_json::from_str::<Vec<serde_json::Value>>(&active_version.pipeline) {
+                Ok(p) => p,
+                Err(e) => {
+                    return response::internal_error(&format!(
+                        "failed to parse stored filter pipeline: {}",
+                        e
+                    ));
+                }
+            };
+        let permissions = body
+            .permissions
+            .clone()
+            .unwrap_or(filter.permissions.clone());
+        let filter_config = match config.workers.get(&filter.survey).map(|w| &w.filter) {
+            Some(c) => c,
+            None => {
+                return response::internal_error(&format!(
+                    "no worker config defined for survey {}",
+                    filter.survey
+                ));
+            }
+        };
+        if let Err(e) =
+            validate_filter_activation(&db, filter_config, &filter.survey, &pipeline, &permissions)
+                .await
+        {
+            return response::bad_request(&e);
+        }
+    }
+
     update_doc.insert("updated_at", Time::now().to_jd());
     let update_result = collection
         .update_one(doc! {"_id": filter_id.clone()}, doc! {"$set": update_doc})

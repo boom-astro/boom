@@ -8,6 +8,7 @@ use crate::{
     },
 };
 
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
 use apache_avro::{serde_avro_bytes, Writer};
@@ -75,7 +76,7 @@ pub enum FilterError {
     FilterNotFound,
     #[error("filter pipeline could not be parsed")]
     FilterPipelineError,
-    #[error("invalid filter pipeline")]
+    #[error("invalid filter pipeline: {0}")]
     InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
@@ -700,6 +701,14 @@ pub async fn build_loaded_filter(
     filter_collection: &mongodb::Collection<Filter>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
+    if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
+        && filter
+            .permissions
+            .get(survey)
+            .is_none_or(|permissions| permissions.is_empty())
+    {
+        return Err(FilterError::InvalidFilterPermissions);
+    }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
     let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
@@ -755,7 +764,13 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        filters.push(build_loaded_filter(&filter_id, survey, &filter_collection).await?);
+        match build_loaded_filter(&filter_id, survey, filter_collection).await {
+            Ok(filter) => filters.push(filter),
+            Err(err) => {
+                warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);
+                continue;
+            }
+        }
     }
 
     Ok(filters)
@@ -787,6 +802,8 @@ pub enum FilterWorkerError {
     FilterNotFound,
     #[error("kafka config missing for survey: {0}")]
     KafkaConfigMissing(Survey),
+    #[error("worker config missing for survey: {0}")]
+    WorkerConfigMissing(Survey),
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
     #[error("missing cutouts for candid {0}")]
@@ -807,6 +824,7 @@ pub trait FilterWorker {
     ) -> Result<Self, FilterWorkerError>
     where
         Self: Sized;
+    async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError>;
     fn input_queue_name(&self) -> String;
     fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
@@ -824,55 +842,82 @@ pub async fn run_filter_worker<T: FilterWorker>(
     debug!(?config_path);
 
     let config = AppConfig::from_path(config_path)?;
+    let survey = T::survey();
+    let worker_config = config
+        .workers
+        .get(&survey)
+        .ok_or(FilterWorkerError::WorkerConfigMissing(survey))?;
 
     let mut filter_worker = T::new(config_path, None).await?;
-
-    if !filter_worker.has_filters() {
-        info!("no filters available for processing, shutting down gracefully");
-        return Ok(());
-    }
 
     // in a never ending loop, loop over the queues
     let mut con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
     let output_topic = filter_worker.output_topic_name();
+    let survey = input_queue
+        .split('_')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
 
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
+    let filter_refresh_interval =
+        Duration::from_secs(worker_config.filter.refresh_interval_minutes * 60);
+    let mut next_filter_refresh = Instant::now() + filter_refresh_interval;
 
-    let command_interval: usize = 500;
+    let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let active_attrs = [worker_id_attr.clone()];
-    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let survey_attr = KeyValue::new("survey", survey.clone());
+    let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
+    let ok_attrs = [
+        worker_id_attr.clone(),
+        survey_attr.clone(),
+        KeyValue::new("status", "ok"),
+    ];
     let ok_included_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "included"),
     ];
     let ok_excluded_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "ok"),
         KeyValue::new("reason", "excluded"),
     ];
     let input_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
     let processing_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
     let output_error_attrs = [
         worker_id_attr,
+        survey_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "kafka_send"),
     ];
     loop {
+        if Instant::now() >= next_filter_refresh {
+            filter_worker.refresh_filters().await?;
+            next_filter_refresh = Instant::now() + filter_refresh_interval;
+
+            if !filter_worker.has_filters() {
+                info!("no active filters available, waiting for the next refresh");
+            }
+        }
+
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
                 // flush the producer before terminating to avoid losing messages
@@ -884,20 +929,30 @@ pub async fn run_filter_worker<T: FilterWorker>(
                             e
                         ))
                     })?;
-                info!("termination signal received, shutting down gracefully");
                 break;
             }
-            command_check_countdown = command_interval + 1;
+            command_check_countdown = command_interval;
+
+            if !filter_worker.has_filters() {
+                // if we don't have any active filter, we call continue to avoid
+                // pooling candids until we have filters to run them through
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
         }
 
         ACTIVE.add(1, &active_attrs);
-        let alerts: Vec<String> = con
+        let alerts: Vec<String> = match con
             .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
             .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
+        {
+            Ok(alerts) => alerts,
+            Err(error) => {
                 BATCH_PROCESSED.add(1, &input_error_attrs);
-            })?;
+                ACTIVE.add(-1, &active_attrs);
+                return Err(error.into());
+            }
+        };
 
         if alerts.is_empty() {
             ACTIVE.add(-1, &active_attrs);
@@ -906,14 +961,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
             continue;
         }
 
-        let alerts_output = filter_worker
-            .process_alerts(&alerts)
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, &processing_error_attrs);
-            })?;
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
+
+        let alerts_output = match filter_worker.process_alerts(&alerts).await {
+            Ok(alerts_output) => alerts_output,
+            Err(error) => {
+                BATCH_PROCESSED.add(1, &processing_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
+                return Err(error);
+            }
+        };
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(
@@ -923,22 +980,24 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
+        let mut enqueue_error = None;
         for alert in alerts_output {
-            delivery_futures.push(
-                send_alert_to_kafka(&alert, &schema, &producer, &output_topic)
-                    .await
-                    .inspect_err(|_| {
-                        ACTIVE.add(-1, &active_attrs);
-                        ALERT_PROCESSED.add(1, &output_error_attrs);
-                    })?,
-            );
-            total_enqueued += 1;
+            match send_alert_to_kafka(&alert, &schema, &producer, &output_topic).await {
+                Ok(delivery_future) => {
+                    delivery_futures.push(delivery_future);
+                    total_enqueued += 1;
+                }
+                Err(error) => {
+                    ALERT_PROCESSED.add(1, &output_error_attrs);
+                    enqueue_error = Some(error);
+                    break;
+                }
+            }
         }
 
-        tracing::debug!(
+        debug!(
             "Enqueued total of {} alerts to Kafka topic {}",
-            total_enqueued,
-            &output_topic
+            total_enqueued, &output_topic
         );
 
         // Wait for all futures to complete and check for errors
@@ -946,15 +1005,15 @@ pub async fn run_filter_worker<T: FilterWorker>(
         let results = futures::future::join_all(delivery_futures).await;
         for r in results {
             let result = r.map_err(|e| {
-                let attributes = &output_error_attrs;
-                ACTIVE.add(-1, attributes);
-                ALERT_PROCESSED.add(1, attributes);
+                ALERT_PROCESSED.add(1, &output_error_attrs);
+                ACTIVE.add(-1, &active_attrs);
                 FilterWorkerError::Kafka(format!(
                     "Failed to deliver alert to Kafka topic {}: {}",
                     &output_topic, e
                 ))
             })?;
             if let Err((e, _)) = result {
+                ALERT_PROCESSED.add(1, &output_error_attrs);
                 error!(
                     "Failed to deliver alert to Kafka topic {}: {}",
                     &output_topic, e
@@ -965,12 +1024,15 @@ pub async fn run_filter_worker<T: FilterWorker>(
             }
         }
 
-        tracing::debug!(
+        debug!(
             "Successfully sent total of {}/{} alerts to Kafka topic {}",
-            total_sent,
-            total_enqueued,
-            &output_topic
+            total_sent, total_enqueued, &output_topic
         );
+
+        if let Some(error) = enqueue_error {
+            ACTIVE.add(-1, &active_attrs);
+            return Err(error);
+        }
 
         ACTIVE.add(-1, &active_attrs);
     }

@@ -8,7 +8,8 @@ ARG SCALA_VERSION
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates curl bash tar xz-utils gcc g++ python3 python3-venv libhdf5-dev libclang-dev perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config && \
+    ca-certificates curl bash tar xz-utils gcc g++ python3 python3-venv libhdf5-dev \
+    perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
     tar -xzf /tmp/kafka.tgz -C /opt && \
@@ -16,6 +17,7 @@ RUN apt-get update && \
     rm -f /tmp/kafka.tgz
 
 ENV PATH="/opt/kafka/bin:${PATH}"
+ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 
 WORKDIR /app
 

@@ -1,3 +1,4 @@
+use chrono::NaiveDate;
 use mongodb::{
     bson::{doc, to_document, Document},
     options::IndexOptions,
@@ -46,6 +47,33 @@ pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
         subtype: mongodb::bson::spec::BinarySubtype::Generic,
         bytes: cutout,
     };
+}
+
+/// Count alerts in `<survey>_alerts` for the observing night labelled by `date`
+/// (local-noon to local-noon JD window).
+///
+/// `programids`:
+/// - `None` → no permission filter (use for surveys without programid, e.g. LSST,
+///   or when caller wants the full unrestricted count).
+/// - `Some(pids)` → restrict to `candidate.programid ∈ pids`.
+#[instrument(skip(db), err)]
+pub async fn count_alerts_for_night(
+    db: &Database,
+    survey: &Survey,
+    date: &NaiveDate,
+    programids: Option<&[i32]>,
+) -> Result<u64, mongodb::error::Error> {
+    let (start_jd, end_jd) = survey.night_jd_window(date);
+    let mut filter = doc! {
+        "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
+    };
+    if *survey == Survey::Ztf {
+        if let Some(pids) = programids {
+            filter.insert("candidate.programid", doc! { "$in": pids });
+        }
+    }
+    let collection: Collection<Document> = db.collection(&format!("{}_alerts", survey));
+    collection.count_documents(filter).await
 }
 
 // This function, for a given survey name (ZTF, LSST), will create

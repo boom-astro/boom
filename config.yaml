@@ -57,6 +57,11 @@ workers:
       n_workers: 3
     filter:
       n_workers: 3
+      refresh_interval_minutes: 15
+      # On activation, filters are validated against a designated reference night.
+      # If more than max_match_rate percent of alerts pass, the filter is not validated.
+      max_match_rate: 5
+      reference_night: "2026-03-16"
   lsst:
     command_interval: 500
     alert:
@@ -65,6 +70,9 @@ workers:
       n_workers: 3
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night: "2026-02-23"
   decam:
     command_interval: 500
     alert:
@@ -73,6 +81,9 @@ workers:
       n_workers: 0
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
 crossmatch:
   ztf:
     - catalog: PS1_DR1
