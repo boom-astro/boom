@@ -92,16 +92,19 @@ pub async fn get_catalog_stats(
             return response::internal_error(&format!("Error listing collections: {}", e));
         }
     };
+    let is_safe = |name: &str| {
+        !name.is_empty()
+            && !name.starts_with("system.")
+            && !PROTECTED_COLLECTION_NAMES.contains(&name)
+    };
     let mut expected: HashSet<String> = config
         .crossmatch
         .values()
         .flat_map(|cats| cats.iter().map(|c| c.catalog.clone()))
+        .filter(|name| is_safe(name))
         .collect();
     for name in &collection_names {
-        if (name.starts_with("ZTF_") || name.starts_with("LSST_"))
-            && !PROTECTED_COLLECTION_NAMES.contains(&name.as_str())
-            && !name.starts_with("system.")
-        {
+        if (name.starts_with("ZTF_") || name.starts_with("LSST_")) && is_safe(name) {
             expected.insert(name.clone());
         }
     }
