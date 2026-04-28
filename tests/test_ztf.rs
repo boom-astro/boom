@@ -307,7 +307,9 @@ async fn test_enrich_ztf_alert() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
 
@@ -422,7 +424,9 @@ async fn test_filter_ztf_alert() {
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
     // then run the enrichment worker to get the classifications
-    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
     let result = enrichment_worker.process_alerts(&[candid]).await;
     assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
     // the result should be a vec of String, for ZTF with the format
@@ -563,7 +567,9 @@ async fn test_filter_ztf_alert_with_lsst_match() {
     alert_worker.process_alert(&bytes_content).await.unwrap();
 
     // Enrich the ZTF alert to satisfy the filter's prv_candidates requirement.
-    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE).await.unwrap();
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
     let enrichment_output = enrichment_worker.process_alerts(&[candid]).await.unwrap();
     assert_eq!(enrichment_output.len(), 1);
     let candid_programid_str = &enrichment_output[0];

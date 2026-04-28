@@ -31,6 +31,20 @@ jobs:
       run: |
         cp .env.example .env
         sed -i 's/BOOM_BABAMUL__ENABLED=false/BOOM_BABAMUL__ENABLED=true/' .env
+    - name: Install ONNX Runtime (CPU) for tests
+      run: |
+        # ort 2.0.0-rc.12 with load-dynamic will download libonnxruntime.so at
+        # runtime if ORT_DYLIB_PATH is not set, which can take ~20 minutes.
+        # Install the CPU onnxruntime wheel and point ort at it to avoid the download.
+        pip install onnxruntime==1.24.4
+        ORT_CAPI=$(python3 -c "import pathlib, onnxruntime; print((pathlib.Path(onnxruntime.__file__).parent / 'capi').as_posix())")
+        ORT_LIB=$(ls "${ORT_CAPI}"/libonnxruntime.so.* 2>/dev/null | head -1)
+        if [ -z "${ORT_LIB}" ]; then
+          ORT_LIB="${ORT_CAPI}/libonnxruntime.so"
+        fi
+        echo "ORT_DYLIB_PATH=${ORT_LIB}" >> "$GITHUB_ENV"
+        echo "BOOM_GPU__ENABLED=false" >> "$GITHUB_ENV"
+        echo "Installed ONNX Runtime at: ${ORT_LIB}"
     - name: Install Kafka CLI tools
       run: |
         KAFKA_VERSION=4.1.1

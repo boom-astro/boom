@@ -42,7 +42,7 @@ pub fn load_dotenv() {
     // Try current directory first
     if std::path::Path::new(".env").exists() {
         match dotenvy::dotenv() {
-            Ok(_) => info!("Loaded environment variables from .env file"),
+            Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
         }
         return;
@@ -51,14 +51,14 @@ pub fn load_dotenv() {
     // Try parent directory (useful when running from subdirectories like api/)
     if std::path::Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
-            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
         }
         return;
     }
 
     // No .env file found - this is fine, environment variables may be set by the system
-    debug!("No .env file found, using system environment variables only");
+    info!("No .env file found, using system environment variables only");
 }
 
 #[instrument(err)]
@@ -506,6 +506,78 @@ pub struct SurveyWorkerConfig {
     pub filter: FilterWorkerConfig,
 }
 
+use serde::{de, Deserializer};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GpuConfig {
+    /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
+    /// Models are loaded once at startup and shared across all enrichment workers
+    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU (the BOOM_GPU__ENABLED
+    /// env var is still respected by the ORT session builder).
+    #[serde(default)]
+    pub enabled: bool,
+    /// CUDA device IDs available for GPU work. Default: [0].
+    /// ONNX models are loaded on the first device. Additional devices are
+    /// available for the GPU pool (future lightcurve fitting).
+    /// Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
+    #[serde(
+        default = "default_gpu_device_ids",
+        deserialize_with = "deserialize_device_ids"
+    )]
+    pub device_ids: Vec<i32>,
+}
+
+fn deserialize_device_ids<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DeviceIdsVisitor;
+    impl<'de> de::Visitor<'de> for DeviceIdsVisitor {
+        type Value = Vec<i32>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list of integers or a comma-separated string")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let ids = v
+                .split(',')
+                .map(|s| s.trim().parse::<i32>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| E::custom("invalid integer in device_ids string"))?;
+            Ok(ids)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut ids = Vec::new();
+            while let Some(val) = seq.next_element()? {
+                ids.push(val);
+            }
+            Ok(ids)
+        }
+    }
+    deserializer.deserialize_any(DeviceIdsVisitor)
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        GpuConfig {
+            enabled: false,
+            device_ids: default_gpu_device_ids(),
+        }
+    }
+}
+
+fn default_gpu_device_ids() -> Vec<i32> {
+    vec![0]
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -519,6 +591,8 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
+    #[serde(default)]
+    pub gpu: GpuConfig,
 }
 
 impl AppConfig {
@@ -610,7 +684,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
         return Err(BoomConfigError::InvalidSecretError(e));
     }
 
-    info!("Configuration loaded successfully");
+    debug!("Configuration loaded successfully");
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
     debug!("Admin username: {}", app_config.api.auth.admin_username);
@@ -627,4 +701,55 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 pub async fn get_test_db() -> Database {
     let config = AppConfig::from_test_config().expect("Failed to load test config");
     config.build_db().await.unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gpu_config_defaults() {
+        let config = GpuConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_empty() {
+        let json = "{}";
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_enabled_single_gpu() {
+        let json = r#"{"enabled": true, "device_ids": [0]}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_multi_gpu() {
+        let json = r#"{"enabled": true, "device_ids": [0, 1, 2, 3, 4, 5, 6, 7]}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.device_ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_partial() {
+        let json = r#"{"enabled": true}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_subset_of_devices() {
+        let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.device_ids, vec![2, 5]);
+    }
 }

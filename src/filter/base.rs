@@ -614,11 +614,6 @@ pub async fn get_filter(
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
 ) -> Result<Filter, FilterError> {
-    info!(
-        "Getting filter object for filter_id: {}, survey: {}",
-        filter_id,
-        survey.to_string()
-    );
     let filter_obj = filter_collection
         .find_one(doc! {
             "_id": filter_id,
