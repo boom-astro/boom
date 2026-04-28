@@ -76,7 +76,7 @@ pub enum FilterError {
     FilterNotFound,
     #[error("filter pipeline could not be parsed")]
     FilterPipelineError,
-    #[error("invalid filter pipeline")]
+    #[error("invalid filter pipeline: {0}")]
     InvalidFilterPipeline(String),
     #[error("invalid filter id")]
     InvalidFilterId,
@@ -869,7 +869,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let producer = create_producer(&config.kafka.producer).await?;
     let schema = load_alert_schema()?;
     let filter_refresh_interval =
-        Duration::from_secs(worker_config.filter_refresh_interval_minutes * 60);
+        Duration::from_secs(worker_config.filter.refresh_interval_minutes * 60);
     let mut next_filter_refresh = Instant::now() + filter_refresh_interval;
 
     let command_interval = worker_config.command_interval;

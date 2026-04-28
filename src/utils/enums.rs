@@ -26,6 +26,7 @@ impl Survey {
             Survey::Ztf => -7.0,
             Survey::Lsst => -3.0,
             Survey::Decam => -4.0,
+            _ => 0.0,
         }
     }
 

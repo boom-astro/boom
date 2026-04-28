@@ -1,4 +1,5 @@
 use crate::utils::{enums::Survey, o11y::logging::as_error};
+use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
 use mongodb::bson::doc;
@@ -422,13 +423,13 @@ where
     const MAX_INTERVAL: u64 = 60;
     if value < MIN_INTERVAL {
         return Err(serde::de::Error::custom(format!(
-            "filter_refresh_interval_minutes must be at least {} minutes, got {}",
+            "refresh_interval_minutes must be at least {} minutes, got {}",
             MIN_INTERVAL, value
         )));
     }
     if value > MAX_INTERVAL {
         return Err(serde::de::Error::custom(format!(
-            "filter_refresh_interval_minutes must be at most {} minutes, got {}",
+            "refresh_interval_minutes must be at most {} minutes, got {}",
             MAX_INTERVAL, value
         )));
     }
@@ -458,18 +459,51 @@ where
     Ok(value)
 }
 
+fn deserialize_max_match_rate<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u8>::deserialize(deserializer)?;
+    if let Some(v) = value {
+        if v == 0 || v > 100 {
+            return Err(serde::de::Error::custom(format!(
+                "max_match_rate must be between 1 and 100, got {}",
+                v
+            )));
+        }
+    }
+    Ok(value)
+}
+
 #[derive(Deserialize, Debug, Clone)]
-pub struct SurveyWorkerConfig {
-    #[serde(deserialize_with = "deserialize_command_interval")]
-    pub command_interval: usize, // in milliseconds
+pub struct FilterWorkerConfig {
+    pub n_workers: usize,
     #[serde(
         default = "default_filter_refresh_interval_minutes",
         deserialize_with = "deserialize_filter_refresh_interval"
     )]
-    pub filter_refresh_interval_minutes: u64,
+    pub refresh_interval_minutes: u64,
+    /// Maximum percentage of alerts that a filter is allowed
+    /// to match before it is considered too permissive to activate. Required
+    /// alongside `reference_night` to allow filter activation on this survey;
+    /// if either is missing, filters cannot be activated.
+    #[serde(default, deserialize_with = "deserialize_max_match_rate")]
+    pub max_match_rate: Option<u8>,
+    /// Reference observing night used to gauge how selective a filter is.
+    /// Should be a recent, well-populated night for the survey. Required
+    /// alongside `max_match_rate` to allow filter activation on this survey;
+    /// if either is missing, filters cannot be activated.
+    #[serde(default)]
+    pub reference_night: Option<NaiveDate>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SurveyWorkerConfig {
+    #[serde(deserialize_with = "deserialize_command_interval")]
+    pub command_interval: usize, // in milliseconds
     pub alert: WorkerConfig,
     pub enrichment: WorkerConfig,
-    pub filter: WorkerConfig,
+    pub filter: FilterWorkerConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
