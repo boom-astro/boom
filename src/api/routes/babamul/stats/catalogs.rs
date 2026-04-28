@@ -1,11 +1,13 @@
 use super::STATS_COLLECTION;
 use crate::api::db::PROTECTED_COLLECTION_NAMES;
 use crate::api::models::response;
+use crate::conf::AppConfig;
 use actix_web::{get, web, HttpResponse};
 use chrono::Utc;
 use futures::StreamExt;
 use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use utoipa::ToSchema;
 
 const CATALOG_STATS_CACHE_KEY: &str = "catalog_stats";
@@ -76,12 +78,37 @@ pub struct CatalogStats {
 pub async fn get_catalog_stats(
     query: web::Query<CatalogStatsQuery>,
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let include_count = query.count.unwrap_or(false);
     let include_size = query.size.unwrap_or(false);
     let now_ts = Utc::now().timestamp() as f64;
 
-    // When extra details are requested, try the cache first
+    // Build the set of catalogs to expose:
+    // configured crossmatch catalogs + survey alert collections (`ZTF_*` / `LSST_*`)
+    let collection_names = match db.list_collection_names().await {
+        Ok(c) => c,
+        Err(e) => {
+            return response::internal_error(&format!("Error listing collections: {}", e));
+        }
+    };
+    let mut expected: HashSet<String> = config
+        .crossmatch
+        .values()
+        .flat_map(|cats| cats.iter().map(|c| c.catalog.clone()))
+        .collect();
+    for name in &collection_names {
+        if (name.starts_with("ZTF_") || name.starts_with("LSST_"))
+            && !PROTECTED_COLLECTION_NAMES.contains(&name.as_str())
+            && !name.starts_with("system.")
+        {
+            expected.insert(name.clone());
+        }
+    }
+
+    // When extra details are requested, try the cache
+    // but only serve it if its set of catalog names matches what we expect now.
+    // If catalogs were added or removed, fall through and refetch.
     if include_count || include_size {
         let stats_collection: Collection<CatalogStatsCacheEntry> = db.collection(STATS_COLLECTION);
 
@@ -92,40 +119,28 @@ pub async fn get_catalog_stats(
             })
             .await
         {
-            let catalogs = cached
-                .catalogs
-                .into_iter()
-                .map(|c| CatalogEntry {
-                    name: c.name,
-                    count: if include_count { c.count } else { None },
-                    size_bytes: if include_size { c.size_bytes } else { None },
-                })
-                .collect::<Vec<_>>();
-            let stats = CatalogStats {
-                n_catalogs: catalogs.len(),
-                catalogs,
-            };
-            return response::ok_ser("catalog stats (cached)", stats);
+            let cached_names: HashSet<String> =
+                cached.catalogs.iter().map(|c| c.name.clone()).collect();
+            if cached_names == expected {
+                let catalogs = cached
+                    .catalogs
+                    .into_iter()
+                    .map(|c| CatalogEntry {
+                        name: c.name,
+                        count: if include_count { c.count } else { None },
+                        size_bytes: if include_size { c.size_bytes } else { None },
+                    })
+                    .collect::<Vec<_>>();
+                let stats = CatalogStats {
+                    n_catalogs: catalogs.len(),
+                    catalogs,
+                };
+                return response::ok_ser("catalog stats (cached)", stats);
+            }
         }
     }
 
-    // List catalog names
-    let collection_names = match db.list_collection_names().await {
-        Ok(c) => c,
-        Err(e) => {
-            return response::internal_error(&format!("Error listing collections: {}", e));
-        }
-    };
-
-    let mut catalog_names: Vec<String> = collection_names
-        .into_iter()
-        .filter(|name| {
-            !PROTECTED_COLLECTION_NAMES.contains(&name.as_str())
-                && !name.starts_with("system.")
-                && !name.starts_with("ZTF_")
-                && !name.starts_with("LSST_")
-        })
-        .collect();
+    let mut catalog_names: Vec<String> = expected.into_iter().collect();
     catalog_names.sort();
 
     let fetch_details = include_count || include_size;
