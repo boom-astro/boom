@@ -1,0 +1,25 @@
+# GPU override, requires NVIDIA Container Toolkit on the host.
+
+volumes:
+  nvidia_compute_cache:
+
+services:
+  scheduler:
+    image: boom-astro/boom-gpu:latest
+    build:
+      context: ${BOOM_REPO_ROOT:?Variable not set}
+      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile.gpu
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      BOOM_GPU__ENABLED: "true"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - nvidia_compute_cache:/root/.nv/ComputeCache

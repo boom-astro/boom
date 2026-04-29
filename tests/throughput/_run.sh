@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# A function that returns the current date and time
+current_datetime() {
+    TZ=utc date "+%Y-%m-%d %H:%M:%S"
+}
+
 # Parse args
 KEEP_UP=false
 POSITIONAL_ARGS=()
@@ -34,6 +39,13 @@ fi
 COMPOSE_CONFIG=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.yaml")
 BG_PIDS=()
 
+PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
+    echo "BOOM_GPU__ENABLED is true and platform is Linux; adding GPU override to Docker Compose configuration (CUDA support)"
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cuda.yaml")
+fi
+
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
 if [ "${LOW_STORAGE:-}" = "true" ]; then
     COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml")
@@ -41,11 +53,6 @@ fi
 
 # Logs folder is the optional positional argument to the script
 LOGS_DIR=${POSITIONAL_ARGS[0]:-logs/boom}
-
-# A function that returns the current date and time
-current_datetime() {
-    TZ=utc date "+%Y-%m-%d %H:%M:%S"
-}
 
 cleanup() {
     echo "$(current_datetime) - Cleaning up background processes"
@@ -128,6 +135,27 @@ if [ "${LOW_STORAGE:-}" = "true" ]; then
     echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up downloaded files to save space"
     rm -rf ./data/alerts/kowalski.NED.json.gz || true
     rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
+fi
+
+# If GPU support is enabled, we wait until we have confirmed that GPU inference is working.
+# On some architectures (recent GPUs, mostly) we may have to wait for CUDA to compile
+# some kernels and populate the cache before we see successful GPU inference,
+# so we wait until we see logs indicating that the ONNX CUDA warmup has completed.
+if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
+    echo "$(current_datetime) - GPU support is enabled; waiting for GPUs to be inference-ready"
+    START_TIME=$(date +%s)
+    while ! grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference" < <(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler); do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+        if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+            echo "$(current_datetime) - Timeout reached while waiting for GPU inference to be validated"
+            exit 1
+        fi
+        sleep 1
+    done
+    END_TIME=$(date +%s)
+    WARMUP_TIME=$((END_TIME - START_TIME))
+    echo "$(current_datetime) - ONNX CUDA warmup completed in $WARMUP_TIME seconds"
 fi
 
 # Wait until we see all alerts
