@@ -1,0 +1,323 @@
+babamul:
+  webapp_url: https://babamul.caltech.edu
+  retention_days: 7
+
+kafka:
+  consumer:
+    lsst:
+      schema_github_fallback_url: null
+  producer:
+    server: "broker:29092"
+
+workers:
+  ztf:
+    alert:
+      n_workers: 8
+    enrichment:
+      n_workers: 12
+  lsst:
+    alert:
+      n_workers: 10
+    enrichment:
+      n_workers: 10
+    filter:
+      n_workers: 3
+  decam:
+    enrichment:
+      n_workers: 1
+
+crossmatch:
+  lsst:
+    - catalog: LSPSC
+      radius: 30.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        score: 1
+        mag_white: 1
+      max_results: 3
+    - catalog: Gaia_DR3
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        parallax: 1
+        parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
+        phot_g_mean_mag: 1
+        phot_bp_mean_mag: 1
+        phot_rp_mean_mag: 1
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        Name: 1
+        Descrip: 1
+        Qpct: 1
+        ra: 1
+        dec: 1
+    - catalog: NED
+      radius: 300.0
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        z_tech: 1
+        z_qual: 1
+        DistMpc: 1
+        DistMpc_unc: 1
+        ebv: 1
+        m_Ks: 1
+        m_Ks_unc: 1
+        tMASSphot: 1
+        Mstar: 1
+        Mstar_unc: 1
+    - catalog: 2MASS_PSC
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        j_m: 1
+        j_msigcom: 1
+        j_snr: 1
+        h_m: 1
+        h_msigcom: 1
+        h_snr: 1
+        k_m: 1
+        k_msigcom: 1
+        k_snr: 1
+        ndet: 1
+    - catalog: GALEX
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        fuv_mag: 1
+        fuv_magerr: 1
+        nuv_mag: 1
+        nuv_magerr: 1
+        fuv_exp: 1
+        nuv_exp: 1
+        obstype: 1
+        band: 1
+    - catalog: VSX
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        name: 1
+        var_flag: 1
+        ra: 1
+        dec: 1
+        types: 1
+        max: 1
+        max_band: 1
+        min_is_amplitude: 1
+        min: 1
+        min_band: 1
+        epoch: 1
+        period: 1
+        spectral_type: 1
+    - catalog: CatWISE2020
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        source_name: 1
+        ra: 1
+        dec: 1
+        sigra: 1
+        sigdec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w1sigmpro: 1
+        w2sigmpro: 1
+        w1rchi2: 1
+        w2rchi2: 1
+        pmra: 1
+        pmdec: 1
+        sigpmra: 1
+        sigpmdec: 1
+        unwise_objid: 1
+    - catalog: TNS
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        name_prefix: 1
+        name: 1
+        ra: 1
+        dec: 1
+        type: 1
+        redshift: 1
+        discovery_mag: 1
+        discovery_jd: 1
+        internal_names: 1
+      max_results: 3
+  ztf:
+    - catalog: Gaia_DR3
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        parallax: 1
+        parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
+        phot_g_mean_mag: 1
+        phot_bp_mean_mag: 1
+        phot_rp_mean_mag: 1
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        Name: 1
+        Descrip: 1
+        Qpct: 1
+        ra: 1
+        dec: 1
+    - catalog: NED
+      radius: 300.0
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        z_tech: 1
+        z_qual: 1
+        DistMpc: 1
+        DistMpc_unc: 1
+        ebv: 1
+        m_Ks: 1
+        m_Ks_unc: 1
+        tMASSphot: 1
+        Mstar: 1
+        Mstar_unc: 1
+    - catalog: 2MASS_PSC
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        j_m: 1
+        j_msigcom: 1
+        j_snr: 1
+        h_m: 1
+        h_msigcom: 1
+        h_snr: 1
+        k_m: 1
+        k_msigcom: 1
+        k_snr: 1
+        ndet: 1
+    - catalog: GALEX
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        fuv_mag: 1
+        fuv_magerr: 1
+        nuv_mag: 1
+        nuv_magerr: 1
+        fuv_exp: 1
+        nuv_exp: 1
+        obstype: 1
+        band: 1
+    - catalog: VSX
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        name: 1
+        var_flag: 1
+        ra: 1
+        dec: 1
+        types: 1
+        max: 1
+        max_band: 1
+        min_is_amplitude: 1
+        min: 1
+        min_band: 1
+        epoch: 1
+        period: 1
+        spectral_type: 1
+    - catalog: CatWISE2020
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        source_name: 1
+        ra: 1
+        dec: 1
+        sigra: 1
+        sigdec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w1sigmpro: 1
+        w2sigmpro: 1
+        w1rchi2: 1
+        w2rchi2: 1
+        pmra: 1
+        pmdec: 1
+        sigpmra: 1
+        sigpmdec: 1
+        unwise_objid: 1
+    - catalog: TNS
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        name_prefix: 1
+        name: 1
+        ra: 1
+        dec: 1
+        type: 1
+        redshift: 1
+        discovery_mag: 1
+        discovery_jd: 1
+        internal_names: 1
+      max_results: 3

@@ -23,6 +23,10 @@ jobs:
     env:
       ENVIRONMENT: production
       DOMAIN: ${{ vars.DOMAIN }}
+      BOOM_CONFIG_PATH: ${{ vars.BOOM_CONFIG_PATH }}
+      BOOM_DATA_MONGODB_PATH: ${{ vars.BOOM_DATA_MONGODB_PATH }}
+      BOOM_DATA_VALKEY_PATH: ${{ vars.BOOM_DATA_VALKEY_PATH }}
+      BOOM_DATA_KAFKA_PATH: ${{ vars.BOOM_DATA_KAFKA_PATH }}
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
       BOOM_BABAMUL__WEBAPP_URL: ${{ vars.BOOM_BABAMUL__WEBAPP_URL }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
@@ -36,15 +40,29 @@ jobs:
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
       KAFKA_ADMIN_PASSWORD: ${{ secrets.KAFKA_ADMIN_PASSWORD }}
       KAFKA_READONLY_PASSWORD: ${{ secrets.KAFKA_READONLY_PASSWORD }}
+      BOOM_KAFKA__CONSUMER__LSST__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__LSST__GROUP_ID }}
+      BOOM_KAFKA__CONSUMER__LSST__USERNAME: ${{ vars.BOOM_KAFKA__CONSUMER__LSST__USERNAME }}
+      BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${{ secrets.BOOM_KAFKA__CONSUMER__LSST__PASSWORD }}
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
+      BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID }}
+      KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST }}
       SMTP_SERVER: ${{ vars.SMTP_SERVER }}
       SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}
+      BOOM_API_RATE_LIMIT_AVERAGE: ${{ vars.BOOM_API_RATE_LIMIT_AVERAGE }}
+      BOOM_API_RATE_LIMIT_BURST: ${{ vars.BOOM_API_RATE_LIMIT_BURST }}
+      BOOM_API_RATE_LIMIT_PERIOD: ${{ vars.BOOM_API_RATE_LIMIT_PERIOD }}
+      USE_GPU: false
     steps:
+      - name: Setup Git LFS
+        run: |
+          git lfs install
       - name: Checkout
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.version || github.ref }}
+          lfs: true
       - run: >
           docker compose --profile prod
           -f docker-compose.yaml build
