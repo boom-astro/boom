@@ -227,7 +227,7 @@ const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
     "/babamul/surveys/ztf/schemas",
     "/babamul/docs",
     "/babamul/stats/nightly",
-    "/babamul/stats/catalogs",
+    "/babamul/stats/collections",
     "/babamul/stats/kafka",
 ];
 
