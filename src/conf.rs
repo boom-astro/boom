@@ -1,4 +1,8 @@
-use crate::utils::{cutouts::CutoutStorage, enums::Survey, o11y::logging::as_error};
+use crate::utils::{
+    cutouts::{CutoutCache, CutoutStorage},
+    enums::Survey,
+    o11y::logging::as_error,
+};
 use config::{Config, File, Value};
 use dotenvy;
 use mongodb::bson::doc;
@@ -135,13 +139,10 @@ async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError
 }
 
 #[instrument(skip_all, err)]
-async fn build_redis(
-    conf: &AppConfig,
+async fn build_redis_conn(
+    redis_conf: &RedisConfig,
 ) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
-    let host = &conf.redis.host;
-    let port = conf.redis.port;
-
-    let uri = format!("redis://{}:{}/", host, port);
+    let uri = format!("redis://{}:{}/", redis_conf.host, redis_conf.port);
 
     let client_redis =
         redis::Client::open(uri).inspect_err(as_error!("failed to connect to redis"))?;
@@ -152,6 +153,41 @@ async fn build_redis(
         .inspect_err(as_error!("failed to get multiplexed connection"))?;
 
     Ok(con)
+}
+
+#[instrument(skip_all, err)]
+async fn build_cutout_cache_conn(
+    cache_conf: &CutoutCacheConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    let uri = format!("redis://{}:{}/", cache_conf.host, cache_conf.port);
+    let client =
+        redis::Client::open(uri).inspect_err(as_error!("failed to connect to cutout cache"))?;
+    let mut con = client
+        .get_multiplexed_async_connection()
+        .await
+        .inspect_err(as_error!(
+            "failed to get multiplexed connection for cutout cache"
+        ))?;
+    if let Err(e) = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("maxmemory")
+        .arg(&cache_conf.max_memory)
+        .query_async::<()>(&mut con)
+        .await
+    {
+        warn!(
+            "Failed to set maxmemory '{}' on cutout cache (may already be configured externally): {:?}",
+            cache_conf.max_memory, e
+        );
+    }
+    Ok(con)
+}
+
+#[instrument(skip_all, err)]
+async fn build_redis(
+    conf: &AppConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    build_redis_conn(&conf.redis).await
 }
 
 fn string_to_static_str(s: String) -> &'static str {
@@ -190,14 +226,17 @@ async fn build_cutout_storage(
             );
             let bucket_name = format!("{}-cutouts", survey.to_string().to_lowercase());
 
-            let redis_conn = build_redis(conf).await.inspect_err(as_error!(
-                "failed to build redis connection for cutout storage"
-            ))?;
+            let redis_conn =
+                build_cutout_cache_conn(&s3_conf.cache)
+                    .await
+                    .inspect_err(as_error!(
+                        "failed to build redis connection for cutout cache"
+                    ))?;
+            let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds);
 
-            CutoutStorage::from_s3(rustfs_client, bucket_name, None)
+            CutoutStorage::from_s3(rustfs_client, bucket_name, None, cache)
                 .await
                 .inspect_err(as_error!("failed to create cutout storage"))?
-                .with_cache(redis_conn, 30)
         }
         CutoutsStorage::Mongo(mongo_conf) => {
             let db = _build_db(&mongo_conf).await?;
@@ -355,13 +394,43 @@ pub struct S3CutoutsStorageConfig {
     pub access_key: String,
     pub secret_key: String,
     pub credentials_provider: String,
+    pub cache: CutoutCacheConfig,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum CutoutsStorage {
     S3(S3CutoutsStorageConfig),
     Mongo(DatabaseConfig),
+}
+
+impl<'de> Deserialize<'de> for CutoutsStorage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        // Materialise the entire map via serde_json::Value so we can (a) read
+        // the "type" discriminant and (b) re-deserialize into the chosen variant
+        // without fighting the config crate's single-pass deserializer constraint
+        // that prevents #[serde(tag = "type")] from working here.
+        let map = serde_json::Value::deserialize(deserializer).map_err(|e| D::Error::custom(e))?;
+
+        let storage_type = map
+            .get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| D::Error::missing_field("type"))?;
+
+        match storage_type {
+            "mongo" => serde_json::from_value::<DatabaseConfig>(map)
+                .map(CutoutsStorage::Mongo)
+                .map_err(|e| D::Error::custom(e)),
+            "s3" => serde_json::from_value::<S3CutoutsStorageConfig>(map)
+                .map(CutoutsStorage::S3)
+                .map_err(|e| D::Error::custom(e)),
+            other => Err(D::Error::custom(format!(
+                "unknown cutouts_storage type {:?}; expected \"mongo\" or \"s3\"",
+                other
+            ))),
+        }
+    }
 }
 
 fn default_kafka_server() -> String {
@@ -446,6 +515,25 @@ impl Default for RedisConfig {
         RedisConfig {
             host: "localhost".to_string(),
             port: 6379,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CutoutCacheConfig {
+    pub host: String,
+    pub port: u16,
+    pub ttl_seconds: u64,
+    pub max_memory: String,
+}
+
+impl Default for CutoutCacheConfig {
+    fn default() -> Self {
+        CutoutCacheConfig {
+            host: "localhost".to_string(),
+            port: 6379,
+            ttl_seconds: 30,
+            max_memory: "1gb".to_string(),
         }
     }
 }

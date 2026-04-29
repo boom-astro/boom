@@ -34,6 +34,14 @@ fi
 COMPOSE_CONFIG=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.yaml")
 BG_PIDS=()
 
+# Select the cutout storage overlay based on BOOM_CUTOUTS_STORAGE__TYPE (default: s3)
+CUTOUTS_TYPE="${BOOM_CUTOUTS_STORAGE__TYPE:-s3}"
+if [ "$CUTOUTS_TYPE" = "s3" ]; then
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-s3.yaml")
+else
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-mongo.yaml")
+fi
+
 # If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
 if [ "${LOW_STORAGE:-}" = "true" ]; then
     COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.low-storage.yaml")
@@ -92,6 +100,10 @@ docker compose "${COMPOSE_CONFIG[@]}" stats consumer --format json > "$LOGS_DIR/
 BG_PIDS+=($!)
 docker compose "${COMPOSE_CONFIG[@]}" stats scheduler --format json > "$LOGS_DIR/scheduler.stats.log" &
 BG_PIDS+=($!)
+if [ "$CUTOUTS_TYPE" = "s3" ]; then
+    docker compose "${COMPOSE_CONFIG[@]}" stats valkey-cutouts --format json > "$LOGS_DIR/valkey-cutouts.stats.log" &
+    BG_PIDS+=($!)
+fi
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25

@@ -40,20 +40,39 @@ kafka:
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
+# cutouts_storage configures where alert cutout images are stored.
+#
+# type: "mongo" (default) stores cutouts in MongoDB.
+#       "s3"    stores them in an S3-compatible bucket (e.g. rustfs).
+# Switch backends without editing this file by setting BOOM_CUTOUTS_STORAGE__TYPE.
+# Every field below can also be overridden via BOOM_CUTOUTS_STORAGE__<FIELD>
+# (e.g. BOOM_CUTOUTS_STORAGE__HOST). For Docker deployments the compose overlays
+# inject the correct type and all infrastructure settings automatically —
+# see README for the three cutout storage modes.
 cutouts_storage:
-  # region: local
-  # endpoint_url: http://127.0.0.1:9000
-  # access_key: rustfsadmin
-  # secret_key: rustfsadminsecret
-  # credentials_provider: rustfs
-  host: localhost
+  type: mongo  # or set via BOOM_CUTOUTS_STORAGE__TYPE
+
+  # --- MongoDB settings (active when type: mongo) ---
+  host: localhost      # or set via BOOM_CUTOUTS_STORAGE__HOST
   port: 27017
-  name: boom_cutouts
+  name: boom           # same database as alerts; or set via BOOM_CUTOUTS_STORAGE__NAME
   max_pool_size: 200
   replica_set: null
-  username: mongoadmin
-  password: "" # Set via BOOM_CUTOUTS_STORAGE__PASSWORD environment variable
+  username: mongoadmin  # or set via BOOM_CUTOUTS_STORAGE__USERNAME
+  password: ""          # or set via BOOM_CUTOUTS_STORAGE__PASSWORD
   srv: false
+
+  # --- S3 settings (active when type: s3) ---
+  region: local                     # or set via BOOM_CUTOUTS_STORAGE__REGION
+  endpoint_url: http://rustfs:9000  # or set via BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
+  access_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__ACCESS_KEY
+  secret_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__SECRET_KEY
+  credentials_provider: rustfs      # or set via BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER
+  cache:
+    host: valkey-cutouts  # or set via BOOM_CUTOUTS_STORAGE__CACHE__HOST
+    port: 6379             # or set via BOOM_CUTOUTS_STORAGE__CACHE__PORT
+    ttl_seconds: 30        # or set via BOOM_CUTOUTS_STORAGE__CACHE__TTL_SECONDS
+    max_memory: "1gb"      # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
 workers:
   ztf:
     command_interval: 500

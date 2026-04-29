@@ -2,7 +2,6 @@ volumes:
   mongodb:
   valkey:
   kafka_data:
-  rustfs_data:
   prometheus_data:
   grafana_data:
 
@@ -55,36 +54,6 @@ services:
     networks:
       - boom
     restart: always
-  rustfs:
-    image: rustfs/rustfs:latest
-    hostname: rustfs
-    restart: unless-stopped
-    expose:
-      - "9000"
-      - "9001"
-    environment:
-      - RUSTFS_STORAGE_PATH=/data
-      - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY:?RUSTFS_ACCESS_KEY must be set}
-      - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY:?RUSTFS_SECRET_KEY must be set}
-      - RUSTFS_ADDRESS=0.0.0.0:9000
-      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
-      - RUSTFS_SERVER_DOMAINS=rustfs
-      - RUSTFS_CONSOLE_ENABLE=true
-    networks:
-      - boom
-    volumes:
-      - ${BOOM_OBJECT_STORAGE_VOLUME:-rustfs_data}:/data
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "sh", "-c",
-          "curl -f http://0.0.0.0:9000/health && curl -f http://0.0.0.0:9001/rustfs/console/health"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
   valkey:
     image: valkey/valkey:7.2.6
     environment:
@@ -219,6 +188,8 @@ services:
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
@@ -271,6 +242,8 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_REDIS__HOST: valkey
     networks:
       - boom
@@ -297,6 +270,8 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_REDIS__HOST: valkey
     networks:
       - boom
@@ -320,6 +295,8 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
     networks:
@@ -346,6 +323,8 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
     networks:

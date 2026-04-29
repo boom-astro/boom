@@ -41,11 +41,7 @@ kafka:
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 cutouts_storage:
-  # region: local
-  # endpoint_url: http://127.0.0.1:9000
-  # access_key: rustfsadmin
-  # secret_key: rustfsadminsecret
-  # credentials_provider: rustfs
+  type: mongo
   host: localhost
   port: 27017
   name: boom_test_cutouts

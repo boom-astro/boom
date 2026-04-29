@@ -45,6 +45,23 @@ parser.add_argument(
     default=False,
 )
 parser.add_argument(
+    "--cutouts-storage-type",
+    choices=["s3", "mongo"],
+    default="mongo",
+    help="Cutout storage backend to benchmark (default: mongo).",
+)
+parser.add_argument(
+    "--cache-ttl-seconds",
+    type=int,
+    default=30,
+    help="Cutout cache TTL in seconds, S3 only (default: 30).",
+)
+parser.add_argument(
+    "--cache-max-memory",
+    default="1gb",
+    help="Cutout cache max memory, S3 only (default: 1gb).",
+)
+parser.add_argument(
     "--boom-repo-dir",
     help="Path to the BOOM repo directory.",
     default=".",
@@ -71,21 +88,18 @@ config["kafka"]["producer"]["server"] = "broker:29092"
 config["redis"]["host"] = "valkey"
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
-# config["cutouts_storage"]["host"] = "mongo"
-# config["cutouts_storage"]["name"] = "boom-benchmarking"
-# config["cutouts_storage"]["username"] = "mongoadmin"
-# config["cutouts_storage"]["password"] = "mongoadminsecret"
-# let's use the s3 cutout storage instead, where keys look like:
-  # region: local
-  # endpoint_url: http://127.0.0.1:9000
-  # access_key: rustfsadmin
-  # secret_key: rustfsadminsecret
-  # credentials_provider: rustfs
-config["cutouts_storage"]["region"] = "local"
-config["cutouts_storage"]["endpoint_url"] = "http://rustfs:9000"
-config["cutouts_storage"]["access_key"] = "rustfsadmin"
-config["cutouts_storage"]["secret_key"] = "rustfsadminsecret"
-config["cutouts_storage"]["credentials_provider"] = "rustfs"
+config["cutouts_storage"]["type"] = args.cutouts_storage_type
+if args.cutouts_storage_type == "s3":
+    config["cutouts_storage"]["access_key"] = "rustfsadmin"
+    config["cutouts_storage"]["secret_key"] = "rustfsadminsecret"
+    config["cutouts_storage"]["cache"]["host"] = "valkey-cutouts"
+    config["cutouts_storage"]["cache"]["ttl_seconds"] = args.cache_ttl_seconds
+    config["cutouts_storage"]["cache"]["max_memory"] = args.cache_max_memory
+elif args.cutouts_storage_type == "mongo":
+    config["cutouts_storage"]["host"] = "mongo"
+    config["cutouts_storage"]["name"] = "boom-benchmarking"
+    config["cutouts_storage"]["username"] = "mongoadmin"
+    config["cutouts_storage"]["password"] = "mongoadminsecret"
 config["babamul"]["enabled"] = True
 with open(
     os.path.join(args.boom_repo_dir, "tests", "throughput", "config.yaml"), "w"
@@ -141,6 +155,7 @@ logs_dir = os.path.join(
 # Now run the benchmark
 os.environ["BOOM_REPO_ROOT"] = os.path.abspath(args.boom_repo_dir)
 os.environ["TIMEOUT_SECS"] = str(args.timeout)
+os.environ["BOOM_CUTOUTS_STORAGE__TYPE"] = args.cutouts_storage_type
 cmd = [
     "bash",
     os.path.join(args.boom_repo_dir, "tests", "throughput", "_run.sh"),

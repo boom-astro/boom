@@ -1,0 +1,107 @@
+# Include this file when using S3-compatible (rustfs) storage for cutouts:
+#   docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml up
+#
+# For local development, also include docker-compose.override.yaml:
+#   docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml -f docker-compose.override.yaml --profile dev up
+#   (or: make dev-s3)
+#
+# Set BOOM_OBJECT_STORAGE_VOLUME to a host path to store cutouts on a separate
+# disk or volume:
+#   BOOM_OBJECT_STORAGE_VOLUME=/mnt/fast-disk/cutouts docker compose ...
+#
+# Set BOOM_CUTOUTS_CACHE_MAXMEMORY to control the cutout cache size (default 1024mb).
+# When the limit is reached, keys with the shortest remaining TTL are evicted first
+# (volatile-ttl policy), so the cache degrades gracefully without filling unboundedly.
+#
+# For local dev access to the rustfs UI, add a ports section to your local
+# docker-compose.override.yaml:
+#   services:
+#     rustfs:
+#       ports:
+#         - "9000:9000"
+#         - "9001:9001"
+
+volumes:
+  rustfs_data:
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    hostname: rustfs
+    restart: unless-stopped
+    expose:
+      - "9000"
+      - "9001"
+    environment:
+      - RUSTFS_STORAGE_PATH=/data
+      - RUSTFS_ACCESS_KEY=${BOOM_CUTOUTS_STORAGE__ACCESS_KEY:?BOOM_CUTOUTS_STORAGE__ACCESS_KEY must be set}
+      - RUSTFS_SECRET_KEY=${BOOM_CUTOUTS_STORAGE__SECRET_KEY:?BOOM_CUTOUTS_STORAGE__SECRET_KEY must be set}
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_SERVER_DOMAINS=rustfs
+      - RUSTFS_CONSOLE_ENABLE=true
+    networks:
+      - boom
+    volumes:
+      - ${BOOM_OBJECT_STORAGE_VOLUME:-rustfs_data}:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh", "-c",
+          "curl -f http://0.0.0.0:9000/health && curl -f http://0.0.0.0:9001/rustfs/console/health"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Point all boom services at S3/rustfs for cutout storage.
+  # Credentials (BOOM_CUTOUTS_STORAGE__ACCESS_KEY / BOOM_CUTOUTS_STORAGE__SECRET_KEY) must be set in .env.
+  # All other S3 fields are infrastructure-determined and set here so that
+  # config.yaml does not need to be edited for Docker deployments.
+  api: &s3_cutouts_env
+    environment:
+      BOOM_CUTOUTS_STORAGE__TYPE: s3
+      BOOM_CUTOUTS_STORAGE__REGION: local
+      BOOM_CUTOUTS_STORAGE__ENDPOINT_URL: http://rustfs:9000
+      BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER: rustfs
+      BOOM_CUTOUTS_STORAGE__ACCESS_KEY: ${BOOM_CUTOUTS_STORAGE__ACCESS_KEY:?BOOM_CUTOUTS_STORAGE__ACCESS_KEY must be set}
+      BOOM_CUTOUTS_STORAGE__SECRET_KEY: ${BOOM_CUTOUTS_STORAGE__SECRET_KEY:?BOOM_CUTOUTS_STORAGE__SECRET_KEY must be set}
+      BOOM_CUTOUTS_STORAGE__CACHE__HOST: valkey-cutouts
+      BOOM_CUTOUTS_STORAGE__CACHE__PORT: 6379
+  consumer-ztf:
+    <<: *s3_cutouts_env
+  consumer-lsst:
+    <<: *s3_cutouts_env
+  scheduler-ztf:
+    <<: *s3_cutouts_env
+  scheduler-lsst:
+    <<: *s3_cutouts_env
+
+  # Dedicated Valkey instance for the cutout cache. Kept separate from the main
+  # valkey so it can be capped with a fixed maxmemory budget and its eviction
+  # policy doesn't interfere with application queues.
+  valkey-cutouts:
+    image: valkey/valkey:7.2.6
+    hostname: valkey-cutouts
+    command:
+      - valkey-server
+      - --maxmemory
+      - ${BOOM_CUTOUTS_CACHE_MAXMEMORY:-1024mb}
+      - --maxmemory-policy
+      - volatile-ttl
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    expose:
+      - "6379"
+    networks:
+      - boom
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

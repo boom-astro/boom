@@ -88,10 +88,6 @@ services:
       - .env
     ports:
       - "27017:27017"
-  rustfs:
-    ports:
-      - "9000:9000"
-      - "9001:9001"
   valkey:
     ports:
       - "6379:6379"

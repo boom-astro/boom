@@ -81,6 +81,109 @@ Babmul activation codes will be printed to the console logs instead,
 and users will need to contact an administrator to retrieve their activation
 code.
 
+### Cutout storage
+
+BOOM supports three backends for storing alert cutout images. Choose one before
+starting the stack, then use the corresponding `make` target.
+
+#### Option 1 — Shared MongoDB (simplest, default)
+
+Cutouts are stored as a `{survey}_alerts_cutouts` collection (e.g.
+`ztf_alerts_cutouts`) inside the same `boom` database and MongoDB instance as
+the alerts. No extra container or credentials needed.
+
+```bash
+make dev
+```
+
+This is the default and requires no configuration beyond the base `.env`. If
+you want to isolate cutouts into a separate database on the same instance, set
+`cutouts_storage.name` in `config.yaml` (or `BOOM_CUTOUTS_STORAGE__NAME`) to a
+different value (e.g. `boom_cutouts`).
+
+#### Option 2 — Dedicated MongoDB container
+
+Cutouts are stored in a separate `mongo-cutouts` container. This lets you put
+the cutout data on a different disk or volume by setting
+`BOOM_CUTOUTS_MONGO_VOLUME` in your `.env`:
+
+```env
+BOOM_CUTOUTS_MONGO_VOLUME=/mnt/large-disk/boom_cutouts
+```
+
+```bash
+make dev-mongo
+```
+
+`BOOM_CUTOUTS_STORAGE__PASSWORD` must be set in `.env` (it defaults to
+`BOOM_DATABASE__PASSWORD` in `.env.example`, which is fine for local dev).
+The compose overlay sets `BOOM_CUTOUTS_STORAGE__HOST=mongo-cutouts` automatically —
+no `config.yaml` edits are needed for Docker deployments.
+
+In production:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up
+```
+
+#### Option 3 — S3-compatible object storage (rustfs)
+
+Cutouts are stored in a rustfs (S3-compatible) bucket. Best for high-throughput
+workloads or when you want cutout storage decoupled from MongoDB entirely.
+
+This mode also spins up a **dedicated `valkey-cutouts` container** used as a
+read-through cache for cutouts. It is capped at a fixed memory budget
+(`BOOM_CUTOUTS_CACHE_MAXMEMORY`, default `1024mb`) and uses the `volatile-ttl`
+eviction policy: when full, keys closest to expiry (shortest remaining TTL) are
+evicted first, so the cache degrades gracefully without ever blocking writes.
+
+Required env vars (present in `.env.example`):
+
+- `BOOM_CUTOUTS_STORAGE__ACCESS_KEY`
+- `BOOM_CUTOUTS_STORAGE__SECRET_KEY`
+
+```bash
+make dev-s3
+```
+
+The compose overlay injects all infrastructure-determined settings as environment
+variables (`BOOM_CUTOUTS_STORAGE__TYPE=s3`, endpoint URL, region, credentials
+provider, cache host/port), so **`config.yaml` does not need to be edited for
+Docker deployments** — only the two credentials above are required.
+
+For non-Docker deployments (running the binaries directly), set
+`type: s3` in the `cutouts_storage` block of `config.yaml` (or
+`BOOM_CUTOUTS_STORAGE__TYPE=s3`), then supply credentials and the cache
+host. The S3 fields are already present in `config.yaml` with sensible
+defaults — only these vars need to be set:
+
+```bash
+BOOM_CUTOUTS_STORAGE__TYPE=s3
+BOOM_CUTOUTS_STORAGE__ACCESS_KEY=<your-key>
+BOOM_CUTOUTS_STORAGE__SECRET_KEY=<your-secret>
+BOOM_CUTOUTS_STORAGE__CACHE__HOST=<valkey-host>
+```
+
+In production:
+
+```bash
+# Optionally pin data and cache sizes via env vars
+BOOM_OBJECT_STORAGE_VOLUME=/mnt/fast-disk/cutouts \
+BOOM_CUTOUTS_CACHE_MAXMEMORY=2gb \
+  docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml up
+```
+
+For local access to the rustfs web UI on port 9000/9001, add a `ports` override
+to your local `docker-compose.override.yaml`:
+
+```yaml
+services:
+  rustfs:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+```
+
 ### Start services for local development
 
 Bring up the local dev stack with:
