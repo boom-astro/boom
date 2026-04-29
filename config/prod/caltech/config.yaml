@@ -23,6 +23,14 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
+gpu:
+  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  # Models are loaded once at startup and shared across all enrichment workers.
+  # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
+  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  # ONNX models are loaded on the first device. Additional devices are available
+  # for the GPU pool (future lightcurve fitting).
+  # Overwrite with BOOM_GPU__DEVICE_IDS environment variable (comma-separated list).
 redis:
   host: localhost
   port: 6379
@@ -46,31 +54,39 @@ kafka:
 workers:
   ztf:
     command_interval: 500
-    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 8
     enrichment:
       n_workers: 12
     filter:
       n_workers: 3
+      refresh_interval_minutes: 15
+      # On activation, filters are validated against a designated reference night.
+      # If more than max_match_rate percent of alerts pass, the filter is not validated.
+      max_match_rate: 5
+      reference_night: "2026-03-16"
   lsst:
     command_interval: 500
-    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 10
     enrichment:
       n_workers: 10
     filter:
       n_workers: 3
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night: "2026-02-23"
   decam:
     command_interval: 500
-    filter_refresh_interval_minutes: 15
     alert:
       n_workers: 1
     enrichment:
       n_workers: 1
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
