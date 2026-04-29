@@ -96,7 +96,7 @@ services:
       interval: 10s
   # Run the Kafka producer just once
   producer:
-    image: boom/boom-benchmarking:latest
+    image: boom-astro/boom:latest
     hostname: producer
     build:
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
@@ -156,6 +156,8 @@ services:
       - ztf
     environment:
       RUST_LOG: error,boom=debug
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:
       - boom
     depends_on:

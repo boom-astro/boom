@@ -16,7 +16,7 @@ aws-sdk-s3 = "1.131.0"
 base64 = "0.22.1"
 bcrypt = "0.17.1"
 cdshealpix = "0.7.3"
-chrono = "0.4.42"
+chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 config = "0.15.18"
 constcat = "0.6.1"
@@ -27,11 +27,11 @@ futures = "0.3.31"
 hifitime = "4.2.3"
 indicatif = "0.18.0"
 itertools = "0.14.0"
-jsonwebtoken = "9.3.1"
+jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
 lettre = "0.11"
 moc = "0.19.1"
 mongodb = "3.3.0"
-ndarray = "0.16.1"
+ndarray = "0.17.2"
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
 opentelemetry_sdk = "0.31.0"
@@ -62,11 +62,11 @@ zune-inflate = { version = "0.2", default-features = false, features = [
 
 # on mac os silicon platform, install ort with the coreml feature
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["coreml"] }
+ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
 
 # otherwise, install ort with the cuda feature
 [target.'cfg(target_os = "linux")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["cuda"] }
+ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic"] }
 
 [workspace]
 members = ["apache-avro-macros"]

@@ -14,6 +14,7 @@
 ## Description
 
 BOOM is an alert broker. What sets it apart from other alert brokers is that it is written to be modular, scalable, and performant. Essentially, the pipeline is composed of multiple types of workers, each with a specific task:
+
 1. The `Kafka` consumer(s), reading alerts from astronomical surveys' `Kafka` topics to transfer them to `Redis`/`Valkey` in-memory queues.
 2. The Alert Ingestion workers, reading alerts from the `Redis`/`Valkey` queues, responsible of formatting them to BSON documents, and enriching them with crossmatches from archival astronomical catalogs and other surveys before writing the formatted alert packets to a `MongoDB` database.
 3. The enrichment workers, running alerts through a series of enrichment classifiers, and writing the results back to the `MongoDB` database.
@@ -32,10 +33,11 @@ BOOM runs on macOS and Linux. You'll need:
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- If you're on Windows, you must use WSL2 (Windows Subsystem for Linux) and install a Linux distribution like Ubuntu 24.04.
-- Kafka CLI tools, available with `brew install kafka`.
+- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
 
-### Installation steps:
+**Note:** On Linux, BOOM will fail to start with a clear error if `ORT_DYLIB_PATH` is not set. This is a hard requirement due to ONNX Runtime's dynamic loading behavior. The process will not run without it.
+
+### Installation steps
 
 #### macOS
 
@@ -49,10 +51,13 @@ BOOM runs on macOS and Linux. You'll need:
 - Rust: You can use [rustup](https://www.rust-lang.org/tools/install) to install Rust. Once installed, you can verify the installation by running `rustc --version` in your terminal. You also want to make sure that cargo is installed, which is the Rust package manager. You can verify this by running `cargo --version` in your terminal.
 - `wget` and `tar`: Most Linux distributions come with `wget` and `tar` pre-installed. If not, you can install them with your package manager.
 - System packages are essential for compiling and linking some Rust crates. On linux, you can install them with your package manager. For example with `apt` on Ubuntu or Debian-based systems, you can run:
+
   ```bash
   sudo apt update
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
+
+- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference-linux) subsection below for more details.
 
 ## Setup
 
@@ -77,7 +82,7 @@ to send Babamul account activation codes,
 the email related environmental variables in `.env.example` must be set.
 
 If email is not configured or disabled,
-Babmul activation codes will be printed to the console logs instead,
+Babamul activation codes will be printed to the console logs instead,
 and users will need to contact an administrator to retrieve their activation
 code.
 
@@ -184,6 +189,62 @@ services:
       - "9001:9001"
 ```
 
+### Linux only
+
+#### ONNX runtime setup {#linux-onnx-runtime-setup}
+
+On Linux, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use GPU inference or not. You must set this variable before running any BOOM binary natively.
+
+The easiest way is to install the Python wheel and point to the bundled `.so` file. We recommend [uv](https://docs.astral.sh/uv/getting-started/installation/):
+
+**CPU-only:**
+
+```bash
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install "onnxruntime>=1.24,<1.25"
+export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
+```
+
+Adjust the version number (`1.24.4`) to match the file actually present in `.venv`:
+
+```bash
+ls .venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.*
+```
+
+You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
+
+#### GPU inference {#gpu-inference-linux}
+
+For GPU inference on Linux you need, in addition to the above:
+
+1. NVIDIA driver installed and working.
+2. A CUDA major version compatible with your driver (we recommend CUDA 12.8).
+3. cuDNN 9 for that CUDA major version.
+4. At least 10 GiB (10240 MiB) of free VRAM on each configured CUDA device for ZTF enrichment.
+
+BOOM validates this requirement at scheduler startup when running ZTF with GPU enabled, and exits early if a configured device is below the threshold.
+
+And the GPU variant of the ONNX Runtime wheel instead of the CPU one:
+
+```bash
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install "onnxruntime-gpu>=1.24,<1.25"
+export ORT_DYLIB_PATH="$PWD/.venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
+```
+
+Then enable GPU inference in your BOOM config:
+
+```yaml
+# config.yaml
+gpu:
+  enabled: true
+  device_ids: [0]
+```
+
+See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
+
 ### Start services for local development
 
 Bring up the local dev stack with:
@@ -220,22 +281,27 @@ the same topic date/program combination.
 
 BOOM is meant to be run in production, reading from a real-time Kafka stream of astronomical alerts. **That said, we made it possible to process ZTF alerts from the [ZTF alerts public archive](https://ztf.uw.edu/alerts/public/).**
 This is a great way to test BOOM on real data at scale, and not just using the unit tests. To start a Kafka producer, you can run the following command:
+
 ```bash
 cargo run --release --bin kafka_producer <SURVEY> [DATE] [PROGRAMID]
 ```
 
-_To see the list of all parameters, documentation, and examples, run the following command:_
+_To see the list of all parameters, documentation, and examples, run the following command:
+
 ```bash
 cargo run --release --bin kafka_producer -- --help
 ```
 
 As an example, let's say you want to produce public ZTF alerts that were observed on `20240617` UTC. You can run the following command:
+
 ```bash
 cargo run --release --bin kafka_producer ztf 20240617 public
 ```
+
 You can leave that running in the background, and start the rest of the pipeline in another terminal.
 
 *If you'd like to clear the `Kafka` topic before starting the producer, you can run the following command:*
+
 ```bash
 docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --delete --topic ztf_YYYYMMDD_programid1
 ```
@@ -243,6 +309,7 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 ### Alert Consumption
 
 Next, you can start the `Kafka` consumer with:
+
 ```bash
 cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
 ```
@@ -250,6 +317,7 @@ cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMID
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
 To continue with the previous example, you can run:
+
 ```bash
 cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ```
@@ -257,16 +325,20 @@ cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ### Alert Processing
 
 Now that alerts have been queued for processing, let's start the workers that will process them. Instead of starting each worker manually, we provide the `scheduler` binary. You can run it with:
+
 ```bash
 cargo run --release --bin scheduler <SURVEY> [CONFIG_PATH]
 ```
+
 Where `<SURVEY>` is the name of the stream you want to process.
 For example, to process ZTF alerts, you can run:
+
 ```bash
 cargo run --release --bin scheduler ztf
 ```
 
 The scheduler prints a variety of messages to your terminal, e.g.:
+
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
 - You should then see some `received alerts len: <nb_alerts>` messages, which means that the enrichment worker is processing the alerts successfully.
 - You should not see anything related to the filter worker. **This is normal, as we did not define any filters yet!** The next version of the README will include instructions on how to upload a dummy filter to the system for testing purposes.
@@ -275,10 +347,11 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 Metrics are collected by Prometheus and visible on a Grafana dashboard.
 See the [observability docs](docs/observability.md) for more information.
 
-## Stopping BOOM:
+## Stopping BOOM
 
 To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then stop the scheduler with `CTRL+C` as well.
 You can also stop the docker containers with:
+
 ```bash
 docker compose down
 ```

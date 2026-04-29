@@ -299,6 +299,8 @@ services:
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:
       - boom
     profiles:
@@ -327,6 +329,8 @@ services:
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
+      BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:
       - boom
     profiles:
