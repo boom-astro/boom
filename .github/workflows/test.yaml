@@ -14,6 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: write-all
     timeout-minutes: 30
+    strategy:
+      matrix:
+        cutouts_storage_type: [mongo, s3]
     steps:
     - uses: actions/checkout@v4
       with:
@@ -56,7 +59,12 @@ jobs:
         sudo ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka
         sudo rm -f /tmp/kafka.tgz
     - name: Start services
-      run: docker compose up --build -d
+      run: |
+        if [ "${{ matrix.cutouts_storage_type }}" = "s3" ]; then
+          docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml up --build -d
+        else
+          docker compose up --build -d
+        fi
     - name: Wait for MongoDB to be ready
       run: |
         echo "Waiting for MongoDB to be ready..."
