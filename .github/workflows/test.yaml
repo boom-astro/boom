@@ -61,9 +61,9 @@ jobs:
     - name: Start services
       run: |
         if [ "${{ matrix.cutouts_storage_type }}" = "s3" ]; then
-          docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml up --build -d
+          docker compose -f docker-compose.yaml -f docker-compose.override.yaml -f docker-compose.cutouts-s3.yaml up --build -d
         else
-          docker compose up --build -d
+          docker compose -f docker-compose.yaml -f docker-compose.override.yaml up --build -d
         fi
     - name: Wait for MongoDB to be ready
       run: |
