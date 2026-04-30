@@ -43,7 +43,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS app
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates bash libsasl2-2 && \
+    ca-certificates curl bash libsasl2-2 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
