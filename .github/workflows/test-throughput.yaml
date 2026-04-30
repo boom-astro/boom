@@ -78,9 +78,10 @@ jobs:
 
   aggregate:
     name: Aggregate and report throughput results
+    runs-on: ubuntu-latest
+    permissions: write-all
     needs: test
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Download Mongo logs
@@ -148,12 +149,8 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
           cat results.txt || true
-      - name: Debug event context
-        run: |
-          echo "Event: ${{ github.event_name }}"
-          echo "PR number: ${{ github.event.pull_request.number }}"
       - name: Post combined PR comment
-        if: ${{ github.event.pull_request.number != '' }}
+        if: github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
