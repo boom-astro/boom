@@ -127,6 +127,7 @@ api:
         admin_password: test123
         admin_email: admin@test.com
 cutouts_storage:
+    type: mongo
     host: localhost
     port: 27017
     name: test_db
@@ -166,6 +167,7 @@ api:
         admin_password: test123
         admin_email: admin@test.com
 cutouts_storage:
+    type: mongo
     host: localhost
     port: 27017
     name: test_db
@@ -206,6 +208,7 @@ api:
         admin_password: test123
         admin_email: admin@test.com
 cutouts_storage:
+    type: mongo
     host: localhost
     port: 27017
     name: test_db
