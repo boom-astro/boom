@@ -25,6 +25,8 @@ pub enum CutoutStorageError {
     CutoutCompressFailed,
     #[error("cutout decompress failed")]
     CutoutDecompressFailed,
+    #[error("cutouts not found")]
+    CutoutsNotFound,
 }
 
 #[serde_as]
@@ -335,13 +337,25 @@ async fn retrieve_alert_cutouts(
 ) -> Result<AlertCutout, CutoutStorageError> {
     let key = format!("{}.json", candid);
 
-    let resp = s3_client
+    let resp = match s3_client
         .get_object()
         .bucket(bucket_name)
         .key(&key)
         .send()
         .await
-        .map_err(|_| CutoutStorageError::CutoutRetrieveFailed)?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if e.as_service_error()
+                .map(|se| se.is_no_such_key())
+                .unwrap_or(false)
+            {
+                return Err(CutoutStorageError::CutoutsNotFound);
+            }
+            error!("Failed to retrieve cutout for candid {}: {:?}", candid, e);
+            return Err(CutoutStorageError::CutoutRetrieveFailed);
+        }
+    };
 
     let data = resp
         .body
@@ -444,21 +458,12 @@ impl S3CutoutStorage {
         &self,
         candids: &[i64],
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
-        let start = std::time::Instant::now();
         let cached = self.cache.mget(candids).await;
         let missing: Vec<i64> = candids
             .iter()
             .filter(|c| !cached.contains_key(*c))
             .copied()
             .collect();
-
-        debug!(
-            "Cache MGET for {} cutouts ({} hits, {} misses) took {:?}",
-            candids.len(),
-            cached.len(),
-            missing.len(),
-            start.elapsed()
-        );
 
         let mut result = cached;
         if !missing.is_empty() {
@@ -476,8 +481,14 @@ impl S3CutoutStorage {
                     Ok(cutout) => {
                         result.insert(candid, cutout);
                     }
-                    Err(_) => {
+                    Err(CutoutStorageError::CutoutsNotFound) => {
                         debug!("Cutout with candid {} not found in S3", candid);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to retrieve cutout for candid {} from S3: {:?}",
+                            candid, e
+                        );
                     }
                 }
             }
@@ -519,7 +530,6 @@ impl MongoCutoutStorage {
     #[instrument(skip_all, err)]
     pub async fn insert_cutouts(&self, cutouts: AlertCutout) -> Result<(), CutoutStorageError> {
         let candid = cutouts.candid;
-
         match self.collection.insert_one(cutouts).await {
             Ok(_) => Ok(()),
             Err(e) => match *e.kind {
@@ -541,7 +551,7 @@ impl MongoCutoutStorage {
         let filter = mongodb::bson::doc! { "_id": candid };
         match self.collection.find_one(filter).await {
             Ok(Some(cutout)) => Ok(cutout),
-            Ok(None) => Err(CutoutStorageError::CutoutRetrieveFailed),
+            Ok(None) => Err(CutoutStorageError::CutoutsNotFound),
             Err(e) => {
                 error!("Failed to retrieve cutout for candid {}: {:?}", candid, e);
                 Err(CutoutStorageError::CutoutRetrieveFailed)
@@ -554,8 +564,6 @@ impl MongoCutoutStorage {
         &self,
         candids: &[i64],
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
-        let start = std::time::Instant::now();
-
         let filter = mongodb::bson::doc! { "_id": { "$in": candids } };
         let mut cursor = self
             .collection
@@ -577,12 +585,6 @@ impl MongoCutoutStorage {
                 }
             }
         }
-
-        debug!(
-            "Retrieved {} cutouts from MongoDB in {:?}",
-            cutouts.len(),
-            start.elapsed()
-        );
         Ok(cutouts)
     }
 

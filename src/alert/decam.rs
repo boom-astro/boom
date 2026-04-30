@@ -426,20 +426,22 @@ impl AlertWorker for DecamAlertWorker {
         // Sort and deduplicate time series data by jd
         DecamForcedPhot::sanitize_timeseries(&mut fp_hists);
 
-        let cutout_status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
+        let alert = DecamAlert {
+            candid,
+            object_id: object_id.clone(),
+            candidate: avro_alert.candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = cutout_status {
-            return Ok(cutout_status);
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
 
         let survey_matches = Some(
@@ -494,17 +496,15 @@ impl AlertWorker for DecamAlertWorker {
             }
         }
 
-        let alert = DecamAlert {
-            candid,
-            object_id: object_id.clone(),
-            candidate: avro_alert.candidate,
-            coordinates: Coordinates::new(ra, dec),
-            created_at: now,
-            updated_at: now,
-        };
-
         let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+            .format_and_insert_cutouts(
+                candid,
+                &object_id,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_storage,
+            )
             .await
             .inspect_err(as_error!())?;
 

@@ -5,7 +5,7 @@ use boom::{
         ZTF_LSST_XMATCH_RADIUS,
     },
     conf::{get_test_cutout_storage, get_test_db},
-    enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
+    enrichment::{EnrichmentWorker, EnrichmentWorkerError, ZtfEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, Origin, ZtfFilterWorker},
     utils::{
         enums::Survey,
@@ -406,6 +406,34 @@ async fn test_enrich_ztf_alert() {
     assert!((fading_rate - 0.063829).abs() < 1e-6);
     assert!(fading_red_chi2.is_nan()); // only 2 points after peak
     assert!((fading_dt - 7.956157).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_enrich_ztf_alert_missing_cutout() {
+    let mut alert_worker = ztf_alert_worker().await;
+
+    let (candid, _object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+    // Delete the cutout from storage to simulate a missing cutout
+    let cutout_storage = get_test_cutout_storage(&Survey::Ztf).await;
+    cutout_storage.delete_cutouts(candid).await.unwrap();
+
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
+    assert!(
+        matches!(result, Err(EnrichmentWorkerError::MissingCutouts(c)) if c == candid),
+        "Expected MissingCutouts({candid}), got: {:?}",
+        result
+    );
+
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

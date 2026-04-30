@@ -1151,20 +1151,23 @@ impl AlertWorker for LsstAlertWorker {
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
 
-        let cutout_status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
+        let alert = LsstAlert {
+            candid,
+            object_id: object_id.clone(),
+            ss_object_id: ss_object_id.clone(),
+            candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = cutout_status {
-            return Ok(cutout_status);
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
 
         let survey_matches = Some(
@@ -1220,18 +1223,15 @@ impl AlertWorker for LsstAlertWorker {
             }
         }
 
-        let alert = LsstAlert {
-            candid,
-            object_id: object_id.clone(),
-            ss_object_id: ss_object_id,
-            candidate,
-            coordinates: Coordinates::new(ra, dec),
-            created_at: now,
-            updated_at: now,
-        };
-
         let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+            .format_and_insert_cutouts(
+                candid,
+                &object_id,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_storage,
+            )
             .await
             .inspect_err(as_error!())?;
 
@@ -1484,6 +1484,51 @@ mod tests {
         };
 
         assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_stored_and_retrievable() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        let parsed_alert: LsstRawAvroAlert = worker
+            .schema_registry
+            .alert_from_avro_bytes(&bytes_content)
+            .await
+            .unwrap();
+
+        let stored = worker
+            .alert_cutout_storage
+            .retrieve_cutouts(candid)
+            .await
+            .expect("cutout should be retrievable after process_alert");
+
+        assert_eq!(stored.candid, candid);
+        assert_eq!(stored.cutout_science, parsed_alert.cutout_science);
+        assert_eq!(stored.cutout_template, parsed_alert.cutout_template);
+        assert_eq!(stored.cutout_difference, parsed_alert.cutout_difference);
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+        let _ = object_id;
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_deduplication() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, _object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Lsst).get().await;
+
+        let first = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(first, ProcessAlertStatus::Added(candid));
+
+        let second = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(second, ProcessAlertStatus::Exists(candid));
 
         drop_alert_from_collections(candid, &Survey::Lsst)
             .await

@@ -5,43 +5,48 @@ mod tests {
     use actix_web::{test, web, App};
     use boom::api::db::get_test_db_api;
     use boom::api::routes;
-    use boom::api::test_utils::{
-        create_test_catalog, delete_test_catalog, read_json_response, read_str_response,
-    };
+    use boom::api::test_utils::{read_json_response, read_str_response};
+    use boom::conf::AppConfig;
+    use boom::utils::cutouts::AlertCutout;
+    use boom::utils::enums::Survey;
     use mongodb::bson::doc;
     use mongodb::Database;
 
     /// Test GET /surveys/{survey_name}/cutouts success case
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
+        let config = AppConfig::from_test_config().unwrap();
         let database: Database = get_test_db_api().await;
 
         // Insert test cutout data with unique ID
-        let cutouts_collection =
-            database.collection::<boom::alert::AlertCutout>("ZTF_alerts_cutouts");
-        let test_candid: i64 = uuid::Uuid::new_v4().as_u128() as i64;
+        let ztf_cutouts_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage");
+        let test_candid = uuid::Uuid::new_v4().as_u128() as i64;
 
-        let cutout = boom::alert::AlertCutout {
+        let cutouts = AlertCutout {
             candid: test_candid,
-            cutout_science: vec![1, 2, 3, 4, 5],
-            cutout_template: vec![6, 7, 8, 9, 10],
-            cutout_difference: vec![11, 12, 13, 14, 15],
+            cutout_science: vec![1, 2, 3],
+            cutout_template: vec![4, 5, 6],
+            cutout_difference: vec![7, 8, 9],
         };
 
-        cutouts_collection
-            .insert_one(&cutout)
+        ztf_cutouts_storage
+            .insert_cutouts(cutouts)
             .await
-            .expect("Failed to insert test cutout");
+            .expect("Failed to store test cutout");
 
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(config.clone()))
                 .app_data(web::Data::new(database.clone()))
-                .service(routes::queries::get_cutouts),
+                .service(routes::surveys::cutouts::get_cutouts),
         )
         .await;
 
         let req = test::TestRequest::get()
-            .uri(&format!("/queries/ztf/cutouts?candid={}", test_candid))
+            .uri(&format!("/surveys/ztf/cutouts?candid={}", test_candid))
             .to_request();
 
         let resp = test::call_service(&app, req).await;
@@ -64,14 +69,14 @@ mod tests {
         );
 
         // Clean up
-        cutouts_collection
-            .delete_one(doc! { "_id": test_candid })
+        ztf_cutouts_storage
+            .delete_cutouts(test_candid)
             .await
             .expect("Failed to delete test cutout");
 
         // Test retrieval of non-existent candid
         let req = test::TestRequest::get()
-            .uri("/queries/ztf/cutouts?candid=8888888888")
+            .uri("/surveys/ztf/cutouts?candid=8888888888")
             .to_request();
 
         let resp = test::call_service(&app, req).await;
@@ -81,4 +86,4 @@ mod tests {
             "Should return 404 for non-existent candid"
         );
     }
-  }
+}

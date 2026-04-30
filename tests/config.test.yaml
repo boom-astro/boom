@@ -44,7 +44,7 @@ cutouts_storage:
   type: mongo
   host: localhost
   port: 27017
-  name: boom_test_cutouts
+  name: boom_test
   max_pool_size: 200
   replica_set: null
   username: mongoadmin

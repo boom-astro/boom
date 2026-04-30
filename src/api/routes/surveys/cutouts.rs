@@ -1,5 +1,6 @@
 use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
 use crate::api::models::response;
+use crate::utils::cutouts::CutoutStorageError;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::Band;
 use actix_web::{get, web, HttpResponse};
@@ -43,6 +44,9 @@ pub async fn get_cutouts(
     if let Some(candid) = query.candid {
         let cutouts = match cutout_storage.retrieve_cutouts(candid).await {
             Ok(cutouts) => cutouts,
+            Err(CutoutStorageError::CutoutsNotFound) => {
+                return response::not_found(&format!("no cutouts found for candid {}", candid));
+            }
             Err(error) => {
                 tracing::error!("Error retrieving cutouts from storage: {}", error);
                 return response::internal_error("error retrieving cutouts from storage");
@@ -103,6 +107,12 @@ pub async fn get_cutouts(
 
         let cutouts = match cutout_storage.retrieve_cutouts(candid).await {
             Ok(cutouts) => cutouts,
+            Err(CutoutStorageError::CutoutsNotFound) => {
+                return response::not_found(&format!(
+                    "no cutouts found for objectId {} (candid: {})",
+                    object_id, candid
+                ));
+            }
             Err(error) => {
                 tracing::error!("Error retrieving cutouts from storage: {}", error);
                 return response::internal_error("error retrieving cutouts from storage");
