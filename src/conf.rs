@@ -235,7 +235,8 @@ async fn build_cutout_storage(
                     ))?;
             let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds);
 
-            CutoutStorage::from_s3(rustfs_client, bucket_name, None, cache)
+            let compress_stamps = matches!(survey, Survey::Lsst);
+            CutoutStorage::from_s3(rustfs_client, bucket_name, None, cache, compress_stamps)
                 .await
                 .inspect_err(as_error!("failed to create cutout storage"))?
         }

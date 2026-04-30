@@ -1119,6 +1119,7 @@ dependencies = [
  "utoipa-scalar",
  "uuid",
  "which",
+ "zstd",
  "zune-inflate",
 ]
 
