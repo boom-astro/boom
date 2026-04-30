@@ -188,9 +188,12 @@ services:
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
-      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__API_ENABLED:-false}
+      BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
     networks:
       - boom
@@ -211,6 +214,7 @@ services:
     profiles:
       - prod
       - api
+      - dev
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public

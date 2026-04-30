@@ -4,9 +4,16 @@ use std::path::Path;
 
 fn ensure_required_env() {
     // AppConfig::from_path validates these secrets must be non-empty.
-    std::env::set_var("BOOM_DATABASE__PASSWORD", "ci-dummy-db-password");
-    std::env::set_var("BOOM_API__AUTH__SECRET_KEY", "ci-dummy-secret-key");
-    std::env::set_var("BOOM_API__AUTH__ADMIN_PASSWORD", "ci-dummy-admin-password");
+    // Only set dummy values when the variables are not already present.
+    if std::env::var_os("BOOM_DATABASE__PASSWORD").is_none() {
+        std::env::set_var("BOOM_DATABASE__PASSWORD", "ci-dummy-db-password");
+    }
+    if std::env::var_os("BOOM_API__AUTH__SECRET_KEY").is_none() {
+        std::env::set_var("BOOM_API__AUTH__SECRET_KEY", "ci-dummy-secret-key");
+    }
+    if std::env::var_os("BOOM_API__AUTH__ADMIN_PASSWORD").is_none() {
+        std::env::set_var("BOOM_API__AUTH__ADMIN_PASSWORD", "ci-dummy-admin-password");
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

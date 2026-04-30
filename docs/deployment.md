@@ -288,25 +288,31 @@ Kafka bind mounts need one extra check. The Kafka container user must be able
 to write to `BOOM_DATA_KAFKA_PATH`. If you see permission errors during broker
 startup, fix ownership or permissions on the host directory.
 
-Recommended options:
+Recommended options (in order of preference):
 
-1. Prefer Docker named volumes (`kafka_data`) when possible, which avoids host
-   filesystem permission management entirely.
-2. If using a bind mount on a separate drive, pre-provision the target
-   directory with ownership and permissions that match the Kafka container's
-   runtime user and group.
-3. Automate that host-path setup in infrastructure provisioning (cloud-init,
-   Ansible, Terraform, etc.) so deploys stay repeatable.
+1. **Prefer Docker named volumes** (`kafka_data`) when possible, which avoids
+   host filesystem permission management entirely.
+2. **Fix ownership for the Kafka container's runtime user.** Kafka typically
+   runs as UID 1000 in the container:
 
-As a last resort for unblocking a deploy when you cannot control host ownership
-or run provisioning tooling:
+   ```bash
+   sudo chown -R 1000:1000 /srv/boom/kafka
+   sudo chmod 750 /srv/boom/kafka
+   ```
 
-```bash
-sudo chmod 777 /srv/boom/kafka
-```
+3. **Use infrastructure provisioning** (cloud-init, Ansible, Terraform, etc.)
+   to pre-provision the target directory with correct ownership and permissions
+   at deploy time, ensuring repeatable deploys.
 
-This works but leaves the directory world-writable, meaning any process on
-the host can read or corrupt Kafka data. Replace it with proper ownership as
-soon as access allows.
+4. **As a last resort only** — if you cannot control host ownership or run
+   provisioning — use world-writable permissions for temporary troubleshooting:
+
+   ```bash
+   sudo chmod 777 /srv/boom/kafka
+   ```
+
+   ⚠️ **This leaves the directory world-writable, meaning any process on the
+   host can read or corrupt Kafka data.** Replace it with proper ownership
+   (option 2) as soon as access allows.
 
 That's it. Now BOOM will deploy to production on each GitHub release.
