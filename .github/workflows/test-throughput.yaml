@@ -148,7 +148,12 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
           cat results.txt || true
+      - name: Debug event context
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "PR number: ${{ github.event.pull_request.number }}"
       - name: Post combined PR comment
+        if: ${{ github.event.pull_request.number != '' }}
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
