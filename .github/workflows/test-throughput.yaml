@@ -21,6 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions: write-all
     timeout-minutes: 30
+    strategy:
+      matrix:
+        cutouts_storage_type: [mongo, s3]
+    env:
+      CUTOUTS_STORAGE_TYPE: ${{ matrix.cutouts_storage_type }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,67 +62,107 @@ jobs:
       - name: Download auxiliary ZTF alerts from Caltech Box
         run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
-        run: uv run tests/throughput/run.py
-          --timeout 600
-          --n-alert-workers=6
-          --n-enrichment-workers=5
-          --n-filter-workers=2
+        run: |
+          uv run tests/throughput/run.py \
+            --timeout 600 \
+            --n-alert-workers=6 \
+            --n-enrichment-workers=5 \
+            --n-filter-workers=2 \
+            --cutouts-storage-type ${{ matrix.cutouts_storage_type }}
       - name: Upload logs (including wall time) as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: throughput-logs
+          name: throughput-logs-${{ matrix.cutouts_storage_type }}
           path: logs/boom-*
-      - name: Download baseline benchmark (PR only)
-        if: github.event_name == 'pull_request'
+
+  aggregate:
+    name: Aggregate and report throughput results
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Mongo logs
+        uses: actions/download-artifact@v4
+        with:
+          name: throughput-logs-mongo
+          path: ./mongo/current
+      - name: Download S3 logs
+        uses: actions/download-artifact@v4
+        with:
+          name: throughput-logs-s3
+          path: ./s3/current
+      - name: Download Mongo baseline logs
         uses: dawidd6/action-download-artifact@v11
         with:
           workflow: test-throughput.yaml
           branch: main
-          name: throughput-logs
-          path: ./baseline
+          name: throughput-logs-mongo
+          path: ./mongo/baseline
           if_no_artifact_found: warn
         continue-on-error: true
-      - name: Compare with baseline (PR only)
-        id: compare-with-baseline
-        # The artifact (is it exists) should have a file called wall_time.txt
-        # so if the file doesn't exist we skip this action, otherwise we
-        # compare the wall time
-        if: github.event_name == 'pull_request'
+      - name: Download S3 baseline logs
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          workflow: test-throughput.yaml
+          branch: main
+          name: throughput-logs-s3
+          path: ./s3/baseline
+          if_no_artifact_found: warn
+        continue-on-error: true
+      - name: Aggregate and compare results
+        id: aggregate
         run: |
-          current=$(cat logs/boom-*/wall_time.txt)
-          echo "Current wall time: $current seconds"
-          if [ -f ./baseline/boom-*/wall_time.txt ]; then
-            baseline=$(cat ./baseline/boom-*/wall_time.txt)
-            echo "Baseline wall time: $baseline seconds"
-            percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
-          else
-            echo "No baseline wall time found. Skipping comparison."
-            percentage_diff=0
-          fi
+          #!/usr/bin/env bash
+          set -euo pipefail
+          make_row() {
+            local type=$1
+            local current_file=$2
+            local baseline_file=$3
+            local current baseline percentage_diff
+            if [ -f "$current_file" ]; then
+              current=$(cat "$current_file")
+            else
+              current="N/A"
+            fi
+            if [ -f "$baseline_file" ]; then
+              baseline=$(cat "$baseline_file")
+              percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
+            else
+              baseline="N/A"
+              percentage_diff="N/A"
+            fi
+            echo "| $type | $current | $baseline | $percentage_diff% |"
+            # Export for fail check
+            echo "$type:$percentage_diff" >> results.txt
+          }
 
-          echo "Percentage difference: $percentage_diff%"
+          echo "| Storage | New wall time | Baseline wall time | Difference |" > table.md
+          echo "| ------- | ------------- | ------------------ | ---------- |" >> table.md
+          make_row "mongo" ./mongo/current/boom-*/wall_time.txt ./mongo/baseline/boom-*/wall_time.txt >> table.md
+          make_row "s3" ./s3/current/boom-*/wall_time.txt ./s3/baseline/boom-*/wall_time.txt >> table.md
 
-          echo "percentage_diff=$percentage_diff" >> $GITHUB_OUTPUT
-          echo "baseline=$baseline" >> $GITHUB_OUTPUT
-          echo "current=$current" >> $GITHUB_OUTPUT
-      - name: Post comment on PR (if applicable)
-        if: github.event_name == 'pull_request'
+          echo "table<<EOF" >> $GITHUB_OUTPUT
+          cat table.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          cat results.txt || true
+      - name: Post combined PR comment
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
             Throughput results (`${{ github.sha }}`):
-            | New wall time | Baseline wall time | Difference |
-            | -------------- | ------------------ | ---------- |
-            | ${{ steps.compare-with-baseline.outputs.current }} | ${{ steps.compare-with-baseline.outputs.baseline }} | ${{ steps.compare-with-baseline.outputs.percentage_diff }}% |
+            ${{ steps.aggregate.outputs.table }}
           edit-mode: replace
       - name: Fail if wall time increased too much (PR only)
-        if: github.event_name == 'pull_request'
         run: |
-          percentage_diff=${{ steps.compare-with-baseline.outputs.percentage_diff }}
-          if (( $(echo "$percentage_diff > $TOLERANCE_PERCENTAGE" | bc -l) )); then
-            echo "Wall time increased by $percentage_diff%, which is more than the allowed $TOLERANCE_PERCENTAGE%."
-            exit 1
-          fi
+          TOL=${{ env.TOLERANCE_PERCENTAGE }}
+          while IFS=: read -r type diff; do
+            if [[ "$diff" != "N/A" && $(echo "$diff > $TOL" | bc -l) -eq 1 ]]; then
+              echo "$type wall time increased by $diff%, which is more than the allowed $TOL%."
+              exit 1
+            fi
+          done < results.txt
