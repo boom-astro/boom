@@ -7,10 +7,12 @@ import { SiteHeader } from "@/components/site-header"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "@/components/ui/sonner";
+import { Loader } from "@/components/ui/loader";
 
 const Query = lazy(() => import("@/pages/Query"));
-const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));
 const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
+const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));
+const KafkaAccessGuide = lazy(() => import("@/pages/KafkaAccessGuide"));
 const Login = lazy(() => import("@/pages/Login"));
 const ObjectPage = lazy(() => import("@/pages/ObjectPage"));
 const SignupPage = lazy(() => import("@/pages/Signup"));
@@ -20,6 +22,7 @@ const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"))
 const ResetPassword = lazy(() => import("@/pages/ResetPassword"))
 const Help = lazy(() => import("@/pages/Help"))
 const Acknowledgments = lazy(() => import("@/pages/Acknowledgments"))
+const Dashboard = lazy(() => import("@/pages/Dashboard"))
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
@@ -71,9 +74,8 @@ function ProtectedRoute({ children }: { children: React.ReactElement }) {
   if (!token) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
-  if (loading) {
-    return <div className="px-4 py-6">Loading...</div>;
-  }
+  if (loading) return <Loader />;
+
   return children;
 }
 
@@ -91,7 +93,7 @@ function LayoutRoutes() {
         <div className="flex flex-1 flex-col">
           <div className="@container/main flex flex-1 flex-col gap-2">
             <div className={`flex flex-col gap-4 ${isLanding ? '' : 'py-4 md:gap-6 md:py-6'}`}>
-              <Suspense fallback={<div className="px-4 py-6">Loading...</div>}>
+              <Suspense fallback={<Loader/>}>
                 <Routes>
                   <Route path="/" element={<Landing />} />
                   <Route path="/landing" element={<Landing />} />
@@ -102,7 +104,9 @@ function LayoutRoutes() {
                   {!PRERELEASE_MODE && <Route path="/activate" element={<SignupPage />} />}
                   <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
                   <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
-                  <Route path="/docs/kafka" element={<ProtectedRoute><KafkaDocs /></ProtectedRoute>} />
+                  <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="/docs/kafka" element={<KafkaDocs />} />
+                  <Route path="/docs/kafka/access-guide" element={<KafkaAccessGuide />} />
                   <Route path="/docs/api" element={<ApiDocs />} />
                   <Route path="/acknowledgments" element={<Acknowledgments />} />
                   <Route path="/help" element={<Help />} />

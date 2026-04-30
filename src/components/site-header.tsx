@@ -38,18 +38,7 @@ export function SiteHeader() {
               <p>Search objects (Ctrl+K)</p>
             </TooltipContent>
           </Tooltip>
-          {/* <Button variant="ghost" asChild size="sm" className="hidden sm:flex">
-            <a
-              href="https://github.com/shadcn-ui/ui/tree/main/apps/v4/app/(examples)/dashboard"
-              rel="noopener noreferrer"
-              target="_blank"
-              className="dark:text-foreground"
-            >
-              GitHub
-            </a>
-          </Button> */}
           <ModeToggle className="-ml-1" />
-          {/* Top-bar user avatar removed — NavUser in sidebar provides account actions */}
         </div>
       </div>
       <SearchDialog open={open} onOpenChange={setOpen} />

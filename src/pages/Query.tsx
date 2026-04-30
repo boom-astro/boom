@@ -325,7 +325,7 @@ export default function Query() {
               <div className="space-y-4">
                 {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => (
                   <div key={i} className="flex gap-4 p-4 border rounded-lg">
-                    <div className="flex gap-2 flex-shrink-0">
+                    <div className="flex gap-2 shrink-0">
                       <Skeleton className="h-24 w-24" />
                       <Skeleton className="h-24 w-24" />
                       <Skeleton className="h-24 w-24" />
@@ -440,7 +440,7 @@ const AlertCard = memo(function AlertCard({ alert, survey }: { alert: Alert; sur
       onClick={handleClick}
     >
       {/* Cutouts */}
-      <div className="flex gap-2 flex-shrink-0">
+      <div className="flex gap-2 shrink-0">
         {loadingCutouts ? (
           <>
             <Skeleton className="h-24 w-24" />
@@ -480,10 +480,10 @@ const AlertCard = memo(function AlertCard({ alert, survey }: { alert: Alert; sur
         </div>
         {drb !== null && (
           <div>
-            <span className="text-muted-foreground">DRB/Reliability:</span> <span className="font-mono">{typeof drb === 'number' ? drb.toFixed(3) : drb}</span>
+            <span className="text-muted-foreground">DRB/Reliability:</span> <span className="font-mono">{drb.toFixed(3)}</span>
           </div>
         )}
-        {alert.candidate.magpsf !== undefined && typeof alert.candidate.magpsf === 'number' && (
+        {alert.candidate.magpsf !== undefined && (
           <div>
             <span className="text-muted-foreground">Magnitude:</span> <span className="font-mono">{alert.candidate.magpsf.toFixed(2)}</span>
           </div>

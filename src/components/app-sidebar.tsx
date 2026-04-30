@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Link } from "react-router-dom"
 import {
+  IconChartBar,
   IconDatabase,
   IconHelp,
   IconSearch,
@@ -31,6 +32,11 @@ const data = {
       title: "Query",
       url: "/query",
       icon: IconSearch,
+    },
+    {
+      title: "Dashboard",
+      url: "/dashboard",
+      icon: IconChartBar,
     },
   ],
   navSecondary: [
@@ -81,7 +87,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <SidebarMenuItem>
             <SidebarMenuButton
               asChild
-              className="data-[slot=sidebar-menu-button]:!p-1.5"
+              className="data-[slot=sidebar-menu-button]:p-1.5!"
             >
               <Link to="/" state={{ explicit: true }} className="flex items-center gap-2">
                 {/* Collapsed version - stacked */}
