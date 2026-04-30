@@ -170,7 +170,7 @@ pub async fn get_test_auth(db: &Database) -> Result<AuthProvider, std::io::Error
     AuthProvider::new(&app_config, &db).await
 }
 
-pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/"];
+pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/", "/filters/test", "/filters/test/count"];
 
 pub async fn auth_middleware(
     req: ServiceRequest,
