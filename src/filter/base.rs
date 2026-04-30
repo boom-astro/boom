@@ -1,6 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
+    scheduler::record_kafka_alert_published,
     utils::{
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
@@ -1028,6 +1029,15 @@ pub async fn run_filter_worker<T: FilterWorker>(
             "Successfully sent total of {}/{} alerts to Kafka topic {}",
             total_sent, total_enqueued, &output_topic
         );
+
+        if total_sent > 0 {
+            record_kafka_alert_published(
+                "filter_worker",
+                &survey,
+                &output_topic,
+                total_sent as u64,
+            );
+        }
 
         if let Some(error) = enqueue_error {
             ACTIVE.add(-1, &active_attrs);
