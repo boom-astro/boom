@@ -267,6 +267,10 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
         let days_ago = |n: i64| today - chrono::Duration::days(n);
 
+        // 0 days ago -> 30 min
+        assert_eq!(cache_duration_secs(&days_ago(0), &today), 1800.0);
+        // 1 day ago -> 30 min
+        assert_eq!(cache_duration_secs(&days_ago(1), &today), 1800.0);
         // 2 days ago -> 30 min (upper bound of the short-cache window)
         assert_eq!(cache_duration_secs(&days_ago(2), &today), 1800.0);
         // 3 days ago -> 1 day (lower bound of the 3–7 day window)
