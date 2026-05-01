@@ -75,7 +75,7 @@ export default function Landing() {
                 Search for alerts
               </Button>
             </Link>
-            <Link to="/dashboard" className="col-span-1">
+            <Link to="/dashboard" className="col-span-2 md:col-span-1">
               <Button className="w-full px-6 py-3 bg-white/90 hover:bg-white text-slate-900 shadow-md hover:shadow-xl transform transition duration-150 ease-out hover:-translate-y-0.5 flex items-center justify-center gap-2">
                 <IconChartBar className="w-4 h-4" />
                 Dashboard
