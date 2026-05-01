@@ -50,14 +50,14 @@ fn cache_id(survey: &Survey, date: &NaiveDate) -> String {
 
 /// Cache duration (in seconds) grows with the age of the night.
 ///
-/// - Today (age 0): 1 hour — the night is still in progress, count changes fast.
-/// - 1–7 days: 1 day.
+/// - 0–2 days: 30 minutes — the night may still be ingesting, count changes fast.
+/// - 3–7 days: 1 day.
 /// - >7 days: 1 year.
 fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
     let age_days = (*today - *date).num_days();
     match age_days {
-        ..=0 => 1.0 * 3600.0,
-        1..=7 => 24.0 * 3600.0,
+        ..=2 => 30.0 * 60.0,
+        3..=7 => 24.0 * 3600.0,
         _ => 365.0 * 24.0 * 3600.0,
     }
 }
@@ -265,28 +265,15 @@ mod tests {
     #[test]
     fn test_cache_duration() {
         let today = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
+        let days_ago = |n: i64| today - chrono::Duration::days(n);
 
-        // Today -> 1h
-        assert_eq!(cache_duration_secs(&today, &today), 3600.0);
-
-        // Yesterday -> 1 day
-        let yesterday = NaiveDate::from_ymd_opt(2024, 6, 14).unwrap();
-        assert_eq!(cache_duration_secs(&yesterday, &today), 86400.0);
-
-        // 5 days ago -> 1 day
-        let five_ago = NaiveDate::from_ymd_opt(2024, 6, 10).unwrap();
-        assert_eq!(cache_duration_secs(&five_ago, &today), 86400.0);
-
-        // 7 days ago -> 1 day (upper bound of the 1–7 day window)
-        let seven_ago = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
-        assert_eq!(cache_duration_secs(&seven_ago, &today), 86400.0);
-
-        // 15 days ago -> 1 year
-        let fifteen_ago = NaiveDate::from_ymd_opt(2024, 5, 31).unwrap();
-        assert_eq!(cache_duration_secs(&fifteen_ago, &today), 31536000.0);
-
-        // 60 days ago -> 1 year
-        let sixty_ago = NaiveDate::from_ymd_opt(2024, 4, 16).unwrap();
-        assert_eq!(cache_duration_secs(&sixty_ago, &today), 31536000.0);
+        // 2 days ago -> 30 min (upper bound of the short-cache window)
+        assert_eq!(cache_duration_secs(&days_ago(2), &today), 1800.0);
+        // 3 days ago -> 1 day (lower bound of the 3–7 day window)
+        assert_eq!(cache_duration_secs(&days_ago(3), &today), 86400.0);
+        // 7 days ago -> 1 day (upper bound of the 3–7 day window)
+        assert_eq!(cache_duration_secs(&days_ago(7), &today), 86400.0);
+        // 8 days ago -> 1 year (lower bound of the long-cache window)
+        assert_eq!(cache_duration_secs(&days_ago(8), &today), 31536000.0);
     }
 }
