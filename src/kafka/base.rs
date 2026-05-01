@@ -447,12 +447,14 @@ pub trait AlertConsumer: Sized {
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
 
+        let survey = self.survey().to_string();
         let mut handles = vec![];
         for i in 0..n_threads {
             let topics = topics.clone();
             let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
+            let survey = survey.clone();
             let handle = tokio::spawn(async move {
                 let result = consumer(
                     &i.to_string(),
@@ -463,6 +465,7 @@ pub trait AlertConsumer: Sized {
                     &config,
                     &kafka_config,
                     exit_on_eof,
+                    &survey,
                 )
                 .await;
                 if let Err(error) = result {
@@ -549,6 +552,7 @@ pub async fn consumer(
     config: &AppConfig,
     survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
+    survey: &str,
 ) -> Result<(), ConsumerError> {
     let server = survey_consumer_config.server.clone();
     let group_id = survey_consumer_config.group_id.clone();
@@ -665,6 +669,7 @@ pub async fn consumer(
         KeyValue::new("messaging.operation.name", "poll"),
         KeyValue::new("messaging.operation.type", "receive"),
         KeyValue::new("messaging.client.id", id.to_string()),
+        KeyValue::new("survey", survey.to_string()),
     ];
     let ok_attrs: Vec<KeyValue> = consumer_attrs
         .iter()

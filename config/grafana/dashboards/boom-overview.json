@@ -110,8 +110,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(irate(kafka_consumer_alert_processed_total[5m])) or vector(0)",
-          "legendFormat": "kafka consumer (total)",
+          "expr": "sum by (survey) (irate(kafka_consumer_alert_processed_total[5m])) or vector(0)",
+          "legendFormat": "kafka consumer {{survey}}",
           "range": true,
           "refId": "A"
         },
