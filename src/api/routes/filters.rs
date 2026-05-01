@@ -4,6 +4,7 @@ use crate::{
         ZtfPrvCandidate,
     },
     api::{
+        catalogs::{catalog_accessible, WATCHLIST_PREFIX},
         filters::{doc2json, SortOrder},
         models::response,
         routes::users::User,
@@ -18,6 +19,43 @@ use crate::{
         enums::Survey,
     },
 };
+
+/// Validates that a watchlist binding on a filter is well-formed and authorized:
+/// - the name starts with `watchlist_`
+/// - the catalog exists as a Mongo collection AND the user has access (admins bypass)
+/// - the catalog is configured for crossmatch on this survey (so it will actually be enriched)
+async fn validate_watchlist(
+    db: &Database,
+    watchlist: &str,
+    survey: &Survey,
+    user: &User,
+    config: &AppConfig,
+) -> Result<(), String> {
+    if !watchlist.starts_with(WATCHLIST_PREFIX) {
+        return Err(format!(
+            "watchlist catalog name must start with '{}'",
+            WATCHLIST_PREFIX
+        ));
+    }
+    if !catalog_accessible(db, watchlist, Some(user)).await {
+        return Err(format!(
+            "watchlist '{}' does not exist or is not accessible to the user",
+            watchlist
+        ));
+    }
+    let configured = config
+        .crossmatch
+        .get(survey)
+        .map(|cats| cats.iter().any(|c| c.catalog == watchlist))
+        .unwrap_or(false);
+    if !configured {
+        return Err(format!(
+            "watchlist '{}' is not configured for crossmatch on survey {:?}.",
+            watchlist, survey
+        ));
+    }
+    Ok(())
+}
 
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
@@ -42,6 +80,8 @@ pub struct FilterPublic {
     pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchlist: Option<String>,
     pub survey: Survey,
     pub active: bool,
     pub active_fid: String,
@@ -58,6 +98,7 @@ impl From<Filter> for FilterPublic {
             description: filter.description,
             permissions: filter.permissions,
             user_id: filter.user_id,
+            watchlist: filter.watchlist,
             survey: filter.survey,
             active: filter.active,
             active_fid: filter.active_fid,
@@ -361,6 +402,10 @@ pub struct FilterPost {
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
+    /// Optional watchlist catalog name. Must start with "watchlist_", be present in
+    /// the crossmatch config for the survey, and be granted to the requesting user.
+    #[serde(default)]
+    pub watchlist: Option<String>,
 }
 
 /// Create a new filter
@@ -378,6 +423,7 @@ pub struct FilterPost {
 #[post("/filters")]
 pub async fn post_filter(
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
     body: web::Json<FilterPost>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
@@ -396,6 +442,12 @@ pub async fn post_filter(
             "Filters running on survey {:?} must have permissions defined for that survey",
             survey
         ));
+    }
+    if let Some(ref watchlist) = body.watchlist {
+        if let Err(msg) = validate_watchlist(&db, watchlist, &survey, &current_user, &config).await
+        {
+            return response::bad_request(&msg);
+        }
     }
     let pipeline = body.pipeline;
 
@@ -432,6 +484,7 @@ pub async fn post_filter(
         survey,
         id: filter_id,
         user_id: current_user.id.clone(),
+        watchlist: body.watchlist,
         active: false,
         active_fid: filter_version.clone(),
         fv: vec![FilterVersion {

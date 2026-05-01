@@ -139,6 +139,7 @@ pub async fn insert_custom_test_filter(
         description: Some("Test filter".to_string()),
         survey: survey.clone(),
         user_id: "test_user".to_string(),
+        watchlist: None,
         permissions,
         active: true,
         active_fid: "v2e0fs".to_string(),

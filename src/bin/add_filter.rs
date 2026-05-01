@@ -1,3 +1,4 @@
+use boom::api::catalogs::{catalog_exists, WATCHLIST_PREFIX};
 use boom::conf::{load_dotenv, AppConfig};
 use boom::filter::{Filter, FilterVersion};
 use boom::utils::enums::Survey;
@@ -20,6 +21,11 @@ struct Cli {
         default_value = "Added via CLI"
     )]
     description: String,
+    #[arg(
+        long,
+        help = "Optional watchlist catalog name to bind the filter to (must start with 'watchlist_'). Output is routed to a private Kafka topic of the same name."
+    )]
+    watchlist: Option<String>,
 }
 
 fn now_jd() -> f64 {
@@ -43,6 +49,7 @@ async fn main() {
     let description = args.description;
     let survey = args.survey;
     let filter_file = args.filter_file;
+    let watchlist = args.watchlist;
 
     // read the JSON as a string
     let filter_pipeline = match std::fs::read_to_string(&filter_file) {
@@ -52,6 +59,35 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    let config = AppConfig::from_default_path().unwrap();
+    let db = match config.build_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            error!("error building db: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Validate the watchlist name match an existing collection,
+    // so we don't insert a filter that would never match.
+    if let Some(ref name) = watchlist {
+        if !name.starts_with(WATCHLIST_PREFIX) {
+            eprintln!(
+                "watchlist catalog name must start with '{}'",
+                WATCHLIST_PREFIX
+            );
+            std::process::exit(1);
+        }
+        if !catalog_exists(&db, name).await {
+            eprintln!(
+                "watchlist catalog '{}' does not exist in the database; \
+                 import the source list as a Mongo collection first",
+                name
+            );
+            std::process::exit(1);
+        }
+    }
 
     // Create a bson document with id, active, catalog, permissions
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
@@ -64,6 +100,7 @@ async fn main() {
         description: Some(description),
         active: true,
         user_id: "cli".to_string(),
+        watchlist,
         survey: survey,
         permissions: permissions,
         fv: vec![FilterVersion {
@@ -78,16 +115,6 @@ async fn main() {
     };
 
     // insert the filter into the database
-    let config = AppConfig::from_default_path().unwrap();
-
-    let db = match config.build_db().await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("error building db: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let collection = db.collection::<Filter>("filters");
 
     match collection.insert_one(filter).await {
