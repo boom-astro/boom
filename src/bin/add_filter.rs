@@ -1,5 +1,5 @@
 use boom::conf::{load_dotenv, AppConfig};
-use boom::filter::{Filter, FilterVersion};
+use boom::filter::{Filter, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS};
 use boom::utils::enums::Survey;
 use clap::Parser;
 use std::collections::HashMap;
@@ -20,6 +20,13 @@ struct Cli {
         default_value = "Added via CLI"
     )]
     description: String,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_values_t = vec![1i32, 2, 3],
+        help = "Comma-separated permission program IDs (ZTF only; ignored for surveys without a permission system)."
+    )]
+    permissions: Vec<i32>,
 }
 
 fn now_jd() -> f64 {
@@ -43,6 +50,11 @@ async fn main() {
     let description = args.description;
     let survey = args.survey;
     let filter_file = args.filter_file;
+    let permissions = if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+        HashMap::from([(survey.clone(), args.permissions)])
+    } else {
+        HashMap::new()
+    };
 
     // read the JSON as a string
     let filter_pipeline = match std::fs::read_to_string(&filter_file) {
@@ -57,15 +69,14 @@ async fn main() {
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
     let filter_id: String = uuid::Uuid::new_v4().to_string();
 
-    let permissions = HashMap::from([(Survey::Ztf, vec![1, 2, 3])]);
     let filter = Filter {
         id: filter_id.clone(),
-        name: name,
+        name,
         description: Some(description),
         active: true,
         user_id: "cli".to_string(),
-        survey: survey,
-        permissions: permissions,
+        survey,
+        permissions,
         fv: vec![FilterVersion {
             fid: "v2e0fs".to_string(),
             pipeline: filter_pipeline,
