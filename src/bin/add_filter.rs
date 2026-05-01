@@ -1,5 +1,5 @@
 use boom::conf::{load_dotenv, AppConfig};
-use boom::filter::{Filter, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS};
+use boom::filter::{Filter, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS, VALID_ZTF_PROGRAMIDS};
 use boom::utils::enums::Survey;
 use clap::Parser;
 use std::collections::HashMap;
@@ -57,6 +57,22 @@ async fn main() {
             );
             std::process::exit(1);
         };
+        let valid: &[i32] = match survey {
+            Survey::Ztf => &VALID_ZTF_PROGRAMIDS,
+            _ => &[],
+        };
+        let invalid: Vec<i32> = perms
+            .iter()
+            .copied()
+            .filter(|p| !valid.contains(p))
+            .collect();
+        if !invalid.is_empty() {
+            eprintln!(
+                "Invalid programid(s) {:?} for survey {:?}; valid values are {:?}",
+                invalid, survey, valid
+            );
+            std::process::exit(1);
+        }
         HashMap::from([(survey.clone(), perms)])
     } else {
         HashMap::new()
