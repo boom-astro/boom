@@ -23,10 +23,9 @@ struct Cli {
     #[arg(
         long,
         value_delimiter = ',',
-        default_values_t = vec![1i32, 2, 3],
-        help = "Comma-separated permission program IDs (ZTF only; ignored for surveys without a permission system)."
+        help = "Comma-separated permission program IDs. Required for surveys with a permission system (e.g. ZTF: 1=public, 2=partnership, 3=Caltech); ignored for others."
     )]
-    permissions: Vec<i32>,
+    permissions: Option<Vec<i32>>,
 }
 
 fn now_jd() -> f64 {
@@ -51,7 +50,14 @@ async fn main() {
     let survey = args.survey;
     let filter_file = args.filter_file;
     let permissions = if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
-        HashMap::from([(survey.clone(), args.permissions)])
+        let Some(perms) = args.permissions else {
+            eprintln!(
+                "--permissions is required for survey {:?} (e.g. --permissions 1 for public-only)",
+                survey
+            );
+            std::process::exit(1);
+        };
+        HashMap::from([(survey.clone(), perms)])
     } else {
         HashMap::new()
     };
