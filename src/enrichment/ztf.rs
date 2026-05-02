@@ -413,6 +413,27 @@ pub struct ZtfEnrichmentWorker {
     gpu_ctx: Option<GpuContext>,
 }
 
+/// Build a `GpuBatchData` for the active villar-pso backend.
+///
+/// The CUDA backend's `GpuBatchData::new` only takes the sources, while the
+/// Metal backend additionally requires the context. This shim absorbs the
+/// signature difference so the call site can stay backend-agnostic.
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+fn make_villar_batch(
+    _ctx: &GpuContext,
+    sources: &[&SourceData],
+) -> Result<GpuBatchData, String> {
+    GpuBatchData::new(sources)
+}
+
+#[cfg(all(feature = "gpu", target_os = "macos"))]
+fn make_villar_batch(
+    ctx: &GpuContext,
+    sources: &[&SourceData],
+) -> Result<GpuBatchData, String> {
+    GpuBatchData::new(ctx, sources)
+}
+
 #[cfg(feature = "gpu")]
 fn to_villar_photometry(p: &PhotometryMag) -> Option<villar_pso::PhotometryMag> {
     let band = match p.band {
