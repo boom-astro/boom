@@ -604,7 +604,9 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Ztf, &filter_collection).await?;
+        let filters =
+            build_loaded_filters(&filter_ids, &Survey::Ztf, &output_topic, &filter_collection)
+                .await?;
 
         // Create a hashmap of filters per programid (permissions)
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
@@ -632,8 +634,13 @@ impl FilterWorker for ZtfFilterWorker {
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing ZTF filters from database");
-        let filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Ztf, &self.filter_collection).await?;
+        let filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Ztf,
+            &self.output_topic,
+            &self.filter_collection,
+        )
+        .await?;
 
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
@@ -664,16 +671,15 @@ impl FilterWorker for ZtfFilterWorker {
         self.input_queue.clone()
     }
 
-    fn output_topic_name(&self) -> String {
-        self.output_topic.clone()
-    }
-
     fn has_filters(&self) -> bool {
         !self.filters.is_empty()
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
+    async fn process_alerts(
+        &mut self,
+        alerts: &[String],
+    ) -> Result<HashMap<String, Vec<Alert>>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
         // retrieve alerts to process and group by programid
@@ -758,6 +764,9 @@ impl FilterWorker for ZtfFilterWorker {
             alerts_output.extend(alerts);
         }
 
-        Ok(alerts_output)
+        Ok(crate::filter::group_alerts_by_topic(
+            alerts_output,
+            &self.filters,
+        ))
     }
 }

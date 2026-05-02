@@ -1,5 +1,5 @@
 /// Endpoints for executing analytical queries.
-use crate::api::catalogs::catalog_exists;
+use crate::api::catalogs::catalog_accessible;
 use crate::api::filters::parse_optional_filter;
 use crate::api::models::response;
 
@@ -125,7 +125,7 @@ pub async fn post_cone_search_query(
     body: web::Json<ConeSearchQuery>,
 ) -> HttpResponse {
     let catalog_name = body.catalog_name.trim();
-    if !catalog_exists(&db, &catalog_name).await {
+    if !catalog_accessible(&db, catalog_name, None).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();

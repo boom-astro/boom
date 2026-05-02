@@ -452,7 +452,13 @@ impl FilterWorker for LsstFilterWorker {
         let input_queue = "LSST_alerts_filter_queue".to_string();
         let output_topic = "LSST_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Lsst, &filter_collection).await?;
+        let filters = build_loaded_filters(
+            &filter_ids,
+            &Survey::Lsst,
+            &output_topic,
+            &filter_collection,
+        )
+        .await?;
 
         Ok(LsstFilterWorker {
             alert_pipeline: create_lsst_alert_pipeline(),
@@ -468,8 +474,13 @@ impl FilterWorker for LsstFilterWorker {
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing LSST filters from database");
-        self.filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Lsst, &self.filter_collection).await?;
+        self.filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Lsst,
+            &self.output_topic,
+            &self.filter_collection,
+        )
+        .await?;
         info!(
             "refreshed LSST filters from database; now tracking {} filters",
             self.filters.len()
@@ -485,16 +496,15 @@ impl FilterWorker for LsstFilterWorker {
         self.input_queue.clone()
     }
 
-    fn output_topic_name(&self) -> String {
-        self.output_topic.clone()
-    }
-
     fn has_filters(&self) -> bool {
         !self.filters.is_empty()
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
+    async fn process_alerts(
+        &mut self,
+        alerts: &[String],
+    ) -> Result<HashMap<String, Vec<Alert>>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
         // unlike ZTF where we get a tuple of (programid, candid) from redis
@@ -553,6 +563,9 @@ impl FilterWorker for LsstFilterWorker {
         .await?;
         alerts_output.extend(alerts);
 
-        Ok(alerts_output)
+        Ok(crate::filter::group_alerts_by_topic(
+            alerts_output,
+            &self.filters,
+        ))
     }
 }

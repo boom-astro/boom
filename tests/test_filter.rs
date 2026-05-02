@@ -14,7 +14,13 @@ async fn test_build_filter() {
     let filter_collection = db.collection("filters");
 
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
-    let filter_result = build_loaded_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
+    let filter_result = build_loaded_filter(
+        &filter_id,
+        &Survey::Ztf,
+        "ZTF_alerts_results",
+        &filter_collection,
+    )
+    .await;
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
 
     let filter = filter_result.unwrap();
@@ -82,7 +88,13 @@ async fn test_build_multisurvey_filter() {
     let filter_id = insert_custom_test_filter(&Survey::Ztf, pipeline_str)
         .await
         .unwrap();
-    let filter_result = build_loaded_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
+    let filter_result = build_loaded_filter(
+        &filter_id,
+        &Survey::Ztf,
+        "ZTF_alerts_results",
+        &filter_collection,
+    )
+    .await;
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
 
     let filter = filter_result.unwrap();
@@ -152,7 +164,13 @@ async fn test_filter_found() {
     let db = get_test_db().await;
     let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
     let filter_collection = db.collection("filters");
-    let filter_result = build_loaded_filter(&filter_id, &Survey::Ztf, &filter_collection).await;
+    let filter_result = build_loaded_filter(
+        &filter_id,
+        &Survey::Ztf,
+        "ZTF_alerts_results",
+        &filter_collection,
+    )
+    .await;
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(filter_result.is_ok());
 }
@@ -161,7 +179,12 @@ async fn test_filter_found() {
 async fn test_no_filter_found() {
     let db = get_test_db().await;
     let filter_collection = db.collection("filters");
-    let filter_result =
-        build_loaded_filter("thisdoesnotexist", &Survey::Ztf, &filter_collection).await;
+    let filter_result = build_loaded_filter(
+        "thisdoesnotexist",
+        &Survey::Ztf,
+        "ZTF_alerts_results",
+        &filter_collection,
+    )
+    .await;
     assert!(filter_result.is_err());
 }

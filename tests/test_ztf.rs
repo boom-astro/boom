@@ -448,7 +448,7 @@ async fn test_filter_ztf_alert() {
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok(), "Filter failed: {:?}", result.err());
 
-    let alerts_output = result.unwrap();
+    let alerts_output: Vec<_> = result.unwrap().into_values().flatten().collect();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
@@ -585,7 +585,7 @@ async fn test_filter_ztf_alert_with_lsst_match() {
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok(), "Filter failed: {:?}", result.err());
 
-    let alerts_output = result.unwrap();
+    let alerts_output: Vec<_> = result.unwrap().into_values().flatten().collect();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
