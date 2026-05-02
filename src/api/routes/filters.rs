@@ -853,14 +853,7 @@ impl FilterTestResponse {
 pub async fn post_filter_test(
     db: web::Data<Database>,
     body: web::Json<FilterTestRequest>,
-    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let _current_user = match current_user {
-        Some(user) => user,
-        None => {
-            return HttpResponse::Unauthorized().body("Unauthorized");
-        }
-    };
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
@@ -987,14 +980,7 @@ impl FilterTestCountResponse {
 pub async fn post_filter_test_count(
     db: web::Data<Database>,
     body: web::Json<FilterTestCountRequest>,
-    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    let _current_user = match current_user {
-        Some(user) => user,
-        None => {
-            return HttpResponse::Unauthorized().body("Unauthorized");
-        }
-    };
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
