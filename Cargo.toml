@@ -68,6 +68,7 @@ default = []
 # The `gpu` feature only controls villar-pso. ONNX GPU is already enabled
 # unconditionally on Linux via ort's `cuda` + `load-dynamic` features below,
 # and is toggled purely at runtime via `config.gpu.enabled`.
+# Backend selection for villar-pso is per-OS: cuda on Linux, metal on macOS.
 gpu = ["dep:villar-pso"]
 
 # on mac os silicon platform, install ort with the coreml feature, and
@@ -76,7 +77,7 @@ gpu = ["dep:villar-pso"]
 ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
 villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["metal"], optional = true }
 
-# otherwise, install ort without cuda by default (enabled via gpu feature)
+# Linux: ort with cuda + load-dynamic, villar-pso with the CUDA backend.
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic"] }
 villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["cuda"], optional = true }
