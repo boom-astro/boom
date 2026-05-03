@@ -1,19 +1,21 @@
-//! Pure light-curve binning math.
+//! Light-curve binning math.
 //!
 //! Aggregates per-band photometric points into per-bin summary records used
 //! by the per-source `binned_lightcurve` representation on the
-//! `<survey>_alerts_aux` collection. See `docs/binned-lightcurves.md` for the
-//! schema, design rationale, and integration plan.
+//! `<survey>_alerts_aux` collection. See `docs/binned-lightcurves.md` for
+//! the schema and design rationale.
 //!
-//! This module is intentionally pure: no MongoDB, no Redis, no async,
-//! no config. The `lightcurve_binner` binary (separate PR) wires these
-//! functions into nightly aggregation; this module supplies the math.
+//! Pure module: no MongoDB, no Redis, no async, no config. The
+//! `lightcurve_binner` binary wires these functions into nightly
+//! aggregation; this module supplies the math.
 //!
-//! Flux convention: inputs and outputs are in whatever flux unit the caller
-//! chose to store on the upstream documents. ZTF's `psf_flux` field is in
-//! `1e9 * (internal ZTF_ZP unit)`; LSST's is in genuine AB nJy. Binning is
-//! linear in flux so the unit choice doesn't affect bin math; downstream
-//! consumers convert to magnitude using the survey-appropriate zero point.
+//! # Flux convention
+//!
+//! Inputs and outputs are in whatever flux unit the caller chose to store
+//! on the upstream documents. ZTF's `psf_flux` field is in `1e9 ×
+//! (internal ZTF_ZP unit)`; LSST's is in genuine AB nJy. Binning is linear
+//! in flux so the unit choice doesn't affect bin math; downstream consumers
+//! convert to magnitude using the survey-appropriate zero point.
 
 use crate::utils::lightcurves::Band;
 use serde::{Deserialize, Serialize};

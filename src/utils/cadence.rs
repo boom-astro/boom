@@ -1,33 +1,32 @@
-//! Pure cadence-tier state machine for the binned light-curve infrastructure.
+//! Cadence-tier state machine for the binned light-curve infrastructure.
 //!
 //! Decides which cadence tier each source's bins are computed at, when to
 //! promote a source to a finer tier (outburst detection, classifier-score
 //! crossing, class change), and when to demote (dwell-gated). See
-//! `docs/binned-lightcurves.md` for the schema and the design rationale; the
-//! settled decision log lives in
-//! `~/.claude/projects/-fred-oz480-mcoughli-simulations/memory/feedback_binner_decisions.md`.
+//! `docs/binned-lightcurves.md` for the schema and design rationale.
 //!
-//! This module is pure: no MongoDB, no async, no config-file parsing. The
-//! caller (the `lightcurve_binner` binary, separate PR) assembles inputs
-//! from the aux document, the resolved tdtax tag set, and the cadence config,
-//! then calls `evaluate_cadence` to produce the new state.
+//! Pure module: no MongoDB, no async, no config-file parsing. Callers
+//! assemble inputs from the aux document, the resolved tdtax tag set, and
+//! the cadence config, then call [`evaluate_cadence`] to produce the new
+//! state.
 //!
-//! Key design points (settled with Michael, 2026-05-03):
+//! # Design
+//!
 //! - **Two ladders.** Transient sources walk H ↔ N then dark; variable
 //!   sources walk N → W → M (aperiodic) or have no time-bins at all
 //!   (periodic; Argus owns the canonical store).
-//! - **Tag-driven resolution.** tdtax tags select ladder, sub-track, and the
-//!   class-specific H-tier `h_cadence_hours`. Most-specific tag wins.
+//! - **Tag-driven resolution.** tdtax tags select ladder, sub-track, and
+//!   the class-specific H-tier `h_cadence_hours`. Most-specific tag wins.
 //!   Catalog hits add synthetic tags upstream; this module sees only the
 //!   final tag set.
 //! - **Promotion is unconditional.** Outburst (>4σ deviation from rolling
 //!   baseline) or classifier score crossing → tier := H, immediately.
-//! - **Demotion is dwell-gated and one-step-at-a-time.** H→N: 14d, N→W: 60d,
-//!   W→M: 180d. Untouched sources don't auto-demote — that's the job of the
-//!   weekly full-sweep, which calls this same function with `outburst = false`
-//!   and `score_promotion = false`.
-//! - **Append-only history.** The state machine never rewrites past bins; on
-//!   tier change, only future windows use the new cadence.
+//! - **Demotion is dwell-gated and one-step-at-a-time.** H→N: 14d, N→W:
+//!   60d, W→M: 180d. Untouched sources don't auto-demote — that's the job
+//!   of the weekly full-sweep, which calls [`evaluate_cadence`] with
+//!   `outburst = false` and `score_promotion = false`.
+//! - **Append-only history.** The state machine never rewrites past bins;
+//!   on tier change, only future windows use the new cadence.
 
 use crate::utils::binning::{median_absolute_deviation, median_f64};
 use serde::{Deserialize, Serialize};

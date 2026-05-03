@@ -8,9 +8,9 @@
 //!
 //! See `docs/binned-lightcurves.md` for the schema, `src/utils/cadence.rs`
 //! for the cadence state machine, and `src/utils/binner_input.rs` for the
-//! pure derivation helpers.
+//! derivation helpers.
 //!
-//! Two driving modes:
+//! # Driving modes
 //!
 //! - **`--date YYYY-MM-DD`** — bin a specific UTC observing-night for the
 //!   survey (local-noon-to-local-noon JD window). Deterministic; safe for
@@ -20,9 +20,6 @@
 //! - **`--since`** (default — pointer in `<survey>_binning_state`) — bin
 //!   everything touched since the last successful run. Idempotent by
 //!   exclusion. The pointer is advanced atomically at the end.
-//!
-//! See PR #3 design memo for the full set of decisions (window quantization,
-//! shard scheme, score→tag mapping, etc.).
 
 use boom::conf::{load_dotenv, AppConfig, BinningConfig};
 use boom::utils::binner_input::{

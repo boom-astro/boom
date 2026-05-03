@@ -1,18 +1,18 @@
-//! Pure helpers for assembling `evaluate_cadence` inputs from a
-//! per-aux-doc bundle.
+//! Helpers for assembling `evaluate_cadence` inputs from a per-aux-doc
+//! bundle.
 //!
-//! The `lightcurve_binner` binary (separate file) reads a per-source bundle
-//! out of MongoDB — the latest classifier scores from `<survey>_alerts`,
-//! the source's `cross_matches` and existing `binned_lightcurve` arrays
-//! from `<survey>_alerts_aux`. This module turns that raw bundle into the
-//! typed inputs `evaluate_cadence` consumes:
+//! The `lightcurve_binner` binary reads a per-source bundle out of
+//! MongoDB — the latest classifier scores from `<survey>_alerts`, the
+//! source's `cross_matches` and existing `binned_lightcurve` arrays from
+//! `<survey>_alerts_aux`. This module turns that bundle into the typed
+//! inputs [`evaluate_cadence`](crate::utils::cadence::evaluate_cadence)
+//! consumes:
 //!
 //! - `tags: Vec<String>` from classifier-score rules + catalog hits
 //! - `score_promotion: bool` derived from the same rules
 //! - per-band outburst signal computed against the new bins + bin history
 //!
-//! All functions here are pure: no MongoDB, no async, no global state.
-//! The binner does the I/O; this module does the math.
+//! Pure module: no MongoDB, no async, no global state.
 
 use crate::conf::ClassifierScoreRule;
 use crate::utils::binning::BinnedPoint;
