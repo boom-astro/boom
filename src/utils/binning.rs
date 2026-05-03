@@ -65,6 +65,11 @@ pub struct BinnedPoint {
     pub has_nondet: bool,
     /// Distinct provenance kinds that contributed (sorted: Psf, Fp, Upper).
     pub src_kinds: Vec<SrcKind>,
+    /// Start JD of the bin's source window. Together with `band` this is the
+    /// bin's stable identity key: re-runs of the binner over the same window
+    /// replace the bin in place rather than appending a near-duplicate when
+    /// late-arriving photometry shifts the median `jd`.
+    pub window_start_jd: f64,
     /// Width of the bin window in days. Lets consumers reason about the
     /// cadence at which each bin was computed (cadence can change across
     /// bins under the tier state machine).
@@ -202,6 +207,7 @@ pub fn bin_band(points: &[FluxPoint], window: BinWindow, band: Band) -> Option<B
         flux_mad,
         has_nondet,
         src_kinds,
+        window_start_jd: window.start_jd,
         window_days: window.width_days(),
         band,
     })
@@ -348,6 +354,7 @@ mod tests {
         assert_eq!(bin.src_kinds, vec![SrcKind::Psf]);
         assert_eq!(bin.jd, 50.0);
         assert_eq!(bin.band, Band::R);
+        assert_eq!(bin.window_start_jd, 0.0);
         assert_eq!(bin.window_days, 100.0);
     }
 
@@ -511,6 +518,7 @@ mod tests {
         assert_eq!(bin.n, 2);
         // arithmetic mean of 100 and 110 = 105
         assert!((bin.flux_med.unwrap() - 105.0).abs() < 1e-9);
+        assert_eq!(bin.window_start_jd, 10.0);
         assert_eq!(bin.window_days, 10.0);
     }
 
@@ -523,6 +531,23 @@ mod tests {
         // weighted-mean error = sqrt(1/(1/25 + 1/25)) = sqrt(12.5) ~ 3.536
         assert_eq!(bin.flux_mad, 0.0);
         assert!((bin.flux_err - 3.535533).abs() < 1e-5);
+    }
+
+    #[test]
+    fn window_start_jd_is_stable_under_late_arriving_points() {
+        // The `(band, window_start_jd)` pair is the bin's identity key. Two
+        // bins computed against the same window must report the same
+        // `window_start_jd` even when their median `jd` shifts as more
+        // points arrive — this is what makes the binner's aggregation-pipeline
+        // dedup robust to late-arriving photometry.
+        let win = BinWindow { start_jd: 10.0, end_jd: 20.0 };
+        let early = vec![psf(15.0, 100.0, 5.0)];
+        let late = vec![psf(15.0, 100.0, 5.0), psf(11.0, 110.0, 5.0)];
+        let bin_early = bin_band(&early, win, Band::R).unwrap();
+        let bin_late = bin_band(&late, win, Band::R).unwrap();
+        assert_ne!(bin_early.jd, bin_late.jd, "median jd should shift");
+        assert_eq!(bin_early.window_start_jd, 10.0);
+        assert_eq!(bin_late.window_start_jd, 10.0);
     }
 
     #[test]

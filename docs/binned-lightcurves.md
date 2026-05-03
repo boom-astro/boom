@@ -57,14 +57,21 @@ Each `BinnedPoint` (defined in `src/utils/binning.rs::BinnedPoint`):
 | `flux_mad`    | `f64`          | MAD of contributing fluxes; `0.0` when `n < 2`.                                                          |
 | `has_nondet`  | `bool`         | Whether the bin window contained any upper-limit points.                                                 |
 | `src_kinds`   | `[SrcKind]`    | Distinct provenance kinds that contributed: subset of `["psf", "fp", "upper"]`, in canonical order.      |
+| `window_start_jd` | `f64`      | Start JD of the bin's source window. Together with `band`, the bin's stable identity key (see below).    |
 | `window_days` | `f64`          | Width of the bin window in days. Lets consumers reason about the cadence at which each bin was computed. |
 | `band`        | `Band`         | Band of this bin.                                                                                        |
 
-`BinnedPoint` arrays are append-only: bins for past windows are never
-rewritten, even when the cadence tier changes (a tier-promoted source begins
-writing finer bins forward; older coarser bins remain in place). The
-`window_days` field lets consumers reconstruct the cadence at any historical
-jd.
+`BinnedPoint` arrays are append-only across tier changes: when a source's
+cadence tier changes, the binner begins writing finer bins forward and older
+coarser bins remain in place. The `window_days` field lets consumers
+reconstruct the cadence at any historical jd.
+
+Within an active window, the binner is *idempotent* on `(band,
+window_start_jd)`: re-running over the same window (e.g., `--date` backfill
+after late-arriving forced photometry) replaces the bin in place rather than
+appending a near-duplicate with a drifted median `jd`. This keeps the array
+clean under reprocessing while preserving the append-only-across-tier-changes
+invariant.
 
 Magnitudes are not stored on the bin. Downstream consumers convert from
 `flux_med` using the survey's appropriate flux-to-magnitude zero point

@@ -1,3 +1,4 @@
+pub mod binner_input;
 pub mod binning;
 pub mod cadence;
 pub mod data;
