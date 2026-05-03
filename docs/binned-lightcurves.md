@@ -9,30 +9,6 @@ This document describes the schema and the math. The cadence state machine
 that decides *which* window each source's bins are computed at is documented
 separately (forthcoming, with the `cadence` module).
 
-## Why
-
-At Argus rates (≈ 100M alerts/night), retaining unbinned per-frame photometry
-for every source becomes both a storage and a query problem. The proposal
-identifies four observations:
-
-1. Most downstream consumers (BTSbot, ACAI, AppleCiDEr, SCoPe, NMMA, GP fits,
-   parametric fits, user filters) operate on summary statistics over
-   time-windowed photometry, not on raw individual frames.
-2. Source classes have very different cadence requirements: a kilonova at
-   first light wants every frame, a Type Ia past peak wants nightly, an RR
-   Lyrae wants per-period sampling, a YSO wants monthly summary.
-3. ZTF/Argus carry both detection-pipeline-triggered points
-   (`prv_candidates`) and forced-photometry at known positions (`fp_hists`).
-   None of the downstream consumers we have inspected distinguish them at the
-   input layer; both are weighted by error and treated as photometry.
-4. Argus is the canonical long-term store for periodic-variable light curves.
-   BOOM does not need to retain decimated raw photometry at long baselines.
-
-The binner computes a class-cadence-aware median+error summary that meets
-points 1 and 2, unifies points 3 (with a per-bin provenance tag), and elides
-storage at point 4 (periodic variables get only the hot-recent retention
-window in BOOM, no time-bins).
-
 ## Schema
 
 A new field on each `<survey>_alerts_aux` document:
@@ -132,27 +108,3 @@ Each bin carries `src_kinds: Vec<SrcKind>` — the distinct kinds among its
 contributing points, in canonical order `[Psf, Fp, Upper]`. Consumers that
 want detection-only bins filter on `src_kinds == [Psf]`; consumers that
 want every bin (the common case) ignore the field.
-
-## Consumer expectations
-
-Confirmed against:
-
-- **villar-pso** (`PhotometryMag { time, mag, mag_err, band }`,
-  inverse-variance weighting via `merge_close_times`): unified
-  representation, no provenance distinction. Conversion from `BinnedPoint`
-  to `PhotometryMag` lives in `villar-pso`, not BOOM.
-- **AppleCider TEMPO** (training matrix
-  `[dt, dt_prev, band_id, logflux, logflux_err, ...]`): unified, no
-  provenance distinction. AppleCider's preprocessing does its own 12-hour
-  internal merge — bins coarser than 12 h during a transient's active phase
-  lose information. The transient-ladder `H` tier `h_cadence_hours` for
-  explosive/SN-tagged sources is correspondingly set to ≤ 12 h so the
-  binned representation matches AppleCider's expected granularity.
-- **SCoPe**: decimates with `removeHighCadence(cadence_minutes=30.0)` then
-  runs LS/CE/AOV/FPW period-finding. SCoPe does not consume
-  `binned_lightcurve` for periodic variables — those source classes have
-  no time-bins in this PR; SCoPe consumes raw photometry from the
-  hot-recent retention window or, in production, periodically pulls from
-  Argus to re-fit periods.
-- **BTSbot, ACAI**: per-alert classifiers consuming `(metadata vector,
-  image cutout)`. They do not read the binned light curve at all.
