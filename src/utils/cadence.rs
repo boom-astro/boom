@@ -397,8 +397,7 @@ pub fn evaluate_cadence(
     let promotion_signal = outburst_detected || score_promotion;
 
     // ── Case 1: variable ladder + periodic sub-track → no time-bins. ──────
-    if target_ladder == Ladder::Variable && tag_policy.variable_sub == Some(VariableSub::Periodic)
-    {
+    if target_ladder == Ladder::Variable && tag_policy.variable_sub == Some(VariableSub::Periodic) {
         let changed = prior.ladder != Ladder::Variable || prior.tier.is_some();
         return BinCadence {
             ladder: Ladder::Variable,
@@ -451,10 +450,7 @@ pub fn evaluate_cadence(
             apply_h_promotion(&mut state, now_jd, tag_policy, config, outburst_detected);
         } else if state.tier == Some(Tier::H) {
             // Possibly demote H → N if active window expired and dwell elapsed.
-            let active_expired = state
-                .active_until_jd
-                .map(|t| now_jd >= t)
-                .unwrap_or(true);
+            let active_expired = state.active_until_jd.map(|t| now_jd >= t).unwrap_or(true);
             let dwell_ok = (now_jd - state.since_jd) >= config.dwell.h_to_n_days;
             if active_expired && dwell_ok {
                 state.tier = Some(clamp_tier(Tier::N, Ladder::Transient, tag_policy));

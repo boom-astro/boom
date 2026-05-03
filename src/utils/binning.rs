@@ -400,7 +400,7 @@ mod tests {
         let bin = bin_band(&pts, full_window(), Band::R).unwrap();
         assert_eq!(bin.n, 3);
         assert_eq!(bin.flux_med, Some(110.0)); // middle of {100, 110, 120}
-        // jd is plain median for n>=3
+                                               // jd is plain median for n>=3
         assert_eq!(bin.jd, 51.0);
         // MAD: median(|100-110|, |110-110|, |120-110|) = median(10, 0, 10) = 10
         assert!((bin.flux_mad - 10.0).abs() < 1e-9);
@@ -507,10 +507,10 @@ mod tests {
     #[test]
     fn out_of_window_points_partition_correctly() {
         let pts = vec![
-            psf(0.0, 50.0, 5.0),    // out (window starts at 10)
-            psf(15.0, 100.0, 5.0),  // in
-            psf(16.0, 110.0, 5.0),  // in
-            psf(20.0, 200.0, 5.0),  // out (window ends at 20, half-open)
+            psf(0.0, 50.0, 5.0),   // out (window starts at 10)
+            psf(15.0, 100.0, 5.0), // in
+            psf(16.0, 110.0, 5.0), // in
+            psf(20.0, 200.0, 5.0), // out (window ends at 20, half-open)
         ];
         let win = BinWindow {
             start_jd: 10.0,
@@ -542,7 +542,10 @@ mod tests {
         // `window_start_jd` even when their median `jd` shifts as more
         // points arrive — this is what makes the binner's aggregation-pipeline
         // dedup robust to late-arriving photometry.
-        let win = BinWindow { start_jd: 10.0, end_jd: 20.0 };
+        let win = BinWindow {
+            start_jd: 10.0,
+            end_jd: 20.0,
+        };
         let early = vec![psf(15.0, 100.0, 5.0)];
         let late = vec![psf(15.0, 100.0, 5.0), psf(11.0, 110.0, 5.0)];
         let bin_early = bin_band(&early, win, Band::R).unwrap();
@@ -560,10 +563,22 @@ mod tests {
             psf(35.0, 300.0, 5.0),
         ];
         let windows = vec![
-            BinWindow { start_jd: 0.0, end_jd: 10.0 },     // → bin
-            BinWindow { start_jd: 10.0, end_jd: 20.0 },    // → bin
-            BinWindow { start_jd: 20.0, end_jd: 30.0 },    // → empty, skipped
-            BinWindow { start_jd: 30.0, end_jd: 40.0 },    // → bin
+            BinWindow {
+                start_jd: 0.0,
+                end_jd: 10.0,
+            }, // → bin
+            BinWindow {
+                start_jd: 10.0,
+                end_jd: 20.0,
+            }, // → bin
+            BinWindow {
+                start_jd: 20.0,
+                end_jd: 30.0,
+            }, // → empty, skipped
+            BinWindow {
+                start_jd: 30.0,
+                end_jd: 40.0,
+            }, // → bin
         ];
         let bins = bin_band_windows(&pts, &windows, Band::R);
         assert_eq!(bins.len(), 3);
@@ -576,8 +591,14 @@ mod tests {
     fn bin_band_windows_handles_overlapping_windows_independently() {
         let pts = vec![psf(5.0, 100.0, 5.0), psf(15.0, 200.0, 5.0)];
         let windows = vec![
-            BinWindow { start_jd: 0.0, end_jd: 10.0 },
-            BinWindow { start_jd: 0.0, end_jd: 20.0 },
+            BinWindow {
+                start_jd: 0.0,
+                end_jd: 10.0,
+            },
+            BinWindow {
+                start_jd: 0.0,
+                end_jd: 20.0,
+            },
         ];
         let bins = bin_band_windows(&pts, &windows, Band::R);
         assert_eq!(bins.len(), 2);

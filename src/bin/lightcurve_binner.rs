@@ -82,6 +82,20 @@ struct Cli {
     /// Cap the number of aux docs processed (debugging only).
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Emit a stress-test summary as JSON to this path on completion.
+    /// Produces `{ wall_seconds, processed, docs_per_sec,
+    /// expected_night_docs, wall_clock_margin }` — used by the PR #6
+    /// stress-test harness in `comparison/stress_test.sh`.
+    #[arg(long)]
+    timing_json: Option<String>,
+
+    /// Reference aux-docs-touched count for a representative ZTF night.
+    /// Used only to compute the wall-clock margin in the timing JSON
+    /// (`margin = (86400 × processed / wall_seconds) / expected`).
+    /// Default 150_000 ≈ live ZTF nightly volume.
+    #[arg(long, default_value_t = 150_000)]
+    expected_night_docs: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -140,8 +154,12 @@ fn parse_shard(s: &str) -> Result<(u64, u64), String> {
     if parts.len() != 2 {
         return Err(format!("expected k/N, got {}", s));
     }
-    let k: u64 = parts[0].parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-    let n: u64 = parts[1].parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let k: u64 = parts[0]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let n: u64 = parts[1]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
     if n == 0 || k >= n {
         return Err(format!("require 0 <= k < N, got {}/{}", k, n));
     }
@@ -203,16 +221,19 @@ fn ztf_flux_points_by_band(
         by_band.entry(band).or_default().push(point);
     };
 
-    for (arr, kind) in [
-        (prv_candidates, SrcKind::Psf),
-        (fp_hists, SrcKind::Fp),
-    ] {
+    for (arr, kind) in [(prv_candidates, SrcKind::Psf), (fp_hists, SrcKind::Fp)] {
         for entry in arr.into_iter().flatten() {
-            let Some(d) = entry.as_document() else { continue };
-            let Some(jd) = bson_as_f64(d.get("jd")) else { continue };
+            let Some(d) = entry.as_document() else {
+                continue;
+            };
+            let Some(jd) = bson_as_f64(d.get("jd")) else {
+                continue;
+            };
             let Some(band) = read_band(d) else { continue };
             let flux = bson_as_f64(d.get("psfFlux"));
-            let Some(flux_err) = bson_as_f64(d.get("psfFluxErr")) else { continue };
+            let Some(flux_err) = bson_as_f64(d.get("psfFluxErr")) else {
+                continue;
+            };
             push(
                 band,
                 FluxPoint {
@@ -226,10 +247,16 @@ fn ztf_flux_points_by_band(
     }
 
     for entry in prv_nondetections.into_iter().flatten() {
-        let Some(d) = entry.as_document() else { continue };
-        let Some(jd) = bson_as_f64(d.get("jd")) else { continue };
+        let Some(d) = entry.as_document() else {
+            continue;
+        };
+        let Some(jd) = bson_as_f64(d.get("jd")) else {
+            continue;
+        };
         let Some(band) = read_band(d) else { continue };
-        let Some(flux_err) = bson_as_f64(d.get("psfFluxErr")) else { continue };
+        let Some(flux_err) = bson_as_f64(d.get("psfFluxErr")) else {
+            continue;
+        };
         push(
             band,
             FluxPoint {
@@ -262,7 +289,9 @@ fn read_existing_bins(aux: &Document) -> HashMap<String, Vec<BinnedPoint>> {
         let Some(arr) = arr.as_array() else { continue };
         let mut bins: Vec<BinnedPoint> = Vec::with_capacity(arr.len());
         for entry in arr {
-            let Some(d) = entry.as_document() else { continue };
+            let Some(d) = entry.as_document() else {
+                continue;
+            };
             if let Ok(bp) = mongodb::bson::from_document::<BinnedPoint>(d.clone()) {
                 bins.push(bp);
             }
@@ -293,7 +322,10 @@ fn build_update_pipeline(
     let mut set = Document::new();
 
     for (band_str, bins) in new_bins_by_band {
-        let new_starts: Vec<Bson> = bins.iter().map(|b| Bson::Double(b.window_start_jd)).collect();
+        let new_starts: Vec<Bson> = bins
+            .iter()
+            .map(|b| Bson::Double(b.window_start_jd))
+            .collect();
         let new_bins_bson: Vec<Bson> = bins
             .iter()
             .map(|b| mongodb::bson::to_bson(b))
@@ -371,9 +403,7 @@ async fn process_aux_doc(
         .as_ref()
         .and_then(|c| c.tier)
         .unwrap_or(Tier::N);
-    let current_h_cadence = current_cadence
-        .as_ref()
-        .and_then(|c| c.h_cadence_hours);
+    let current_h_cadence = current_cadence.as_ref().and_then(|c| c.h_cadence_hours);
     let on_periodic_track = current_cadence
         .as_ref()
         .map(|c| c.ladder == Ladder::Variable && c.tier.is_none())
@@ -382,7 +412,12 @@ async fn process_aux_doc(
     // ── Compute new bins (skip entirely on periodic track — Q3) ──
     let mut new_bins_by_band: HashMap<String, Vec<BinnedPoint>> = HashMap::new();
     if !on_periodic_track {
-        let windows = windows_for_tier(active_start_jd, active_end_jd, current_tier, current_h_cadence);
+        let windows = windows_for_tier(
+            active_start_jd,
+            active_end_jd,
+            current_tier,
+            current_h_cadence,
+        );
         if !windows.is_empty() {
             let prv_candidates = aux.get_array("prv_candidates").ok();
             let prv_nondetections = aux.get_array("prv_nondetections").ok();
@@ -402,7 +437,10 @@ async fn process_aux_doc(
     // ── Outburst signal: OR per-band ──
     let existing_bins = read_existing_bins(&aux);
     let outburst_detected = new_bins_by_band.iter().any(|(band_str, bins)| {
-        let history = existing_bins.get(band_str).map(|v| v.as_slice()).unwrap_or(&[]);
+        let history = existing_bins
+            .get(band_str)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         bins.iter().any(|b| {
             band_outburst_signal(
                 b,
@@ -466,8 +504,10 @@ async fn run_binner(
         .unwrap_or(0);
     let pb = ProgressBar::new(estimated_total / shard.1.max(1));
     pb.set_style(
-        ProgressStyle::with_template("bin {bar:40} {pos}/{len} [{elapsed_precise} < {eta_precise}]")
-            .unwrap(),
+        ProgressStyle::with_template(
+            "bin {bar:40} {pos}/{len} [{elapsed_precise} < {eta_precise}]",
+        )
+        .unwrap(),
     );
 
     let mut shard_ids: Vec<String> = Vec::with_capacity(batch_size);
@@ -555,7 +595,10 @@ async fn process_batch(
         },
     ];
 
-    let mut cursor = db.collection::<Document>(aux_name).aggregate(pipeline).await?;
+    let mut cursor = db
+        .collection::<Document>(aux_name)
+        .aggregate(pipeline)
+        .await?;
     let mut count = 0_usize;
     while let Some(aux_with_class) = cursor.try_next().await? {
         // Pull the looked-up classification off the joined doc, then strip
@@ -632,7 +675,9 @@ async fn write_since_pointer(
 #[tokio::main]
 async fn main() -> BinnerResult<()> {
     load_dotenv();
-    let subscriber = FmtSubscriber::builder().with_max_level(Level::INFO).finish();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
     tracing::subscriber::set_global_default(subscriber).expect("set subscriber");
 
     let args = Cli::parse();
@@ -663,13 +708,15 @@ async fn main() -> BinnerResult<()> {
     } else {
         let since = match args.since {
             Some(s) => s,
-            None => match read_since_pointer(&db, &args.survey).await {
-                Some(s) => s,
-                None => {
-                    warn!("no since-pointer for {} and --since not provided; defaulting to now-1d", args.survey);
-                    now_jd - 1.0
+            None => {
+                match read_since_pointer(&db, &args.survey).await {
+                    Some(s) => s,
+                    None => {
+                        warn!("no since-pointer for {} and --since not provided; defaulting to now-1d", args.survey);
+                        now_jd - 1.0
+                    }
                 }
-            },
+            }
         };
         (since, now_jd, format!("--since {:.5}", since))
     };
@@ -679,6 +726,7 @@ async fn main() -> BinnerResult<()> {
         args.survey, mode_label, active_start_jd, active_end_jd, shard.0, shard.1, args.batch_size,
     );
 
+    let t_run = std::time::Instant::now();
     let processed = run_binner(
         &db,
         &args.survey,
@@ -691,8 +739,36 @@ async fn main() -> BinnerResult<()> {
         args.limit,
     )
     .await?;
+    let wall_seconds = t_run.elapsed().as_secs_f64();
+    let docs_per_sec = if wall_seconds > 0.0 {
+        processed as f64 / wall_seconds
+    } else {
+        0.0
+    };
+    let wall_clock_margin = if args.expected_night_docs > 0 && wall_seconds > 0.0 {
+        (86400.0 * docs_per_sec) / args.expected_night_docs as f64
+    } else {
+        0.0
+    };
 
-    info!("processed {} aux docs", processed);
+    info!(
+        "processed {} aux docs in {:.2}s ({:.0} docs/s, {:.1}× nightly margin vs {} expected)",
+        processed, wall_seconds, docs_per_sec, wall_clock_margin, args.expected_night_docs,
+    );
+
+    if let Some(path) = &args.timing_json {
+        let report = serde_json::json!({
+            "wall_seconds": wall_seconds,
+            "processed": processed,
+            "docs_per_sec": docs_per_sec,
+            "expected_night_docs": args.expected_night_docs,
+            "wall_clock_margin": wall_clock_margin,
+            "shard": format!("{}/{}", shard.0, shard.1),
+            "survey": args.survey.to_string(),
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&report)?)?;
+        info!("timing report written to {}", path);
+    }
 
     // Advance the since-pointer only on `--since` driven runs and only when
     // we processed all shards (shard.1 == 1). Sharded runs leave the
@@ -925,12 +1001,20 @@ mod tests {
 
         // ── Raw trim: only the two in-window points remain ──
         let prv = after.get_array("prv_candidates").unwrap();
-        assert_eq!(prv.len(), 2, "expected 2 prv_candidates after trim, got {:?}", prv);
+        assert_eq!(
+            prv.len(),
+            2,
+            "expected 2 prv_candidates after trim, got {:?}",
+            prv
+        );
         for p in prv {
-            let jd = p.as_document().and_then(|d| d.get("jd")).and_then(|b| match b {
-                Bson::Double(d) => Some(*d),
-                _ => None,
-            });
+            let jd = p
+                .as_document()
+                .and_then(|d| d.get("jd"))
+                .and_then(|b| match b {
+                    Bson::Double(d) => Some(*d),
+                    _ => None,
+                });
             assert!(jd.unwrap() > now_jd - cfg.retention_days);
         }
 
@@ -1002,5 +1086,4 @@ mod tests {
         assert!(set_stage.contains_key("prv_nondetections"));
         assert!(set_stage.contains_key("fp_hists"));
     }
-
 }

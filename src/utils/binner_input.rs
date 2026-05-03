@@ -177,7 +177,8 @@ mod tests {
 
     #[test]
     fn classifier_scores_none_returns_empty() {
-        let (tags, promote) = tags_from_classifier_scores(None, &[rule("btsbot", 0.5, &["explosive"], true)]);
+        let (tags, promote) =
+            tags_from_classifier_scores(None, &[rule("btsbot", 0.5, &["explosive"], true)]);
         assert!(tags.is_empty());
         assert!(!promote);
     }
@@ -205,8 +206,10 @@ mod tests {
     fn classifier_score_at_threshold_inclusive() {
         // `>=` semantics — equality fires.
         let scores = doc! { "btsbot": 0.5 };
-        let (tags, promote) =
-            tags_from_classifier_scores(Some(&scores), &[rule("btsbot", 0.5, &["explosive"], true)]);
+        let (tags, promote) = tags_from_classifier_scores(
+            Some(&scores),
+            &[rule("btsbot", 0.5, &["explosive"], true)],
+        );
         assert_eq!(tags, vec!["explosive".to_string()]);
         assert!(promote);
     }
@@ -214,8 +217,10 @@ mod tests {
     #[test]
     fn classifier_score_below_threshold_does_not_fire() {
         let scores = doc! { "btsbot": 0.4 };
-        let (tags, promote) =
-            tags_from_classifier_scores(Some(&scores), &[rule("btsbot", 0.5, &["explosive"], true)]);
+        let (tags, promote) = tags_from_classifier_scores(
+            Some(&scores),
+            &[rule("btsbot", 0.5, &["explosive"], true)],
+        );
         assert!(tags.is_empty());
         assert!(!promote);
     }
@@ -224,8 +229,10 @@ mod tests {
     fn classifier_missing_field_does_not_fire() {
         // Common shape during early enrichment — only some classifiers ran.
         let scores = doc! { "acai_h": 0.9 };
-        let (tags, promote) =
-            tags_from_classifier_scores(Some(&scores), &[rule("btsbot", 0.5, &["explosive"], true)]);
+        let (tags, promote) = tags_from_classifier_scores(
+            Some(&scores),
+            &[rule("btsbot", 0.5, &["explosive"], true)],
+        );
         assert!(tags.is_empty());
         assert!(!promote);
     }
@@ -233,8 +240,10 @@ mod tests {
     #[test]
     fn classifier_non_numeric_field_skipped() {
         let scores = doc! { "btsbot": "broken" };
-        let (tags, promote) =
-            tags_from_classifier_scores(Some(&scores), &[rule("btsbot", 0.5, &["explosive"], true)]);
+        let (tags, promote) = tags_from_classifier_scores(
+            Some(&scores),
+            &[rule("btsbot", 0.5, &["explosive"], true)],
+        );
         assert!(tags.is_empty());
         assert!(!promote);
     }
@@ -264,7 +273,11 @@ mod tests {
         );
         assert_eq!(
             tags,
-            vec!["explosive".to_string(), "supernova".to_string(), "variable".to_string()]
+            vec![
+                "explosive".to_string(),
+                "supernova".to_string(),
+                "variable".to_string()
+            ]
         );
         assert!(promote);
     }
@@ -287,8 +300,10 @@ mod tests {
     fn classifier_promote_false_does_not_set_bool() {
         // Tags add but promote stays false — the acai_v case from the design.
         let scores = doc! { "acai_v": 0.9 };
-        let (tags, promote) =
-            tags_from_classifier_scores(Some(&scores), &[rule("acai_v", 0.5, &["variable"], false)]);
+        let (tags, promote) = tags_from_classifier_scores(
+            Some(&scores),
+            &[rule("acai_v", 0.5, &["variable"], false)],
+        );
         assert_eq!(tags, vec!["variable".to_string()]);
         assert!(!promote);
     }
@@ -347,10 +362,16 @@ mod tests {
         };
         let mut rules = HashMap::new();
         rules.insert("milliquas_v6".to_string(), "agn".to_string());
-        rules.insert("kilonova_candidates".to_string(), "kilonova-candidate".to_string());
+        rules.insert(
+            "kilonova_candidates".to_string(),
+            "kilonova-candidate".to_string(),
+        );
         let mut tags = tags_from_cross_matches(Some(&xm), &rules);
         tags.sort(); // HashMap iteration order is unstable
-        assert_eq!(tags, vec!["agn".to_string(), "kilonova-candidate".to_string()]);
+        assert_eq!(
+            tags,
+            vec!["agn".to_string(), "kilonova-candidate".to_string()]
+        );
     }
 
     #[test]
@@ -402,7 +423,10 @@ mod tests {
     #[test]
     fn band_outburst_short_history_does_not_fire() {
         // Fewer than 3 finite-flux history bins → is_outburst returns false.
-        let history = vec![bin_with_flux(100.0, 5.0, Band::R), bin_with_flux(105.0, 5.0, Band::R)];
+        let history = vec![
+            bin_with_flux(100.0, 5.0, Band::R),
+            bin_with_flux(105.0, 5.0, Band::R),
+        ];
         let new_bin = bin_with_flux(1000.0, 5.0, Band::R);
         assert!(!band_outburst_signal(&new_bin, &history, 10, 4.0));
     }
