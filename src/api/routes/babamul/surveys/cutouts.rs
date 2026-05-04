@@ -1,12 +1,13 @@
 use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
-use crate::utils::cutouts::CutoutStorageError;
+use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::Band;
 use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
 use mongodb::{bson::doc, Database};
+use std::collections::HashMap;
 
 #[utoipa::path(
     get,
@@ -31,7 +32,7 @@ pub async fn get_cutouts(
     query: web::Query<CutoutQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
-    config: web::Data<crate::conf::AppConfig>,
+    cutout_storages: web::Data<HashMap<Survey, CutoutStorage>>,
 ) -> HttpResponse {
     let _current_user = match current_user {
         Some(user) => user,
@@ -41,11 +42,10 @@ pub async fn get_cutouts(
     };
     let survey = path.into_inner();
 
-    let cutout_storage = match config.build_cutout_storage(&survey).await {
-        Ok(storage) => storage,
-        Err(error) => {
-            tracing::error!("Error building cutout storage: {}", error);
-            return response::internal_error("error building cutout storage");
+    let cutout_storage = match cutout_storages.get(&survey) {
+        Some(storage) => storage,
+        None => {
+            return response::internal_error("cutout storage not available for this survey");
         }
     };
 

@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
@@ -7,7 +8,10 @@ use boom::api::email::EmailService;
 use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::cutouts::CutoutStorage;
+use boom::utils::enums::Survey;
 use boom::utils::o11y::metrics::init_metrics;
+use std::collections::HashMap;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use uuid::Uuid;
@@ -26,6 +30,19 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize email service
     let email_service = EmailService::new();
+
+    // Build cutout storage for each survey once at startup
+    let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+    for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam] {
+        let storage = config
+            .build_cutout_storage(&survey)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Failed to initialize cutout storage for {}: {}", survey, e)
+            });
+        cutout_storage_map.insert(survey, storage);
+    }
+    let cutout_storages = web::Data::new(cutout_storage_map);
 
     // Initialize logging
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
@@ -47,6 +64,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
+            .app_data(cutout_storages.clone())
             .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled

@@ -51,7 +51,10 @@ async fn test_process_ztf_alert() {
 
     // check that the cutouts were inserted
     let cutout_storage = get_test_cutout_storage(&Survey::Ztf).await;
-    let cutouts = cutout_storage.retrieve_cutouts(candid).await.unwrap();
+    let cutouts = cutout_storage
+        .retrieve_cutouts(candid, false)
+        .await
+        .unwrap();
     assert_eq!(cutouts.candid, candid);
 
     // check that the aux collection was inserted
