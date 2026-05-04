@@ -39,8 +39,8 @@ fi
 COMPOSE_CONFIG=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.yaml")
 BG_PIDS=()
 
-# Select the cutout storage overlay based on BOOM_CUTOUTS_STORAGE__TYPE (default: s3)
-CUTOUTS_TYPE="${BOOM_CUTOUTS_STORAGE__TYPE:-s3}"
+# Select the cutout storage overlay based on BOOM_CUTOUTS_STORAGE__TYPE (default: mongo)
+CUTOUTS_TYPE="${BOOM_CUTOUTS_STORAGE__TYPE:-mongo}"
 if [ "$CUTOUTS_TYPE" = "s3" ]; then
     COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-s3.yaml")
 else
