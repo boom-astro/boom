@@ -103,7 +103,7 @@ pub fn distance_kpc_from_arcsec(distance_arcsec: f64, z: f64) -> f64 {
 pub async fn xmatch(
     ra: f64,
     dec: f64,
-    xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
+    xmatch_configs: &[conf::CatalogXmatchConfig],
     db: &mongodb::Database,
 ) -> Result<HashMap<String, Vec<mongodb::bson::Document>>, XmatchError> {
     // TODO, make the xmatch config a hashmap for faster access
