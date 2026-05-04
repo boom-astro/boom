@@ -1504,7 +1504,7 @@ mod tests {
 
         let stored = worker
             .alert_cutout_storage
-            .retrieve_cutouts(candid)
+            .retrieve_cutouts(candid, false)
             .await
             .expect("cutout should be retrievable after process_alert");
 
