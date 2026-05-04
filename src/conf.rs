@@ -212,12 +212,14 @@ async fn build_cutout_storage(
             );
             let region = aws_sdk_s3::config::Region::new(s3_conf.region.clone());
 
-            let s3_config = aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
-                .region(region)
-                .credentials_provider(credentials)
-                .endpoint_url(s3_conf.endpoint_url.clone())
-                .load()
-                .await;
+            let mut s3_config_builder =
+                aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(region)
+                    .credentials_provider(credentials);
+            if let Some(endpoint_url) = &s3_conf.endpoint_url {
+                s3_config_builder = s3_config_builder.endpoint_url(endpoint_url.clone());
+            }
+            let s3_config = s3_config_builder.load().await;
 
             let rustfs_client = aws_sdk_s3::Client::from_conf(
                 aws_sdk_s3::Config::from(&s3_config)
@@ -406,7 +408,10 @@ pub struct S3CutoutsStorageConfig {
     #[serde(default = "default_bucket_name")]
     pub bucket_name: String,
     pub region: String,
-    pub endpoint_url: String,
+    /// Custom endpoint URL for S3-compatible services (rustfs, MinIO, Wasabi, …).
+    /// Leave unset when pointing at AWS S3 — the SDK derives the endpoint from the region.
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
     pub access_key: String,
     pub secret_key: String,
     pub credentials_provider: String,

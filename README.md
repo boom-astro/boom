@@ -131,7 +131,7 @@ In production:
 docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up
 ```
 
-#### Option 3 — S3-compatible object storage (rustfs)
+#### Option 3 — S3-compatible object storage (local rustfs)
 
 Cutouts are stored in a rustfs (S3-compatible) bucket. Best for high-throughput
 workloads or when you want cutout storage decoupled from MongoDB entirely.
@@ -187,6 +187,37 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+```
+
+#### Option 4 — External S3 bucket (AWS S3, Wasabi, Backblaze B2, …)
+
+Use this when you already have a bucket on a managed S3 service and do not want
+to run a local rustfs container. All surveys share a single bucket, namespaced
+by per-survey key prefixes (`ztf/`, `lsst/`, …), so per-survey S3 lifecycle
+rules can still be applied using prefix filters.
+
+Required env vars:
+
+- `BOOM_CUTOUTS_STORAGE__ACCESS_KEY` — access key / key ID
+- `BOOM_CUTOUTS_STORAGE__SECRET_KEY` — secret key
+- `BOOM_CUTOUTS_STORAGE__REGION` — bucket region (e.g. `us-east-1`)
+
+Optional env vars:
+
+- `BOOM_CUTOUTS_STORAGE__BUCKET_NAME` — name of the pre-existing bucket (default: `boom-cutouts`)
+- `BOOM_CUTOUTS_STORAGE__ENDPOINT_URL` — custom endpoint for non-AWS providers
+  (e.g. `https://s3.us-west-1.wasabisys.com`). Omit for AWS S3 — the SDK
+  derives the endpoint from the region automatically.
+- `BOOM_CUTOUTS_CACHE_MAXMEMORY` — memory cap for the read-through cutout cache (default: `1024mb`)
+
+```bash
+make dev-s3-external
+```
+
+In production:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3-external.yaml up
 ```
 
 ### Linux only

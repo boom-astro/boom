@@ -1,0 +1,83 @@
+# Include this file when using a pre-provisioned external S3 bucket (AWS S3,
+# Wasabi, Backblaze B2, or any other S3-compatible service you already operate):
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3-external.yaml up
+#
+# Unlike docker-compose.cutouts-s3.yaml, this overlay does NOT spin up a local
+# rustfs container — it expects the bucket to already exist and be accessible.
+#
+# Required env vars (set in .env or your deployment environment):
+#
+#   BOOM_CUTOUTS_STORAGE__ACCESS_KEY   — access key / key ID
+#   BOOM_CUTOUTS_STORAGE__SECRET_KEY   — secret key
+#   BOOM_CUTOUTS_STORAGE__REGION       — bucket region (e.g. us-east-1)
+#
+# Optional env vars:
+#
+#   BOOM_CUTOUTS_STORAGE__BUCKET_NAME
+#       Name of the pre-existing bucket. Defaults to "boom-cutouts".
+#       Objects are stored under per-survey prefixes (ztf/, lsst/, …) so a
+#       single bucket serves all surveys.
+#
+#   BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
+#       Custom endpoint URL for non-AWS S3-compatible providers
+#       (e.g. https://s3.us-west-1.wasabisys.com). Leave unset for AWS S3 —
+#       the SDK derives the endpoint from the region automatically.
+#
+#   BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER
+#       Label used internally to identify the credentials source.
+#       Defaults to "s3". Any non-empty string is valid.
+#
+#   BOOM_CUTOUTS_CACHE_MAXMEMORY
+#       Memory cap for the read-through cutout cache (default: 1024mb).
+#       When the limit is reached, keys closest to expiry are evicted first
+#       (volatile-ttl policy).
+
+services:
+  # Dedicated Valkey instance for the cutout read-through cache. Kept separate
+  # from the main valkey so its eviction policy (volatile-ttl) and memory cap
+  # don't interfere with application queues.
+  valkey-cutouts:
+    image: valkey/valkey:7.2.6
+    hostname: valkey-cutouts
+    command:
+      - valkey-server
+      - --maxmemory
+      - ${BOOM_CUTOUTS_CACHE_MAXMEMORY:-1024mb}
+      - --maxmemory-policy
+      - volatile-ttl
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    expose:
+      - "6379"
+    networks:
+      - boom
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Point all boom services at the external S3 bucket.
+  api: &s3_external_cutouts_env
+    environment:
+      BOOM_CUTOUTS_STORAGE__TYPE: s3
+      BOOM_CUTOUTS_STORAGE__REGION: ${BOOM_CUTOUTS_STORAGE__REGION:?BOOM_CUTOUTS_STORAGE__REGION must be set (e.g. us-east-1)}
+      BOOM_CUTOUTS_STORAGE__ACCESS_KEY: ${BOOM_CUTOUTS_STORAGE__ACCESS_KEY:?BOOM_CUTOUTS_STORAGE__ACCESS_KEY must be set}
+      BOOM_CUTOUTS_STORAGE__SECRET_KEY: ${BOOM_CUTOUTS_STORAGE__SECRET_KEY:?BOOM_CUTOUTS_STORAGE__SECRET_KEY must be set}
+      BOOM_CUTOUTS_STORAGE__BUCKET_NAME: ${BOOM_CUTOUTS_STORAGE__BUCKET_NAME:-boom-cutouts}
+      BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER: ${BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER:-s3}
+      BOOM_CUTOUTS_STORAGE__ENDPOINT_URL: ${BOOM_CUTOUTS_STORAGE__ENDPOINT_URL:-}
+      BOOM_CUTOUTS_STORAGE__CACHE__HOST: valkey-cutouts
+      BOOM_CUTOUTS_STORAGE__CACHE__PORT: 6379
+  consumer-ztf:
+    <<: *s3_external_cutouts_env
+  consumer-lsst:
+    <<: *s3_external_cutouts_env
+  scheduler-ztf:
+    <<: *s3_external_cutouts_env
+  scheduler-lsst:
+    <<: *s3_external_cutouts_env
