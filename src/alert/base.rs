@@ -1,9 +1,11 @@
 use crate::conf::AppConfig;
+use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
     utils::{
+        cutouts::{CutoutStorage, CutoutStorageError},
         db::mongify,
         o11y::{
             logging::{as_error, log_error, WARN},
@@ -238,6 +240,8 @@ pub enum AlertError {
     UnknownFid(i32),
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("cutout storage error")]
+    CutoutStorageError(#[from] CutoutStorageError),
     #[error("invalid timeseries input: {0}")]
     InvalidTimeseriesInput(String),
     #[error("failed to run fallback aux update (no match with existing aux for {0})")]
@@ -638,43 +642,6 @@ impl SchemaCache {
     pub fn get_cached_start_idx(&self) -> Option<usize> {
         self.cached_start_idx
     }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AlertCutout {
-    #[serde(rename = "_id")]
-    pub candid: i64,
-    #[serde(rename = "cutoutScience")]
-    #[serde(serialize_with = "serialize_cutout")]
-    #[serde(deserialize_with = "deserialize_cutout")]
-    pub cutout_science: Vec<u8>,
-    #[serde(serialize_with = "serialize_cutout")]
-    #[serde(deserialize_with = "deserialize_cutout")]
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Vec<u8>,
-    #[serde(serialize_with = "serialize_cutout")]
-    #[serde(deserialize_with = "deserialize_cutout")]
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Vec<u8>,
-}
-
-fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let binary = <mongodb::bson::Binary as Deserialize>::deserialize(deserializer)?;
-    Ok(binary.bytes)
-}
-
-fn serialize_cutout<S>(cutout: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    let binary = mongodb::bson::Binary {
-        subtype: mongodb::bson::spec::BinarySubtype::Generic,
-        bytes: cutout.clone(),
-    };
-    binary.serialize(serializer)
 }
 
 /// Convert a Julian Date (JD) to a normalized u64 bit representation for consistent hashing and deduplication.
@@ -1135,33 +1102,38 @@ pub trait AlertWorker {
             > 0;
         Ok(alert_aux_exists)
     }
-    #[instrument(skip(self, cutout_science, cutout_template, cutout_difference), err)]
+    #[instrument(
+        skip(
+            self,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
+            cutout_storage
+        ),
+        err
+    )]
     async fn format_and_insert_cutouts(
         &self,
         candid: i64,
+        object_id: &str,
         cutout_science: Vec<u8>,
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
-        collection: &Collection<AlertCutout>,
+        cutout_storage: &CutoutStorage,
     ) -> Result<ProcessAlertStatus, AlertError> {
-        let alert_cutout = AlertCutout {
-            candid,
+        let cutouts = AlertCutout {
+            candid: candid,
             cutout_science,
             cutout_template,
             cutout_difference,
         };
-
-        let status = collection
-            .insert_one(alert_cutout)
-            .await
-            .map(|_| ProcessAlertStatus::Added(candid))
-            .or_else(|error| match *error.kind {
-                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                    write_error,
-                )) if write_error.code == 11000 => Ok(ProcessAlertStatus::Exists(candid)),
-                _ => Err(error),
-            })?;
-        Ok(status)
+        match cutout_storage.insert_cutouts(cutouts).await {
+            Ok(_) => Ok(ProcessAlertStatus::Added(candid)),
+            Err(CutoutStorageError::CutoutAlreadyExists(_)) => {
+                Ok(ProcessAlertStatus::Exists(candid))
+            }
+            Err(e) => Err(AlertError::from(e)),
+        }
     }
     #[instrument(skip(self, dec_range, radius_rad, collection), fields(xmatch_survey = collection.name()), err)]
     async fn get_matches(

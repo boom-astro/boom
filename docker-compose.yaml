@@ -181,6 +181,7 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
@@ -188,6 +189,9 @@ services:
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
@@ -235,11 +239,15 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_REDIS__HOST: valkey
     networks:
       - boom
@@ -259,6 +267,7 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       BOOM_KAFKA__CONSUMER__LSST__GROUP_ID: ${BOOM_KAFKA__CONSUMER__LSST__GROUP_ID:?BOOM_KAFKA__CONSUMER__LSST__GROUP_ID must be set}
       BOOM_KAFKA__CONSUMER__LSST__USERNAME: ${BOOM_KAFKA__CONSUMER__LSST__USERNAME:?BOOM_KAFKA__CONSUMER__LSST__USERNAME must be set}
       BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${BOOM_KAFKA__CONSUMER__LSST__PASSWORD:?BOOM_KAFKA__CONSUMER__LSST__PASSWORD must be set}
@@ -266,6 +275,9 @@ services:
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_REDIS__HOST: valkey
     networks:
       - boom
@@ -285,10 +297,14 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
@@ -313,10 +329,14 @@ services:
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}

@@ -1,6 +1,7 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
-    conf::get_test_db,
+    conf::{get_test_cutout_storage, get_test_db},
     utils::{
         enums::Survey,
         testing::{decam_alert_worker, drop_alert_from_collections, AlertRandomizer},
@@ -41,18 +42,12 @@ async fn test_process_decam_alert() {
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
-    let cutout_collection_name = "DECAM_alerts_cutouts";
-    let cutouts = db
-        .collection::<mongodb::bson::Document>(cutout_collection_name)
-        .find_one(filter.clone())
+    let cutout_storage = get_test_cutout_storage(&Survey::Decam).await;
+    let cutouts = cutout_storage
+        .retrieve_cutouts(candid, false)
         .await
         .unwrap();
-    assert!(cutouts.is_some());
-    let cutouts = cutouts.unwrap();
-    assert_eq!(cutouts.get_i64("_id").unwrap(), candid);
-    assert!(cutouts.contains_key("cutoutScience"));
-    assert!(cutouts.contains_key("cutoutTemplate"));
-    assert!(cutouts.contains_key("cutoutDifference"));
+    assert_eq!(cutouts.candid, candid);
 
     // check that the aux collection was inserted
     let aux_collection_name = "DECAM_alerts_aux";
@@ -71,5 +66,7 @@ async fn test_process_decam_alert() {
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 59);
 
-    drop_alert_from_collections(candid, "DECAM").await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Decam)
+        .await
+        .unwrap();
 }

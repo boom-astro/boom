@@ -39,8 +39,16 @@ fi
 COMPOSE_CONFIG=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.yaml")
 BG_PIDS=()
 
-PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
+# Select the cutout storage overlay based on BOOM_CUTOUTS_STORAGE__TYPE (default: mongo)
+CUTOUTS_TYPE="${BOOM_CUTOUTS_STORAGE__TYPE:-mongo}"
+if [ "$CUTOUTS_TYPE" = "s3" ]; then
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-s3.yaml")
+else
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-mongo.yaml")
+fi
 
+# If BOOM_GPU__ENABLED is true and we're on Linux, add the GPU override to enable CUDA support
+PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
 if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
     echo "BOOM_GPU__ENABLED is true and platform is Linux; adding GPU override to Docker Compose configuration (CUDA support)"
     COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cuda.yaml")
@@ -99,6 +107,10 @@ docker compose "${COMPOSE_CONFIG[@]}" stats consumer --format json > "$LOGS_DIR/
 BG_PIDS+=($!)
 docker compose "${COMPOSE_CONFIG[@]}" stats scheduler --format json > "$LOGS_DIR/scheduler.stats.log" &
 BG_PIDS+=($!)
+if [ "$CUTOUTS_TYPE" = "s3" ]; then
+    docker compose "${COMPOSE_CONFIG[@]}" stats valkey-cutouts --format json > "$LOGS_DIR/valkey-cutouts.stats.log" &
+    BG_PIDS+=($!)
+fi
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25

@@ -1,0 +1,7 @@
+# Cutout storage overlay: MongoDB (default)
+# No extra services needed — the base compose.yaml already includes mongo.
+# _run.sh includes this when BOOM_CUTOUTS_STORAGE__TYPE=mongo.
+# Note: We could have spun a separate MongoDB for cutouts, but for
+# simplicity we'll just use the same one as the base compose.yaml.
+
+services: {}

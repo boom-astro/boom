@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and s3 client
 use apache_avro::AvroSchema;
 use boom::{
     alert::{Candidate, DiaSource, LsstCandidate, LsstPrvCandidate, ZtfCandidate},
@@ -11,6 +12,7 @@ use boom::{
         ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
     },
     utils::{
+        cutouts::AlertCutout,
         lightcurves::{flux2mag, Band, PerBandProperties, ZTF_ZP},
         testing::TEST_CONFIG_FILE,
     },
@@ -1034,7 +1036,7 @@ async fn test_babamul_filters_pixel_flags() {
 #[tokio::test]
 async fn test_babamul_lsst_with_ztf_match() {
     use boom::alert::{
-        AlertCutout, DiaForcedSource, FpHist, LsstAlert, LsstAliases, LsstForcedPhot, LsstObject,
+        DiaForcedSource, FpHist, LsstAlert, LsstAliases, LsstForcedPhot, LsstObject,
         PrvCandidate as ZtfPrvCandidateFields, ZtfAliases, ZtfForcedPhot, ZtfObject,
         ZtfPrvCandidate,
     };
@@ -1068,7 +1070,10 @@ async fn test_babamul_lsst_with_ztf_match() {
     let ztf_aux_collection = db.collection::<ZtfObject>("ZTF_alerts_aux");
     let lsst_alerts_collection = db.collection::<LsstAlert>("LSST_alerts");
     let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
-    let lsst_cutouts_collection = db.collection::<AlertCutout>("LSST_alerts_cutouts");
+    let lsst_cutout_storage = config
+        .build_cutout_storage(&boom::utils::enums::Survey::Lsst)
+        .await
+        .expect("Failed to build LSST cutout storage");
 
     ztf_aux_collection
         .delete_many(doc! {"_id": {"$in": [&ztf_match_id]}})
@@ -1082,8 +1087,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         .delete_many(doc! {"_id": {"$in": [&lsst_object_id]}})
         .await
         .expect("Failed to cleanup LSST aux fixture");
-    lsst_cutouts_collection
-        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+    lsst_cutout_storage
+        .delete_cutouts(lsst_alert_id)
         .await
         .expect("Failed to cleanup LSST cutouts fixture");
 
@@ -1205,16 +1210,21 @@ async fn test_babamul_lsst_with_ztf_match() {
         .await
         .expect("Failed to insert LSST alert");
 
+    let cutout_storage = config
+        .build_cutout_storage(&boom::utils::enums::Survey::Lsst)
+        .await
+        .expect("Failed to build cutout storage");
+
     // Insert cutouts for the alert
-    let cutout_doc = AlertCutout {
+    let cutouts = AlertCutout {
         candid: lsst_alert_id,
         cutout_science: vec![1, 2, 3, 4, 5],
         cutout_template: vec![6, 7, 8, 9, 10],
         cutout_difference: vec![11, 12, 13, 14, 15],
     };
 
-    lsst_cutouts_collection
-        .insert_one(&cutout_doc)
+    cutout_storage
+        .insert_cutouts(cutouts)
         .await
         .expect("Failed to insert LSST cutout");
 
@@ -1374,8 +1384,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         .delete_many(doc! {"_id": {"$in": [&lsst_object_id]}})
         .await
         .expect("Failed to cleanup LSST aux fixture after test");
-    lsst_cutouts_collection
-        .delete_many(doc! {"_id": {"$in": [lsst_alert_id]}})
+    lsst_cutout_storage
+        .delete_cutouts(lsst_alert_id)
         .await
         .expect("Failed to cleanup LSST cutouts fixture after test");
 
@@ -1418,7 +1428,10 @@ async fn test_babamul_ztf_with_lsst_match() {
     let lsst_aux_collection = db.collection::<LsstObject>("LSST_alerts_aux");
     let ztf_aux_collection = db.collection::<ZtfObject>("ZTF_alerts_aux");
     let ztf_alerts_collection = db.collection::<boom::alert::ZtfAlert>("ZTF_alerts");
-    let ztf_cutouts_collection = db.collection::<boom::alert::AlertCutout>("ZTF_alerts_cutouts");
+    let ztf_cutouts_storage = config
+        .build_cutout_storage(&Survey::Ztf)
+        .await
+        .expect("Failed to build ZTF cutout storage");
 
     // Clean up any existing fixtures with this ID
     lsst_aux_collection
@@ -1433,8 +1446,8 @@ async fn test_babamul_ztf_with_lsst_match() {
         .delete_many(doc! {"_id": {"$in": [&ztf_object_id]}})
         .await
         .expect("Failed to cleanup ZTF aux fixture");
-    ztf_cutouts_collection
-        .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
+    ztf_cutouts_storage
+        .delete_cutouts(ztf_candid)
         .await
         .expect("Failed to cleanup ZTF cutouts fixture");
 
@@ -1644,8 +1657,8 @@ async fn test_babamul_ztf_with_lsst_match() {
         .delete_many(doc! {"_id": {"$in": [&ztf_object_id]}})
         .await
         .expect("Failed to cleanup ZTF aux fixture after test");
-    ztf_cutouts_collection
-        .delete_many(doc! {"_id": {"$in": [ztf_candid]}})
+    ztf_cutouts_storage
+        .delete_cutouts(ztf_candid)
         .await
         .expect("Failed to cleanup ZTF cutouts fixture after test");
 

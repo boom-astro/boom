@@ -126,6 +126,16 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_storage:
+    type: mongo
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -156,6 +166,16 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_storage:
+    type: mongo
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -187,6 +207,16 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_storage:
+    type: mongo
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();

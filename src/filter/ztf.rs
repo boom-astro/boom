@@ -6,7 +6,7 @@ use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{
     create_ztf_alert_pipeline, deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve,
-    fetch_alert_cutouts, fetch_alerts, ZtfAlertClassifications, ZtfPhotometry, ZtfSurveyMatches,
+    fetch_alerts, ZtfAlertClassifications, ZtfPhotometry, ZtfSurveyMatches,
 };
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
@@ -14,6 +14,7 @@ use crate::filter::{
     validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
     FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
+use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
@@ -151,7 +152,7 @@ pub struct ZtfAlertEnriched {
 /// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
 /// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
 /// * `alert_collection` - The MongoDB collection containing ZTF alert documents.
-/// * `alert_cutout_collection` - The MongoDB collection containing ZTF alert cutout documents.
+/// * `alert_cutout_storage` - The storage for ZTF alert cutouts.
 
 ///
 /// # Returns
@@ -161,7 +162,7 @@ pub async fn build_ztf_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
     alert_pipeline: &Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
-    alert_cutout_collection: &mongodb::Collection<Document>,
+    alert_cutout_storage: &CutoutStorage,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     if candids.is_empty() {
@@ -187,9 +188,9 @@ pub async fn build_ztf_alerts(
         );
     }
 
-    let mut candid_to_cutouts = fetch_alert_cutouts(&candids, &alert_cutout_collection)
-        .await
-        .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))?;
+    let mut candid_to_cutouts = alert_cutout_storage
+        .retrieve_multiple_cutouts(&candids, true)
+        .await?;
 
     if candid_to_cutouts.len() != alerts.len() {
         let mut missing_cutouts_candids: Vec<&i64> = alerts
@@ -212,9 +213,6 @@ pub async fn build_ztf_alerts(
     let mut alerts_output = Vec::new();
     for alert in alerts {
         let candid = alert.candid;
-        let cutouts = candid_to_cutouts
-            .remove(&candid)
-            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let mut classifications = Vec::new();
         if let Some(rb) = alert.candidate.candidate.rb {
@@ -366,6 +364,10 @@ pub async fn build_ztf_alerts(
                 photometry: lsst_photometry,
             });
         }
+
+        let cutouts = candid_to_cutouts
+            .remove(&candid)
+            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let alert = Alert {
             candid: alert.candid,
@@ -579,7 +581,7 @@ pub async fn build_ztf_filter_pipeline(
 pub struct ZtfFilterWorker {
     alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_cutout_storage: CutoutStorage,
     filter_collection: mongodb::Collection<Filter>,
     input_queue: String,
     output_topic: String,
@@ -598,8 +600,8 @@ impl FilterWorker for ZtfFilterWorker {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let alert_collection = db.collection("ZTF_alerts");
-        let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
         let filter_collection = db.collection("filters");
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
@@ -620,7 +622,7 @@ impl FilterWorker for ZtfFilterWorker {
         Ok(ZtfFilterWorker {
             alert_pipeline: create_ztf_alert_pipeline(true),
             alert_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             filter_collection,
             input_queue,
             output_topic,
@@ -752,10 +754,12 @@ impl FilterWorker for ZtfFilterWorker {
                 &results_map,
                 &self.alert_pipeline,
                 &self.alert_collection,
-                &self.alert_cutout_collection,
+                &self.alert_cutout_storage,
             )
             .await?;
             alerts_output.extend(alerts);
+
+            self.alert_cutout_storage.evict_from_cache(&candids).await;
         }
 
         Ok(alerts_output)

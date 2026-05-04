@@ -1,11 +1,13 @@
 use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
+use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
-use crate::{alert::AlertCutout, utils::lightcurves::Band};
+use crate::utils::lightcurves::Band;
 use actix_web::{get, web, HttpResponse};
 use base64::prelude::*;
-use mongodb::{bson::doc, Collection, Database};
+use mongodb::{bson::doc, Database};
+use std::collections::HashMap;
 
 #[utoipa::path(
     get,
@@ -30,6 +32,7 @@ pub async fn get_cutouts(
     query: web::Query<CutoutQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
+    cutout_storages: web::Data<HashMap<Survey, CutoutStorage>>,
 ) -> HttpResponse {
     let _current_user = match current_user {
         Some(user) => user,
@@ -39,22 +42,22 @@ pub async fn get_cutouts(
     };
     let survey = path.into_inner();
 
-    let cutout_collection: Collection<AlertCutout> =
-        db.collection(&format!("{}_alerts_cutouts", survey));
+    let cutout_storage = match cutout_storages.get(&survey) {
+        Some(storage) => storage,
+        None => {
+            return response::internal_error("cutout storage not available for this survey");
+        }
+    };
 
     if let Some(candid) = query.candid {
-        let cutouts = match cutout_collection
-            .find_one(doc! {
-                "_id": candid,
-            })
-            .await
-        {
-            Ok(Some(cutouts)) => cutouts,
-            Ok(None) => {
+        let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
+            Ok(cutouts) => cutouts,
+            Err(CutoutStorageError::CutoutsNotFound) => {
                 return response::not_found(&format!("no cutouts found for candid {}", candid));
             }
             Err(error) => {
-                return response::internal_error(&format!("error getting documents: {}", error));
+                tracing::error!("Error retrieving cutouts from storage: {}", error);
+                return response::internal_error("error retrieving cutouts from storage");
             }
         };
         let resp = serde_json::json!({
@@ -114,21 +117,17 @@ pub async fn get_cutouts(
             }
         };
 
-        let cutouts = match cutout_collection
-            .find_one(doc! {
-                "_id": candid,
-            })
-            .await
-        {
-            Ok(Some(cutouts)) => cutouts,
-            Ok(None) => {
+        let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
+            Ok(cutouts) => cutouts,
+            Err(CutoutStorageError::CutoutsNotFound) => {
                 return response::not_found(&format!(
-                    "no cutouts found for objectId {}",
-                    object_id
+                    "no cutouts found for objectId {} (candid: {})",
+                    object_id, candid
                 ));
             }
             Err(error) => {
-                return response::internal_error(&format!("error getting documents: {}", error));
+                tracing::error!("Error retrieving cutouts from storage: {}", error);
+                return response::internal_error("error retrieving cutouts from storage");
             }
         };
 

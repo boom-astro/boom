@@ -1,4 +1,8 @@
-use crate::utils::{enums::Survey, o11y::logging::as_error};
+use crate::utils::{
+    cutouts::{CutoutCache, CutoutStorage},
+    enums::Survey,
+    o11y::logging::as_error,
+};
 use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
@@ -28,6 +32,8 @@ pub enum BoomConfigError {
     MissingKeyError(String),
     #[error("failed to deserialize config: {0}")]
     InvalidSecretError(String),
+    #[error("cutout storage error: {0}")]
+    CutoutStorageError(#[from] crate::utils::cutouts::CutoutStorageError),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -84,9 +90,7 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let db_conf = &conf.database;
-
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
     let prefix = match db_conf.srv {
         true => "mongodb+srv://",
         false => "mongodb://",
@@ -129,13 +133,17 @@ async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError
 }
 
 #[instrument(skip_all, err)]
-async fn build_redis(
-    conf: &AppConfig,
-) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
-    let host = &conf.redis.host;
-    let port = conf.redis.port;
+async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+    let db_conf = &conf.database;
 
-    let uri = format!("redis://{}:{}/", host, port);
+    _build_db(db_conf).await
+}
+
+#[instrument(skip_all, err)]
+async fn build_redis_conn(
+    redis_conf: &RedisConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    let uri = format!("redis://{}:{}/", redis_conf.host, redis_conf.port);
 
     let client_redis =
         redis::Client::open(uri).inspect_err(as_error!("failed to connect to redis"))?;
@@ -146,6 +154,109 @@ async fn build_redis(
         .inspect_err(as_error!("failed to get multiplexed connection"))?;
 
     Ok(con)
+}
+
+#[instrument(skip_all, err)]
+async fn build_cutout_cache_conn(
+    cache_conf: &CutoutCacheConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    let uri = format!("redis://{}:{}/", cache_conf.host, cache_conf.port);
+    let client =
+        redis::Client::open(uri).inspect_err(as_error!("failed to connect to cutout cache"))?;
+    let mut con = client
+        .get_multiplexed_async_connection()
+        .await
+        .inspect_err(as_error!(
+            "failed to get multiplexed connection for cutout cache"
+        ))?;
+    if let Err(e) = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("maxmemory")
+        .arg(&cache_conf.max_memory)
+        .query_async::<()>(&mut con)
+        .await
+    {
+        warn!(
+            "Failed to set maxmemory '{}' on cutout cache (may already be configured externally): {:?}",
+            cache_conf.max_memory, e
+        );
+    }
+    Ok(con)
+}
+
+#[instrument(skip_all, err)]
+async fn build_redis(
+    conf: &AppConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    build_redis_conn(&conf.redis).await
+}
+
+fn string_to_static_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+#[instrument(skip_all, err)]
+async fn build_cutout_storage(
+    survey: &Survey,
+    conf: &AppConfig,
+) -> Result<CutoutStorage, BoomConfigError> {
+    let storage = match &conf.cutouts_storage {
+        CutoutsStorage::S3(s3_conf) => {
+            let credentials_static_str = string_to_static_str(s3_conf.credentials_provider.clone());
+            let credentials = aws_sdk_s3::config::Credentials::new(
+                s3_conf.access_key.clone(),
+                s3_conf.secret_key.clone(),
+                None,
+                None,
+                credentials_static_str,
+            );
+            let region = aws_sdk_s3::config::Region::new(s3_conf.region.clone());
+
+            let mut s3_config_builder =
+                aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(region)
+                    .credentials_provider(credentials);
+            if let Some(endpoint_url) = &s3_conf.endpoint_url {
+                s3_config_builder = s3_config_builder.endpoint_url(endpoint_url.clone());
+            }
+            let s3_config = s3_config_builder.load().await;
+
+            let rustfs_client = aws_sdk_s3::Client::from_conf(
+                aws_sdk_s3::Config::from(&s3_config)
+                    .to_builder()
+                    .force_path_style(true)
+                    .build(),
+            );
+            let bucket_name = s3_conf.bucket_name.clone();
+            let key_prefix = survey.to_string().to_lowercase();
+
+            let redis_conn =
+                build_cutout_cache_conn(&s3_conf.cache)
+                    .await
+                    .inspect_err(as_error!(
+                        "failed to build redis connection for cutout cache"
+                    ))?;
+            let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds, key_prefix.clone());
+
+            let compress_stamps = matches!(survey, Survey::Lsst);
+            CutoutStorage::from_s3(
+                rustfs_client,
+                bucket_name,
+                key_prefix,
+                None,
+                cache,
+                compress_stamps,
+            )
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?
+        }
+        CutoutsStorage::Mongo(mongo_conf) => {
+            let db = _build_db(&mongo_conf).await?;
+            CutoutStorage::from_mongo(db, survey).await
+        }
+    };
+
+    Ok(storage)
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +399,61 @@ impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     }
 }
 
+fn default_bucket_name() -> String {
+    "boom-cutouts".to_string()
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct S3CutoutsStorageConfig {
+    #[serde(default = "default_bucket_name")]
+    pub bucket_name: String,
+    pub region: String,
+    /// Custom endpoint URL for S3-compatible services (rustfs, MinIO, Wasabi, …).
+    /// Leave unset when pointing at AWS S3 — the SDK derives the endpoint from the region.
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+    pub access_key: String,
+    pub secret_key: String,
+    pub credentials_provider: String,
+    pub cache: CutoutCacheConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum CutoutsStorage {
+    S3(S3CutoutsStorageConfig),
+    Mongo(DatabaseConfig),
+}
+
+impl<'de> Deserialize<'de> for CutoutsStorage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        // Materialise the entire map via serde_json::Value so we can (a) read
+        // the "type" discriminant and (b) re-deserialize into the chosen variant
+        // without fighting the config crate's single-pass deserializer constraint
+        // that prevents #[serde(tag = "type")] from working here.
+        let map = serde_json::Value::deserialize(deserializer).map_err(|e| D::Error::custom(e))?;
+
+        let storage_type = map
+            .get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| D::Error::missing_field("type"))?;
+
+        match storage_type {
+            "mongo" => serde_json::from_value::<DatabaseConfig>(map)
+                .map(CutoutsStorage::Mongo)
+                .map_err(|e| D::Error::custom(e)),
+            "s3" => serde_json::from_value::<S3CutoutsStorageConfig>(map)
+                .map(CutoutsStorage::S3)
+                .map_err(|e| D::Error::custom(e)),
+            other => Err(D::Error::custom(format!(
+                "unknown cutouts_storage type {:?}; expected \"mongo\" or \"s3\"",
+                other
+            ))),
+        }
+    }
+}
+
 fn default_kafka_server() -> String {
     "localhost:9092".to_string()
 }
@@ -370,6 +536,25 @@ impl Default for RedisConfig {
         RedisConfig {
             host: "localhost".to_string(),
             port: 6379,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CutoutCacheConfig {
+    pub host: String,
+    pub port: u16,
+    pub ttl_seconds: u64,
+    pub max_memory: String,
+}
+
+impl Default for CutoutCacheConfig {
+    fn default() -> Self {
+        CutoutCacheConfig {
+            host: "localhost".to_string(),
+            port: 6379,
+            ttl_seconds: 30,
+            max_memory: "1gb".to_string(),
         }
     }
 }
@@ -593,6 +778,7 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    pub cutouts_storage: CutoutsStorage,
 }
 
 impl AppConfig {
@@ -667,6 +853,20 @@ impl AppConfig {
     pub async fn build_redis(&self) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
         build_redis(self).await
     }
+
+    #[instrument(skip_all, err)]
+    pub async fn build_cutout_storage(
+        &self,
+        survey: &Survey,
+    ) -> Result<CutoutStorage, BoomConfigError> {
+        match build_cutout_storage(survey, self).await {
+            Ok(storage) => Ok(storage),
+            Err(e) => {
+                println!("Failed to build cutout storage: {}", e);
+                Err(e)
+            }
+        }
+    }
 }
 
 #[instrument(err)]
@@ -701,6 +901,19 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 pub async fn get_test_db() -> Database {
     let config = AppConfig::from_test_config().expect("Failed to load test config");
     config.build_db().await.unwrap()
+}
+
+pub async fn get_test_redis_connection() -> redis::aio::MultiplexedConnection {
+    let config = AppConfig::from_test_config().expect("Failed to load test config");
+    config.build_redis().await.unwrap()
+}
+
+pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
+    let config = AppConfig::from_test_config().expect("Failed to load test config");
+    config
+        .build_cutout_storage(survey)
+        .await
+        .expect("Failed to build cutout storage")
 }
 
 #[cfg(test)]

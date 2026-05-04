@@ -40,6 +40,16 @@ kafka:
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
+cutouts_storage:
+  type: mongo
+  host: localhost
+  port: 27017
+  name: boom_test
+  max_pool_size: 200
+  replica_set: null
+  username: mongoadmin
+  password: mongoadminsecret
+  srv: false
 workers:
   ztf:
     command_interval: 500

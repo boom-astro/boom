@@ -1,6 +1,6 @@
 // we use zune_inflate as a replacement for flate2
 // which is a slightly faster alternative
-use crate::alert::AlertCutout;
+use crate::utils::cutouts::AlertCutout;
 use zune_inflate::{DeflateDecoder, DeflateOptions};
 
 const NAXIS1_BYTES: &[u8] = "NAXIS1  =".as_bytes();

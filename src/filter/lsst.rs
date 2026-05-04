@@ -3,15 +3,14 @@ use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
 use crate::conf::AppConfig;
-use crate::enrichment::{
-    create_lsst_alert_pipeline, fetch_alert_cutouts, fetch_alerts, LsstAlertForEnrichment,
-};
+use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment};
 use crate::filter::{
     build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
     update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline, Alert,
     Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
     LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
+use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
 
@@ -109,8 +108,7 @@ pub fn insert_lsst_aux_pipeline_if_needed(
 /// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
 /// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
 /// * `alert_collection` - The MongoDB collection containing LSST alert documents.
-/// * `alert_cutout_collection` - The MongoDB collection containing LSST alert cutout documents.
-///
+/// * `alert_cutout_storage` -  The storage for LSST alert cutouts.
 /// # Returns
 /// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
 #[instrument(skip_all, err)]
@@ -118,7 +116,7 @@ pub async fn build_lsst_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
     alert_pipeline: &Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
-    alert_cutout_collection: &mongodb::Collection<Document>,
+    alert_cutout_storage: &CutoutStorage,
 ) -> Result<Vec<Alert>, FilterWorkerError> {
     let candids: Vec<i64> = alerts_with_filter_results.keys().cloned().collect();
     if candids.is_empty() {
@@ -145,9 +143,9 @@ pub async fn build_lsst_alerts(
         );
     }
 
-    let mut candid_to_cutouts = fetch_alert_cutouts(&candids, &alert_cutout_collection)
-        .await
-        .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))?;
+    let mut candid_to_cutouts = alert_cutout_storage
+        .retrieve_multiple_cutouts(&candids, true)
+        .await?;
 
     if candid_to_cutouts.len() != alerts.len() {
         let mut missing_cutouts_candids: Vec<&i64> = alerts
@@ -170,9 +168,6 @@ pub async fn build_lsst_alerts(
     let mut alerts_output = Vec::new();
     for alert in alerts {
         let candid = alert.candid;
-        let cutouts = candid_to_cutouts
-            .remove(&candid)
-            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let mut classifications = Vec::new();
         if let Some(reliability) = alert.candidate.dia_source.reliability {
@@ -268,6 +263,10 @@ pub async fn build_lsst_alerts(
                 photometry: ztf_photometry,
             });
         }
+
+        let cutouts = candid_to_cutouts
+            .remove(&candid)
+            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
         let alert = Alert {
             candid: alert.candid,
@@ -428,7 +427,7 @@ pub async fn build_lsst_filter_pipeline(
 pub struct LsstFilterWorker {
     alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_cutout_storage: CutoutStorage,
     filter_collection: mongodb::Collection<Filter>,
     input_queue: String,
     output_topic: String,
@@ -446,8 +445,8 @@ impl FilterWorker for LsstFilterWorker {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let alert_collection = db.collection("LSST_alerts");
-        let alert_cutout_collection = db.collection("LSST_alerts_cutouts");
         let filter_collection = db.collection("filters");
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Lsst).await?;
 
         let input_queue = "LSST_alerts_filter_queue".to_string();
         let output_topic = "LSST_alerts_results".to_string();
@@ -457,7 +456,7 @@ impl FilterWorker for LsstFilterWorker {
         Ok(LsstFilterWorker {
             alert_pipeline: create_lsst_alert_pipeline(),
             alert_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             filter_collection,
             input_queue,
             output_topic,
@@ -548,10 +547,12 @@ impl FilterWorker for LsstFilterWorker {
             &results_map,
             &self.alert_pipeline,
             &self.alert_collection,
-            &self.alert_cutout_collection,
+            &self.alert_cutout_storage,
         )
         .await?;
         alerts_output.extend(alerts);
+
+        self.alert_cutout_storage.evict_from_cache(&candids).await;
 
         Ok(alerts_output)
     }

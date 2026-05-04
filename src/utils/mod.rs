@@ -1,3 +1,4 @@
+pub mod cutouts;
 pub mod data;
 pub mod db;
 pub mod derive_avro_schema;

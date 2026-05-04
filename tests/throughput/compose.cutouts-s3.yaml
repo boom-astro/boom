@@ -1,0 +1,63 @@
+# Cutout storage overlay: S3 (rustfs) + dedicated Valkey cache
+# _run.sh includes this when BOOM_CUTOUTS_STORAGE__TYPE=s3.
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    hostname: rustfs
+    restart: unless-stopped
+    expose:
+      - "9000"
+      - "9001"
+    environment:
+      - RUSTFS_STORAGE_PATH=/data
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadminsecret
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_SERVER_DOMAINS=rustfs
+      - RUSTFS_CONSOLE_ENABLE=true
+    networks:
+      - boom
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh", "-c",
+          "curl -f http://0.0.0.0:9000/health && curl -f http://0.0.0.0:9001/rustfs/console/health"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  valkey-cutouts:
+    image: valkey/valkey:7.2.6
+    hostname: valkey-cutouts
+    expose:
+      - "6379"
+    networks:
+      - boom
+    restart: always
+    # maxmemory is applied by the app via CONFIG SET on connect (cache.max_memory in config.yaml)
+    command: valkey-server --save "" --appendonly no --maxmemory-policy volatile-ttl
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Merge extra deps into the base consumer and scheduler services
+  consumer:
+    depends_on:
+      rustfs:
+        condition: service_healthy
+      valkey-cutouts:
+        condition: service_healthy
+
+  scheduler:
+    depends_on:
+      rustfs:
+        condition: service_healthy
+      valkey-cutouts:
+        condition: service_healthy

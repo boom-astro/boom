@@ -1,13 +1,14 @@
 use crate::{
     alert::{
         base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
-            ProcessAlertStatus, SchemaRegistry,
+            AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly, ProcessAlertStatus,
+            SchemaRegistry,
         },
         decam, ztf, TimeSeries,
     },
     conf::{self, AppConfig, BoomConfigError},
     utils::{
+        cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
@@ -32,7 +33,6 @@ pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
 pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
-pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const LSST_ZTF_XMATCH_RADIUS: f64 =
     (LSST_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
@@ -895,8 +895,8 @@ pub struct LsstAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
+    alert_cutout_storage: CutoutStorage,
     alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
-    alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
 }
@@ -1081,8 +1081,11 @@ impl AlertWorker for LsstAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Lsst)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
         let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&ztf::ALERT_AUX_COLLECTION);
@@ -1100,8 +1103,8 @@ impl AlertWorker for LsstAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
+            alert_cutout_storage,
             alert_aux_collection_update,
-            alert_cutout_collection,
             ztf_alert_aux_collection,
             decam_alert_aux_collection,
         };
@@ -1149,19 +1152,23 @@ impl AlertWorker for LsstAlertWorker {
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
 
-        let cutout_status = self
-            .format_and_insert_cutouts(
-                candid,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_collection,
-            )
+        let alert = LsstAlert {
+            candid,
+            object_id: object_id.clone(),
+            ss_object_id: ss_object_id.clone(),
+            candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = cutout_status {
-            return Ok(cutout_status);
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
 
         let survey_matches = Some(
@@ -1217,18 +1224,15 @@ impl AlertWorker for LsstAlertWorker {
             }
         }
 
-        let alert = LsstAlert {
-            candid,
-            object_id: object_id.clone(),
-            ss_object_id: ss_object_id,
-            candidate,
-            coordinates: Coordinates::new(ra, dec),
-            created_at: now,
-            updated_at: now,
-        };
-
         let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+            .format_and_insert_cutouts(
+                candid,
+                &object_id,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_storage,
+            )
             .await
             .inspect_err(as_error!())?;
 
@@ -1482,6 +1486,53 @@ mod tests {
 
         assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_stored_and_retrievable() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        let parsed_alert: LsstRawAvroAlert = worker
+            .schema_registry
+            .alert_from_avro_bytes(&bytes_content)
+            .await
+            .unwrap();
+
+        let stored = worker
+            .alert_cutout_storage
+            .retrieve_cutouts(candid, false)
+            .await
+            .expect("cutout should be retrievable after process_alert");
+
+        assert_eq!(stored.candid, candid);
+        assert_eq!(stored.cutout_science, parsed_alert.cutout_science);
+        assert_eq!(stored.cutout_template, parsed_alert.cutout_template);
+        assert_eq!(stored.cutout_difference, parsed_alert.cutout_difference);
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+        let _ = object_id;
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_deduplication() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, _object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Lsst).get().await;
+
+        let first = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(first, ProcessAlertStatus::Added(candid));
+
+        let second = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(second, ProcessAlertStatus::Exists(candid));
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
     }
 }
