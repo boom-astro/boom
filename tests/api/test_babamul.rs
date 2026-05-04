@@ -11,7 +11,7 @@ mod tests {
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
-    use boom::utils::cutouts::AlertCutout;
+    use boom::utils::cutouts::{AlertCutout, CutoutStorage};
     use boom::utils::enums::Survey;
     use boom::utils::testing::{
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
@@ -19,6 +19,7 @@ mod tests {
     };
     use mongodb::bson::doc;
     use mongodb::Database;
+    use std::collections::HashMap;
 
     /// Helper struct to manage test user lifecycle
     struct TestUser {
@@ -502,12 +503,16 @@ mod tests {
             .await
             .expect("Failed to store test cutout");
 
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, ztf_cutouts_storage);
+
         let app = test::init_service(
             App::new().service(
                 actix_web::web::scope("/babamul")
                     .app_data(web::Data::new(config.clone()))
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(cutout_storage_map))
                     .wrap(from_fn(babamul_auth_middleware))
                     .service(routes::babamul::surveys::get_cutouts),
             ),
@@ -542,7 +547,10 @@ mod tests {
         );
 
         // Clean up
-        ztf_cutouts_storage
+        config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage for cleanup")
             .delete_cutouts(test_candid)
             .await
             .expect("Failed to delete test cutout");

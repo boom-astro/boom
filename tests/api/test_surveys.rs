@@ -7,10 +7,10 @@ mod tests {
     use boom::api::routes;
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::AppConfig;
-    use boom::utils::cutouts::AlertCutout;
+    use boom::utils::cutouts::{AlertCutout, CutoutStorage};
     use boom::utils::enums::Survey;
-    use mongodb::bson::doc;
     use mongodb::Database;
+    use std::collections::HashMap;
 
     /// Test GET /surveys/{survey_name}/cutouts success case
     #[actix_rt::test]
@@ -37,10 +37,14 @@ mod tests {
             .await
             .expect("Failed to store test cutout");
 
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, ztf_cutouts_storage);
+
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(config.clone()))
                 .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(cutout_storage_map))
                 .service(routes::surveys::cutouts::get_cutouts),
         )
         .await;
@@ -69,7 +73,10 @@ mod tests {
         );
 
         // Clean up
-        ztf_cutouts_storage
+        config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage for cleanup")
             .delete_cutouts(test_candid)
             .await
             .expect("Failed to delete test cutout");
