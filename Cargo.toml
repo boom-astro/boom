@@ -64,9 +64,11 @@ default = []
 # and is toggled purely at runtime via `config.gpu.enabled`.
 gpu = ["dep:villar-pso"]
 
-# on mac os silicon platform, install ort with the coreml feature
+# on mac os silicon platform, install ort with the coreml feature, and
+# villar-pso with the metal feature for Apple Silicon GPU light curve fitting
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
+villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["metal"], optional = true }
 
 # otherwise, install ort without cuda by default (enabled via gpu feature)
 [target.'cfg(target_os = "linux")'.dependencies]

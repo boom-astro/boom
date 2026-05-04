@@ -26,8 +26,10 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use tracing::{instrument, trace, warn};
 #[cfg(feature = "gpu")]
 use tracing::info;
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, GpuContext, SourceData};
+#[cfg(all(feature = "gpu", target_os = "macos"))]
+use villar_pso::gpu_metal::{GpuBatchData, GpuContext, SourceData};
 
 /// Atomic counter for round-robin GPU device assignment across worker threads.
 #[cfg(feature = "gpu")]
@@ -461,7 +463,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // Assign a GPU device to this worker via round-robin over `config.gpu.device_ids`.
         // Only initialize a villar-pso GpuContext when GPU usage is actually enabled at
-        // runtime; otherwise leave it `None` so this worker never touches CUDA.
+        // runtime; otherwise leave it `None` so this worker never touches the GPU.
+        // Backend is selected by target_os: CUDA on Linux, Metal on macOS. The Metal
+        // backend ignores `device_id` since Apple Silicon exposes a single GPU.
         #[cfg(feature = "gpu")]
         let gpu_ctx: Option<GpuContext> = if config.gpu.enabled {
             let device_ids = &config.gpu.device_ids;
@@ -677,7 +681,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
                 let pso_config = villar_pso::PsoConfig::default();
 
-                match GpuBatchData::new(&source_refs).and_then(|batch| {
+                #[cfg(target_os = "linux")]
+                let batch_result = GpuBatchData::new(&source_refs);
+                #[cfg(target_os = "macos")]
+                let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
+
+                match batch_result.and_then(|batch| {
                     gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
                 }) {
                     Ok(results) => {
