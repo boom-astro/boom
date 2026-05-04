@@ -132,13 +132,19 @@ fn decompress_stamps(cutout: AlertCutout) -> Result<AlertCutout, CutoutStorageEr
 pub struct CutoutCache {
     connection: redis::aio::MultiplexedConnection,
     ttl_seconds: u64,
+    key_prefix: String,
 }
 
 impl CutoutCache {
-    pub fn new(connection: redis::aio::MultiplexedConnection, ttl_seconds: u64) -> Self {
+    pub fn new(
+        connection: redis::aio::MultiplexedConnection,
+        ttl_seconds: u64,
+        key_prefix: String,
+    ) -> Self {
         Self {
             connection,
             ttl_seconds,
+            key_prefix,
         }
     }
 
@@ -181,8 +187,12 @@ impl CutoutCache {
         })
     }
 
+    fn cache_key(&self, candid: i64) -> String {
+        format!("{}:cutout:{}", self.key_prefix, candid)
+    }
+
     async fn set(&self, cutout: &AlertCutout) {
-        let key = format!("cutout:{}", cutout.candid);
+        let key = self.cache_key(cutout.candid);
         let mut conn = self.connection.clone();
         if let Err(e) = conn
             .set_ex::<_, _, ()>(&key, Self::pack(cutout), self.ttl_seconds)
@@ -193,7 +203,7 @@ impl CutoutCache {
     }
 
     async fn get(&self, candid: i64) -> Option<AlertCutout> {
-        let key = format!("cutout:{}", candid);
+        let key = self.cache_key(candid);
         let mut conn = self.connection.clone();
         let bytes: Option<Vec<u8>> = match conn.get(&key).await {
             Ok(b) => b,
@@ -218,7 +228,7 @@ impl CutoutCache {
         if candids.is_empty() {
             return HashMap::new();
         }
-        let keys: Vec<String> = candids.iter().map(|c| format!("cutout:{}", c)).collect();
+        let keys: Vec<String> = candids.iter().map(|c| self.cache_key(*c)).collect();
         let mut conn = self.connection.clone();
         let values: Vec<Option<Vec<u8>>> = match conn.mget(&keys).await {
             Ok(v) => v,
@@ -245,7 +255,7 @@ impl CutoutCache {
     }
 
     async fn del(&self, candid: i64) {
-        let key = format!("cutout:{}", candid);
+        let key = self.cache_key(candid);
         let mut conn = self.connection.clone();
         if let Err(e) = conn.del::<_, ()>(&key).await {
             warn!("Failed to delete cached cutout {}: {:?}", candid, e);
@@ -256,7 +266,7 @@ impl CutoutCache {
         if candids.is_empty() {
             return;
         }
-        let keys: Vec<String> = candids.iter().map(|c| format!("cutout:{}", c)).collect();
+        let keys: Vec<String> = candids.iter().map(|c| self.cache_key(*c)).collect();
         let mut conn = self.connection.clone();
         if let Err(e) = conn.del::<_, ()>(&keys).await {
             warn!("Failed to evict {} cached cutouts: {:?}", candids.len(), e);
@@ -305,10 +315,11 @@ async fn create_bucket_if_not_exists(
 async fn insert_alert_cutouts(
     cutouts: &AlertCutout,
     bucket_name: &str,
+    key_prefix: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
     let candid = cutouts.candid;
-    let key = format!("{}.json", candid);
+    let key = format!("{}/{}.json", key_prefix, candid);
 
     let encoded = serde_json::to_vec(&S3AlertCutout::from(cutouts))?;
     let body = aws_sdk_s3::primitives::ByteStream::from(encoded);
@@ -333,9 +344,10 @@ async fn insert_alert_cutouts(
 async fn retrieve_alert_cutouts(
     candid: i64,
     bucket_name: &str,
+    key_prefix: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<AlertCutout, CutoutStorageError> {
-    let key = format!("{}.json", candid);
+    let key = format!("{}/{}.json", key_prefix, candid);
 
     let resp = match s3_client
         .get_object()
@@ -371,9 +383,10 @@ async fn retrieve_alert_cutouts(
 async fn delete_alert_cutouts(
     candid: i64,
     bucket_name: &str,
+    key_prefix: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
-    let key = format!("{}.json", candid);
+    let key = format!("{}/{}.json", key_prefix, candid);
 
     match s3_client
         .delete_object()
@@ -393,6 +406,7 @@ async fn delete_alert_cutouts(
 pub struct S3CutoutStorage {
     s3_client: aws_sdk_s3::Client,
     bucket_name: String,
+    key_prefix: String,
     concurrency_limit: usize,
     cache: CutoutCache,
     compress_stamps: bool,
@@ -403,6 +417,7 @@ impl S3CutoutStorage {
     pub async fn new(
         s3_client: aws_sdk_s3::Client,
         bucket_name: String,
+        key_prefix: String,
         concurrency_limit: Option<usize>,
         cache: CutoutCache,
         compress_stamps: bool,
@@ -411,6 +426,7 @@ impl S3CutoutStorage {
         Ok(Self {
             s3_client,
             bucket_name,
+            key_prefix,
             concurrency_limit: concurrency_limit.unwrap_or(1),
             cache,
             compress_stamps,
@@ -432,7 +448,13 @@ impl S3CutoutStorage {
         } else {
             cutouts
         };
-        insert_alert_cutouts(&cutouts, &self.bucket_name, &self.s3_client).await?;
+        insert_alert_cutouts(
+            &cutouts,
+            &self.bucket_name,
+            &self.key_prefix,
+            &self.s3_client,
+        )
+        .await?;
         self.cache.set(&cutouts).await;
         Ok(())
     }
@@ -442,7 +464,8 @@ impl S3CutoutStorage {
         let raw = if let Some(cutout) = self.cache.get(candid).await {
             cutout
         } else {
-            retrieve_alert_cutouts(candid, &self.bucket_name, &self.s3_client).await?
+            retrieve_alert_cutouts(candid, &self.bucket_name, &self.key_prefix, &self.s3_client)
+                .await?
         };
         if self.compress_stamps {
             tokio::task::spawn_blocking(move || decompress_stamps(raw))
@@ -469,8 +492,13 @@ impl S3CutoutStorage {
         if !missing.is_empty() {
             let s3_results = stream::iter(missing.iter().copied())
                 .map(|candid| async move {
-                    let res =
-                        retrieve_alert_cutouts(candid, &self.bucket_name, &self.s3_client).await;
+                    let res = retrieve_alert_cutouts(
+                        candid,
+                        &self.bucket_name,
+                        &self.key_prefix,
+                        &self.s3_client,
+                    )
+                    .await;
                     (candid, res)
                 })
                 .buffer_unordered(self.concurrency_limit)
@@ -512,7 +540,7 @@ impl S3CutoutStorage {
     #[instrument(skip_all, err)]
     pub async fn delete_cutouts(&self, candid: i64) -> Result<(), CutoutStorageError> {
         self.cache.del(candid).await;
-        delete_alert_cutouts(candid, &self.bucket_name, &self.s3_client).await
+        delete_alert_cutouts(candid, &self.bucket_name, &self.key_prefix, &self.s3_client).await
     }
 }
 
@@ -647,6 +675,7 @@ impl CutoutStorage {
     pub async fn from_s3(
         s3_client: aws_sdk_s3::Client,
         bucket_name: String,
+        key_prefix: String,
         concurrency_limit: Option<usize>,
         cache: CutoutCache,
         compress_stamps: bool,
@@ -654,6 +683,7 @@ impl CutoutStorage {
         let s3_storage = S3CutoutStorage::new(
             s3_client,
             bucket_name,
+            key_prefix,
             concurrency_limit,
             cache,
             compress_stamps,

@@ -225,7 +225,8 @@ async fn build_cutout_storage(
                     .force_path_style(true)
                     .build(),
             );
-            let bucket_name = format!("{}-cutouts", survey.to_string().to_lowercase());
+            let bucket_name = s3_conf.bucket_name.clone();
+            let key_prefix = survey.to_string().to_lowercase();
 
             let redis_conn =
                 build_cutout_cache_conn(&s3_conf.cache)
@@ -233,12 +234,19 @@ async fn build_cutout_storage(
                     .inspect_err(as_error!(
                         "failed to build redis connection for cutout cache"
                     ))?;
-            let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds);
+            let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds, key_prefix.clone());
 
             let compress_stamps = matches!(survey, Survey::Lsst);
-            CutoutStorage::from_s3(rustfs_client, bucket_name, None, cache, compress_stamps)
-                .await
-                .inspect_err(as_error!("failed to create cutout storage"))?
+            CutoutStorage::from_s3(
+                rustfs_client,
+                bucket_name,
+                key_prefix,
+                None,
+                cache,
+                compress_stamps,
+            )
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?
         }
         CutoutsStorage::Mongo(mongo_conf) => {
             let db = _build_db(&mongo_conf).await?;
@@ -389,8 +397,14 @@ impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     }
 }
 
+fn default_bucket_name() -> String {
+    "boom-cutouts".to_string()
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct S3CutoutsStorageConfig {
+    #[serde(default = "default_bucket_name")]
+    pub bucket_name: String,
     pub region: String,
     pub endpoint_url: String,
     pub access_key: String,

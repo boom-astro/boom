@@ -71,6 +71,11 @@ cutouts_storage:
   srv: false
 
   # --- S3 settings (active when type: s3) ---
+  # All surveys share a single bucket, namespaced by a per-survey key prefix
+  # (e.g. ztf/12345.json, lsst/67890.json). This lets you point boom at a
+  # pre-provisioned remote bucket without creating one bucket per survey.
+  # Per-survey S3 lifecycle rules can still be applied using prefix filters.
+  bucket_name: boom-cutouts         # or set via BOOM_CUTOUTS_STORAGE__BUCKET_NAME
   region: local                     # or set via BOOM_CUTOUTS_STORAGE__REGION
   endpoint_url: http://rustfs:9000  # or set via BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
   access_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__ACCESS_KEY
