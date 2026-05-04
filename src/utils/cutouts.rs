@@ -106,6 +106,8 @@ impl From<&AlertCutout> for S3AlertCutout {
 }
 
 fn compress_stamp(data: &[u8]) -> Result<Vec<u8>, CutoutStorageError> {
+    // We use zstd level 0 which basically means "use the default compression level,
+    // which is often 3, a good balance of speed and compression".
     zstd::encode_all(data, 0).map_err(|_| CutoutStorageError::CutoutCompressFailed)
 }
 
