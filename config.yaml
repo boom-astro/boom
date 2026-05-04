@@ -81,7 +81,7 @@ cutouts_storage:
   # Omit it when pointing at AWS S3 — the SDK derives the endpoint from the region automatically.
   # Docker compose overlays inject this automatically; set BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
   # when running binaries directly against a non-AWS provider.
-  endpoint_url:
+  endpoint_url: http://rustfs:9000
   access_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__ACCESS_KEY
   secret_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__SECRET_KEY
   credentials_provider: rustfs      # or set via BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER
