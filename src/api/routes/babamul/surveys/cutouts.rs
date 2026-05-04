@@ -50,7 +50,7 @@ pub async fn get_cutouts(
     };
 
     if let Some(candid) = query.candid {
-        let cutouts = match cutout_storage.retrieve_cutouts(candid).await {
+        let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
             Ok(cutouts) => cutouts,
             Err(CutoutStorageError::CutoutsNotFound) => {
                 return response::not_found(&format!("no cutouts found for candid {}", candid));
@@ -117,7 +117,7 @@ pub async fn get_cutouts(
             }
         };
 
-        let cutouts = match cutout_storage.retrieve_cutouts(candid).await {
+        let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
             Ok(cutouts) => cutouts,
             Err(CutoutStorageError::CutoutsNotFound) => {
                 return response::not_found(&format!(

@@ -473,7 +473,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let mut candid_to_cutouts = self
             .alert_cutout_storage
-            .retrieve_multiple_cutouts(candids)
+            .retrieve_multiple_cutouts(candids, true)
             .await?;
 
         if candid_to_cutouts.len() != alerts.len() {

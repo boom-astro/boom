@@ -144,7 +144,7 @@ pub async fn build_lsst_alerts(
     }
 
     let mut candid_to_cutouts = alert_cutout_storage
-        .retrieve_multiple_cutouts(&candids)
+        .retrieve_multiple_cutouts(&candids, true)
         .await?;
 
     if candid_to_cutouts.len() != alerts.len() {

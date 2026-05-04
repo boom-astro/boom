@@ -19,6 +19,8 @@ pub enum CutoutStorageError {
     CutoutRetrieveFailed,
     #[error("cutout delete failed")]
     CutoutDeleteFailed,
+    #[error("bucket create failed")]
+    BucketCreateFailed,
     #[error("json serialization error: {0}")]
     JsonError(#[from] serde_json::Error),
     #[error("cutout compress failed")]
@@ -70,13 +72,13 @@ where
     Ok(binary.bytes)
 }
 
-fn serialize_cutout<S>(cutout: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_cutout<S>(cutout: &[u8], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     let binary = mongodb::bson::Binary {
         subtype: mongodb::bson::spec::BinarySubtype::Generic,
-        bytes: cutout.clone(),
+        bytes: cutout.to_vec(),
     };
     binary.serialize(serializer)
 }
@@ -254,6 +256,22 @@ impl CutoutCache {
             .collect()
     }
 
+    async fn set_many(&self, cutouts: &[AlertCutout]) {
+        if cutouts.is_empty() {
+            return;
+        }
+        let mut pipe = redis::pipe();
+        for cutout in cutouts {
+            let key = self.cache_key(cutout.candid);
+            pipe.set_ex(&key, Self::pack(cutout), self.ttl_seconds)
+                .ignore();
+        }
+        let mut conn = self.connection.clone();
+        if let Err(e) = pipe.query_async::<()>(&mut conn).await {
+            warn!("Failed to batch cache {} cutouts: {:?}", cutouts.len(), e);
+        }
+    }
+
     async fn del(&self, candid: i64) {
         let key = self.cache_key(candid);
         let mut conn = self.connection.clone();
@@ -278,37 +296,42 @@ async fn create_bucket_if_not_exists(
     bucket_name: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
-    let buckets = match s3_client.list_buckets().send().await {
-        Ok(b) => b,
-        Err(e) => {
-            error!("Failed to list buckets: {:?}", e);
-            return Err(CutoutStorageError::BucketListFailed);
+    match s3_client.head_bucket().bucket(bucket_name).send().await {
+        Ok(_) => {
+            debug!("Bucket {} already exists", bucket_name);
+            return Ok(());
         }
-    };
-
-    let bucket_exists = buckets
-        .buckets()
-        .iter()
-        .any(|b| b.name().unwrap_or_default() == bucket_name);
-
-    if bucket_exists {
-        debug!("Bucket {} already exists", bucket_name);
-        return Ok(());
+        Err(e) => {
+            let is_not_found = e
+                .as_service_error()
+                .map(|se| se.is_not_found())
+                .unwrap_or(false);
+            if !is_not_found {
+                error!("Failed to check if bucket {} exists: {:?}", bucket_name, e);
+                return Err(CutoutStorageError::BucketListFailed);
+            }
+        }
     }
-    // we may have some concurrency issues here, so let's just try to create the bucket and ignore errors if it already exists
+
     match s3_client.create_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
             debug!("Created bucket: {}", bucket_name);
+            Ok(())
         }
         Err(e) => {
-            warn!(
-                "Bucket {} may already exist or failed to create: {:?}",
-                bucket_name, e
-            );
+            let already_exists = e
+                .as_service_error()
+                .map(|se| se.is_bucket_already_exists() || se.is_bucket_already_owned_by_you())
+                .unwrap_or(false);
+            if already_exists {
+                debug!("Bucket {} was created concurrently", bucket_name);
+                Ok(())
+            } else {
+                error!("Failed to create bucket {}: {:?}", bucket_name, e);
+                Err(CutoutStorageError::BucketCreateFailed)
+            }
         }
-    };
-
-    Ok(())
+    }
 }
 
 #[instrument(skip_all, err)]
@@ -460,12 +483,25 @@ impl S3CutoutStorage {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
+    pub async fn retrieve_cutouts(
+        &self,
+        candid: i64,
+        populate_cache: bool,
+    ) -> Result<AlertCutout, CutoutStorageError> {
         let raw = if let Some(cutout) = self.cache.get(candid).await {
             cutout
         } else {
-            retrieve_alert_cutouts(candid, &self.bucket_name, &self.key_prefix, &self.s3_client)
-                .await?
+            let cutout = retrieve_alert_cutouts(
+                candid,
+                &self.bucket_name,
+                &self.key_prefix,
+                &self.s3_client,
+            )
+            .await?;
+            if populate_cache {
+                self.cache.set(&cutout).await;
+            }
+            cutout
         };
         if self.compress_stamps {
             tokio::task::spawn_blocking(move || decompress_stamps(raw))
@@ -480,6 +516,7 @@ impl S3CutoutStorage {
     pub async fn retrieve_multiple_cutouts(
         &self,
         candids: &[i64],
+        populate_cache: bool,
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
         let cached = self.cache.mget(candids).await;
         let missing: Vec<i64> = candids
@@ -504,10 +541,13 @@ impl S3CutoutStorage {
                 .buffer_unordered(self.concurrency_limit)
                 .collect::<Vec<_>>()
                 .await;
+            let mut to_cache: Vec<AlertCutout> = Vec::new();
+            let mut fetch_error: Option<CutoutStorageError> = None;
             for (candid, res) in s3_results {
                 match res {
                     Ok(cutout) => {
-                        result.insert(candid, cutout);
+                        result.insert(candid, cutout.clone());
+                        to_cache.push(cutout);
                     }
                     Err(CutoutStorageError::CutoutsNotFound) => {
                         debug!("Cutout with candid {} not found in S3", candid);
@@ -517,8 +557,15 @@ impl S3CutoutStorage {
                             "Failed to retrieve cutout for candid {} from S3: {:?}",
                             candid, e
                         );
+                        fetch_error.get_or_insert(e);
                     }
                 }
+            }
+            if populate_cache {
+                self.cache.set_many(&to_cache).await;
+            }
+            if let Some(e) = fetch_error {
+                return Err(e);
             }
         }
 
@@ -575,7 +622,11 @@ impl MongoCutoutStorage {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
+    pub async fn retrieve_cutouts(
+        &self,
+        candid: i64,
+        _populate_cache: bool,
+    ) -> Result<AlertCutout, CutoutStorageError> {
         let filter = mongodb::bson::doc! { "_id": candid };
         match self.collection.find_one(filter).await {
             Ok(Some(cutout)) => Ok(cutout),
@@ -591,6 +642,7 @@ impl MongoCutoutStorage {
     pub async fn retrieve_multiple_cutouts(
         &self,
         candids: &[i64],
+        _populate_cache: bool,
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
         let filter = mongodb::bson::doc! { "_id": { "$in": candids } };
         let mut cursor = self
@@ -642,20 +694,25 @@ impl CutoutStorage {
         }
     }
 
-    pub async fn retrieve_cutouts(&self, candid: i64) -> Result<AlertCutout, CutoutStorageError> {
+    pub async fn retrieve_cutouts(
+        &self,
+        candid: i64,
+        populate_cache: bool,
+    ) -> Result<AlertCutout, CutoutStorageError> {
         match self {
-            CutoutStorage::S3(s) => s.retrieve_cutouts(candid).await,
-            CutoutStorage::Mongo(s) => s.retrieve_cutouts(candid).await,
+            CutoutStorage::S3(s) => s.retrieve_cutouts(candid, populate_cache).await,
+            CutoutStorage::Mongo(s) => s.retrieve_cutouts(candid, populate_cache).await,
         }
     }
 
     pub async fn retrieve_multiple_cutouts(
         &self,
         candids: &[i64],
+        populate_cache: bool,
     ) -> Result<HashMap<i64, AlertCutout>, CutoutStorageError> {
         match self {
-            CutoutStorage::S3(s) => s.retrieve_multiple_cutouts(candids).await,
-            CutoutStorage::Mongo(s) => s.retrieve_multiple_cutouts(candids).await,
+            CutoutStorage::S3(s) => s.retrieve_multiple_cutouts(candids, populate_cache).await,
+            CutoutStorage::Mongo(s) => s.retrieve_multiple_cutouts(candids, populate_cache).await,
         }
     }
 
