@@ -9,7 +9,7 @@
 # disk or volume:
 #   BOOM_OBJECT_STORAGE_VOLUME=/mnt/fast-disk/cutouts docker compose ...
 #
-# Set BOOM_CUTOUTS_CACHE_MAXMEMORY to control the cutout cache size (default 1024mb).
+# Set BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY to control the cutout cache size (default 1024mb).
 # When the limit is reached, keys with the shortest remaining TTL are evicted first
 # (volatile-ttl policy), so the cache degrades gracefully without filling unboundedly.
 #
@@ -88,7 +88,7 @@ services:
     command:
       - valkey-server
       - --maxmemory
-      - ${BOOM_CUTOUTS_CACHE_MAXMEMORY:-1024mb}
+      - ${BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY:-1024mb}
       - --maxmemory-policy
       - volatile-ttl
       - --save

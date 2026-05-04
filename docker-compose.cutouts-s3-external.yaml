@@ -28,7 +28,7 @@
 #       Label used internally to identify the credentials source.
 #       Defaults to "s3". Any non-empty string is valid.
 #
-#   BOOM_CUTOUTS_CACHE_MAXMEMORY
+#   BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
 #       Memory cap for the read-through cutout cache (default: 1024mb).
 #       When the limit is reached, keys closest to expiry are evicted first
 #       (volatile-ttl policy).
@@ -43,7 +43,7 @@ services:
     command:
       - valkey-server
       - --maxmemory
-      - ${BOOM_CUTOUTS_CACHE_MAXMEMORY:-1024mb}
+      - ${BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY:-1024mb}
       - --maxmemory-policy
       - volatile-ttl
       - --save

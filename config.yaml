@@ -89,7 +89,7 @@ cutouts_storage:
     host: valkey-cutouts  # or set via BOOM_CUTOUTS_STORAGE__CACHE__HOST
     port: 6379             # or set via BOOM_CUTOUTS_STORAGE__CACHE__PORT
     ttl_seconds: 30        # or set via BOOM_CUTOUTS_STORAGE__CACHE__TTL_SECONDS
-    max_memory: "1gb"      # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
+    max_memory: "1024mb"   # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
 workers:
   ztf:
     command_interval: 500

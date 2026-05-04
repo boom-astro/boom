@@ -138,7 +138,7 @@ workloads or when you want cutout storage decoupled from MongoDB entirely.
 
 This mode also spins up a **dedicated `valkey-cutouts` container** used as a
 read-through cache for cutouts. It is capped at a fixed memory budget
-(`BOOM_CUTOUTS_CACHE_MAXMEMORY`, default `1024mb`) and uses the `volatile-ttl`
+(`BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY`, default `1024mb`) and uses the `volatile-ttl`
 eviction policy: when full, keys closest to expiry (shortest remaining TTL) are
 evicted first, so the cache degrades gracefully without ever blocking writes.
 
@@ -174,7 +174,7 @@ In production:
 ```bash
 # Optionally pin data and cache sizes via env vars
 BOOM_OBJECT_STORAGE_VOLUME=/mnt/fast-disk/cutouts \
-BOOM_CUTOUTS_CACHE_MAXMEMORY=2gb \
+BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY=2gb \
   docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml up
 ```
 
@@ -208,7 +208,7 @@ Optional env vars:
 - `BOOM_CUTOUTS_STORAGE__ENDPOINT_URL` — custom endpoint for non-AWS providers
   (e.g. `https://s3.us-west-1.wasabisys.com`). Omit for AWS S3 — the SDK
   derives the endpoint from the region automatically.
-- `BOOM_CUTOUTS_CACHE_MAXMEMORY` — memory cap for the read-through cutout cache (default: `1024mb`)
+- `BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY` — memory cap for the read-through cutout cache (default: `1024mb`)
 
 ```bash
 make dev-s3-external
