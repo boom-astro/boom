@@ -1,6 +1,20 @@
 use futures::StreamExt;
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
+
+/// Standard progress bar used by long-running maintenance binaries
+/// (`reprocess_crossmatch`, `migrate_*`).
+pub fn make_progress_bar(total: u64, label: String) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} {bar:40} {pos}/{len} [{elapsed_precise} < {eta_precise}]",
+        )
+        .unwrap(),
+    );
+    pb.set_message(label);
+    pb
+}
 
 // let's make this more generic so we can take any file type, not just a NamedTempFile
 pub async fn download_to_file(

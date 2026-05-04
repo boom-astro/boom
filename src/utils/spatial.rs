@@ -57,7 +57,7 @@ impl Coordinates {
     }
 }
 
-fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
+pub fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
     let value = match doc.get(key) {
         Some(mongodb::bson::Bson::Double(v)) => *v,
         Some(mongodb::bson::Bson::Int32(v)) => *v as f64,
@@ -73,6 +73,30 @@ fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
         return None;
     }
     Some(value)
+}
+
+/// Effective match radius in arcsec for a `use_distance` catalog row at
+/// redshift `z`. For very nearby objects (z < 0.01) we use the fixed
+/// `distance_max_near`; otherwise the radius scales as
+/// `distance_max * 0.05 / z`.
+pub fn cm_radius_arcsec(z: f64, distance_max: f64, distance_max_near: f64) -> f64 {
+    if z < 0.01 {
+        distance_max_near
+    } else {
+        distance_max * (0.05 / z)
+    }
+}
+
+/// Projected distance in kpc from an angular separation (arcsec) at redshift
+/// `z`. Returns `-1.0` for very nearby objects (z <= 0.005), where the
+/// physical distance is meaningless and `-1.0` is used as a sort sentinel
+/// (sorted before positive values).
+pub fn distance_kpc_from_arcsec(distance_arcsec: f64, z: f64) -> f64 {
+    if z > 0.005 {
+        distance_arcsec * (z / 0.05)
+    } else {
+        -1.0
+    }
 }
 
 #[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
@@ -258,26 +282,13 @@ pub async fn xmatch(
                     }
                 };
 
-                let cm_radius_arcsec = if doc_z < 0.01 {
-                    distance_max_near // in arcsec
-                } else {
-                    distance_max * (0.05 / doc_z) // in arcsec
-                };
+                let cm_radius = cm_radius_arcsec(doc_z, distance_max, distance_max_near);
                 let distance_arcsec =
-                    great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0; // convert to arcsec
+                    great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0;
 
-                if distance_arcsec < cm_radius_arcsec {
-                    // calculate the distance between objs in kpc
-                    // let distance_kpc = angular_separation * (doc_z / 0.05);
-                    let distance_kpc = if doc_z > 0.005 {
-                        distance_arcsec * (doc_z / 0.05)
-                    } else {
-                        -1.0
-                    };
-
-                    // we make a mutable copy of the xmatch_doc
+                if distance_arcsec < cm_radius {
+                    let distance_kpc = distance_kpc_from_arcsec(distance_arcsec, doc_z);
                     let mut xmatch_doc = xmatch_doc.clone();
-                    // add the distance fields to the xmatch_doc
                     xmatch_doc.insert("distance_arcsec", distance_arcsec);
                     xmatch_doc.insert("distance_kpc", distance_kpc);
                     matches_filtered.push(xmatch_doc);
