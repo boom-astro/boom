@@ -1,4 +1,8 @@
-use crate::utils::{enums::Survey, o11y::logging::as_error};
+use crate::utils::{
+    cadence::{CadenceConfig, TagRule},
+    enums::Survey,
+    o11y::logging::as_error,
+};
 use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
@@ -578,6 +582,56 @@ fn default_gpu_device_ids() -> Vec<i32> {
     vec![0]
 }
 
+/// One row of `binning.<survey>.classifier_score_rules`. When the named
+/// classifier-score field on the survey's classifications doc crosses
+/// `threshold`, the binner appends `tags` to the source's tag set and OR's
+/// `promote` into the `score_promotion` bool fed to `evaluate_cadence`.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct ClassifierScoreRule {
+    /// Field name on the survey's classifications doc, e.g. `"btsbot"`,
+    /// `"acai_h"`. Must match a field on the survey's `*Classifications`
+    /// struct (see `src/enrichment/<survey>.rs`).
+    pub field: String,
+    /// Inclusive threshold. The rule fires when `score >= threshold`.
+    pub threshold: f64,
+    /// Tags appended to the source's tag set when the rule fires.
+    pub tags: Vec<String>,
+    /// If `true`, the firing rule also OR's into the `score_promotion`
+    /// argument of `evaluate_cadence` (i.e., this score crossing argues
+    /// for H-tier sub-day cadence).
+    #[serde(default)]
+    pub promote: bool,
+}
+
+/// Per-survey binning policy. Carried in `binning.<survey>` of
+/// `config.yaml`. Each survey block is fully self-contained — no global
+/// defaults or merge logic — so the effective policy for any survey can be
+/// read in one place.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct BinningConfig {
+    /// Days of raw photometry to retain on aux docs after binning. Raw
+    /// arrays (`prv_candidates`, `prv_nondetections`, `fp_hists`) get
+    /// $filter'd to `jd > now - retention_days` on every binner walk.
+    pub retention_days: f64,
+    /// Per-classifier-class score → tag mapping (see `ClassifierScoreRule`).
+    #[serde(default)]
+    pub classifier_score_rules: Vec<ClassifierScoreRule>,
+    /// `cross_matches` catalog name → synthetic tag emitted when the
+    /// catalog's match list is non-empty on a source. e.g.,
+    /// `milliquas_v6 → "agn"`. The named tags then resolve through
+    /// `tag_rules` like any other tag.
+    #[serde(default)]
+    pub catalog_tag_rules: HashMap<String, String>,
+    /// Cadence state-machine parameters (presets, dwell, outburst
+    /// detection, default H-tier cadence).
+    pub cadence: CadenceConfig,
+    /// tdtax / synthetic tag → policy resolution rules. Walked in order by
+    /// `resolve_tag_policy`; later rules override earlier ones field by
+    /// field, so order from least- to most-specific.
+    #[serde(default)]
+    pub tag_rules: Vec<TagRule>,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -593,6 +647,9 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    /// Per-survey binning policy. Read by the `lightcurve_binner` binary.
+    #[serde(default)]
+    pub binning: HashMap<Survey, BinningConfig>,
 }
 
 impl AppConfig {
@@ -751,5 +808,107 @@ mod tests {
         let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.device_ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn test_binning_config_round_trip_minimal() {
+        // Smallest legal block: retention_days + cadence. Other fields
+        // default to empty (Vec / HashMap).
+        let json = r#"{
+            "retention_days": 14.0,
+            "cadence": {
+                "presets": { "fast": 0.5, "medium": 12.0, "slow": 48.0 },
+                "dwell": { "h_to_n_days": 14.0, "n_to_w_days": 60.0, "w_to_m_days": 180.0 },
+                "outburst_sigma": 4.0,
+                "rolling_window_k": 10,
+                "active_window_days": 30.0,
+                "default_h_cadence_hours": 12.0
+            }
+        }"#;
+        let cfg: BinningConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.retention_days, 14.0);
+        assert!(cfg.classifier_score_rules.is_empty());
+        assert!(cfg.catalog_tag_rules.is_empty());
+        assert!(cfg.tag_rules.is_empty());
+        assert_eq!(cfg.cadence.outburst_sigma, 4.0);
+    }
+
+    #[test]
+    fn test_binning_config_round_trip_full_ztf_shape() {
+        // Sanity-check the full shape — what a real ZTF block looks like.
+        // Catches typos in the field names referenced by the binner.
+        let json = r#"{
+            "retention_days": 14.0,
+            "classifier_score_rules": [
+                { "field": "btsbot", "threshold": 0.5, "tags": ["explosive", "supernova"], "promote": true },
+                { "field": "acai_h", "threshold": 0.5, "tags": ["explosive", "hostless"], "promote": true },
+                { "field": "acai_n", "threshold": 0.5, "tags": ["nuclear"], "promote": false },
+                { "field": "acai_b", "threshold": 0.7, "tags": ["bogus"], "promote": false }
+            ],
+            "catalog_tag_rules": {
+                "milliquas_v6": "agn",
+                "kilonova_candidates": "kilonova-candidate"
+            },
+            "cadence": {
+                "presets": { "fast": 0.5, "medium": 12.0, "slow": 48.0 },
+                "dwell": { "h_to_n_days": 14.0, "n_to_w_days": 60.0, "w_to_m_days": 180.0 },
+                "outburst_sigma": 4.0,
+                "rolling_window_k": 10,
+                "active_window_days": 30.0,
+                "default_h_cadence_hours": 12.0
+            },
+            "tag_rules": [
+                { "tag": "explosive", "ladder": "transient", "h_cadence_hours": 12.0 },
+                { "tag": "agn", "ladder": "variable", "variable_sub": "aperiodic", "coarsest_allowed": "W" },
+                { "tag": "kilonova-candidate", "ladder": "transient", "h_cadence_hours": 0.5, "coarsest_allowed": "H", "finest_allowed": "H" },
+                { "tag": "bogus", "finest_allowed": "M" }
+            ]
+        }"#;
+        let cfg: BinningConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.classifier_score_rules.len(), 4);
+        assert_eq!(cfg.classifier_score_rules[0].field, "btsbot");
+        assert!(cfg.classifier_score_rules[0].promote);
+        assert!(!cfg.classifier_score_rules[2].promote); // acai_n
+        assert_eq!(cfg.catalog_tag_rules.get("milliquas_v6").unwrap(), "agn");
+        assert_eq!(cfg.tag_rules.len(), 4);
+        assert_eq!(cfg.tag_rules[0].tag, "explosive");
+    }
+
+    #[test]
+    fn test_binning_config_promote_defaults_false() {
+        // `promote` is `#[serde(default)]` → defaults to `false` when
+        // omitted. Verifies operators can leave it off for non-promoting
+        // rules without writing it explicitly.
+        let json = r#"{
+            "field": "acai_v",
+            "threshold": 0.5,
+            "tags": ["variable"]
+        }"#;
+        let rule: ClassifierScoreRule = serde_json::from_str(json).unwrap();
+        assert!(!rule.promote);
+        assert_eq!(rule.tags, vec!["variable".to_string()]);
+    }
+
+    #[test]
+    fn test_binning_per_survey_keyed_in_app_config() {
+        // The `binning` HashMap on AppConfig is keyed by Survey, matching
+        // the convention used by `crossmatch` and `workers`. Verify the
+        // serde rename / alias machinery accepts the lowercase form.
+        let json = r#"{
+            "ztf": {
+                "retention_days": 14.0,
+                "cadence": {
+                    "presets": { "fast": 0.5, "medium": 12.0, "slow": 48.0 },
+                    "dwell": { "h_to_n_days": 14.0, "n_to_w_days": 60.0, "w_to_m_days": 180.0 },
+                    "outburst_sigma": 4.0,
+                    "rolling_window_k": 10,
+                    "active_window_days": 30.0,
+                    "default_h_cadence_hours": 12.0
+                }
+            }
+        }"#;
+        let map: HashMap<Survey, BinningConfig> = serde_json::from_str(json).unwrap();
+        let ztf = map.get(&Survey::Ztf).expect("ztf binning block");
+        assert_eq!(ztf.retention_days, 14.0);
     }
 }
