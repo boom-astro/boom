@@ -37,7 +37,7 @@ RUN mkdir -p /app/src && \
     cargo build --release && rm -rf /app/src
 
 COPY ./src /app/src
-RUN cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_snr
+RUN cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS app
 
