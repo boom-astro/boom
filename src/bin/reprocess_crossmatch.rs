@@ -111,7 +111,7 @@ async fn run_objects_driven(
         let db = db.clone();
         let catalogs = catalogs.clone();
         workers.push(tokio::spawn(async move {
-            objects_worker(survey, db, catalogs, rx, batch_size, pb).await;
+            objects_worker(survey, db, catalogs, rx, batch_size, pb).await
         }));
     }
     drop(rx);
@@ -128,12 +128,23 @@ async fn run_objects_driven(
     }
     drop(tx);
 
+    let mut first_err: Option<mongodb::error::Error> = None;
     for h in workers {
-        if let Err(e) = h.await {
-            error!("worker join failed: {}", e);
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("worker failed: {}", e);
+                first_err.get_or_insert(e);
+            }
+            Err(e) => {
+                error!("worker join failed: {}", e);
+            }
         }
     }
     pb.finish();
+    if let Some(e) = first_err {
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -144,7 +155,7 @@ async fn objects_worker(
     rx: async_channel::Receiver<AuxIdAndCoords>,
     batch_size: usize,
     pb: ProgressBar,
-) {
+) -> Result<(), mongodb::error::Error> {
     let client = db.client().clone();
     let aux_collection: mongodb::Collection<AuxIdAndCoords> =
         db.collection(&format!("{}_alerts_aux", survey));
@@ -154,12 +165,13 @@ async fn objects_worker(
     while let Ok(item) = rx.recv().await {
         batch.push(item);
         if batch.len() >= batch_size {
-            flush_objects_batch(&db, &client, &aux_ns, &catalogs, &mut batch, &pb).await;
+            flush_objects_batch(&db, &client, &aux_ns, &catalogs, &mut batch, &pb).await?;
         }
     }
     if !batch.is_empty() {
-        flush_objects_batch(&db, &client, &aux_ns, &catalogs, &mut batch, &pb).await;
+        flush_objects_batch(&db, &client, &aux_ns, &catalogs, &mut batch, &pb).await?;
     }
+    Ok(())
 }
 
 async fn flush_objects_batch(
@@ -169,7 +181,7 @@ async fn flush_objects_batch(
     catalogs: &[CatalogXmatchConfig],
     batch: &mut Vec<AuxIdAndCoords>,
     pb: &ProgressBar,
-) {
+) -> Result<(), mongodb::error::Error> {
     let mut writes = Vec::with_capacity(batch.len());
     for obj in batch.drain(..) {
         let (ra, dec) = obj.coordinates.get_radec();
@@ -196,10 +208,9 @@ async fn flush_objects_batch(
         pb.inc(1);
     }
     if !writes.is_empty() {
-        if let Err(e) = client.bulk_write(writes).await {
-            error!("bulk_write failed: {}", e);
-        }
+        client.bulk_write(writes).await?;
     }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -281,7 +292,7 @@ async fn run_catalog_driven(
                 batch_size,
                 pb,
             )
-            .await;
+            .await
         }));
     }
     drop(rx);
@@ -297,12 +308,27 @@ async fn run_catalog_driven(
         }
     }
     drop(tx);
+    let mut first_err: Option<mongodb::error::Error> = None;
     for h in workers {
-        if let Err(e) = h.await {
-            error!("worker join failed: {}", e);
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("worker failed: {}", e);
+                first_err.get_or_insert(e);
+            }
+            Err(e) => {
+                error!("worker join failed: {}", e);
+            }
         }
     }
     pb.finish();
+    if let Some(e) = first_err {
+        // CRITICAL: phase 1 cleared temp on every existing record. If phase 2 partially failed,
+        // some records have empty temp; running phase 4 would overwrite their valid live
+        // cross_matches with that empty temp. Abort before phase 3 to preserve existing data.
+        // Phase 5-style cleanup of any orphan temp must still run on retry.
+        return Err(e);
+    }
 
     // Phase 3: sort + trim of accumulated matches per alerts_aux record.
     info!(
@@ -359,7 +385,7 @@ async fn catalog_worker(
     rx: async_channel::Receiver<Document>,
     batch_size: usize,
     pb: ProgressBar,
-) {
+) -> Result<(), mongodb::error::Error> {
     let client = db.client().clone();
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
@@ -383,12 +409,13 @@ async fn catalog_worker(
             warn!(error = %e, "catalog row processing failed, skipping");
         }
         if cat_count % (batch_size as u64) == 0 && !pending.is_empty() {
-            flush_pending(&client, &aux_ns, &temp_field, &mut pending).await;
+            flush_pending(&client, &aux_ns, &temp_field, &mut pending).await?;
         }
     }
     if !pending.is_empty() {
-        flush_pending(&client, &aux_ns, &temp_field, &mut pending).await;
+        flush_pending(&client, &aux_ns, &temp_field, &mut pending).await?;
     }
+    Ok(())
 }
 
 async fn process_cat_doc(
@@ -470,7 +497,7 @@ async fn flush_pending(
     aux_ns: &Namespace,
     field: &str,
     pending: &mut HashMap<String, Vec<Document>>,
-) {
+) -> Result<(), mongodb::error::Error> {
     let drained: Vec<(String, Vec<Document>)> = pending.drain().collect();
     let models: Vec<WriteModel> = drained
         .into_iter()
@@ -485,10 +512,9 @@ async fn flush_pending(
         })
         .collect();
     if !models.is_empty() {
-        if let Err(e) = client.bulk_write(models).await {
-            error!("bulk_write failed: {}", e);
-        }
+        client.bulk_write(models).await?;
     }
+    Ok(())
 }
 
 /// `coordinates.radec_geojson.coordinates` is `[ra - 180, dec]`.
