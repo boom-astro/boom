@@ -205,7 +205,7 @@ async fn flush_objects_batch(
 // -----------------------------------------------------------------------------
 // catalog-driven: stream catalog rows, fan out to N workers that geo-lookup
 // matching alerts_aux records and accumulate $push updates. Uses a temp field
-// (`cross_matches_temp.<catalog>`) as a buffer so the `cross_matches.<catalog>` field is
+// (`cross_matches.<catalog>_temp`) as a buffer so the `cross_matches.<catalog>` field is
 // never empty mid-run.
 //
 // Concurrency with the live ingest pipeline: every phase is gated on
@@ -226,14 +226,14 @@ async fn run_catalog_driven(
         db.collection(&format!("{}_alerts_aux", survey));
     let cat_collection: mongodb::Collection<Document> = db.collection(&catalog_config.catalog);
     let live_field = format!("cross_matches.{}", catalog_config.catalog);
-    let temp_field = format!("cross_matches_temp.{}", catalog_config.catalog);
+    let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let run_start_jd = Time::now().to_jd();
     let existing_records = doc! { "created_at": { "$lt": run_start_jd } };
 
     // Phase 1: clear temp field on every alerts_aux record that existed at run start
     // so we start from a known empty state. Records inserted later are skipped.
     info!(
-        "[catalog→{}] phase 1/5: clearing temp field",
+        "[catalog→{}] phase 1/5: cleaning temp field",
         catalog_config.catalog
     );
     let empty: Vec<Document> = Vec::new();
@@ -627,7 +627,7 @@ async fn main() {
     }
 
     info!(
-        "starting reprocess: survey={} processes={} batch_size={} objects_catalogs={:?} catalog_catalogs={:?}",
+        "starting reprocess: survey={} processes={} batch_size={} objects_driven={:?} catalogs_driven={:?}",
         args.survey,
         args.processes,
         args.batch_size,
