@@ -5,6 +5,7 @@ use boom::{
     utils::{
         data::make_progress_bar,
         enums::Survey,
+        parser::parse_positive_usize,
         spatial::{
             cm_radius_arcsec, distance_kpc_from_arcsec, get_f64_from_doc, xmatch, Coordinates,
         },
@@ -45,11 +46,11 @@ struct Cli {
     #[arg(long, value_name = "FILE", default_value = "config.yaml")]
     config: String,
 
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
     /// Number of parallel worker tasks. Each worker holds its own DB connection.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 }
 
@@ -99,7 +100,6 @@ async fn run_objects_driven(
         .join(",");
     let pb = make_progress_bar(estimated, format!("objects→{}", label));
 
-    let processes = processes.max(1);
     let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
     let (tx, rx) = async_channel::bounded::<AuxIdAndCoords>(queue_capacity);
 
@@ -259,7 +259,6 @@ async fn run_catalog_driven(
 
     let cat_estimated = cat_collection.estimated_document_count().await.unwrap_or(0);
     let pb = make_progress_bar(cat_estimated, format!("catalog→{}", catalog_config.catalog));
-    let processes = processes.max(1);
     let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
     let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::data::make_progress_bar;
 use boom::utils::lightcurves::ZTF_ZP;
+use boom::utils::parser::parse_positive_usize;
 use clap::Parser;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
@@ -30,10 +31,10 @@ struct Cli {
     config: Option<String>,
 
     /// Number of document IDs to collect per update_many batch
-    #[arg(long, default_value = "5000")]
+    #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
     /// Whether or not validation should run after migration. Defaults to False (caution, it's very slow!)
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value_t = false)]
     validate: bool,
 }
 
