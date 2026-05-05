@@ -7,6 +7,7 @@ use boom::{
             logging::{build_subscriber, log_error, WARN},
             metrics::init_metrics,
         },
+        parser::parse_positive_usize,
     },
 };
 
@@ -36,7 +37,7 @@ struct Cli {
     config: String,
 
     /// Number of processes to use to read the Kafka stream in parallel
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
     /// Clear the in-memory (Valkey) queue of alerts already consumed from Kafka
@@ -45,7 +46,7 @@ struct Cli {
 
     /// Set a maximum number of alerts to hold in memory (Valkey), default is
     /// 15000
-    #[arg(long, value_name = "MAX", default_value_t = 15000)]
+    #[arg(long, value_name = "MAX", default_value_t = 15000, value_parser = parse_positive_usize)]
     max_in_queue: usize,
 
     /// Simulated mode (for testing purposes, LSST only)
