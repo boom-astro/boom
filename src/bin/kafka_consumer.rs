@@ -46,7 +46,7 @@ struct Cli {
 
     /// Set a maximum number of alerts to hold in memory (Valkey), default is
     /// 15000
-    #[arg(long, value_name = "MAX", default_value_t = 15000, value_parser = parse_positive_usize)]
+    #[arg(long, value_name = "MAX", default_value_t = 15000)]
     max_in_queue: usize,
 
     /// Simulated mode (for testing purposes, LSST only)
