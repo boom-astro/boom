@@ -198,8 +198,8 @@ async fn warn_if_missing_crossmatches(survey: &Survey, db: &mongodb::Database, c
              This may indicate that newly added catalogs have not been reprocessed for existing records. \
              The scheduler only crossmatches new alerts_aux, so existing objects \
              will not be updated with new catalogs. To populate the detected missing crossmatches \
-             for existing records, run `cargo run --bin reprocess_crossmatch -- \
-             --survey {} --catalogs {}`.",
+             for existing records, run `reprocess_crossmatch --survey {} --catalogs {}` \
+             with the appropriate processes and batch_size.",
             missing.join(", "),
             object_id,
             survey.to_string().to_lowercase(),
