@@ -33,7 +33,7 @@ BOOM runs on macOS and Linux. You'll need:
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
+- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [ONNX runtime setup](#onnx-runtime-setup) section below for details.
 
 **Note:** On Linux, BOOM will fail to start with a clear error if `ORT_DYLIB_PATH` is not set. This is a hard requirement due to ONNX Runtime's dynamic loading behavior. The process will not run without it.
 
@@ -57,7 +57,7 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
 
-- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference-linux) subsection below for more details.
+- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference) subsection below for more details.
 
 ## Setup
 
@@ -88,7 +88,7 @@ code.
 
 ### Linux only
 
-#### ONNX runtime setup {#linux-onnx-runtime-setup}
+#### ONNX runtime setup
 
 On Linux, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use GPU inference or not. You must set this variable before running any BOOM binary natively.
 
@@ -111,7 +111,7 @@ ls .venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.*
 
 You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
 
-#### GPU inference {#gpu-inference-linux}
+#### GPU inference
 
 For GPU inference on Linux you need, in addition to the above:
 
