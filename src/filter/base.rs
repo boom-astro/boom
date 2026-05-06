@@ -60,6 +60,9 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
 
+// Valid ZTF programids: 1 = public, 2 = partnership, 3 = Caltech.
+pub const VALID_ZTF_PROGRAMIDS: [i32; 3] = [1, 2, 3];
+
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
     #[error("value access error from bson")]
@@ -1368,7 +1371,7 @@ mod tests {
         let filter_name = format!("test_filter_{}", &filter_id[..8]);
         // first, insert a filter
         let mut permissions = HashMap::new();
-        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
+        permissions.insert(Survey::Ztf, VALID_ZTF_PROGRAMIDS.to_vec());
         let filter = Filter {
             id: filter_id.clone(),
             name: filter_name.clone(),
@@ -1398,7 +1401,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_active_filter_pipeline() {
         let mut permissions = HashMap::new();
-        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
+        permissions.insert(Survey::Ztf, VALID_ZTF_PROGRAMIDS.to_vec());
         let mut filter = Filter {
             id: "test_filter".to_string(),
             name: "test_filter".to_string(),
