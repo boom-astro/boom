@@ -39,7 +39,8 @@ pub const LSST_ZTF_XMATCH_RADIUS: f64 =
 pub const LSST_DECAM_XMATCH_RADIUS: f64 =
     (LSST_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
-pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
+pub const LSST_SCHEMA_REGISTRY_URL: &str =
+    "https://rubin-alert-schemas.slac.stanford.edu/schema-registry";
 pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
     "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema";
 

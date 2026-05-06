@@ -58,7 +58,7 @@ ARG SCALA_VERSION=2.13
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates bash libsasl2-2 default-jre-headless && \
+    ca-certificates curl bash libsasl2-2 default-jre-headless && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
