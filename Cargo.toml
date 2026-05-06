@@ -19,7 +19,6 @@ clap = { version = "4", features = ["derive", "env"] }
 config = "0.15.18"
 constcat = "0.6.1"
 dotenvy = "0.15.7"
-env_logger = "0.11.8"
 flare = "0.2.0"
 futures = "0.3.31"
 hifitime = "4.2.3"
@@ -31,8 +30,8 @@ moc = "0.19.1"
 mongodb = "3.3.0"
 ndarray = "0.17.2"
 opentelemetry = "0.31.0"
-opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics"] }
-opentelemetry_sdk = "0.31.0"
+opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics", "trace"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 rand = "0.10.1"
 rdkafka = { version = "0.39.0", features = ["gssapi", "ssl", "tracing", "sasl", "zstd"] }
 redis = { version = "0.32.7", features = ["tokio-comp"] }
@@ -47,6 +46,7 @@ thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "signal"] }
 tracing = "0.1.41"
 tracing-flame = "0.2.0"
+tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "registry"]}
 utoipa = { version = "5.4.0", features = ["actix_extras"] }
 utoipa-scalar = { version = "0.3.0", features = ["actix-web"] }

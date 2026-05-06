@@ -6,8 +6,9 @@ use boom::{
         db::initialize_survey_indexes,
         enums::Survey,
         o11y::{
-            logging::{build_subscriber, log_error, WARN},
+            logging::{build_subscriber_with_otel, log_error, WARN},
             metrics::init_metrics,
+            tracing::init_tracing,
         },
         worker::WorkerType,
     },
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
@@ -163,7 +165,7 @@ struct Cli {
 }
 
 #[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli, meter_provider: SdkMeterProvider) {
+async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTracerProvider) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -303,6 +305,9 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     if let Err(error) = meter_provider.shutdown() {
         log_error!(WARN, error, "failed to shut down the meter provider");
     }
+    if let Err(error) = tracer_provider.shutdown() {
+        log_error!(WARN, error, "failed to shut down the tracer provider");
+    }
 }
 
 #[tokio::main]
@@ -312,10 +317,18 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
+    let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
+    let tracer_provider = init_tracing(
+        String::from("scheduler"),
+        instance_id,
+        args.deployment_env.clone(),
+    )
+    .expect("failed to initialize tracing");
+
+    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), "scheduler")
+        .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
-    let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
     let meter_provider = init_metrics(
         String::from("scheduler"),
         instance_id,
@@ -323,7 +336,7 @@ async fn main() {
     )
     .expect("failed to initialize metrics");
 
-    run(args, meter_provider).await;
+    run(args, meter_provider, tracer_provider).await;
 }
 
 #[cfg(all(test, target_os = "linux"))]

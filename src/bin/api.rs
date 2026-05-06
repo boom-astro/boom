@@ -7,7 +7,9 @@ use boom::api::email::EmailService;
 use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::o11y::metrics::init_metrics;
+use boom::utils::o11y::{
+    logging::build_subscriber_with_otel, metrics::init_metrics, tracing::init_tracing,
+};
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use uuid::Uuid;
@@ -21,14 +23,21 @@ async fn main() -> std::io::Result<()> {
     let auth = get_auth(&config, &database).await.unwrap();
     let port = config.api.port;
     let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or_else(|_| "dev".to_string());
-    let _meter_provider = init_metrics(String::from("api"), Uuid::new_v4(), deployment_env)
+    let instance_id = Uuid::new_v4();
+    let _tracer_provider = init_tracing(String::from("api"), instance_id, deployment_env.clone())
+        .expect("failed to initialize tracing");
+    let _meter_provider = init_metrics(String::from("api"), instance_id, deployment_env)
         .expect("failed to initialize metrics");
+
+    // Install a tracing subscriber that fans out to stdout and the OTLP
+    // pipeline (Tempo). actix's Logger middleware emits via the `log` crate;
+    // tracing-subscriber's default LogTracer captures those into tracing.
+    let (subscriber, _guard) = build_subscriber_with_otel(Some(&_tracer_provider), "api")
+        .expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
     // Initialize email service
     let email_service = EmailService::new();
-
-    // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {

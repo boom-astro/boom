@@ -1,9 +1,12 @@
 //! Common logging utilities.
 use std::{fs::File, io::BufWriter, iter::successors};
 
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::Subscriber;
 use tracing_flame::{FlameLayer, FlushGuard};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+
+use crate::utils::o11y::tracing::otel_layer;
 
 /// Iterate over the `Display` representations of the sources of the given error
 /// by recursively calling `std::error::Error::source()`.
@@ -243,6 +246,22 @@ pub fn build_subscriber() -> Result<
     ),
     BuildSubscriberError,
 > {
+    build_subscriber_with_otel(None, "boom")
+}
+
+/// Like `build_subscriber`, but if `tracer_provider` is `Some`, also adds a
+/// `tracing-opentelemetry` layer that forwards `tracing` spans to the OTLP
+/// pipeline. `service_name` is used as the tracer name for the OTel layer.
+pub fn build_subscriber_with_otel(
+    tracer_provider: Option<&SdkTracerProvider>,
+    service_name: &str,
+) -> Result<
+    (
+        Box<dyn Subscriber + Send + Sync>,
+        Option<FlushGuard<BufWriter<File>>>,
+    ),
+    BuildSubscriberError,
+> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_file(true)
@@ -252,13 +271,22 @@ pub fn build_subscriber() -> Result<
     let env_filter =
         EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info,ort=error"))?;
 
-    let subscriber = tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter));
-
-    match std::env::var("BOOM_FLAME_FILE") {
+    // Compose optional layers (flame + OTel) by type-erasing each into a
+    // boxed dyn Layer so we can attach them in a single shared layered chain.
+    let (flame_layer, guard) = match std::env::var("BOOM_FLAME_FILE") {
         Ok(path) => {
-            let (flame_layer, guard) = FlameLayer::with_file(path)?;
-            Ok((Box::new(subscriber.with(flame_layer)), Some(guard)))
+            let (layer, guard) = FlameLayer::with_file(path)?;
+            (Some(layer.boxed()), Some(guard))
         }
-        Err(_) => Ok((Box::new(subscriber), None)),
-    }
+        Err(_) => (None, None),
+    };
+
+    let otel = tracer_provider.map(|provider| otel_layer(provider, service_name).boxed());
+
+    let subscriber = tracing_subscriber::registry()
+        .with(fmt_layer.with_filter(env_filter))
+        .with(flame_layer)
+        .with(otel);
+
+    Ok((Box::new(subscriber), guard))
 }

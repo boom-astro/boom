@@ -1,0 +1,36 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Tail all Docker container JSON log files. Uses the Docker SD which talks to
+  # the read-only docker-socket-proxy (no direct daemon access required).
+  - job_name: docker
+    docker_sd_configs:
+      - host: tcp://docker-socket-proxy:2375
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: "stream"
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: "service"
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        target_label: "project"
+      - target_label: "host"
+        replacement: "boom"
+    pipeline_stages:
+      # Detect OTel log records that include trace_id so Grafana can link logs
+      # back to traces in Tempo via the derived field on the Loki datasource.
+      - regex:
+          expression: '(?P<trace_id>[a-f0-9]{32})'
+      - labels:
+          trace_id:

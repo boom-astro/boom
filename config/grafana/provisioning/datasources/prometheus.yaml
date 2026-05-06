@@ -8,3 +8,42 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Link from a log line containing a 32-char hex trace_id directly to
+      # the corresponding trace in Tempo.
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"([a-f0-9]{32})"'
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+        - name: TraceIDPlain
+          matcherRegex: 'trace_id=([a-f0-9]{32})'
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        filterByTraceID: true
+        tags:
+          - key: service.name
+            value: service
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true

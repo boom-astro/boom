@@ -1,0 +1,244 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: infrastructure
+    folder: boom
+    interval: 1m
+    rules:
+      - uid: disk-fills-in-24h
+        title: Disk will fill within 24 hours
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 21600  # 6h linear regression window
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 24*60*60) < 0
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.instance }} {{ $labels.mountpoint }} is projected to fill within 24h'
+          description: 'predict_linear over 6h shows the filesystem hitting 0 bytes within the next 24h.'
+
+      - uid: container-restart-flapping
+        title: Container is flapping (restarted >3 times in 1h)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                sum by (name) (changes(container_start_time_seconds{name!=""}[1h])) > 3
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Container {{ $labels.name }} restarted >3 times in the last hour'
+          description: 'The container start_time has rolled over more than 3 times in the past hour, indicating crash-loop behavior.'
+
+      - uid: cpu-throttling
+        title: Container is being CPU-throttled
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                sum by (name) (rate(container_cpu_cfs_throttled_seconds_total{name!=""}[5m]))
+                  / clamp_min(sum by (name) (rate(container_cpu_cfs_periods_total{name!=""}[5m])), 1)
+                  > 0.25
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.name }} CPU-throttled >25% of CFS periods'
+          description: 'The container is being throttled against its CPU quota; consider raising the cpu limit or rebalancing the workload.'
+
+      - uid: otel-collector-dropped-metrics
+        title: OTel Collector is dropping metric points
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) > 0
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: OTel Collector exporter is failing to send metric points
+          description: 'Check otel-collector logs and the downstream Prometheus OTLP receiver for errors.'
+
+  - orgId: 1
+    name: pipeline
+    folder: boom
+    interval: 1m
+    rules:
+      - uid: valkey-queue-backed-up
+        title: Valkey alert queue is growing unboundedly
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                max by (key) (redis_key_size{key=~".*_queue.*"}) > 50000
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Valkey queue {{ $labels.key }} > 50k entries'
+          description: 'A worker pool is not draining its upstream queue. Check scheduler logs/traces and worker health.'

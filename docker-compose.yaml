@@ -4,6 +4,8 @@ volumes:
   kafka_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  tempo_data:
 
 networks:
   boom:
@@ -376,6 +378,28 @@ services:
     cap_drop:
       - ALL
     restart: always
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    hostname: node-exporter
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/.+)($$|/)
+      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro,rslave
+    networks:
+      - boom
+    pid: host
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: always
   docker-metadata-exporter:
     image: python:3.12-alpine
     hostname: docker-metadata-exporter
@@ -398,10 +422,66 @@ services:
     cap_drop:
       - ALL
     restart: always
+  loki:
+    image: grafana/loki:3.5.5
+    hostname: loki
+    command:
+      - -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./config/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    expose:
+      - "3100"
+    networks:
+      - boom
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready | grep -q 'ready' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: always
+  promtail:
+    image: grafana/promtail:3.5.5
+    hostname: promtail
+    command:
+      - -config.file=/etc/promtail/promtail-config.yaml
+    volumes:
+      - ./config/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_started
+    networks:
+      - boom
+    restart: always
+  tempo:
+    image: grafana/tempo:2.8.4
+    hostname: tempo
+    command:
+      - -config.file=/etc/tempo/tempo-config.yaml
+    volumes:
+      - ./config/tempo/tempo-config.yaml:/etc/tempo/tempo-config.yaml:ro
+      - tempo_data:/var/tempo
+    expose:
+      - "3200"  # Tempo HTTP API (Grafana datasource)
+      - "4317"  # OTLP gRPC (from otel-collector)
+    networks:
+      - boom
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready | grep -q 'ready' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: always
   prometheus:
     image: prom/prometheus:latest
     command:
       - --web.enable-otlp-receiver # [^2]
+      - --web.enable-remote-write-receiver  # Tempo's metrics_generator pushes RED metrics here
+      - --enable-feature=exemplar-storage
       - --config.file=/etc/prometheus/prometheus.yaml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
@@ -444,6 +524,9 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: false
       # Dashboards are read-only by default in production; set to true in docker-compose.override.yaml for dev
       GRAFANA_DASHBOARD_EDITABLE: false
+      # Referenced as $SLACK_WEBHOOK_URL in provisioning/alerting/contact-points.yaml.
+      # Leave empty to skip Slack notifications (rules still fire and are visible in Grafana).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     volumes:
       - grafana_data:/var/lib/grafana
       # Keep provisioning read-only in the container; the entrypoint script
