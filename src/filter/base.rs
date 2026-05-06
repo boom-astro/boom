@@ -1033,12 +1033,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
             total_sent, total_enqueued, &output_topic
         );
 
-        if total_sent > 0 {
+        if total_enqueued > 0 {
             record_kafka_alert_published(
                 "filter_worker",
                 &survey,
                 &output_topic,
-                total_sent as u64,
+                total_enqueued as u64,
             );
         }
 

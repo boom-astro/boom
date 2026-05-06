@@ -1,6 +1,6 @@
 .PHONY: dev
 dev:
-	docker compose --profile dev up
+	docker compose --profile dev up --build
 
 .PHONY: delete-produce-ztf
 delete-produce-ztf: # Delete Kafka topic, data, and re-produce ZTF traffic for testing

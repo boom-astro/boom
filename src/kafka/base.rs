@@ -393,6 +393,14 @@ pub enum ConsumerError {
     ConfigError(#[from] config::ConfigError),
 }
 
+fn survey_label(survey: &crate::utils::enums::Survey) -> &'static str {
+    match survey {
+        crate::utils::enums::Survey::Ztf => "ZTF",
+        crate::utils::enums::Survey::Lsst => "LSST",
+        crate::utils::enums::Survey::Decam => "DECAM",
+    }
+}
+
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
     fn topic_names(&self, timestamp: i64) -> Vec<String>;
@@ -427,34 +435,29 @@ pub trait AlertConsumer: Sized {
         config_path: &str,
     ) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
+        let survey = self.survey();
 
         let topics = topics.unwrap_or_else(|| self.topic_names(timestamp));
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
-            None => config
-                .kafka
-                .consumer
-                .get(&self.survey())
-                .cloned()
-                .ok_or_else(|| {
-                    ConsumerError::from(BoomConfigError::MissingKeyError(format!(
-                        "kafka.consumer.{}",
-                        self.survey().to_string().to_lowercase()
-                    )))
-                })?,
+            None => config.kafka.consumer.get(&survey).cloned().ok_or_else(|| {
+                ConsumerError::from(BoomConfigError::MissingKeyError(format!(
+                    "kafka.consumer.{}",
+                    survey.to_string().to_lowercase()
+                )))
+            })?,
         };
 
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
 
-        let survey = self.survey().to_string();
+        let survey = survey_label(&survey);
         let mut handles = vec![];
         for i in 0..n_threads {
             let topics = topics.clone();
             let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
-            let survey = survey.clone();
             let handle = tokio::spawn(async move {
                 let result = consumer(
                     &i.to_string(),
@@ -465,7 +468,7 @@ pub trait AlertConsumer: Sized {
                     &config,
                     &kafka_config,
                     exit_on_eof,
-                    &survey,
+                    survey,
                 )
                 .await;
                 if let Err(error) = result {
@@ -552,7 +555,7 @@ pub async fn consumer(
     config: &AppConfig,
     survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
-    survey: &str,
+    survey: &'static str,
 ) -> Result<(), ConsumerError> {
     let server = survey_consumer_config.server.clone();
     let group_id = survey_consumer_config.group_id.clone();
@@ -669,7 +672,7 @@ pub async fn consumer(
         KeyValue::new("messaging.operation.name", "poll"),
         KeyValue::new("messaging.operation.type", "receive"),
         KeyValue::new("messaging.client.id", id.to_string()),
-        KeyValue::new("survey", survey.to_string()),
+        KeyValue::new("survey", survey),
     ];
     let ok_attrs: Vec<KeyValue> = consumer_attrs
         .iter()
