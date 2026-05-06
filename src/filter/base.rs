@@ -721,22 +721,22 @@ pub async fn build_loaded_filter(
         return Err(FilterError::InvalidFilterPermissions);
     }
 
-    let pipeline = get_active_filter_pipeline(&filter)?;
-    let mut pipeline =
-        build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
+    let mut pipeline = get_active_filter_pipeline(&filter)?;
 
-    // If the filter is bound to a watchlist, prepend a $match stage that requires
-    // a crossmatch against that catalog.
+    // If the filter is bound to a watchlist, inject a $match stage in the pipeline
+    // to only keep alerts that have a match in the corresponding watchlist catalog.
     if let Some(watchlist) = filter.watchlist.as_deref() {
         pipeline.insert(
             0,
-            doc! {
+            serde_json::json!({
                 "$match": {
                     format!("cross_matches.{}.0", watchlist): { "$exists": true }
                 }
-            },
+            }),
         );
     }
+
+    let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
     let output_topic = filter
         .watchlist
