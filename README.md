@@ -144,35 +144,31 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
 
 ### Start services for local development
 
-Bring up the local dev stack with:
+1. Install lfs and pull the large files:
+    ```bash
+    git lfs install
+    git lfs pull
+    ```
+2. Bring up the local dev stack:
 
-```bash
-make dev
-```
+    - With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` file:
+      ```bash
+      make dev
+      ```
+      This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
+      the supporting Docker services they need.
+      This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
+      *To check if the containers are running and healthy, run `docker ps`.*
 
-This starts `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
-the supporting Docker services they need.
+      **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
-## Running BOOM
+3. Produce alerts for testing:
 
-### Local dev pipeline (recommended)
+    ```bash
+    make delete-produce-ztf
+    ```
 
-For local development, use:
-
-```bash
-make dev
-```
-
-This brings up the hot-reloading API, ZTF consumer, and ZTF scheduler.
-
-To produce alerts for testing, run:
-
-```bash
-make delete-produce-ztf
-```
-
-If you change the producer date or program, make sure the consumer is reading
-the same topic date/program combination.
+    If you change the producer date or program, make sure the consumer is reading the same topic date/program combination.
 
 ### Alert Production (not required for production use)
 
@@ -234,6 +230,24 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
+## Running BOOM in production
+
+### Using Docker
+To run the consumer and the scheduler with Docker, you can open a shell in the `boom` container with:
+```bash
+docker exec -it -w /app boom /bin/bash
+```
+Then you can run the binaries with:
+```bash
+./kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
+./scheduler <SURVEY> [CONFIG_PATH]
+```
+Or you can run them directly with:
+```bash
+docker exec -it -w /app boom ./kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
+docker exec -it -w /app boom ./scheduler <SURVEY> [CONFIG_PATH]
+```
+
 The scheduler prints a variety of messages to your terminal, e.g.:
 
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -279,6 +293,34 @@ As a more complete example, the following sets the logging level to DEBUG, with 
 
 ```bash
 RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+```
+
+## Running Benchmark
+
+This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
+This benchmark uses Docker to build the image and run the benchmark.
+The step to run the benchmark are as follows:
+
+### Build Image
+For Docker (docker Image):
+```bash
+  docker buildx create --use
+  docker buildx inspect --bootstrap
+  docker buildx bake -f tests/throughput/compose.yaml --load
+```
+
+### Download Data
+```bash
+  mkdir -p ./data/alerts
+  mkdir -p ./tests/data/alerts/ztf/public/20250311
+  wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+  gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+```
+
+### Start Benchmark
+Using Docker:
+```bash
+  uv run tests/throughput/run.py
 ```
 
 ## Contributing
