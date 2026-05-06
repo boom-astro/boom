@@ -2,15 +2,21 @@ server:
   http_listen_port: 9080
   grpc_listen_port: 0
 
+# Persisted via the `promtail_positions` named volume so restarts don't
+# re-ship logs. Without this, the file lives in the container's writable
+# layer and is wiped whenever the container is recreated.
 positions:
-  filename: /tmp/positions.yaml
+  filename: /positions/positions.yaml
 
 clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  # Tail all Docker container JSON log files. Uses the Docker SD which talks to
-  # the read-only docker-socket-proxy (no direct daemon access required).
+  # Tail all Docker container logs. Uses Docker SD against the read-only
+  # docker-socket-proxy (no direct daemon access required). We deliberately
+  # do NOT extract trace_id into a Loki label — trace_id is high cardinality
+  # and would explode the index. Instead it stays in the log line so the
+  # Loki datasource's derived field can match it and link to Tempo.
   - job_name: docker
     docker_sd_configs:
       - host: tcp://docker-socket-proxy:2375
@@ -27,10 +33,3 @@ scrape_configs:
         target_label: "project"
       - target_label: "host"
         replacement: "boom"
-    pipeline_stages:
-      # Detect OTel log records that include trace_id so Grafana can link logs
-      # back to traces in Tempo via the derived field on the Loki datasource.
-      - regex:
-          expression: '(?P<trace_id>[a-f0-9]{32})'
-      - labels:
-          trace_id:

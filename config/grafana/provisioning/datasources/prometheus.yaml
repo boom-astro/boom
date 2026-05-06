@@ -16,14 +16,10 @@ datasources:
     url: http://loki:3100
     editable: false
     jsonData:
-      # Link from a log line containing a 32-char hex trace_id directly to
-      # the corresponding trace in Tempo.
+      # Link from a log line containing `trace_id=<32-hex>` (emitted by the
+      # boom `OtelTraceFormatter`) directly to the corresponding trace in Tempo.
       derivedFields:
         - name: TraceID
-          matcherRegex: '"trace_id":"([a-f0-9]{32})"'
-          url: '$${__value.raw}'
-          datasourceUid: tempo
-        - name: TraceIDPlain
           matcherRegex: 'trace_id=([a-f0-9]{32})'
           url: '$${__value.raw}'
           datasourceUid: tempo

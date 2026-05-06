@@ -7,7 +7,7 @@ contactPoints:
       - uid: slack-default
         type: slack
         settings:
-          url: $SLACK_WEBHOOK_URL
+          url: ${SLACK_WEBHOOK_URL}
           title: '{{ template "slack.title" . }}'
           text: '{{ template "slack.message" . }}'
         disableResolveMessage: false

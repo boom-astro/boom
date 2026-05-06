@@ -23,11 +23,13 @@ Container/service logs are shipped separately:
 - **Loki** stores them with 7d retention.
 
 **Grafana** is the single visualization layer for all three signals
-(Prometheus, Loki, Tempo). The Loki datasource is configured with a derived
-field that detects `trace_id=<32-hex>` in log lines and links the user
-straight to the matching trace in Tempo. The Tempo datasource is configured
-with `tracesToLogs` so jumping from a span back to the surrounding logs is
-one click.
+(Prometheus, Loki, Tempo). When a boom binary emits a log event inside a
+traced span, the custom `OtelTraceFormatter` prepends the line with
+`trace_id=<32-hex> span_id=<16-hex>`. The Loki datasource's derived field
+matches that token and turns it into a link straight to the trace in Tempo.
+The Tempo datasource is configured with `tracesToLogsV2` keyed on the
+`service.name` resource attribute (matched against the Promtail `service`
+label) so jumping from a span back to the surrounding logs is one click.
 
 cAdvisor + `docker-metadata-exporter` together resolve cAdvisor's container
 IDs to readable service names. Both run with a reduced security surface

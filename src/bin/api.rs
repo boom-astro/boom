@@ -30,11 +30,13 @@ async fn main() -> std::io::Result<()> {
         .expect("failed to initialize metrics");
 
     // Install a tracing subscriber that fans out to stdout and the OTLP
-    // pipeline (Tempo). actix's Logger middleware emits via the `log` crate;
-    // tracing-subscriber's default LogTracer captures those into tracing.
+    // pipeline (Tempo). actix's `Logger` middleware emits access logs via the
+    // `log` crate, so install `LogTracer` to forward them into tracing —
+    // tracing-subscriber does NOT do this automatically.
     let (subscriber, _guard) = build_subscriber_with_otel(Some(&_tracer_provider), "api")
         .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+    tracing_log::LogTracer::init().expect("failed to install LogTracer");
 
     // Initialize email service
     let email_service = EmailService::new();

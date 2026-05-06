@@ -179,23 +179,22 @@ async fn main() {
     let args = Cli::parse();
 
     let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
+    // Match the Compose service name (consumer-ztf, consumer-lsst, ...) so
+    // Grafana can correlate traces, logs, and metrics on a single label.
+    let service_name = format!("consumer-{}", args.survey.to_string().to_lowercase());
     let tracer_provider = init_tracing(
-        String::from("consumer"),
+        service_name.clone(),
         instance_id,
         args.deployment_env.clone(),
     )
     .expect("failed to initialize tracing");
 
-    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), "consumer")
+    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), &service_name)
         .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
-    let meter_provider = init_metrics(
-        String::from("consumer"),
-        instance_id,
-        args.deployment_env.clone(),
-    )
-    .expect("failed to initialize metrics");
+    let meter_provider = init_metrics(service_name, instance_id, args.deployment_env.clone())
+        .expect("failed to initialize metrics");
 
     run(args, meter_provider, tracer_provider).await;
 }

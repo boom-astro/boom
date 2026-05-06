@@ -1,10 +1,20 @@
 //! Common logging utilities.
-use std::{fs::File, io::BufWriter, iter::successors};
+use std::{fmt, fs::File, io::BufWriter, iter::successors};
 
+use opentelemetry::trace::TraceContextExt;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tracing::Subscriber;
+use tracing::{Event, Subscriber};
 use tracing_flame::{FlameLayer, FlushGuard};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::{
+    fmt::{
+        format::{FmtSpan, Format, Writer},
+        FmtContext, FormatEvent, FormatFields,
+    },
+    layer::SubscriberExt,
+    registry::LookupSpan,
+    EnvFilter, Layer,
+};
 
 use crate::utils::o11y::tracing::otel_layer;
 
@@ -237,6 +247,53 @@ fn parse_span_events(env_var: &str) -> FmtSpan {
 /// the value is used as the path where the raw flame graph data are to be
 /// written. If unset, then the returned subscriber will not include a flame
 /// graph layer.
+/// `FormatEvent` adapter that prefixes each formatted log line with
+/// `trace_id=<32-hex> span_id=<16-hex> ` when an OTel span context is active.
+///
+/// This is what makes Loki → Tempo derived-field linking work: the matcher
+/// regex on the Loki datasource (`trace_id=([a-f0-9]{32})`) needs the trace
+/// id to actually appear in the log line. `tracing-opentelemetry` adds the
+/// OTel context to spans as an extension but does not surface it as a
+/// formatted field, so we read it ourselves at format time.
+pub struct OtelTraceFormatter<F = Format> {
+    inner: F,
+}
+
+impl<F> OtelTraceFormatter<F> {
+    pub fn new(inner: F) -> Self {
+        Self { inner }
+    }
+}
+
+impl<S, N, F> FormatEvent<S, N> for OtelTraceFormatter<F>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        // The OTel span context lives on the *currently entered* tracing
+        // span, which `tracing::Span::current()` returns. We use the
+        // `OpenTelemetrySpanExt::context` extension to extract it.
+        let cx = tracing::Span::current().context();
+        let span_cx = cx.span().span_context().clone();
+        if span_cx.is_valid() {
+            write!(
+                writer,
+                "trace_id={} span_id={} ",
+                span_cx.trace_id(),
+                span_cx.span_id()
+            )?;
+        }
+        self.inner.format_event(ctx, writer, event)
+    }
+}
+
 pub fn build_subscriber() -> Result<
     (
         // Return a boxed subscriber because the subscriber type is different
@@ -262,14 +319,27 @@ pub fn build_subscriber_with_otel(
     ),
     BuildSubscriberError,
 > {
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_file(true)
-        .with_line_number(true)
-        .with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
-
     let env_filter =
         EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info,ort=error"))?;
+
+    // Build the base `Format` with our line-shape options and reuse it whether
+    // or not OTel is active. When OTel tracing is on, wrap the format in
+    // `OtelTraceFormatter` so each log line gets a `trace_id=<hex>` prefix —
+    // that's what the Loki datasource's derived field matches on to link
+    // logs back to traces in Tempo.
+    let format = Format::default()
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true);
+    let fmt_base =
+        tracing_subscriber::fmt::layer().with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
+    let fmt_layer = if tracer_provider.is_some() {
+        fmt_base
+            .event_format(OtelTraceFormatter::new(format))
+            .boxed()
+    } else {
+        fmt_base.event_format(format).boxed()
+    };
 
     // Compose optional layers (flame + OTel) by type-erasing each into a
     // boxed dyn Layer so we can attach them in a single shared layered chain.

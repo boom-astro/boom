@@ -17,8 +17,10 @@ groups:
             datasourceUid: prometheus
             model:
               refId: A
+              # Returns predicted available bytes 24h from now (negative => projected to fill).
+              # The threshold step below fires when this is < 0.
               expr: |
-                predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 24*60*60) < 0
+                predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 24*60*60)
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -34,7 +36,7 @@ groups:
               conditions:
                 - evaluator:
                     params: [0]
-                    type: gt
+                    type: lt
                   operator:
                     type: and
                   query:

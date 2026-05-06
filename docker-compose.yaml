@@ -6,6 +6,7 @@ volumes:
   grafana_data:
   loki_data:
   tempo_data:
+  promtail_positions:
 
 networks:
   boom:
@@ -448,6 +449,7 @@ services:
       - -config.file=/etc/promtail/promtail-config.yaml
     volumes:
       - ./config/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - promtail_positions:/positions
     depends_on:
       loki:
         condition: service_healthy
@@ -455,6 +457,11 @@ services:
         condition: service_started
     networks:
       - boom
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: always
   tempo:
     image: grafana/tempo:2.8.4
