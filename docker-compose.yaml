@@ -391,7 +391,10 @@ services:
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      - /:/rootfs:ro,rslave
+      # Plain `:ro` (no `,rslave`) — `rslave` mount propagation is unsupported
+      # on Docker Desktop for Mac. node-exporter still reports filesystem
+      # metrics correctly; it just won't see new bind-mounts dynamically.
+      - /:/rootfs:ro
     networks:
       - boom
     pid: host
