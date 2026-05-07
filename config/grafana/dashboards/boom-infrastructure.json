@@ -192,13 +192,13 @@
     },
     {
       "id": 7,
-      "title": "Container logs (last 1h)",
+      "title": "Errors, warnings, and panics (all containers)",
       "type": "logs",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 24 },
       "options": {
         "showTime": true,
-        "showLabels": false,
+        "showLabels": true,
         "showCommonLabels": false,
         "wrapLogMessage": true,
         "prettifyLogMessage": false,
@@ -210,7 +210,7 @@
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "loki" },
-          "expr": "{project=\"boom\"} |~ \"(?i)error|warn|panic\"",
+          "expr": "{host=\"boom\"} |~ \"(?i)error|warn|panic\"",
           "queryType": "range"
         }
       ]

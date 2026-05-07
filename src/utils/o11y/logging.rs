@@ -326,11 +326,14 @@ pub fn build_subscriber_with_otel(
     // or not OTel is active. When OTel tracing is on, wrap the format in
     // `OtelTraceFormatter` so each log line gets a `trace_id=<hex>` prefix —
     // that's what the Loki datasource's derived field matches on to link
-    // logs back to traces in Tempo.
+    // logs back to traces in Tempo. ANSI is disabled because the dominant log
+    // sink is Loki/Grafana (and `docker compose logs`), where escape codes
+    // render as visual noise.
     let format = Format::default()
         .with_target(false)
         .with_file(true)
-        .with_line_number(true);
+        .with_line_number(true)
+        .with_ansi(false);
     let fmt_base =
         tracing_subscriber::fmt::layer().with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
     let fmt_layer = if tracer_provider.is_some() {

@@ -347,6 +347,9 @@ services:
     environment:
       CONTAINERS: 1
       EVENTS: 0
+      # Promtail's Docker SD enriches each container target with its network
+      # info, so it needs read access to /networks. Read-only; no POST allowed.
+      NETWORKS: 1
       PING: 1
       VERSION: 1
       POST: 0
