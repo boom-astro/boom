@@ -233,20 +233,6 @@ fn parse_span_events(env_var: &str) -> FmtSpan {
         .unwrap_or(FmtSpan::NONE)
 }
 
-/// Build a tracing subscriber.
-///
-/// The Ok value is a tuple containing the subscriber and an optional flush
-/// guard. The flush guard is created if the subscriber includes a flame graph
-/// layer and should be kept in scope until the program ends to ensure all of
-/// the flame graph data are flushed to it. If the subscriber does not include a
-/// flame graph layer, then the second value in the tuple is None (no flush
-/// guard).
-///
-/// The inclusion of a flame graph layer depends on the environment variable
-/// BOOM_SPAN_EVENTS. If set, a flame graph layer is added to the subscriber and
-/// the value is used as the path where the raw flame graph data are to be
-/// written. If unset, then the returned subscriber will not include a flame
-/// graph layer.
 /// `FormatEvent` adapter that prefixes each formatted log line with
 /// `trace_id=<32-hex> span_id=<16-hex> ` when an OTel span context is active.
 ///
@@ -294,6 +280,22 @@ where
     }
 }
 
+/// Build a tracing subscriber without an OpenTelemetry layer.
+///
+/// The Ok value is a tuple containing the subscriber and an optional flush
+/// guard. The flush guard is created if the subscriber includes a flame graph
+/// layer and should be kept in scope until the program ends to ensure all of
+/// the flame graph data are flushed to it. If the subscriber does not include
+/// a flame graph layer, then the second value in the tuple is None (no flush
+/// guard).
+///
+/// The inclusion of a flame graph layer is gated by the environment variable
+/// `BOOM_FLAME_FILE`. If set, a flame graph layer is added to the subscriber
+/// and the value is used as the path where the raw flame graph data are
+/// written. If unset, the returned subscriber omits the flame layer. (The
+/// related `BOOM_SPAN_EVENTS` env var separately controls which span
+/// lifecycle events the fmt layer prints — new/enter/exit/close — and is
+/// independent of the flame layer.)
 pub fn build_subscriber() -> Result<
     (
         // Return a boxed subscriber because the subscriber type is different

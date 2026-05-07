@@ -8,7 +8,9 @@ use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::o11y::{
-    logging::build_subscriber_with_otel, metrics::init_metrics, tracing::init_tracing,
+    logging::{build_subscriber_with_otel, log_error, WARN},
+    metrics::init_metrics,
+    tracing::init_tracing,
 };
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
@@ -24,16 +26,16 @@ async fn main() -> std::io::Result<()> {
     let port = config.api.port;
     let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or_else(|_| "dev".to_string());
     let instance_id = Uuid::new_v4();
-    let _tracer_provider = init_tracing(String::from("api"), instance_id, deployment_env.clone())
+    let tracer_provider = init_tracing(String::from("api"), instance_id, deployment_env.clone())
         .expect("failed to initialize tracing");
-    let _meter_provider = init_metrics(String::from("api"), instance_id, deployment_env)
+    let meter_provider = init_metrics(String::from("api"), instance_id, deployment_env)
         .expect("failed to initialize metrics");
 
     // Install a tracing subscriber that fans out to stdout and the OTLP
     // pipeline (Tempo). actix's `Logger` middleware emits access logs via the
     // `log` crate, so install `LogTracer` to forward them into tracing —
     // tracing-subscriber does NOT do this automatically.
-    let (subscriber, _guard) = build_subscriber_with_otel(Some(&_tracer_provider), "api")
+    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), "api")
         .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
     tracing_log::LogTracer::init().expect("failed to install LogTracer");
@@ -52,7 +54,7 @@ async fn main() -> std::io::Result<()> {
     let api_doc = ApiDoc::openapi();
     let babamul_doc = BabamulApiDoc::openapi();
 
-    HttpServer::new(move || {
+    let server_result = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
@@ -133,5 +135,17 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(("0.0.0.0", port))?
     .run()
-    .await
+    .await;
+
+    // Flush any buffered metrics/spans before exiting. Without these, recent
+    // telemetry can be lost on shutdown (especially for short-lived dev
+    // restarts).
+    if let Err(error) = meter_provider.shutdown() {
+        log_error!(WARN, error, "failed to shut down the meter provider");
+    }
+    if let Err(error) = tracer_provider.shutdown() {
+        log_error!(WARN, error, "failed to shut down the tracer provider");
+    }
+
+    server_result
 }

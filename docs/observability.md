@@ -118,15 +118,23 @@ app, the usage for which is described in the README.
 
 In Grafana, open **Explore** → Loki datasource. Useful starting queries:
 
+The `service` label matches the Compose service name, so the schedulers and
+consumers are split per-survey: `scheduler-ztf`, `scheduler-lsst`,
+`consumer-ztf`, `consumer-lsst`, etc. Promtail also stamps every line with
+`host="boom"` so a single label query reaches every container in the stack.
+
 ```logql
 # All logs from a single service
 {service="api"}
 
+# Both ZTF and LSST schedulers
+{service=~"scheduler-.*"}
+
 # Errors across the whole stack in the last 15m
-{project="boom"} |~ "(?i)error|panic|fatal"
+{host="boom"} |~ "(?i)error|panic|fatal"
 
 # Logs that carry a trace_id (clickable to jump to Tempo)
-{service="scheduler"} |= "trace_id="
+{service=~"scheduler-.*"} |= "trace_id="
 ```
 
 ### Searching traces

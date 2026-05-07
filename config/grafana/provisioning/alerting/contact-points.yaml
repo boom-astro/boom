@@ -6,8 +6,10 @@ contactPoints:
     receivers:
       - uid: slack-default
         type: slack
+        # No title/text overrides — let Grafana's built-in Slack message format
+        # do the work. Custom templates would have to be provisioned alongside
+        # this file (see /etc/grafana/provisioning/alerting/templates/), and
+        # the defaults are good enough for our use case.
         settings:
           url: ${SLACK_WEBHOOK_URL}
-          title: '{{ template "slack.title" . }}'
-          text: '{{ template "slack.message" . }}'
         disableResolveMessage: false

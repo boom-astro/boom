@@ -20,7 +20,7 @@ use clap::Parser;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::oneshot;
-use tracing::{info, info_span, instrument, warn, Instrument};
+use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -164,7 +164,11 @@ struct Cli {
     deployment_env: String,
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
+// `run` deliberately is NOT `#[instrument]`'d. The scheduler runs for the full
+// process lifetime; wrapping it in a single span would make every per-alert
+// span a descendant of the same root, producing a trace that grows unboundedly
+// until Tempo rejects it. The survey is already encoded in the OTel
+// `service.name` resource attribute, so a span field here is redundant.
 async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTracerProvider) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {

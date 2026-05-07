@@ -15,7 +15,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use clap::Parser;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tracing::{error, info, instrument};
+use tracing::{error, info};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -79,7 +79,12 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
     Ok(date.and_hms_opt(0, 0, 0).unwrap())
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
+// `run` deliberately is NOT `#[instrument]`'d. It runs for the entire lifetime
+// of the consumer; wrapping it in a single span would make every per-batch /
+// per-alert child span a descendant of the same root span, producing a single
+// trace that grows unboundedly until Tempo rejects it. The survey is already
+// captured in the OTel `service.name` resource attribute, so it doesn't need
+// to be a span field here.
 async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTracerProvider) {
     let date = args.date.unwrap_or_else(|| {
         let today = chrono::Utc::now().naive_utc().date();

@@ -48,13 +48,6 @@ overrides:
   defaults:
     metrics_generator:
       processors: [service-graphs, span-metrics]
-    global:
-      # Default is 5_000_000 (5 MB). The boom consumer/scheduler currently
-      # wrap a long-running `run()` in a single `#[instrument]` span, so all
-      # the per-alert child spans end up under one giant trace. Bumping the
-      # cap to 50 MB unblocks dev; the proper fix is to stop wrapping `run`
-      # in a span so each alert becomes its own root trace.
-      max_bytes_per_trace: 50000000
 
 usage_report:
   reporting_enabled: false
