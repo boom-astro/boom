@@ -534,9 +534,13 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: false
       # Dashboards are read-only by default in production; set to true in docker-compose.override.yaml for dev
       GRAFANA_DASHBOARD_EDITABLE: false
-      # Referenced as $SLACK_WEBHOOK_URL in provisioning/alerting/contact-points.yaml.
-      # Leave empty to skip Slack notifications (rules still fire and are visible in Grafana).
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # Referenced as ${SLACK_WEBHOOK_URL} in provisioning/alerting/contact-points.yaml.
+      # An empty value would make Grafana fall back to the Slack chat API (which
+      # then requires a recipient + token), so when the env var is unset we
+      # substitute a syntactically valid but non-existent webhook URL — alert
+      # rules still fire and are visible in Grafana, and POSTs to the placeholder
+      # simply 404, signalling that no real webhook is configured.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/UNSET/UNSET/UNSET}
     volumes:
       - grafana_data:/var/lib/grafana
       # Keep provisioning read-only in the container; the entrypoint script
