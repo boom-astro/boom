@@ -233,19 +233,35 @@ cargo run --release --bin scheduler ztf
 ## Running BOOM in production
 
 ### Using Docker
-To run the consumer and the scheduler with Docker, you can open a shell in the `boom` container with:
+
+In production, BOOM runs as a set of dedicated services defined in `docker-compose.yaml`
+under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, and `scheduler-lsst`.
+Each service starts its binary automatically at container startup.
+
+Bring up the full prod stack with:
+
 ```bash
-docker exec -it -w /app boom /bin/bash
+docker compose --profile prod up -d
 ```
-Then you can run the binaries with:
+
+Or start individual services:
+
 ```bash
-./kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
-./scheduler <SURVEY> [CONFIG_PATH]
+docker compose --profile prod up -d consumer-ztf scheduler-ztf
 ```
-Or you can run them directly with:
+
+To run a binary one-shot with custom arguments (e.g., a specific date and programid for the ZTF consumer), override the service's command with `docker compose run`:
+
 ```bash
-docker exec -it -w /app boom ./kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
-docker exec -it -w /app boom ./scheduler <SURVEY> [CONFIG_PATH]
+docker compose --profile prod run --rm consumer-ztf /app/kafka_consumer ztf 20240617 --programids public
+docker compose --profile prod run --rm scheduler-ztf /app/scheduler ztf /app/config.yaml
+```
+
+To tail logs or open a shell in a running container:
+
+```bash
+docker compose logs -f scheduler-ztf
+docker compose exec scheduler-ztf /bin/bash
 ```
 
 The scheduler prints a variety of messages to your terminal, e.g.:
