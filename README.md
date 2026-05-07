@@ -32,6 +32,7 @@ BOOM runs on macOS and Linux. You'll need:
 - `Docker` and `docker compose`: used to run the database, cache/task queue, and `Kafka`;
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
+- `git-lfs`: required to pull the large files (e.g. ML models) tracked via Git LFS.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
 - On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX runtime setup](#onnx-runtime-setup) section below for details.
 
@@ -72,8 +73,7 @@ by copying it to `.env`:
 cp .env.example .env
 ```
 
-**Note:** Do not commit `.env` to Git or use the example values
-in production.
+**Note:** Do not commit `.env` to Git or use the example values in production.
 
 #### Email configuration (for notifications)
 
@@ -151,24 +151,23 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
     ```
 2. Bring up the local dev stack:
 
-    - With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` file:
+    - With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` files:
       ```bash
       make dev
       ```
       This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
       the supporting Docker services they need.
       This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
-      *To check if the containers are running and healthy, run `docker ps`.*
+      To check if the containers are running and healthy, run `docker ps`.
 
       **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
-3. Produce alerts for testing:
+3. Delete existing ZTF Kafka topics and produce alerts for testing:
 
     ```bash
     make delete-produce-ztf
     ```
-
-    If you change the producer date or program, make sure the consumer is reading the same topic date/program combination.
+    _If you change the producer date or program, make sure the consumer is reading the same topic date/program combination._
 
 ### Alert Production (not required for production use)
 
@@ -234,9 +233,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs as a set of dedicated services defined in `docker-compose.yaml`
-under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, and `scheduler-lsst`.
-Each service starts its binary automatically at container startup.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, and `scheduler-lsst`. Each of these services starts its binary automatically at container startup.
 
 Bring up the full prod stack with:
 
@@ -254,7 +251,7 @@ To run a binary one-shot with custom arguments (e.g., a specific date and progra
 
 ```bash
 docker compose --profile prod run --rm consumer-ztf /app/kafka_consumer ztf 20240617 --programids public
-docker compose --profile prod run --rm scheduler-ztf /app/scheduler ztf /app/config.yaml
+docker compose --profile prod run --rm scheduler-ztf /app/scheduler ztf
 ```
 
 To tail logs or open a shell in a running container:
@@ -320,23 +317,22 @@ The steps to run the benchmark are as follows:
 ### Build Image
 For Docker (docker Image):
 ```bash
-  docker buildx create --use
-  docker buildx inspect --bootstrap
-  docker buildx bake -f tests/throughput/compose.yaml --load
+docker buildx create --use
+docker buildx inspect --bootstrap
+docker buildx bake -f tests/throughput/compose.yaml --load
 ```
 
 ### Download Data
 ```bash
-  mkdir -p ./data/alerts
-  mkdir -p ./data/alerts/ztf/public/20250311
-  wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
-  gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+mkdir -p ./data/alerts/ztf/public/20250311 # target directory where the producer will download the ZTF archive data
+wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
 ```
 
 ### Start Benchmark
 Using Docker:
 ```bash
-  uv run tests/throughput/run.py
+uv run tests/throughput/run.py
 ```
 
 ## Contributing
