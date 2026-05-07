@@ -497,7 +497,10 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SearchObjectsQuery {
-    object_id: String,
+    object_id: Option<String>,
+    ra: Option<f64>,
+    dec: Option<f64>,
+    radius: Option<f64>,
     #[serde(default = "default_limit")]
     limit: u32,
 }
@@ -510,9 +513,11 @@ fn default_limit() -> u32 {
 struct SearchObjectResult {
     #[serde(rename = "objectId")]
     object_id: String,
+    survey: Survey,
     ra: f64,
     dec: f64,
-    survey: Survey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distance_arcsec: Option<f64>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -522,17 +527,23 @@ struct ObjectMini {
     coordinates: Coordinates,
 }
 
-/// Search for objects by partial object ID across surveys. Supports ZTF and LSST, and returns id, ra, dec for up to `limit` results.
+/// Search for objects by partial object ID or sky position across surveys.
+///
+/// Provide either `object_id` (survey is auto-inferred) or all three of `ra` / `dec` / `radius`
+/// for a cross-survey cone search over both ZTF and LSST. The two modes are mutually exclusive.
 #[utoipa::path(
     get,
     path = "/babamul/objects",
     params(
-        ("object_id" = String, Query, description = "Partial object ID to search for"),
+        ("object_id" = Option<String>, Query, description = "Partial object ID to search for (mutually exclusive with ra/dec/radius)"),
+        ("ra" = Option<f64>, Query, description = "Right ascension in degrees [0, 360) for cone search"),
+        ("dec" = Option<f64>, Query, description = "Declination in degrees [-90, 90] for cone search"),
+        ("radius" = Option<f64>, Query, description = "Search radius in arcseconds (0, 600] for cone search"),
         ("limit" = Option<u32>, Query, description = "Maximum number of results to return (1-100, default 10)"),
     ),
     responses(
         (status = 200, description = "Search results", body = Vec<SearchObjectResult>),
-        (status = 400, description = "Invalid objectId format"),
+        (status = 400, description = "Invalid query parameters"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Surveys"]
@@ -550,59 +561,156 @@ pub async fn get_objects(
         }
     };
 
-    // Validate limit is within bounds
     let limit = if query.limit < 1 || query.limit > 100 {
         return response::bad_request("Limit must be between 1 and 100");
     } else {
         query.limit as i64
     };
 
-    // Infer survey from objectId (and normalize id casing for ZTF)
-    let (survey, normalized_id) = match infer_survey_from_objectid(&query.object_id) {
-        Ok(pair) => pair,
-        Err(e) => return response::bad_request(&e),
-    };
+    let has_object_id = query.object_id.is_some();
+    let has_position = query.ra.is_some() || query.dec.is_some() || query.radius.is_some();
 
-    let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
+    if has_object_id && has_position {
+        return response::bad_request("Provide either object_id or ra/dec/radius, not both");
+    }
+    if !has_object_id && !has_position {
+        return response::bad_request("Must provide either object_id or ra/dec/radius");
+    }
 
-    // Anchor regex to the start so we only match ordered prefixes
-    let filter = doc! {
-        "_id": {
-            "$regex": format!("^{}", normalized_id),
-        }
-    };
+    if has_object_id {
+        let object_id = query.object_id.as_deref().unwrap();
+        let (survey, normalized_id) = match infer_survey_from_objectid(object_id) {
+            Ok(pair) => pair,
+            Err(e) => return response::bad_request(&e),
+        };
 
-    match collection
-        .find(filter)
-        .sort(doc! { "_id": 1 })
-        .limit(limit)
-        .await
-    {
-        Ok(mut cursor) => {
-            let mut results = vec![];
-            loop {
-                match cursor.try_next().await {
-                    Ok(Some(obj)) => {
-                        let (ra, dec) = obj.coordinates.get_radec();
-                        results.push(SearchObjectResult {
-                            object_id: obj.object_id,
-                            ra,
-                            dec,
-                            survey: survey.clone(),
-                        });
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error searching objects: {}",
-                            error
-                        ));
+        let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
+        let filter = doc! {
+            "_id": { "$regex": format!("^{}", normalized_id) }
+        };
+
+        match collection
+            .find(filter)
+            .sort(doc! { "_id": 1 })
+            .limit(limit)
+            .await
+        {
+            Ok(mut cursor) => {
+                let mut results = vec![];
+                loop {
+                    match cursor.try_next().await {
+                        Ok(Some(obj)) => {
+                            let (ra, dec) = obj.coordinates.get_radec();
+                            results.push(SearchObjectResult {
+                                object_id: obj.object_id,
+                                ra,
+                                dec,
+                                survey: survey.clone(),
+                                distance_arcsec: None,
+                            });
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            return response::internal_error(&format!(
+                                "error searching objects: {}",
+                                error
+                            ));
+                        }
                     }
                 }
+                response::ok_ser(&format!("Found {} objects", results.len()), results)
             }
-            response::ok_ser(&format!("Found {} objects", results.len()), results)
+            Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
         }
-        Err(error) => response::internal_error(&format!("error searching objects: {}", error)),
+    } else {
+        let (ra, dec, radius_arcsec) = match (query.ra, query.dec, query.radius) {
+            (Some(ra), Some(dec), Some(r)) => (ra, dec, r),
+            _ => {
+                return response::bad_request(
+                    "Must provide ra, dec, and radius together for position search",
+                )
+            }
+        };
+
+        if ra < 0.0 || ra >= 360.0 {
+            return response::bad_request("ra must be in [0, 360)");
+        }
+        if dec < -90.0 || dec > 90.0 {
+            return response::bad_request("dec must be in [-90, 90]");
+        }
+        if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
+            return response::bad_request("radius must be between 0 and 600 arcseconds");
+        }
+
+        let radius_radians = (radius_arcsec / 3600.0_f64).to_radians();
+        let near_filter = doc! {
+            "coordinates.radec_geojson": {
+                "$nearSphere": [ra - 180.0, dec],
+                "$maxDistance": radius_radians,
+            }
+        };
+
+        let mut results: Vec<SearchObjectResult> = vec![];
+
+        let ztf_collection = db.collection::<ObjectMini>("ZTF_alerts_aux");
+        match ztf_collection.find(near_filter.clone()).limit(limit).await {
+            Ok(mut cursor) => {
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    let (obj_ra, obj_dec) = obj.coordinates.get_radec();
+                    results.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra: obj_ra,
+                        dec: obj_dec,
+                        survey: Survey::Ztf,
+                        distance_arcsec: Some(
+                            flare::spatial::great_circle_distance(ra, dec, obj_ra, obj_dec)
+                                * 3600.0,
+                        ),
+                    });
+                }
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error searching ZTF objects: {}",
+                    error
+                ));
+            }
+        }
+
+        let lsst_collection = db.collection::<ObjectMini>("LSST_alerts_aux");
+        match lsst_collection.find(near_filter).limit(limit).await {
+            Ok(mut cursor) => {
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    let (obj_ra, obj_dec) = obj.coordinates.get_radec();
+                    results.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra: obj_ra,
+                        dec: obj_dec,
+                        survey: Survey::Lsst,
+                        distance_arcsec: Some(
+                            flare::spatial::great_circle_distance(ra, dec, obj_ra, obj_dec)
+                                * 3600.0,
+                        ),
+                    });
+                }
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error searching LSST objects: {}",
+                    error
+                ));
+            }
+        }
+
+        results.sort_by(|a, b| {
+            a.distance_arcsec
+                .unwrap_or(f64::MAX)
+                .partial_cmp(&b.distance_arcsec.unwrap_or(f64::MAX))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit as usize);
+
+        response::ok_ser(&format!("Found {} objects", results.len()), results)
     }
 }
 
@@ -702,6 +810,7 @@ pub async fn cone_search_objects(
                         ra: obj.coordinates.get_radec().0,
                         dec: obj.coordinates.get_radec().1,
                         survey: survey.clone(),
+                        distance_arcsec: None,
                     });
                 }
                 results.insert(object_name.clone(), matches);

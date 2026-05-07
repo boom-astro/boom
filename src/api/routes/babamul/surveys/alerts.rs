@@ -47,6 +47,7 @@ struct AlertsQuery {
     min_drb: Option<f64>,
     #[serde(alias = "max_reliability")]
     max_drb: Option<f64>,
+    is_positive: Option<bool>,
     is_rock: Option<bool>,
     is_star: Option<bool>,
     is_near_brightstar: Option<bool>,
@@ -76,6 +77,7 @@ enum AlertsQueryResult {
         ("max_magpsf" = Option<f64>, Query, description = "Maximum magpsf for brightness filter"),
         ("min_drb" = Option<f64>, Query, description = "Minimum DRB score for classification filter"),
         ("max_drb" = Option<f64>, Query, description = "Maximum DRB score for classification filter"),
+        ("is_positive" = Option<bool>, Query, description = "Whether to filter for positive/negative difference sources"),
         ("is_rock" = Option<bool>, Query, description = "Whether to filter for likely rock candidates"),
         ("is_star" = Option<bool>, Query, description = "Whether to filter for likely star candidates"),
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
@@ -211,6 +213,10 @@ pub async fn get_alerts(
             drb_filter.insert("$lte", max_drb);
         }
         filter_doc.insert(drb_key, drb_filter);
+    }
+
+    if let Some(is_positive) = query.is_positive {
+        filter_doc.insert("candidate.isdiffpos", is_positive);
     }
 
     if let Some(is_rock) = query.is_rock {

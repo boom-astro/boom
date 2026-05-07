@@ -919,6 +919,212 @@ mod tests {
         }
     }
 
+    /// Test GET /babamul/objects with ra/dec/radius (cross-survey cone search)
+    #[actix_rt::test]
+    async fn test_get_objects_cone_search() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        // Random position away from poles so arcsec offsets are well-behaved
+        let ztf_ra: f64 = rng.random_range(10.0..350.0);
+        let ztf_dec: f64 = rng.random_range(-70.0..70.0);
+        // LSST object ~3 arcsec away in both axes
+        let offset_arcsec = 3.0_f64 / 3600.0;
+        let lsst_ra = ztf_ra + offset_arcsec;
+        let lsst_dec = ztf_dec + offset_arcsec;
+
+        // Insert one ZTF and one LSST object close to each other
+        let ztf_aux: mongodb::Collection<boom::alert::ZtfObject> =
+            database.collection("ZTF_alerts_aux");
+        let lsst_aux: mongodb::Collection<boom::alert::LsstObject> =
+            database.collection("LSST_alerts_aux");
+
+        let ztf_id = format!("ZTF24conetest_{}", unique_suffix);
+        let lsst_id = format!("111{}", unique_suffix);
+
+        ztf_aux
+            .insert_one(boom::alert::ZtfObject {
+                object_id: ztf_id.clone(),
+                coordinates: Coordinates::new(ztf_ra, ztf_dec),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert ZTF test object");
+
+        lsst_aux
+            .insert_one(boom::alert::LsstObject {
+                object_id: lsst_id.clone(),
+                coordinates: Coordinates::new(lsst_ra, lsst_dec),
+                prv_candidates: vec![],
+                fp_hists: vec![],
+                is_sso: false,
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert LSST test object");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_objects),
+            ),
+        )
+        .await;
+
+        // Successful cone search: both objects should be returned (within 10 arcsec)
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?ra={}&dec={}&radius=10&limit=10",
+                ztf_ra, ztf_dec
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cone search should succeed (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        let results = body["data"].as_array().expect("data should be an array");
+        let ids: Vec<&str> = results
+            .iter()
+            .filter_map(|r| r["objectId"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&ztf_id.as_str()),
+            "ZTF object should be in results"
+        );
+        assert!(
+            ids.contains(&lsst_id.as_str()),
+            "LSST object should be in results"
+        );
+
+        // Results must be sorted nearest-first
+        let distances: Vec<f64> = results
+            .iter()
+            .filter_map(|r| r["distance_arcsec"].as_f64())
+            .collect();
+        assert!(
+            distances.windows(2).all(|w| w[0] <= w[1]),
+            "Results should be sorted by distance ascending"
+        );
+
+        // Tiny radius — no objects expected
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?ra={}&dec={}&radius=0.001&limit=10",
+                ztf_ra + 1.0,
+                ztf_dec + 1.0
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["data"].as_array().unwrap().len(),
+            0,
+            "Should return no results for tiny radius far from test objects"
+        );
+
+        // Providing both object_id and ra/dec/radius should be rejected
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?object_id=ZTF24abc&ra={}&dec={}&radius=10",
+                ztf_ra, ztf_dec
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject both object_id and ra/dec/radius"
+        );
+
+        // Missing one of ra/dec/radius should be rejected
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/objects?ra={}&dec={}", ztf_ra, ztf_dec))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject incomplete position params (missing radius)"
+        );
+
+        // Invalid RA
+        let req = test::TestRequest::get()
+            .uri("/babamul/objects?ra=400&dec=0&radius=10")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject RA out of range"
+        );
+
+        // Invalid radius
+        let req = test::TestRequest::get()
+            .uri("/babamul/objects?ra=83&dec=-5&radius=700")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius > 600"
+        );
+
+        // No params at all should be rejected
+        let req = test::TestRequest::get()
+            .uri("/babamul/objects")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject request with no search params"
+        );
+
+        // Clean up
+        ztf_aux.delete_one(doc! { "_id": &ztf_id }).await.ok();
+        lsst_aux.delete_one(doc! { "_id": &lsst_id }).await.ok();
+    }
+
     /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
     /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
     #[actix_rt::test]
