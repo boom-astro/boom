@@ -393,14 +393,6 @@ pub enum ConsumerError {
     ConfigError(#[from] config::ConfigError),
 }
 
-fn survey_label(survey: &crate::utils::enums::Survey) -> &'static str {
-    match survey {
-        crate::utils::enums::Survey::Ztf => "ZTF",
-        crate::utils::enums::Survey::Lsst => "LSST",
-        crate::utils::enums::Survey::Decam => "DECAM",
-    }
-}
-
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
     fn topic_names(&self, timestamp: i64) -> Vec<String>;
@@ -451,7 +443,7 @@ pub trait AlertConsumer: Sized {
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
 
-        let survey = survey_label(&survey);
+        let survey = survey.as_str();
         let mut handles = vec![];
         for i in 0..n_threads {
             let topics = topics.clone();
