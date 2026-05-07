@@ -32,7 +32,7 @@ pub enum ModelError {
 /// GPU usage is controlled by the `BOOM_GPU__ENABLED` environment variable (default: `"true"`).
 /// When `device_id` is `Some(id)`, that CUDA device is used; otherwise device 0.
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
-    load_model_on_device(path, None)
+    load_model_on_device(path, None, std::ptr::null_mut())
 }
 
 fn env_truthy(value: &str) -> bool {
@@ -42,7 +42,20 @@ fn env_truthy(value: &str) -> bool {
     )
 }
 
-pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Session, ModelError> {
+/// Load an ONNX model on a specific device. On Linux+CUDA, `cuda_stream` (a
+/// `cudaStream_t` cast to `*mut c_void`) lets the session share its compute
+/// stream with other CUDA work — pass `std::ptr::null_mut()` to let ORT
+/// allocate its own stream. The stream argument is ignored on macOS.
+///
+/// # Safety
+/// When non-null, `cuda_stream` must be a valid `cudaStream_t` belonging to
+/// `device_id`'s device, and must outlive the returned [`Session`].
+pub fn load_model_on_device(
+    path: &str,
+    device_id: Option<i32>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    cuda_stream: *mut std::ffi::c_void,
+) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
     let use_gpu = env::var("BOOM_GPU__ENABLED")
@@ -67,11 +80,20 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let dev = device_id.unwrap_or(0);
 
+        #[cfg(target_os = "linux")]
+        let cuda_ep = {
+            let mut ep = ort::ep::CUDAExecutionProvider::default().with_device_id(dev);
+            if !cuda_stream.is_null() {
+                // Safety: caller guarantees the stream is valid for `dev`
+                // and outlives the session (see fn-level safety comment).
+                ep = unsafe { ep.with_compute_stream(cuda_stream as *mut ()) };
+            }
+            ep.build()
+        };
+
         builder = builder.with_execution_providers([
             #[cfg(target_os = "linux")]
-            ort::ep::CUDAExecutionProvider::default()
-                .with_device_id(dev)
-                .build(),
+            cuda_ep,
             #[cfg(target_os = "macos")]
             ort::ep::CoreMLExecutionProvider::default().build(),
         ])?;
