@@ -639,7 +639,9 @@ pub async fn get_objects(
             return response::bad_request("dec must be in [-90, 90]");
         }
         if radius_arcsec <= 0.0 || radius_arcsec > 600.0 {
-            return response::bad_request("radius must be between 0 and 600 arcseconds");
+            return response::bad_request(
+                "radius must be greater than 0 and at most 600 arcseconds",
+            );
         }
 
         let radius_radians = (radius_arcsec / 3600.0_f64).to_radians();

@@ -941,6 +941,15 @@ mod tests {
         let lsst_ra = ztf_ra + offset_arcsec;
         let lsst_dec = ztf_dec + offset_arcsec;
 
+        // Ensure the 2dsphere index on coordinates.radec_geojson exists for both surveys
+        // so $nearSphere works regardless of test execution order.
+        boom::utils::db::initialize_survey_indexes(&Survey::Ztf, &database)
+            .await
+            .expect("Failed to initialize ZTF indexes");
+        boom::utils::db::initialize_survey_indexes(&Survey::Lsst, &database)
+            .await
+            .expect("Failed to initialize LSST indexes");
+
         // Insert one ZTF and one LSST object close to each other
         let ztf_aux: mongodb::Collection<boom::alert::ZtfObject> =
             database.collection("ZTF_alerts_aux");
