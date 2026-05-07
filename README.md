@@ -323,9 +323,21 @@ docker buildx bake -f tests/throughput/compose.yaml --load
 ```
 
 ### Download Data
-```bash
-mkdir -p ./data/alerts/ztf/public/20250311 # target directory where the producer will download the ZTF archive data
+
+Download a ZTF alerts aux data archive
+
+**For Linux:**
+```
 wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+```
+**For macOS:**
+```
+curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+```
+
+Download the NED catalog for crossmatching.
+```
+mkdir -p ./data/alerts/ztf/public/20250311 # target directory where the producer will download the ZTF archive data
 uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
 ```
 
