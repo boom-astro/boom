@@ -836,7 +836,8 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
-#[instrument(skip_all, err)]
+// No `#[instrument]`: this is the long-lived filter worker loop; a wrapping
+// span would put every per-alert span under a single root trace.
 pub async fn run_filter_worker<T: FilterWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,

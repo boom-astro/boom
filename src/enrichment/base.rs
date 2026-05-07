@@ -196,7 +196,8 @@ pub async fn fetch_alert_cutouts(
 }
 
 #[tokio::main]
-#[instrument(skip_all, err)]
+// No `#[instrument]`: this is the long-lived enrichment worker loop; a
+// wrapping span would put every per-alert span under a single root trace.
 pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,

@@ -7,7 +7,7 @@ use crate::{
     filter::{run_filter_worker, LsstFilterWorker, ZtfFilterWorker},
     utils::{
         enums::Survey,
-        o11y::logging::{as_error, INFO},
+        o11y::logging::as_error,
         worker::{WorkerCmd, WorkerType},
     },
 };
@@ -17,7 +17,7 @@ use std::thread;
 
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
-use tracing::{debug, error, info, instrument, span, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 #[derive(thiserror::Error, Debug)]
@@ -215,60 +215,59 @@ impl Worker {
     ) -> Worker {
         let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(1);
+        // Each thread body deliberately does NOT wrap the worker `run(...)`
+        // call in a long-lived span. Each per-alert call inside the worker
+        // is its own short-lived span (and therefore its own trace), which
+        // is what we want — a single life-of-the-worker span would make
+        // every alert a descendant of one ever-growing root trace and Tempo
+        // would reject it. The `?tid`/`?survey_name` info is logged once at
+        // startup instead of being attached as span fields.
         let handle = match worker_type {
             WorkerType::Alert => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "alert worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting alert worker");
-                    debug!(?config_path);
-                    let run = match survey_name {
-                        Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
-                        Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
-                        Survey::Decam => run_alert_worker::<DecamAlertWorker>,
-                    };
-                    run(receiver, &config_path, id)
-                        .unwrap_or_else(as_error!("alert worker failed"));
-                })
+                info!(?tid, ?survey_name, "starting alert worker");
+                debug!(?config_path);
+                let run = match survey_name {
+                    Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
+                    Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
+                    Survey::Decam => run_alert_worker::<DecamAlertWorker>,
+                };
+                run(receiver, &config_path, id).unwrap_or_else(as_error!("alert worker failed"));
             }),
             WorkerType::Filter => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "filter worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting filter worker");
-                    debug!(?config_path);
-                    let run = match survey_name {
-                        Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
-                        Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
-                        _ => {
-                            error!(
-                                "Filter worker not implemented for survey: {:?}",
-                                survey_name
-                            );
-                            return;
-                        }
-                    };
-                    run(receiver, &config_path, id)
-                        .unwrap_or_else(as_error!("filter worker failed"));
-                })
+                info!(?tid, ?survey_name, "starting filter worker");
+                debug!(?config_path);
+                let run = match survey_name {
+                    Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
+                    Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
+                    _ => {
+                        error!(
+                            "Filter worker not implemented for survey: {:?}",
+                            survey_name
+                        );
+                        return;
+                    }
+                };
+                run(receiver, &config_path, id).unwrap_or_else(as_error!("filter worker failed"));
             }),
             WorkerType::Enrichment => thread::spawn(move || {
                 let tid = std::thread::current().id();
-                span!(INFO, "enrichment worker", ?tid, ?survey_name).in_scope(|| {
-                    info!("starting enrichment worker");
-                    debug!(?config_path);
-                    let run = match survey_name {
-                        Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
-                        Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
-                        _ => {
-                            error!(
-                                "Enrichment worker not implemented for survey: {:?}",
-                                survey_name
-                            );
-                            return;
-                        }
-                    };
-                    run(receiver, &config_path, id, shared_models)
-                        .unwrap_or_else(as_error!("enrichment worker failed"));
-                })
+                info!(?tid, ?survey_name, "starting enrichment worker");
+                debug!(?config_path);
+                let run = match survey_name {
+                    Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
+                    Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
+                    _ => {
+                        error!(
+                            "Enrichment worker not implemented for survey: {:?}",
+                            survey_name
+                        );
+                        return;
+                    }
+                };
+                run(receiver, &config_path, id, shared_models)
+                    .unwrap_or_else(as_error!("enrichment worker failed"));
             }),
         };
 

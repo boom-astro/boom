@@ -1399,7 +1399,8 @@ async fn handle_process_result(
 }
 
 #[tokio::main]
-#[instrument(skip_all, err)]
+// No `#[instrument]`: this is the long-lived alert worker loop; a wrapping
+// span would put every per-alert span under a single root trace.
 pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,

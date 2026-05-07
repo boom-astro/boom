@@ -415,7 +415,10 @@ pub trait AlertConsumer: Sized {
         );
         Ok(())
     }
-    #[instrument(skip(self))]
+    // No `#[instrument]` here: `consume` runs the consumer loop for the
+    // entire process lifetime, and any wrapping span would make every
+    // per-message child span a descendant of the same root trace, which
+    // grows until Tempo rejects it (TRACE_TOO_LARGE).
     async fn consume(
         &self,
         topics: Option<Vec<String>>,
@@ -539,7 +542,8 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
     Ok(())
 }
 
-#[instrument(skip(config, survey_consumer_config))]
+// No `#[instrument]` here: this function is the long-lived Kafka poll loop;
+// instrumenting it would funnel every per-message span into one giant trace.
 pub async fn consumer(
     id: &str,
     topics: Vec<&str>,

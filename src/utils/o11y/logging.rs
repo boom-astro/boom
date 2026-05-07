@@ -321,8 +321,20 @@ pub fn build_subscriber_with_otel(
     ),
     BuildSubscriberError,
 > {
+    // Default filter excludes the HTTP/2 + HTTP plumbing crates that the OTLP
+    // gRPC exporter itself uses. Without this, tracing the tracer's own
+    // network operations produces thousands of `h2`/`hyper`/`tonic`/`tower`
+    // spans per outbound batch, which inflates traces past Tempo's
+    // per-trace size cap (TRACE_TOO_LARGE) and creates a feedback loop where
+    // exporting telemetry generates more telemetry. The override env var
+    // `RUST_LOG` still wins if set explicitly. We build it twice because
+    // `EnvFilter` isn't `Clone` and we attach it to two different layers.
+    let filter_directives =
+        "info,ort=error,h2=off,hyper=off,tonic=warn,tower=off,reqwest=warn,opentelemetry=warn";
     let env_filter =
-        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info,ort=error"))?;
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(filter_directives))?;
+    let otel_filter =
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(filter_directives))?;
 
     // Build the base `Format` with our line-shape options and reuse it whether
     // or not OTel is active. When OTel tracing is on, wrap the format in
@@ -356,7 +368,14 @@ pub fn build_subscriber_with_otel(
         Err(_) => (None, None),
     };
 
-    let otel = tracer_provider.map(|provider| otel_layer(provider, service_name).boxed());
+    // Filter the OTel layer separately so h2/hyper/etc. spans don't reach
+    // Tempo even though they might still appear in stdout (if the user
+    // overrode `RUST_LOG`). This is what actually prevents TRACE_TOO_LARGE.
+    let otel = tracer_provider.map(|provider| {
+        otel_layer(provider, service_name)
+            .with_filter(otel_filter)
+            .boxed()
+    });
 
     let subscriber = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))
