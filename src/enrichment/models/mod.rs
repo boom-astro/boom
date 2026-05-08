@@ -111,11 +111,7 @@ impl SharedModels {
                     id,
                     stream_ptr,
                 )?,
-                BtsBotModel::new_on_device(
-                    "data/models/btsbot-v1.0.1.onnx",
-                    id,
-                    stream_ptr,
-                )?,
+                BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", id, stream_ptr)?,
             ),
             None => (
                 AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
