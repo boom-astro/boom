@@ -19,9 +19,9 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{instrument, trace, warn};
 #[cfg(feature = "gpu")]
 use tracing::info;
+use tracing::{instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -508,8 +508,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "config.gpu.enabled is true but config.gpu.device_ids is empty".to_string(),
                 ));
             }
-            let idx = (GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize)
-                % device_ids.len();
+            let idx =
+                (GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize) % device_ids.len();
             let device_id = device_ids[idx];
             info!(device_id, "initializing villar-pso GPU context");
             Some(GpuContext::new(device_id).map_err(|e| {
@@ -668,11 +668,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // loaded with a GPU device (i.e. config.gpu.enabled is true).
         // Otherwise `villar_inputs` is empty and we skip the entire block.
         #[cfg(feature = "gpu")]
-        if let Some(gpu_ctx) = self
-            .models
-            .as_ref()
-            .and_then(|m| m.gpu_ctx.as_ref())
-        {
+        if let Some(gpu_ctx) = self.models.as_ref().and_then(|m| m.gpu_ctx.as_ref()) {
             // Document whose keys match a successful fit's keys but with all values NaN.
             // Written whenever a fit can't be produced (bad photometry or GPU failure).
             let nan_set_doc = {
@@ -720,8 +716,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             // Run GPU batch fit on the fittable sources.
             if !fittable.is_empty() {
-                let (candids, sources): (Vec<i64>, Vec<SourceData>) =
-                    fittable.into_iter().unzip();
+                let (candids, sources): (Vec<i64>, Vec<SourceData>) = fittable.into_iter().unzip();
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
                 let pso_config = villar_pso::PsoConfig::default();
 
