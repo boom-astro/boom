@@ -19,8 +19,6 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-#[cfg(feature = "gpu")]
-use tracing::info;
 use tracing::{instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
@@ -450,33 +448,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None => Some(SharedModels::load(None)?),
         };
 
-        // Assign a GPU device to this worker via round-robin over `config.gpu.device_ids`.
-        // Only initialize a villar-pso GpuContext when GPU usage is actually enabled at
-        // runtime; otherwise leave it `None` so this worker never touches the GPU.
-        // Backend is selected by target_os: CUDA on Linux, Metal on macOS. The Metal
-        // backend ignores `device_id` since Apple Silicon exposes a single GPU.
-        #[cfg(feature = "gpu")]
-        let gpu_ctx: Option<GpuContext> = if config.gpu.enabled {
-            let device_ids = &config.gpu.device_ids;
-            if device_ids.is_empty() {
-                return Err(EnrichmentWorkerError::ConfigurationError(
-                    "config.gpu.enabled is true but config.gpu.device_ids is empty".to_string(),
-                ));
-            }
-            let idx =
-                (GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize) % device_ids.len();
-            let device_id = device_ids[idx];
-            info!(device_id, "initializing villar-pso GPU context");
-            Some(GpuContext::new(device_id).map_err(|e| {
-                EnrichmentWorkerError::ConfigurationError(format!(
-                    "villar-pso GPU init failed for device {}: {}",
-                    device_id, e
-                ))
-            })?)
-        } else {
-            None
-        };
-
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -674,9 +645,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
                 let pso_config = villar_pso::PsoConfig::default();
 
-                #[cfg(target_os = "linux")]
-                let batch_result = GpuBatchData::new(&source_refs);
-                #[cfg(target_os = "macos")]
                 let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
 
                 match batch_result.and_then(|batch| {
