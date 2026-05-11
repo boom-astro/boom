@@ -906,11 +906,6 @@ pub async fn get_test_db() -> Database {
     config.build_db().await.unwrap()
 }
 
-pub async fn get_test_redis_connection() -> redis::aio::MultiplexedConnection {
-    let config = AppConfig::from_test_config().expect("Failed to load test config");
-    config.build_redis().await.unwrap()
-}
-
 pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
     let config = AppConfig::from_test_config().expect("Failed to load test config");
     config
