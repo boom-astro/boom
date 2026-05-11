@@ -314,17 +314,13 @@ This repository includes a benchmark to test the system and get an idea of the t
 This benchmark uses Docker to build the image and run the benchmark.
 The steps to run the benchmark are as follows:
 
-### Build Image
-For Docker (docker Image):
-```bash
-docker buildx create --use
-docker buildx inspect --bootstrap
-docker buildx bake -f tests/throughput/compose.yaml --load
-```
-
 ### Download Data
 
-Download a ZTF alerts aux data archive
+Download the ZTF alerts auxiliary data dump
+
+```
+mkdir -p ./data/alerts
+```
 
 **For Linux:**
 ```
@@ -337,7 +333,6 @@ curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.
 
 Download the NED catalog for crossmatching.
 ```
-mkdir -p ./data/alerts/ztf/public/20250311 # target directory where the producer will download the ZTF archive data
 uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
 ```
 
