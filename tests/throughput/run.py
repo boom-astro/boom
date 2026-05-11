@@ -134,7 +134,7 @@ logs_dir = os.path.join(
     + (
         f"na={args.n_alert_workers}-"
         f"ne={args.n_enrichment_workers}-"
-        f"nf={args.n_filter_workers}"
+        f"nf={args.n_filter_workers}-"
         f"gpu={gpus}"
     ),
 )

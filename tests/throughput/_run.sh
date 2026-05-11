@@ -22,17 +22,8 @@ if [ -z "${BOOM_REPO_ROOT:-}" ]; then
     exit 1
 fi
 
-# Ports
-MONGO_PORT=$BENCHMARK_MONGO_PORT
-REDIS_PORT=$BENCHMARK_REDIS_PORT
-KAFKA_PORT=$BENCHMARK_KAFKA_PORT
-
 # Paths
 TESTS_DIR="$TESTS_DIR"
-PERSISTENCE_DIR="$TESTS_DIR/apptainer/persistent"
-CONFIG_FILE="$TESTS_DIR/throughput/config.yaml"
-HEALTHCHECK_DIR="$BOOM_REPO_ROOT/apptainer/scripts/healthcheck"
-BENCHMARK_SIF_DIR="$TESTS_DIR/apptainer/sif"
 BG_PIDS=()
 
 # Parse args
