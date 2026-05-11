@@ -151,23 +151,23 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
     ```
 2. Bring up the local dev stack:
 
-    - With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` files:
-      ```bash
-      make dev
-      ```
-      This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
-      the supporting Docker services they need.
-      This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
-      To check if the containers are running and healthy, run `docker ps`.
+- With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` files:
+  ```bash
+  make dev
+  ```
+  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
+  the supporting Docker services they need.
+  This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
+  To check if the containers are running and healthy, run `docker ps`.
 
-      **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
+  **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
 3. Delete existing ZTF Kafka topics and produce alerts for testing:
 
     ```bash
     make delete-produce-ztf
     ```
-    _If you change the producer date or program, make sure the consumer is reading the same topic date/program combination._
+   _If you change the producer date or program, make sure the consumer is reading the same topic date/program combination._
 
 ### Alert Production (not required for production use)
 
