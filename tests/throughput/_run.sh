@@ -23,7 +23,7 @@ if [ -z "${BOOM_REPO_ROOT:-}" ]; then
 fi
 
 # Paths
-TESTS_DIR="$TESTS_DIR"
+TESTS_DIR="$BOOM_REPO_ROOT/tests"
 BG_PIDS=()
 
 # Parse args
