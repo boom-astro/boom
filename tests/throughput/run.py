@@ -113,13 +113,21 @@ with open(
 ) as f:
     json.dump(for_insert, f)
 
+if os.environ.get("BOOM_GPU__ENABLED", "false").lower() == "true":
+    n_gpus = len(
+        [d for d in os.environ.get("BOOM_GPU__DEVICE_IDS", "0").split(",") if d.strip()]
+    )
+else:
+    n_gpus = 0
+
 logs_dir = os.path.join(
-    "logs",
+    f"{args.boom_repo_dir}/logs",
     "boom-"
     + (
         f"na={args.n_alert_workers}-"
         f"ne={args.n_enrichment_workers}-"
         f"nf={args.n_filter_workers}"
+        f"ng={n_gpus}"
     ),
 )
 
