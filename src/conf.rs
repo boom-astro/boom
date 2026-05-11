@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
@@ -862,7 +862,10 @@ impl AppConfig {
         match build_cutout_storage(survey, self).await {
             Ok(storage) => Ok(storage),
             Err(e) => {
-                println!("Failed to build cutout storage: {}", e);
+                error!(
+                    "Failed to build cutout storage for survey {:?}: {:?}",
+                    survey, e
+                );
                 Err(e)
             }
         }

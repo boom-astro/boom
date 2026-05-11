@@ -336,6 +336,10 @@ async fn create_bucket_if_not_exists(
     }
 }
 
+fn cutout_s3_key(key_prefix: &str, candid: i64) -> String {
+    format!("{}/cutouts/{}.json", key_prefix, candid)
+}
+
 #[instrument(skip_all, err)]
 async fn insert_alert_cutouts(
     cutouts: &AlertCutout,
@@ -344,7 +348,7 @@ async fn insert_alert_cutouts(
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
     let candid = cutouts.candid;
-    let key = format!("{}/{}.json", key_prefix, candid);
+    let key = cutout_s3_key(key_prefix, candid);
 
     let encoded = serde_json::to_vec(&S3AlertCutout::from(cutouts))?;
     let body = aws_sdk_s3::primitives::ByteStream::from(encoded);
@@ -372,7 +376,7 @@ async fn retrieve_alert_cutouts(
     key_prefix: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<AlertCutout, CutoutStorageError> {
-    let key = format!("{}/{}.json", key_prefix, candid);
+    let key = cutout_s3_key(key_prefix, candid);
 
     let resp = match s3_client
         .get_object()
@@ -411,7 +415,7 @@ async fn delete_alert_cutouts(
     key_prefix: &str,
     s3_client: &aws_sdk_s3::Client,
 ) -> Result<(), CutoutStorageError> {
-    let key = format!("{}/{}.json", key_prefix, candid);
+    let key = cutout_s3_key(key_prefix, candid);
 
     match s3_client
         .delete_object()
