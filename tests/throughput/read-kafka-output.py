@@ -1,8 +1,10 @@
-"""Script to read the Kafka output from the BOOM throughput test.
-    requires:
-        Python 3.13+,
-        confluent-kafka
-"""
+"""Script to read the Kafka output from the BOOM throughput test."""
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "confluent-kafka",
+# ]
+# ///
 
 import argparse
 from confluent_kafka import Consumer, KafkaException
