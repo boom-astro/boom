@@ -44,6 +44,55 @@ pub const LSST_SCHEMA_REGISTRY_URL: &str =
 pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
     "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema";
 
+/// Serde-with adapter that accepts both an Avro union (nullable field) and a plain Avro value
+/// (non-optional field), deserializing both into `Option<T>`. This preserves backwards
+/// compatibility when an Avro schema makes a previously-optional field mandatory, while our
+/// Rust structs keep the field as `Option<T>`.
+///
+/// Currently implemented for `visit_i32` only, covering the Avro `int` fields that went from
+/// optional to non-optional in LSST alert schema v10 → v11 (`long`/`i64` fields were
+/// unaffected). If future schema versions make other field types mandatory (e.g. `long`,
+/// `float`, `boolean`), extend this visitor with the corresponding `visit_*` method and apply
+/// `#[serde_as(deserialize_as = "FlexibleOption")]` to the newly affected fields.
+///
+/// Wire-format cases handled:
+///   Union(Null)   → visit_unit  → None
+///   Union(Int(n)) → visit_i32   → Some(n)   (v10: field was nullable)
+///   Int(n)        → visit_i32   → Some(n)   (v11: field is non-optional)
+struct FlexibleOption;
+
+struct FlexibleOptionVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for FlexibleOptionVisitor<T> {
+    type Value = Option<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an optional or plain Avro value")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, de: D) -> Result<Option<T>, D::Error> {
+        T::deserialize(de).map(Some)
+    }
+
+    fn visit_i32<E: serde::de::Error>(self, v: i32) -> Result<Option<T>, E> {
+        T::deserialize(serde::de::value::I32Deserializer::<E>::new(v)).map(Some)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> serde_with::DeserializeAs<'de, Option<T>> for FlexibleOption {
+    fn deserialize_as<D: Deserializer<'de>>(de: D) -> Result<Option<T>, D::Error> {
+        de.deserialize_any(FlexibleOptionVisitor(std::marker::PhantomData))
+    }
+}
+
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
@@ -111,6 +160,7 @@ pub struct DiaSource {
     pub psf_chi2: Option<f32>,
     /// The number of data points (pixels) used to fit the point source model.
     #[serde(rename = "psfNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub psf_ndata: Option<i32>,
     /// Failure to derive linear least-squares fit of psf model. Another psfFlux flag field should also be set to provide more information.
     #[serde(rename = "psfFlux_flag")]
@@ -156,6 +206,7 @@ pub struct DiaSource {
     pub trail_chi2: Option<f32>,
     /// The number of data points (pixels) used to fit the trailed source model.
     #[serde(rename = "trailNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub trail_ndata: Option<i32>,
     /// This flag is set if a trailed source extends onto or past edge pixels.
     pub trail_flag_edge: Option<bool>,
@@ -501,6 +552,7 @@ pub struct DiaObject {
     pub u_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute u_psfFluxChi2.
     #[serde(rename = "u_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub u_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for u filter.
     #[serde(rename = "u_fpFluxMean")]
@@ -519,6 +571,7 @@ pub struct DiaObject {
     pub g_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute g_psfFluxChi2.
     #[serde(rename = "g_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub g_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for g filter.
     #[serde(rename = "g_fpFluxMean")]
@@ -537,6 +590,7 @@ pub struct DiaObject {
     pub r_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute r_psfFluxChi2.
     #[serde(rename = "r_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub r_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for r filter.
     #[serde(rename = "r_fpFluxMean")]
@@ -555,6 +609,7 @@ pub struct DiaObject {
     pub i_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute i_psfFluxChi2.
     #[serde(rename = "i_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub i_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for i filter.
     #[serde(rename = "i_fpFluxMean")]
@@ -573,6 +628,7 @@ pub struct DiaObject {
     pub z_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute z_psfFluxChi2.
     #[serde(rename = "z_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub z_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for z filter.
     #[serde(rename = "z_fpFluxMean")]
@@ -591,6 +647,7 @@ pub struct DiaObject {
     pub y_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute y_psfFluxChi2.
     #[serde(rename = "y_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub y_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for y filter.
     #[serde(rename = "y_fpFluxMean")]
