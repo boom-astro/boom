@@ -275,10 +275,13 @@ export type AlertSearchParams = {
   max_magpsf?: number;
   min_drb?: number;
   max_drb?: number;
-  min_sgscore1?: number;
-  max_sgscore1?: number;
-  min_distpsnr1?: number;
-  max_distpsnr1?: number;
+  is_rock?: boolean;
+  is_star?: boolean;
+  is_near_brightstar?: boolean;
+  is_stationary?: boolean;
+  is_positive?: boolean;
+  limit?: number;
+  skip?: number;
 };
 
 export type Cutouts = {

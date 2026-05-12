@@ -126,6 +126,19 @@
   }
 }
 
+input[type="datetime-local"] {
+  justify-content: space-between;
+}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+}
+
+.dark input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  opacity: 0.75;
+}
+
 .shimmer,
 .shimmer-destructive {
   position: relative;
