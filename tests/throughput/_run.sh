@@ -264,7 +264,7 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts filtered in $FILTERING_T
 
 echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
-python "$TESTS_DIR/throughput/read-kafka-output.py"
+uv run "$TESTS_DIR/throughput/read-kafka-output.py"
 
 # -----------------------------
 # Export MongoDB collection stats to JSON for analysis
