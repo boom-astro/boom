@@ -20,6 +20,10 @@ use uuid::Uuid;
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
+
+    // Initialize logging
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
     let config = AppConfig::from_default_path().unwrap();
     let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
@@ -43,9 +47,6 @@ async fn main() -> std::io::Result<()> {
         cutout_storage_map.insert(survey, storage);
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
-
-    // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
