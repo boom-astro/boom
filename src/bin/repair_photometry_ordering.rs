@@ -39,7 +39,7 @@ struct Cli {
     #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
-    /// Number of parallel worker tasks. Each worker holds its own DB connection.
+    /// Number of parallel worker tasks.
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
@@ -253,7 +253,7 @@ async fn run_repair(
         broken = broken_total,
         modified = modified_total,
         dry_run,
-        "repair_fp_hists_ordering done"
+        "repair_photometry_ordering done"
     );
 
     if let Some(e) = first_err {
@@ -344,7 +344,7 @@ async fn main() {
     };
 
     info!(
-        "starting repair_fp_hists_ordering: survey={} processes={} batch_size={} dry_run={}",
+        "starting repair_photometry_ordering: survey={} processes={} batch_size={} dry_run={}",
         args.survey, args.processes, args.batch_size, args.dry_run,
     );
 

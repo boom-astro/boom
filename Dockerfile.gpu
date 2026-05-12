@@ -37,7 +37,7 @@ RUN mkdir -p /app/src && \
     cargo build --release && rm -rf /app/src
 
 COPY ./src /app/src
-RUN cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin repair_fp_hists_ordering
+RUN cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin repair_photometry_ordering
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS app
 
@@ -56,7 +56,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/scheduler /app/scheduler
 COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
-COPY --from=builder /app/target/release/repair_fp_hists_ordering /app/repair_fp_hists_ordering
+COPY --from=builder /app/target/release/repair_photometry_ordering /app/repair_photometry_ordering
 COPY --from=builder /opt/ort /opt/ort
 
 CMD ["/app/scheduler"]
