@@ -247,11 +247,11 @@ Or start individual services:
 docker compose --profile prod up -d consumer-ztf scheduler-ztf
 ```
 
-To run a binary one-shot with custom arguments (e.g., a specific date and programid for the ZTF consumer), override the service's command with `docker compose run`:
+To run a one-shot operational task, override the service's command with `docker compose run`. This is typically used for database migrations such as `migrate_fp_flux` and `migrate_snr`:
 
 ```bash
-docker compose --profile prod run --rm consumer-ztf /app/kafka_consumer ztf 20240617 --programids public
-docker compose --profile prod run --rm scheduler-ztf /app/scheduler ztf
+docker compose --profile prod run --rm scheduler-ztf /app/migrate_fp_flux
+docker compose --profile prod run --rm scheduler-ztf /app/migrate_snr
 ```
 
 To tail logs or open a shell in a running container:
