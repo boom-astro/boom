@@ -224,7 +224,6 @@ async fn flush_objects_batch(
 // completely untouched (the scheduler pipeline already filled their cross_matches).
 // Without this guard, phase 4's `$set live = $temp` would overwrite a new record's
 // field with a missing/partial temp and silently delete it.
-// Phase 5 then cleans up any orphan temp left.
 // -----------------------------------------------------------------------------
 async fn run_catalog_driven(
     survey: &Survey,
@@ -244,7 +243,7 @@ async fn run_catalog_driven(
     // Phase 1: clear temp field on every alerts_aux record that existed at run start
     // so we start from a known empty state. Records inserted later are skipped.
     info!(
-        "[catalog→{}] phase 1/5: cleaning temp field",
+        "[catalog→{}] phase 1/4: cleaning temp field",
         catalog_config.catalog
     );
     let empty: Vec<Document> = Vec::new();
@@ -257,7 +256,7 @@ async fn run_catalog_driven(
 
     // Phase 2: stream catalog rows through a worker pool, $push matches to temp.
     info!(
-        "[catalog→{}] phase 2/5: streaming catalog rows",
+        "[catalog→{}] phase 2/4: streaming catalog rows",
         catalog_config.catalog
     );
     let mut cat_projection = catalog_config.projection.clone();
@@ -326,13 +325,13 @@ async fn run_catalog_driven(
         // CRITICAL: phase 1 cleared temp on every existing record. If phase 2 partially failed,
         // some records have empty temp; running phase 4 would overwrite their valid live
         // cross_matches with that empty temp. Abort before phase 3 to preserve existing data.
-        // Phase 5-style cleanup of any orphan temp must still run on retry.
+        // The next run's phase 1 will reset temp to [] on every existing record before phase 4 unsets it.
         return Err(e);
     }
 
     // Phase 3: sort + trim of accumulated matches per alerts_aux record.
     info!(
-        "[catalog→{}] phase 3/5: sorting and trimming temp",
+        "[catalog→{}] phase 3/4: sorting and trimming temp",
         catalog_config.catalog
     );
     aux_collection
@@ -348,7 +347,7 @@ async fn run_catalog_driven(
     // Phase 4: copy temp to live field, then clear temp.
     // Gated on created_at to avoid overwriting new records that arrived during the run.
     info!(
-        "[catalog→{}] phase 4/5: swapping temp into live",
+        "[catalog→{}] phase 4/4: swapping temp into live",
         catalog_config.catalog
     );
     aux_collection
@@ -358,18 +357,6 @@ async fn run_catalog_driven(
                 doc! { "$set": { &live_field: format!("${}", &temp_field) } },
                 doc! { "$unset": &temp_field },
             ],
-        )
-        .await?;
-
-    // Phase 5: clean up any orphan temp fields left on records inserted during the run.
-    info!(
-        "[catalog→{}] phase 5/5: cleaning orphan temp",
-        catalog_config.catalog
-    );
-    aux_collection
-        .update_many(
-            doc! { &temp_field: { "$exists": true } },
-            doc! { "$unset": { &temp_field: "" } },
         )
         .await?;
 
