@@ -222,7 +222,7 @@ async fn flush_objects_batch(
 // Concurrency with the live ingest pipeline: every phase is gated on
 // `created_at < run_start_jd` so records inserted during the run are left
 // completely untouched (the scheduler pipeline already filled their cross_matches).
-// Without this guard, phase 4's `$set live = $temp` would overwrite a new record's
+// Without this guard, the final `$set live = $temp` would overwrite a new record's
 // field with a missing/partial temp and silently delete it.
 // -----------------------------------------------------------------------------
 async fn run_catalog_driven(
