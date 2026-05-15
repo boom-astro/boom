@@ -5,7 +5,6 @@
 #     "pyyaml",
 #     "pandas>2",
 #     "astropy",
-#     "confluent-kafka",
 # ]
 # ///
 
@@ -56,22 +55,34 @@ parser.add_argument(
     help="Number of seconds to wait before considering the benchmark a failure.",
 )
 args = parser.parse_args()
-
+hosts = {
+    "mongo": "mongo",
+    "redis": "valkey",
+    "kafka": "broker",
+}
+ports = {
+    "mongo": 27017,
+    "redis": 6379,
+    "kafka": 29092,
+}
 with open(os.path.join(args.boom_repo_dir, "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
-config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
-config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
-config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
+config["database"]["host"] = hosts["mongo"]
+config["database"]["port"] = ports["mongo"]
 config["database"]["name"] = "boom-benchmarking"
-config["database"]["host"] = "mongo"
 config["database"]["password"] = "mongoadminsecret"
-config["kafka"]["consumer"]["ztf"]["server"] = "broker:29092"
+config["redis"]["host"] = hosts["redis"]
+config["redis"]["port"] = ports["redis"]
+config["kafka"]["consumer"]["ztf"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
 config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
-config["kafka"]["producer"]["server"] = "broker:29092"
-config["redis"]["host"] = "valkey"
+config["kafka"]["producer"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
+config["api"]["port"] = 4000
 config["api"]["auth"]["secret_key"] = "1234"
 config["api"]["auth"]["admin_password"] = "adminsecret"
 config["babamul"]["enabled"] = True
+config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
+config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers
+config["workers"]["ztf"]["filter"]["n_workers"] = args.n_filter_workers
 with open(
     os.path.join(args.boom_repo_dir, "tests", "throughput", "config.yaml"), "w"
 ) as f:
@@ -113,13 +124,21 @@ with open(
 ) as f:
     json.dump(for_insert, f)
 
+if os.environ.get("BOOM_GPU__ENABLED", "false").lower() == "true":
+    gpus = len(
+        [d for d in os.environ.get("BOOM_GPU__DEVICE_IDS", "0").split(",") if d.strip()]
+    )
+else:
+    gpus = 0
+
 logs_dir = os.path.join(
-    "logs",
+    f"{args.boom_repo_dir}/logs",
     "boom-"
     + (
         f"na={args.n_alert_workers}-"
         f"ne={args.n_enrichment_workers}-"
-        f"nf={args.n_filter_workers}"
+        f"nf={args.n_filter_workers}-"
+        f"gpu={gpus}"
     ),
 )
 
@@ -136,38 +155,34 @@ if args.keep_up:
 subprocess.run(cmd, check=True)
 
 # Now analyze the logs and raise an error if we're too slow
-boom_config = (
-    f"na={args.n_alert_workers}-"
-    f"ne={args.n_enrichment_workers}-"
-    f"nf={args.n_filter_workers}"
-)
-boom_consumer_log_fpath = f"logs/boom-{boom_config}/consumer.log"
-boom_scheduler_log_fpath = f"logs/boom-{boom_config}/scheduler.log"
 t1_b, t2_b = None, None
+
+def extract_date_from_log(line_to_process):
+    line_index = 2 # Docker logs have two extra columns
+    return pd.to_datetime(
+        line_to_process.split()[line_index].replace("\x1b[2m", "").replace("\x1b[0m", "")
+    )
+
 # To calculate BOOM wall time, take:
 # - Start: timestamp of the first message received by the consumer
 # - End: last timestamp in the scheduler log
-with open(boom_consumer_log_fpath) as f:
+with open(f"{logs_dir}/consumer.log") as f:
     lines = f.readlines()
     for line in lines:
         if "Consumer received first message, continuing..." in line:
-            t1_b = pd.to_datetime(
-                line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
-            )
+            t1_b = extract_date_from_log(line)
             break
 
 if t1_b is None:
     raise ValueError("Could not find start time in consumer log")
-with open(boom_scheduler_log_fpath) as f:
+with open(f"{logs_dir}/scheduler.log") as f:
     lines = f.readlines()
     if len(lines) < 3:
         raise ValueError(
             "Scheduler log has fewer than 3 lines; cannot determine end time."
         )
     line = lines[-3]
-    t2_b = pd.to_datetime(
-        line.split()[2].replace("\x1b[2m", "").replace("\x1b[0m", "")
-    )
+    t2_b = extract_date_from_log(line)
 
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
