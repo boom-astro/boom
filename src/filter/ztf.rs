@@ -1,3 +1,4 @@
+use futures::TryFutureExt;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
@@ -168,9 +169,12 @@ pub async fn build_ztf_alerts(
         return Ok(Vec::new());
     }
 
-    let alerts: Vec<ZtfAlertEnriched> = fetch_alerts(&candids, &alert_pipeline, alert_collection)
-        .await
-        .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
+    let (alerts, mut candid_to_cutouts): (Vec<ZtfAlertEnriched>, _) = tokio::try_join!(
+        fetch_alerts(&candids, &alert_pipeline, alert_collection)
+            .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string())),
+        fetch_alert_cutouts(&candids, &alert_cutout_collection)
+            .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))
+    )?;
 
     if alerts.len() != candids.len() {
         let nb_total = candids.len();
@@ -186,10 +190,6 @@ pub async fn build_ztf_alerts(
             missing_candids
         );
     }
-
-    let mut candid_to_cutouts = fetch_alert_cutouts(&candids, &alert_cutout_collection)
-        .await
-        .map_err(|e| FilterWorkerError::FetchCutoutsError(e.to_string()))?;
 
     if candid_to_cutouts.len() != alerts.len() {
         let mut missing_cutouts_candids: Vec<&i64> = alerts
