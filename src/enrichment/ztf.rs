@@ -798,8 +798,8 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 63, 63, 3));
-        let mut metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 3, 63, 63));
+        let mut acai_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
         let mut btsbot_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
 
         for (row, idx) in selected_indices.iter().enumerate() {
@@ -810,17 +810,39 @@ impl ZtfEnrichmentWorker {
             triplet
                 .slice_mut(ndarray::s![row, .., .., ..])
                 .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
-            metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
+            acai_metadata
+                .row_mut(row)
+                .assign(&acai_metadata_all.row(apos));
             btsbot_metadata
                 .row_mut(row)
                 .assign(&bts_metadata_all.row(bpos));
         }
 
-        let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_h_scores = models
+            .acai_h
+            .lock()
+            .unwrap()
+            .predict(&acai_metadata, &triplet)?;
+        let acai_n_scores = models
+            .acai_n
+            .lock()
+            .unwrap()
+            .predict(&acai_metadata, &triplet)?;
+        let acai_v_scores = models
+            .acai_v
+            .lock()
+            .unwrap()
+            .predict(&acai_metadata, &triplet)?;
+        let acai_o_scores = models
+            .acai_o
+            .lock()
+            .unwrap()
+            .predict(&acai_metadata, &triplet)?;
+        let acai_b_scores = models
+            .acai_b
+            .lock()
+            .unwrap()
+            .predict(&acai_metadata, &triplet)?;
         let btsbot_scores = models
             .btsbot
             .lock()

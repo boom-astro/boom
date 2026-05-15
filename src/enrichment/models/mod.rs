@@ -40,23 +40,23 @@ impl SharedModels {
         let models = match device_id {
             Some(id) => Self {
                 acai_h: Mutex::new(AcaiModel::new_on_device(
-                    "data/models/acai_h.d1_dnn_20201130.onnx",
+                    "data/models/acai_h.d1_dnn_20201130_nchw.onnx",
                     id,
                 )?),
                 acai_n: Mutex::new(AcaiModel::new_on_device(
-                    "data/models/acai_n.d1_dnn_20201130.onnx",
+                    "data/models/acai_n.d1_dnn_20201130_nchw.onnx",
                     id,
                 )?),
                 acai_v: Mutex::new(AcaiModel::new_on_device(
-                    "data/models/acai_v.d1_dnn_20201130.onnx",
+                    "data/models/acai_v.d1_dnn_20201130_nchw.onnx",
                     id,
                 )?),
                 acai_o: Mutex::new(AcaiModel::new_on_device(
-                    "data/models/acai_o.d1_dnn_20201130.onnx",
+                    "data/models/acai_o.d1_dnn_20201130_nchw.onnx",
                     id,
                 )?),
                 acai_b: Mutex::new(AcaiModel::new_on_device(
-                    "data/models/acai_b.d1_dnn_20201130.onnx",
+                    "data/models/acai_b.d1_dnn_20201130_nchw.onnx",
                     id,
                 )?),
                 btsbot: Mutex::new(BtsBotModel::new_on_device(
@@ -65,11 +65,21 @@ impl SharedModels {
                 )?),
             },
             None => Self {
-                acai_h: Mutex::new(AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?),
-                acai_n: Mutex::new(AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?),
-                acai_v: Mutex::new(AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?),
-                acai_o: Mutex::new(AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?),
-                acai_b: Mutex::new(AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?),
+                acai_h: Mutex::new(AcaiModel::new(
+                    "data/models/acai_h.d1_dnn_20201130_nchw.onnx",
+                )?),
+                acai_n: Mutex::new(AcaiModel::new(
+                    "data/models/acai_n.d1_dnn_20201130_nchw.onnx",
+                )?),
+                acai_v: Mutex::new(AcaiModel::new(
+                    "data/models/acai_v.d1_dnn_20201130_nchw.onnx",
+                )?),
+                acai_o: Mutex::new(AcaiModel::new(
+                    "data/models/acai_o.d1_dnn_20201130_nchw.onnx",
+                )?),
+                acai_b: Mutex::new(AcaiModel::new(
+                    "data/models/acai_b.d1_dnn_20201130_nchw.onnx",
+                )?),
                 btsbot: Mutex::new(BtsBotModel::new("data/models/btsbot-v2.0.0.onnx")?),
             },
         };

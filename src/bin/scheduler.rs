@@ -44,7 +44,7 @@ fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::
         info!(device_id, "Running BTSBotModel inference on device");
         let mut model = BtsBotModel::new_on_device("data/models/btsbot-v2.0.0.onnx", device_id)?;
         let metadata = ndarray::Array::from_shape_vec((1, 25), vec![0.5; 25])?;
-        let triplet = ndarray::Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
+        let triplet = ndarray::Array::from_shape_vec((1, 3, 63, 63), vec![0.5; 3 * 63 * 63])?;
         let _ = model.predict(&metadata, &triplet)?;
     }
     Ok(())
