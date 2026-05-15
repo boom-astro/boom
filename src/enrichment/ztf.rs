@@ -459,8 +459,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         &mut self,
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
-        let alerts: Vec<ZtfAlertForEnrichment> =
-            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
+        let (alerts, mut candid_to_cutouts) = tokio::try_join!(
+            fetch_alerts::<ZtfAlertForEnrichment>(
+                &candids,
+                &self.alert_pipeline,
+                &self.alert_collection
+            ),
+            fetch_alert_cutouts(&candids, &self.alert_cutout_collection)
+        )?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -472,9 +478,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         if alerts.is_empty() {
             return Ok(vec![]);
         }
-
-        let mut candid_to_cutouts =
-            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
 
         if candid_to_cutouts.len() != alerts.len() {
             warn!(

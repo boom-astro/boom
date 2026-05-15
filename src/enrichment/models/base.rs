@@ -13,10 +13,10 @@ pub enum ModelError {
     MissingDocumentField(#[from] mongodb::bson::document::ValueAccessError),
     #[error("shape error from ndarray")]
     NdarrayShape(#[from] ndarray::ShapeError),
-    #[error("error from ort")]
-    Ort(#[from] ort::Error),
-    #[error("error from ort session builder")]
-    OrtSessionBuilder(#[from] ort::Error<ort::session::builder::SessionBuilder>),
+    #[error("error from ort: {0}")]
+    Ort(String),
+    #[error("error from ort session builder: {0}")]
+    OrtSessionBuilder(String),
     #[error("error preparing cutout data")]
     PrepareCutoutError(#[from] CutoutError),
     #[error("error converting predictions to vec")]
@@ -25,6 +25,18 @@ pub enum ModelError {
     MissingFeature(&'static str),
     #[error("ORT_DYLIB_PATH is not set on Linux; ONNX Runtime cannot be loaded. Please set ORT_DYLIB_PATH to the path of your libonnxruntime.so.")]
     MissingOrtDylibPath,
+}
+
+impl From<ort::Error> for ModelError {
+    fn from(e: ort::Error) -> Self {
+        ModelError::Ort(e.to_string())
+    }
+}
+
+impl From<ort::Error<ort::session::builder::SessionBuilder>> for ModelError {
+    fn from(e: ort::Error<ort::session::builder::SessionBuilder>) -> Self {
+        ModelError::OrtSessionBuilder(e.to_string())
+    }
 }
 
 /// Load an ONNX model, optionally on a specific CUDA device.
