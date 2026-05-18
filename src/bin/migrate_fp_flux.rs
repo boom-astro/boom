@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::data::make_progress_bar;
 use boom::utils::lightcurves::ZTF_ZP;
+use boom::utils::parser::parse_positive_usize;
 use clap::Parser;
 use futures::TryStreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
 use mongodb::bson::{doc, Bson, Document};
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -30,10 +31,10 @@ struct Cli {
     config: Option<String>,
 
     /// Number of document IDs to collect per update_many batch
-    #[arg(long, default_value = "5000")]
+    #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
     /// Whether or not validation should run after migration. Defaults to False (caution, it's very slow!)
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value_t = false)]
     validate: bool,
 }
 
@@ -47,14 +48,7 @@ async fn run_batched_update(
     estimated_total: u64,
     label: &str,
 ) -> i64 {
-    let pb = ProgressBar::new(estimated_total);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{msg} {bar:40} {pos}/{len} [{elapsed_precise} < {eta_precise}]",
-        )
-        .unwrap(),
-    );
-    pb.set_message(label.to_string());
+    let pb = make_progress_bar(estimated_total, label.to_string());
 
     let mut cursor = match collection
         .find(filter)
@@ -329,14 +323,7 @@ async fn validate(collection: &mongodb::Collection<Document>) {
         }
     };
 
-    let pb = ProgressBar::new(estimated_count);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "validate {bar:40} {pos}/{len} [{elapsed_precise} < {eta_precise}]",
-        )
-        .unwrap(),
-    );
-    pb.set_message("validate".to_string());
+    let pb = make_progress_bar(estimated_count, "validate".to_string());
 
     let mut cursor = match collection.aggregate(pipeline).await {
         Ok(c) => c,
