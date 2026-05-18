@@ -50,6 +50,8 @@ services:
       - VALKEY_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
     expose:
       - "6379"
+    ports:
+      - "6379:6379"
     restart: always
     networks:
       - boom
@@ -108,7 +110,7 @@ services:
       - --server-url
       - broker:29092
     environment:
-      RUST_LOG: debug,ort=error
+      RUST_LOG: error,boom=debug
     networks:
       - boom
     depends_on:
@@ -130,7 +132,7 @@ services:
     # have it sleep 5 seconds to allow kafka to finish producing
     command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public"]
     environment:
-      RUST_LOG: debug,ort=error
+      RUST_LOG: error,boom=debug
     depends_on:
       producer:
         condition: service_completed_successfully
@@ -153,7 +155,7 @@ services:
       - /app/scheduler
       - ztf
     environment:
-      RUST_LOG: debug,ort=error
+      RUST_LOG: error,boom=debug
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:
