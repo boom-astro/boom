@@ -11,6 +11,7 @@ mod tests {
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
+    use boom::utils::cutouts::{AlertCutout, CutoutStorage};
     use boom::utils::enums::Survey;
     use boom::utils::testing::{
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
@@ -18,6 +19,7 @@ mod tests {
     };
     use mongodb::bson::doc;
     use mongodb::Database;
+    use std::collections::HashMap;
 
     /// Helper struct to manage test user lifecycle
     struct TestUser {
@@ -475,6 +477,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
         load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
@@ -482,27 +485,34 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         // Insert test cutout data with unique ID
-        let cutouts_collection =
-            database.collection::<boom::alert::AlertCutout>("ZTF_alerts_cutouts");
-        let test_candid: i64 = uuid::Uuid::new_v4().as_u128() as i64;
+        let ztf_cutouts_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage");
+        let test_candid = uuid::Uuid::new_v4().as_u128() as i64;
 
-        let cutout = boom::alert::AlertCutout {
+        let cutouts = AlertCutout {
             candid: test_candid,
-            cutout_science: vec![1, 2, 3, 4, 5],
-            cutout_template: vec![6, 7, 8, 9, 10],
-            cutout_difference: vec![11, 12, 13, 14, 15],
+            cutout_science: vec![1, 2, 3],
+            cutout_template: vec![4, 5, 6],
+            cutout_difference: vec![7, 8, 9],
         };
 
-        cutouts_collection
-            .insert_one(&cutout)
+        ztf_cutouts_storage
+            .insert_cutouts(cutouts)
             .await
-            .expect("Failed to insert test cutout");
+            .expect("Failed to store test cutout");
+
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, ztf_cutouts_storage);
 
         let app = test::init_service(
             App::new().service(
                 actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(cutout_storage_map))
                     .wrap(from_fn(babamul_auth_middleware))
                     .service(routes::babamul::surveys::get_cutouts),
             ),
@@ -537,8 +547,11 @@ mod tests {
         );
 
         // Clean up
-        cutouts_collection
-            .delete_one(doc! { "_id": test_candid })
+        config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage for cleanup")
+            .delete_cutouts(test_candid)
             .await
             .expect("Failed to delete test cutout");
 
@@ -619,7 +632,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
     }
 
     /// Test GET /babamul/surveys/ztf/alerts
@@ -684,7 +699,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 
     /// Test GET /babamul/surveys/lsst/objects/{object_id}
@@ -744,7 +761,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
 
         // Test retrieval of non-existent object
         let req = test::TestRequest::get()
@@ -817,7 +836,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
 
         // Test retrieval of non-existent object
         let req = test::TestRequest::get()
