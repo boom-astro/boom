@@ -77,5 +77,8 @@ COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 COPY --from=builder /app/target/release/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /opt/ort /opt/ort
+# Temporary
+COPY --from=builder /app/target/release/copy_cutouts /app/copy_cutouts
+COPY --from=builder /app/target/release/stream_kowalski_alerts /app/stream_kowalski_alerts
 
 CMD ["/app/scheduler"]
