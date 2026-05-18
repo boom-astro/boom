@@ -1,10 +1,11 @@
 use crate::{
     alert::{
         base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
-        decam, lsst, AlertCutout, LightcurveJdOnly, TimeSeries,
+        decam, lsst, LightcurveJdOnly, TimeSeries,
     },
     conf::{self, AppConfig},
     utils::{
+        cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
@@ -29,7 +30,6 @@ pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
-pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
@@ -700,8 +700,8 @@ pub struct ZtfAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
+    alert_cutout_storage: CutoutStorage,
     alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
-    alert_cutout_collection: mongodb::Collection<AlertCutout>,
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
@@ -911,8 +911,11 @@ impl AlertWorker for ZtfAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
         let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&lsst::ALERT_AUX_COLLECTION);
@@ -925,7 +928,7 @@ impl AlertWorker for ZtfAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
@@ -978,20 +981,22 @@ impl AlertWorker for ZtfAlertWorker {
         ZtfPrvCandidate::sanitize_timeseries(&mut prv_nondetections);
         ZtfForcedPhot::sanitize_timeseries(&mut fp_hists);
 
-        // add the cutouts, skip processing if the cutouts already exist
-        let cutout_status = self
-            .format_and_insert_cutouts(
-                candid,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_collection,
-            )
+        let alert = ZtfAlert {
+            candid,
+            object_id: object_id.clone(),
+            candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = cutout_status {
-            return Ok(cutout_status);
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
 
         let survey_matches = Some(
@@ -1049,17 +1054,15 @@ impl AlertWorker for ZtfAlertWorker {
             }
         }
 
-        let alert = ZtfAlert {
-            candid,
-            object_id: object_id.clone(),
-            candidate,
-            coordinates: Coordinates::new(ra, dec),
-            created_at: now,
-            updated_at: now,
-        };
-
         let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+            .format_and_insert_cutouts(
+                candid,
+                &object_id,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_storage,
+            )
             .await
             .inspect_err(as_error!())?;
 
@@ -1500,7 +1503,9 @@ mod tests {
             jd
         );
 
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 
     /// Verify that SchemaCache falls back to the Reader-based path when the
@@ -1585,6 +1590,47 @@ mod tests {
 
         assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_stored_and_retrievable() {
+        let mut worker = ztf_alert_worker().await;
+        let (candid, object_id, parsed_alert) = seed_ztf_alert(&mut worker).await;
+
+        let stored = worker
+            .alert_cutout_storage
+            .retrieve_cutouts(candid, false)
+            .await
+            .expect("cutout should be retrievable after process_alert");
+
+        assert_eq!(stored.candid, candid);
+        assert_eq!(stored.cutout_science, parsed_alert.cutout_science);
+        assert_eq!(stored.cutout_template, parsed_alert.cutout_template);
+        assert_eq!(stored.cutout_difference, parsed_alert.cutout_difference);
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+        let _ = object_id;
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_deduplication() {
+        let mut worker = ztf_alert_worker().await;
+        let (candid, _object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+
+        let first = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(first, ProcessAlertStatus::Added(candid));
+
+        let second = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(second, ProcessAlertStatus::Exists(candid));
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 }

@@ -3,7 +3,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 
 /// Standard progress bar used by long-running maintenance binaries
-/// (`repair_photometry_ordering`, `migrate_*`).
+/// (`reprocess_crossmatch`, `migrate_*`).
 pub fn make_progress_bar(total: u64, label: String) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
