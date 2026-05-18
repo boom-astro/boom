@@ -1294,10 +1294,6 @@ pub trait AlertWorker {
             .update_one(find_doc, update_doc)
             .await?;
         if update_result.matched_count == 0 {
-            warn!(
-                "Concurrent modification detected for object_id {}. Using DB-only update.",
-                object_id
-            );
             return Err(AlertError::ConcurrentAuxUpdate(object_id.to_string()));
         }
         Ok(())
