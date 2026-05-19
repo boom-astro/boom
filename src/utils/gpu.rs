@@ -130,10 +130,24 @@ pub fn validate_gpu_configuration_for_survey(
     config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if matches!(survey, Survey::Ztf) && config.gpu.enabled {
-        validate_linux_gpu_runtime_preconditions().expect("GPU runtime preconditions not met");
-        validate_gpu_free_vram(&config.gpu.device_ids, ZTF_MIN_FREE_VRAM_MIB)
-            .expect("configured GPU(s) do not have enough free VRAM for ZTF enrichment");
-        validate_gpu_inference(&config.gpu.device_ids).expect("failed to validate GPU inference");
+        validate_linux_gpu_runtime_preconditions().map_err(|e| {
+            std::io::Error::other(format!(
+                "GPU configuration validation failed for survey {}: {e}",
+                survey
+            ))
+        })?;
+        validate_gpu_free_vram(&config.gpu.device_ids, ZTF_MIN_FREE_VRAM_MIB).map_err(|e| {
+            std::io::Error::other(format!(
+                "GPU free VRAM guardrail check failed for survey {}: {e}",
+                survey
+            ))
+        })?;
+        validate_gpu_inference(&config.gpu.device_ids).map_err(|e| {
+            std::io::Error::other(format!(
+                "GPU inference validation failed for survey {}: {e}",
+                survey
+            ))
+        })?;
         info!("Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference");
     }
     Ok(())

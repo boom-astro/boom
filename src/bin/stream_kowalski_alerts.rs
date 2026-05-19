@@ -70,8 +70,8 @@ use tracing::{debug, error, info, warn};
 /// check ZTF_alerts_aux to decide which alerts belong to objects already known
 /// to BOOM, and bulk-insert only those.  Alerts for unknown objects are dropped.
 ///
-/// The operation is idempotent: duplicates are silently skipped.  Pass
-/// The operation is idempotent: restarting from the beginning is safe.
+/// The operation is idempotent: duplicates are silently skipped,
+/// so restarting from the beginning is safe.
 ///
 /// See module-level docs for full examples.
 #[derive(Parser)]
@@ -198,20 +198,17 @@ async fn collect_batch(
 }
 
 // Returns the set of objectIds present in ZTF_alerts_aux (_id field).
-async fn query_known_obj_ids(coll: &Collection<ObjectIdOnly>, obj_ids: &[&str]) -> HashSet<String> {
+async fn query_known_obj_ids(
+    coll: &Collection<ObjectIdOnly>,
+    obj_ids: &[&str],
+) -> Result<HashSet<String>> {
     let t = Instant::now();
-    let mut cursor = match coll
+    let mut cursor = coll
         .find(doc! { "_id": { "$in": obj_ids } })
         .projection(doc! { "_id": 1 })
         .no_cursor_timeout(true)
         .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("ZTF_alerts_aux query failed: {}", e);
-            return HashSet::new();
-        }
-    };
+        .context("ZTF_alerts_aux query failed")?;
     debug!(
         n = obj_ids.len(),
         elapsed_ms = t.elapsed().as_millis(),
@@ -221,12 +218,11 @@ async fn query_known_obj_ids(coll: &Collection<ObjectIdOnly>, obj_ids: &[&str]) 
     let t = Instant::now();
     let mut known = HashSet::with_capacity(obj_ids.len());
     while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => {
-                known.insert(doc.object_id);
-            }
-            Err(e) => warn!("cursor error in ZTF_alerts_aux query: {}", e),
-        }
+        known.insert(
+            result
+                .context("cursor error in ZTF_alerts_aux query")?
+                .object_id,
+        );
     }
     debug!(
         n = obj_ids.len(),
@@ -234,7 +230,7 @@ async fn query_known_obj_ids(coll: &Collection<ObjectIdOnly>, obj_ids: &[&str]) 
         elapsed_ms = t.elapsed().as_millis(),
         "aux cursor drain"
     );
-    known
+    Ok(known)
 }
 
 fn into_boom(alerts: Vec<KowalskiZtfAlert>) -> Vec<ZtfAlert> {
@@ -260,35 +256,27 @@ fn into_boom(alerts: Vec<KowalskiZtfAlert>) -> Vec<ZtfAlert> {
 async fn fetch_cutouts_from_kowalski(
     coll: &Collection<KowalskiZtfCutout>,
     candids: &[i64],
-) -> Vec<AlertCutout> {
+) -> Result<Vec<AlertCutout>> {
     if candids.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
     let t = Instant::now();
-    let mut cursor = match coll
+    let mut cursor = coll
         .find(doc! { "candid": { "$in": candids } })
         .projection(
             doc! { "candid": 1, "cutoutScience": 1, "cutoutTemplate": 1, "cutoutDifference": 1 },
         )
         .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Kowalski cutout query failed: {}", e);
-            return vec![];
-        }
-    };
+        .context("Kowalski cutout query failed")?;
     let mut cutouts = Vec::with_capacity(candids.len());
     while let Some(result) = cursor.next().await {
-        match result {
-            Ok(kc) => cutouts.push(AlertCutout {
-                candid: kc.candid,
-                cutout_science: kc.cutout_science,
-                cutout_template: kc.cutout_template,
-                cutout_difference: kc.cutout_difference,
-            }),
-            Err(e) => warn!("cursor error fetching Kowalski cutouts: {}", e),
-        }
+        let kc = result.context("cursor error fetching Kowalski cutouts")?;
+        cutouts.push(AlertCutout {
+            candid: kc.candid,
+            cutout_science: kc.cutout_science,
+            cutout_template: kc.cutout_template,
+            cutout_difference: kc.cutout_difference,
+        });
     }
     debug!(
         requested = candids.len(),
@@ -296,7 +284,7 @@ async fn fetch_cutouts_from_kowalski(
         elapsed_ms = t.elapsed().as_millis(),
         "cutout fetch from Kowalski"
     );
-    cutouts
+    Ok(cutouts)
 }
 
 // insert_many with ordered=false; returns batch indices of E11000 duplicates.
@@ -305,15 +293,15 @@ async fn insert_many_skip_dups<T>(
     docs: Vec<T>,
     opts: &InsertManyOptions,
     label: &str,
-) -> Vec<usize>
+) -> Result<Vec<usize>>
 where
     T: serde::Serialize + Send + Sync,
 {
     if docs.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
     match coll.insert_many(docs).with_options(opts.clone()).await {
-        Ok(_) => vec![],
+        Ok(_) => Ok(vec![]),
         Err(e) => {
             if let mongodb::error::ErrorKind::InsertMany(ref ime) = *e.kind {
                 if let Some(ref write_errors) = ime.write_errors {
@@ -328,11 +316,10 @@ where
                             dups.push(we.index);
                         }
                     }
-                    return dups;
+                    return Ok(dups);
                 }
             }
-            error!("error inserting {}: {}", label, e);
-            vec![]
+            Err(e).context(format!("error inserting {label}"))
         }
     }
 }
@@ -425,7 +412,7 @@ async fn worker(
                 .collect()
         };
 
-        let known = query_known_obj_ids(&aux_coll, &unique_obj_ids).await;
+        let known = query_known_obj_ids(&aux_coll, &unique_obj_ids).await?;
 
         let to_import: Vec<KowalskiZtfAlert> = batch
             .into_iter()
@@ -446,7 +433,7 @@ async fn worker(
         // Insert alerts first to learn which candids are actually new.
         let t = Instant::now();
         let dup_indices =
-            insert_many_skip_dups(&alerts_coll, ztf_alerts, &insert_opts, "alerts").await;
+            insert_many_skip_dups(&alerts_coll, ztf_alerts, &insert_opts, "alerts").await?;
         let inserted = n - dup_indices.len();
         debug!(
             count = n,
@@ -466,11 +453,15 @@ async fn worker(
             .collect();
 
         if !inserted_candids.is_empty() {
-            debug!("inserted candids: {:?}", inserted_candids);
-
+            debug!(
+                requested = candids.len(),
+                inserted = inserted_candids.len(),
+                elapsed_ms = t.elapsed().as_millis(),
+                "new alerts to fetch cutouts for"
+            );
             // Fetch cutouts from Kowalski only for the newly inserted candids.
             let cutouts =
-                fetch_cutouts_from_kowalski(&kowalski_cutout_coll, &inserted_candids).await;
+                fetch_cutouts_from_kowalski(&kowalski_cutout_coll, &inserted_candids).await?;
             if cutouts.len() != inserted_candids.len() {
                 warn!(
                     requested = inserted_candids.len(),
@@ -480,7 +471,7 @@ async fn worker(
             }
 
             let t = Instant::now();
-            insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await;
+            insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await?;
             info!(
                 count = inserted,
                 elapsed_ms = t.elapsed().as_millis(),

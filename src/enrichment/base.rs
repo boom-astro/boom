@@ -112,7 +112,6 @@ pub trait EnrichmentWorker {
     ) -> Result<Vec<String>, EnrichmentWorkerError>;
 
     /// Forcibly disable Babamul on this worker, regardless of config.
-    /// Surveys without Babamul can leave this as the default no-op.
     fn disable_babamul(&mut self);
 }
 
