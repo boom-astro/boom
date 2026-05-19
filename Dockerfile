@@ -76,6 +76,8 @@ COPY --from=builder /app/target/release/api /app/boom-api
 COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 COPY --from=builder /app/target/release/reprocess_crossmatch /app/reprocess_crossmatch
+COPY --from=builder /app/target/release/find_orphan_cutouts /app/find_orphan_cutouts
+COPY --from=builder /app/target/release/find_orphan_aux_objects /app/find_orphan_aux_objects
 COPY --from=builder /opt/ort /opt/ort
 
 CMD ["/app/scheduler"]
