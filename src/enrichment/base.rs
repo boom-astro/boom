@@ -91,6 +91,8 @@ pub enum EnrichmentWorkerError {
     MissingMagZPSci,
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
+    #[error("Empty lightcurve after preparation for candid {0}")]
+    EmptyLightcurve(i64),
 }
 
 #[async_trait::async_trait]
@@ -108,6 +110,10 @@ pub trait EnrichmentWorker {
         &mut self,
         alerts: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError>;
+
+    /// Forcibly disable Babamul on this worker, regardless of config.
+    /// Surveys without Babamul can leave this as the default no-op.
+    fn disable_babamul(&mut self);
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.

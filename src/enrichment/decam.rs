@@ -129,6 +129,8 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         Survey::Decam
     }
 
+    fn disable_babamul(&mut self) {}
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }

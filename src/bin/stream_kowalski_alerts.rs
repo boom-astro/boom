@@ -7,34 +7,23 @@
 //!
 //! ## Architecture
 //!
-//!   Main thread  — streams Kowalski ZTF_alerts into a bounded channel.
+//!   Main thread  — streams Kowalski ZTF_alerts (without cutouts) into a bounded channel.
 //!   N workers    — each worker pulls up to --batch-size alerts, checks which of
 //!                  their objectIds exist in BOOM's ZTF_alerts_aux, drops alerts
-//!                  for unknown objects, and bulk-inserts the rest into
-//!                  ZTF_alerts and ZTF_alerts_cutouts.
+//!                  for unknown objects, bulk-inserts the rest into ZTF_alerts,
+//!                  then fetches cutouts from Kowalski only for the candids that
+//!                  were actually new (not E11000 duplicates), and inserts those.
 //!
 //! ## Idempotency
 //!
 //! insert_many calls use ordered=false and silently skip E11000 (duplicate-key)
 //! errors, so restarting the tool from the beginning is safe.
 //!
-//! ## Resuming an interrupted run
-//!
-//! When the run ends (either normally or on a cursor error) the last candid read
-//! from Kowalski is printed.  Pass it as --min-candid on the next invocation to
-//! skip already-processed documents.
-//!
 //! # Examples
 //!
 //!   stream_kowalski_alerts \
 //!     --kowalski-uri "mongodb://ro:pass@kowalski-host:27017/kowalski" \
 //!     --boom-uri     "mongodb://rw:pass@boom-host:27017/boom"
-//!
-//!   # Resume after interruption at candid 1234567890123456789:
-//!   stream_kowalski_alerts \
-//!     --kowalski-uri  "mongodb://ro:pass@kowalski-host:27017/kowalski" \
-//!     --boom-uri      "mongodb://rw:pass@boom-host:27017/boom" \
-//!     --min-candid    1234567890123456789
 //!
 //!   # Cutouts on a separate host:
 //!   stream_kowalski_alerts \
@@ -70,7 +59,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tracing::{debug, error, info, warn};
 
@@ -82,7 +71,7 @@ use tracing::{debug, error, info, warn};
 /// to BOOM, and bulk-insert only those.  Alerts for unknown objects are dropped.
 ///
 /// The operation is idempotent: duplicates are silently skipped.  Pass
-/// --min-candid to resume from a previous run's last-seen candid.
+/// The operation is idempotent: restarting from the beginning is safe.
 ///
 /// See module-level docs for full examples.
 #[derive(Parser)]
@@ -115,17 +104,22 @@ struct Cli {
     #[arg(long, env = "BOOM_MONGODB_CUTOUT_NAME")]
     boom_cutout_db_name: Option<String>,
 
-    /// Optional Redis URI for the ZTF enrichment queue (reprocessing).
-    /// When set, newly inserted candids are lpush'd to ZTF_alerts_enrichment_queue_reprocess.
+    /// Optional Redis URI for pushing newly inserted candids to an enrichment queue.
     /// Only candids actually written (not E11000 skips) are enqueued.
+    /// Must be paired with --enrichment-queue.
     /// Env: REDIS_URI
     #[arg(long, env = "REDIS_URI")]
     redis_uri: Option<String>,
 
+    /// Redis queue name to push newly inserted candids to.
+    /// Must be paired with --redis-uri.
+    /// Env: BOOM_ENRICHMENT_QUEUE
+    #[arg(long)]
+    enrichment_queue: Option<String>,
+
     /// Number of alerts collected per worker batch.
     /// Each batch issues one ZTF_alerts_aux lookup and one insert_many pair.
-    /// Higher values amortise round-trip costs; lower values reduce peak memory
-    /// (cutout images are buffered in memory for the duration of a batch).
+    /// Higher values amortise round-trip costs; lower values reduce peak memory.
     #[arg(long, default_value_t = 1000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
@@ -134,14 +128,16 @@ struct Cli {
     #[arg(long, default_value_t = 4, value_parser = parse_positive_usize)]
     n_workers: usize,
 
-    /// Only process alerts with candid >= this value.
-    /// Use the "last candid" value printed on a previous interrupted run to resume.
-    #[arg(long)]
-    min_candid: Option<i64>,
+    /// Maximum JD of candidates to stream, to avoid processing new alerts during a long run.
+    /// Env: MAX_JD
+    #[arg(long, env = "MAX_JD")]
+    max_jd: Option<f64>,
 }
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
+/// Alert document streamed from Kowalski — cutouts are excluded from the
+/// projection so they are never transferred over the wire at this stage.
 #[derive(Debug, Deserialize)]
 struct KowalskiZtfAlert {
     candid: i64,
@@ -149,6 +145,12 @@ struct KowalskiZtfAlert {
     object_id: String,
     #[serde(deserialize_with = "deserialize_candidate")]
     candidate: ZtfCandidate,
+}
+
+/// Cutout-only document fetched from Kowalski by candid after alert insertion.
+#[derive(Debug, Deserialize)]
+struct KowalskiZtfCutout {
+    candid: i64,
     #[serde(
         rename = "cutoutScience",
         deserialize_with = "deserialize_cutout_as_bytes"
@@ -235,30 +237,66 @@ async fn query_known_obj_ids(coll: &Collection<ObjectIdOnly>, obj_ids: &[&str]) 
     known
 }
 
-fn into_boom(alerts: Vec<KowalskiZtfAlert>) -> (Vec<ZtfAlert>, Vec<AlertCutout>) {
+fn into_boom(alerts: Vec<KowalskiZtfAlert>) -> Vec<ZtfAlert> {
     let now = flare::Time::now().to_jd();
-    let n = alerts.len();
-    let mut ztf_alerts = Vec::with_capacity(n);
-    let mut cutouts = Vec::with_capacity(n);
-    for a in alerts {
-        let ra = a.candidate.candidate.ra;
-        let dec = a.candidate.candidate.dec;
-        ztf_alerts.push(ZtfAlert {
-            candid: a.candid,
-            object_id: a.object_id,
-            candidate: a.candidate,
-            coordinates: Coordinates::new(ra, dec),
-            created_at: now,
-            updated_at: now,
-        });
-        cutouts.push(AlertCutout {
-            candid: a.candid,
-            cutout_science: a.cutout_science,
-            cutout_template: a.cutout_template,
-            cutout_difference: a.cutout_difference,
-        });
+    alerts
+        .into_iter()
+        .map(|a| {
+            let ra = a.candidate.candidate.ra;
+            let dec = a.candidate.candidate.dec;
+            ZtfAlert {
+                candid: a.candid,
+                object_id: a.object_id,
+                candidate: a.candidate,
+                coordinates: Coordinates::new(ra, dec),
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect()
+}
+
+/// Fetch cutouts from Kowalski for a specific set of candids.
+async fn fetch_cutouts_from_kowalski(
+    coll: &Collection<KowalskiZtfCutout>,
+    candids: &[i64],
+) -> Vec<AlertCutout> {
+    if candids.is_empty() {
+        return vec![];
     }
-    (ztf_alerts, cutouts)
+    let t = Instant::now();
+    let mut cursor = match coll
+        .find(doc! { "candid": { "$in": candids } })
+        .projection(
+            doc! { "candid": 1, "cutoutScience": 1, "cutoutTemplate": 1, "cutoutDifference": 1 },
+        )
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Kowalski cutout query failed: {}", e);
+            return vec![];
+        }
+    };
+    let mut cutouts = Vec::with_capacity(candids.len());
+    while let Some(result) = cursor.next().await {
+        match result {
+            Ok(kc) => cutouts.push(AlertCutout {
+                candid: kc.candid,
+                cutout_science: kc.cutout_science,
+                cutout_template: kc.cutout_template,
+                cutout_difference: kc.cutout_difference,
+            }),
+            Err(e) => warn!("cursor error fetching Kowalski cutouts: {}", e),
+        }
+    }
+    debug!(
+        requested = candids.len(),
+        fetched = cutouts.len(),
+        elapsed_ms = t.elapsed().as_millis(),
+        "cutout fetch from Kowalski"
+    );
+    cutouts
 }
 
 // insert_many with ordered=false; returns batch indices of E11000 duplicates.
@@ -285,6 +323,9 @@ where
                             dups.push(we.index);
                         } else {
                             error!("non-duplicate write error inserting {}: {:?}", label, we);
+                            // Treat other errors as "not inserted" so the candid is
+                            // not pushed to the enrichment queue or cutout fetcher.
+                            dups.push(we.index);
                         }
                     }
                     return dups;
@@ -298,22 +339,31 @@ where
 
 // ── worker ────────────────────────────────────────────────────────────────────
 
+#[tracing::instrument(skip_all, err)]
 async fn worker(
     rx: async_channel::Receiver<KowalskiZtfAlert>,
+    kowalski_uri: String,
     boom_uri: String,
     boom_db_name: String,
     boom_cutout_uri: Option<String>,
     boom_cutout_db_name: Option<String>,
     redis_uri: Option<String>,
+    enrichment_queue: Option<String>,
     batch_size: usize,
     total_imported: Arc<AtomicU64>,
     pb: ProgressBar,
 ) -> Result<u64> {
-    let enrichment_queue_reprocess = "ZTF_alerts_enrichment_queue_reprocess";
-    let client = Client::with_uri_str(&boom_uri)
+    let kowalski_client = Client::with_uri_str(&kowalski_uri)
+        .await
+        .context("failed to connect to Kowalski MongoDB")?;
+    let kowalski_cutout_coll: Collection<KowalskiZtfCutout> = kowalski_client
+        .database("kowalski")
+        .collection("ZTF_alerts");
+
+    let boom_client = Client::with_uri_str(&boom_uri)
         .await
         .context("failed to connect to BOOM MongoDB")?;
-    let db = client.database(&boom_db_name);
+    let db = boom_client.database(&boom_db_name);
 
     let aux_coll: Collection<ObjectIdOnly> = db.collection("ZTF_alerts_aux");
     let alerts_coll: Collection<ZtfAlert> = db.collection("ZTF_alerts");
@@ -390,17 +440,10 @@ async fn worker(
         }
 
         let n = to_import.len();
-        let (ztf_alerts, cutouts) = into_boom(to_import);
+        let ztf_alerts = into_boom(to_import);
         let candids: Vec<i64> = ztf_alerts.iter().map(|a| a.candid).collect();
 
-        let t = Instant::now();
-        insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await;
-        debug!(
-            count = n,
-            elapsed_ms = t.elapsed().as_millis(),
-            "cutout insert"
-        );
-
+        // Insert alerts first to learn which candids are actually new.
         let t = Instant::now();
         let dup_indices =
             insert_many_skip_dups(&alerts_coll, ztf_alerts, &insert_opts, "alerts").await;
@@ -413,17 +456,42 @@ async fn worker(
             "alert insert"
         );
 
-        if let Some(ref mut conn) = redis_conn {
-            let dup_set: HashSet<usize> = dup_indices.into_iter().collect();
-            let to_enqueue: Vec<i64> = candids
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !dup_set.contains(i))
-                .map(|(_, c)| *c)
-                .collect();
-            if !to_enqueue.is_empty() {
+        // Determine exactly which candids were new so we only fetch those cutouts.
+        let dup_set: HashSet<usize> = dup_indices.into_iter().collect();
+        let inserted_candids: Vec<i64> = candids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !dup_set.contains(i))
+            .map(|(_, c)| *c)
+            .collect();
+
+        if !inserted_candids.is_empty() {
+            debug!("inserted candids: {:?}", inserted_candids);
+
+            // Fetch cutouts from Kowalski only for the newly inserted candids.
+            let cutouts =
+                fetch_cutouts_from_kowalski(&kowalski_cutout_coll, &inserted_candids).await;
+            if cutouts.len() != inserted_candids.len() {
+                warn!(
+                    requested = inserted_candids.len(),
+                    fetched = cutouts.len(),
+                    "mismatch between requested and fetched cutouts"
+                );
+            }
+
+            let t = Instant::now();
+            insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await;
+            info!(
+                count = inserted,
+                elapsed_ms = t.elapsed().as_millis(),
+                "cutout insert"
+            );
+
+            if let (Some(ref mut conn), Some(ref queue)) =
+                (redis_conn.as_mut(), enrichment_queue.as_ref())
+            {
                 let t = Instant::now();
-                conn.lpush::<&str, Vec<i64>, usize>(enrichment_queue_reprocess, to_enqueue)
+                conn.lpush::<&str, Vec<i64>, usize>(queue.as_str(), inserted_candids)
                     .await
                     .context("Redis lpush failed")?;
                 debug!(
@@ -464,6 +532,11 @@ async fn main() {
         std::process::exit(1);
     }
 
+    if args.redis_uri.is_some() != args.enrichment_queue.is_some() {
+        eprintln!("error: --redis-uri and --enrichment-queue must be provided together");
+        std::process::exit(1);
+    }
+
     let kowalski_client = Client::with_uri_str(&args.kowalski_uri)
         .await
         .unwrap_or_else(|e| {
@@ -474,22 +547,14 @@ async fn main() {
         .database("kowalski")
         .collection("ZTF_alerts");
 
-    let estimated_total = match args.min_candid {
-        Some(min) => kowalski_coll
-            .count_documents(doc! { "_id": { "$gte": Bson::Int64(min) } })
-            .await
-            .unwrap_or_else(|e| {
-                warn!("count_documents failed: {}", e);
-                0
-            }),
-        None => kowalski_coll
-            .estimated_document_count()
-            .await
-            .unwrap_or_else(|e| {
-                warn!("estimated_document_count failed: {}", e);
-                0
-            }),
-    };
+    let estimated_total = kowalski_coll
+        .estimated_document_count()
+        .await
+        .unwrap_or_else(|e| {
+            warn!("estimated_document_count failed: {}", e);
+            0
+        });
+
     info!(
         "~{} Kowalski alerts to stream ({} workers, batch_size {})",
         estimated_total, args.n_workers, args.batch_size
@@ -505,22 +570,26 @@ async fn main() {
     let mut handles = Vec::with_capacity(args.n_workers);
     for _ in 0..args.n_workers {
         let rx = receiver.clone();
+        let kowalski_uri = args.kowalski_uri.clone();
         let boom_uri = args.boom_uri.clone();
         let boom_db_name = args.boom_db_name.clone();
         let boom_cutout_uri = args.boom_cutout_uri.clone();
         let boom_cutout_db_name = args.boom_cutout_db_name.clone();
         let redis_uri = args.redis_uri.clone();
+        let enrichment_queue = args.enrichment_queue.clone();
         let batch_size = args.batch_size;
         let counter = Arc::clone(&total_imported);
         let pb = pb.clone();
         handles.push(tokio::spawn(async move {
             worker(
                 rx,
+                kowalski_uri,
                 boom_uri,
                 boom_db_name,
                 boom_cutout_uri,
                 boom_cutout_db_name,
                 redis_uri,
+                enrichment_queue,
                 batch_size,
                 counter,
                 pb,
@@ -531,22 +600,40 @@ async fn main() {
 
     drop(receiver); // main never reads; workers hold the live clones
 
-    // _id == candid in Kowalski's ZTF_alerts — use the primary index for filter and sort.
-    let filter = match args.min_candid {
-        Some(min) => doc! { "_id": { "$gte": Bson::Int64(min) } },
+    let channel_capacity = args.n_workers * args.batch_size * 2;
+    let monitor_sender = sender.clone();
+    let queue_monitor = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let len = monitor_sender.len();
+            info!(
+                queue_len = len,
+                queue_capacity = channel_capacity,
+                "channel queue depth (full = workers are the bottleneck, empty = cursor is)"
+            );
+        }
+    });
+
+    let filter = match args.max_jd {
+        Some(max_jd) => doc! { "candidate.jd": { "$lte": Bson::Double(max_jd) } },
         None => doc! {},
     };
 
+    // Exclude cutouts from the streaming cursor — they are large and we only
+    // need them for the subset of candids that are actually new. Workers fetch
+    // cutouts separately after determining which alerts were inserted.
     let projection = doc! {
         "classifications": 0,
         "publisher": 0,
         "schemavsn": 0,
         "coordinates": 0,
+        "cutoutScience": 0,
+        "cutoutTemplate": 0,
+        "cutoutDifference": 0,
     };
 
     let mut cursor = kowalski_coll
         .find(filter)
-        .sort(doc! { "_id": 1 })
         .projection(projection)
         .batch_size(1000)
         .no_cursor_timeout(true)
@@ -556,32 +643,26 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let mut last_candid: i64 = args.min_candid.unwrap_or(0);
     let mut n_read: u64 = 0;
 
     while let Some(result) = cursor.next().await {
         match result {
             Ok(alert) => {
-                last_candid = alert.candid;
                 n_read += 1;
                 if sender.send(alert).await.is_err() {
-                    error!("all workers stopped; last candid read: {}", last_candid);
-                    info!("resume with: --min-candid {}", last_candid);
+                    error!("all workers have exited, cannot send more alerts");
                     std::process::exit(1);
                 }
             }
             Err(e) => {
                 error!("Kowalski cursor error: {}", e);
-                info!("resume with: --min-candid {}", last_candid);
                 break;
             }
         }
     }
 
-    info!(
-        "cursor done — read {} alerts, last candid: {}",
-        n_read, last_candid
-    );
+    info!("cursor done — read {} alerts", n_read);
+    queue_monitor.abort();
     drop(sender); // workers drain remaining channel items then exit
 
     for handle in handles {
@@ -598,9 +679,5 @@ async fn main() {
         "finished — {} Kowalski alerts read, {} imported into BOOM",
         n_read,
         total_imported.load(Ordering::Relaxed)
-    );
-    info!(
-        "to resume from this point, use: --min-candid {}",
-        last_candid
     );
 }
