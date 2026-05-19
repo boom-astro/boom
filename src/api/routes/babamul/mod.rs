@@ -4,14 +4,16 @@ pub mod tokens;
 
 use crate::api::email::EmailService;
 use crate::api::models::response;
-use crate::api::{auth::AuthProvider, kafka::delete_kafka_credentials_and_acls};
+use crate::api::{
+    auth::{hash_token, AuthProvider},
+    kafka::delete_kafka_credentials_and_acls,
+};
 use crate::utils::enums::Survey;
 use actix_web::{delete, get, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use sha2::{Digest, Sha256};
 use std::process::Command;
 use utoipa::ToSchema;
 
@@ -889,9 +891,7 @@ pub async fn post_babamul_forgot_password(
 
     // Generate a secure random raw token and store its SHA-256 hash.
     let raw_token = generate_random_string(48);
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
-    let token_hash = format!("{:x}", hasher.finalize());
+    let token_hash = hash_token(&raw_token);
 
     // Expiry: 1 hour from now.
     let expires_at = flare::Time::now().to_utc().timestamp() + 3600;
@@ -985,9 +985,7 @@ pub async fn post_babamul_reset_password(
     }
 
     // Hash the incoming token to look it up in the database.
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
-    let token_hash = format!("{:x}", hasher.finalize());
+    let token_hash = hash_token(&raw_token);
 
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
