@@ -1,9 +1,11 @@
 //! Back-fill BOOM by streaming the entire Kowalski ZTF_alerts collection once.
 //!
 //! Unlike `import_kowalski_alerts`, which first builds a list of objectIds from BOOM
-//! and then makes repeated round trips to Kowalski, this tool opens **one** Kowalski
-//! cursor and reads every alert document from start to finish.  There are no per-batch
-//! Kowalski queries — all Kowalski I/O is sequential reads from a single cursor.
+//! and then makes repeated round trips to Kowalski for alerts, this tool opens **one**
+//! Kowalski cursor and reads every alert document from start to finish. Alert
+//! streaming is sequential from that single cursor, but workers later issue
+//! additional per-batch Kowalski queries to fetch cutouts for candids that were
+//! newly inserted into BOOM.
 //!
 //! ## Architecture
 //!
@@ -310,10 +312,11 @@ where
                         if we.code == 11000 {
                             dups.push(we.index);
                         } else {
-                            error!("non-duplicate write error inserting {}: {:?}", label, we);
-                            // Treat other errors as "not inserted" so the candid is
-                            // not pushed to the enrichment queue or cutout fetcher.
-                            dups.push(we.index);
+                            return Err(anyhow::anyhow!(
+                                "non-duplicate write error inserting {}: {:?}",
+                                label,
+                                we
+                            ));
                         }
                     }
                     return Ok(dups);

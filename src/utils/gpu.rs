@@ -13,7 +13,7 @@ fn validate_linux_gpu_runtime_preconditions() -> Result<(), &'static str> {
     // fail fast if the runtime library path is not explicitly configured.
     if std::env::var("ORT_DYLIB_PATH").map_or(true, |v| v.trim().is_empty()) {
         return Err("GPU is enabled but ORT_DYLIB_PATH is not set. \
-Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting scheduler.");
+Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting this process.");
     }
 
     Ok(())

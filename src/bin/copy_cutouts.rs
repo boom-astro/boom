@@ -259,13 +259,31 @@ async fn main() {
             }
             Ok(None) => {
                 if !batch.is_empty() {
-                    let _ = tx.send((batch, batch_start)).await;
+                    let start = batch_start;
+                    if tx.send((batch, start)).await.is_err() {
+                        error!(
+                            "all writer tasks stopped; resume with --min-candid {}",
+                            start
+                        );
+                        std::process::exit(1);
+                    }
                 }
                 break;
             }
             Err(e) => {
+                // batch_start is i64::MIN when the error falls between batches;
+                // use max_candid_read (last successfully read _id) in that case.
+                let resume = if !batch.is_empty() {
+                    batch_start
+                } else {
+                    max_candid_read
+                };
                 error!("cursor error: {}", e);
-                error!("resume with --min-candid {}", batch_start);
+                if resume == i64::MIN {
+                    error!("no documents read yet; restart without --min-candid");
+                } else {
+                    error!("resume with --min-candid {}", resume);
+                }
                 std::process::exit(1);
             }
         }
