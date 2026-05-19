@@ -35,7 +35,7 @@ struct Cli {
     dst_uri: String,
 
     /// Survey name — copies {survey}_alerts_cutouts
-    #[arg(long, default_value = "ztf")]
+    #[arg(long, value_enum, default_value = "ztf")]
     survey: Survey,
 
     /// Documents per insert_many batch

@@ -129,7 +129,7 @@ pub fn validate_gpu_configuration_for_survey(
     survey: &Survey,
     config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if matches!(survey, Survey::Ztf) && config.gpu.enabled {
+    if matches!(survey, &Survey::Ztf) && config.gpu.enabled {
         validate_linux_gpu_runtime_preconditions().map_err(|e| {
             std::io::Error::other(format!(
                 "GPU configuration validation failed for survey {}: {e}",

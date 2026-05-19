@@ -79,7 +79,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Parser)]
 #[command(verbatim_doc_comment)]
 struct Cli {
-    /// Kowalski MongoDB URI.  Format: mongodb://[user:pass@]host:port/database
+    /// Kowalski MongoDB URI.  Format: mongodb://[user:pass@]host:port
     /// Read-only credentials are sufficient.
     /// Env: KOWALSKI_MONGODB_URI
     #[arg(long, env = "KOWALSKI_MONGODB_URI")]
@@ -495,14 +495,19 @@ async fn worker(
                     .filter(|c| fetched_set.contains(c))
                     .collect();
                 let t = Instant::now();
-                conn.lpush::<&str, Vec<i64>, usize>(queue.as_str(), to_enqueue)
-                    .await
-                    .context("Redis lpush failed")?;
-                debug!(
-                    count = inserted,
-                    elapsed_ms = t.elapsed().as_millis(),
-                    "Redis push"
-                );
+                let enqueued = to_enqueue.len();
+                if enqueued == 0 {
+                    debug!("Redis push skipped: no newly inserted candids had fetched cutouts");
+                } else {
+                    conn.lpush::<&str, Vec<i64>, usize>(queue.as_str(), to_enqueue)
+                        .await
+                        .context("Redis lpush failed")?;
+                    debug!(
+                        count = inserted,
+                        elapsed_ms = t.elapsed().as_millis(),
+                        "Redis push"
+                    );
+                }
             }
         }
 
