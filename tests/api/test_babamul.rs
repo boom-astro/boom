@@ -4,7 +4,7 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
     use boom::alert::{AlertWorker, ProcessAlertStatus};
-    use boom::api::auth::{babamul_auth_middleware, get_test_auth};
+    use boom::api::auth::{babamul_auth_middleware, get_test_auth, hash_token};
     use boom::api::db::get_test_db_api;
     use boom::api::email::EmailService;
     use boom::api::routes;
@@ -2683,19 +2683,11 @@ mod tests {
 
     // ─── Password reset tests ─────────────────────────────────────────────────
 
-    /// Helper: compute the SHA-256 hex digest of a string (mirrors the production code).
-    fn sha256_hex(input: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(input.as_bytes());
-        format!("{:x}", h.finalize())
-    }
-
     /// Helper: insert a password-reset token directly into the DB for a user.
     async fn set_reset_token(database: &Database, user_id: &str, raw_token: &str, expires_at: i64) {
         let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
             database.collection("babamul_users");
-        let token_hash = sha256_hex(raw_token);
+        let token_hash = hash_token(raw_token);
         col.update_one(
             doc! { "_id": user_id },
             doc! {

@@ -25,7 +25,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
-use tracing::{instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "LSST";
@@ -1022,10 +1022,7 @@ impl LsstAlertWorker {
         .await
     }
 
-    #[instrument(
-        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
-        err
-    )]
+    #[instrument(skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux))]
     async fn update_aux_inner(
         &mut self,
         object_id: &str,
@@ -1089,9 +1086,13 @@ impl LsstAlertWorker {
             .await
         {
             Ok(_) => Ok(()),
-            Err(_) => {
+            Err(e) => {
                 // if we get a concurrent modification error or an error preparing the lightcurves update,
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                match &e {
+                    AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    _ => error!(error = %e),
+                }
                 self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
                     .await
             }
