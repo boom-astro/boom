@@ -80,5 +80,6 @@ COPY --from=builder /opt/ort /opt/ort
 # Temporary
 COPY --from=builder /app/target/release/copy_cutouts /app/copy_cutouts
 COPY --from=builder /app/target/release/stream_kowalski_alerts /app/stream_kowalski_alerts
+COPY --from=builder /app/target/release/enrich_reprocess /app/enrich_reprocess
 
 CMD ["/app/scheduler"]
