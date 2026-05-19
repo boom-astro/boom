@@ -465,11 +465,17 @@ async fn worker(
             // Fetch cutouts from Kowalski only for the newly inserted candids.
             let cutouts =
                 fetch_cutouts_from_kowalski(&kowalski_cutout_coll, &inserted_candids).await?;
-            if cutouts.len() != inserted_candids.len() {
+
+            // Build set of candids that actually came back so we can filter the
+            // enrichment queue below. Enqueueing a candid with no cutout would
+            // produce a guaranteed MissingCutouts error in the enrichment worker.
+            let fetched_set: HashSet<i64> = cutouts.iter().map(|c| c.candid).collect();
+            if fetched_set.len() != inserted_candids.len() {
                 warn!(
-                    requested = inserted_candids.len(),
-                    fetched = cutouts.len(),
-                    "mismatch between requested and fetched cutouts"
+                    inserted = inserted_candids.len(),
+                    fetched = fetched_set.len(),
+                    missing = inserted_candids.len() - fetched_set.len(),
+                    "cutouts missing for some newly inserted alerts; those candids will not be enqueued"
                 );
             }
 
@@ -484,8 +490,12 @@ async fn worker(
             if let (Some(ref mut conn), Some(ref queue)) =
                 (redis_conn.as_mut(), enrichment_queue.as_ref())
             {
+                let to_enqueue: Vec<i64> = inserted_candids
+                    .into_iter()
+                    .filter(|c| fetched_set.contains(c))
+                    .collect();
                 let t = Instant::now();
-                conn.lpush::<&str, Vec<i64>, usize>(queue.as_str(), inserted_candids)
+                conn.lpush::<&str, Vec<i64>, usize>(queue.as_str(), to_enqueue)
                     .await
                     .context("Redis lpush failed")?;
                 debug!(

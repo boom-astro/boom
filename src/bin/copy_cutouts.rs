@@ -235,7 +235,18 @@ async fn main() {
     loop {
         match cursor.try_next().await {
             Ok(Some(doc)) => {
-                let id = doc.get("_id").and_then(|b| b.as_i64()).unwrap_or(i64::MIN);
+                let id = match doc.get("_id") {
+                    Some(Bson::Int64(v)) => *v,
+                    Some(Bson::Int32(v)) => *v as i64,
+                    other => {
+                        error!(
+                            "_id is missing or not an integer (got {:?}); \
+                             collection may have the wrong _id type",
+                            other
+                        );
+                        std::process::exit(1);
+                    }
+                };
                 if batch.is_empty() {
                     batch_start = id;
                 }
