@@ -97,6 +97,11 @@ workers:
       n_workers: 3
     enrichment:
       n_workers: 3
+      # Max alerts pulled from the input queue per worker iteration (RPOP cap).
+      batch_size: 1000
+      # Fixed ONNX batch size for GPU inference. Partial batches are zero-padded
+      # so ORT only ever sees one shape and the BFC arena stays stable.
+      gpu_infer_shape: 750
     filter:
       n_workers: 3
       refresh_interval_minutes: 15
