@@ -219,7 +219,9 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
         ACTIVE.add(1, &active_attrs);
         let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
+            // Capped at 750 to match GPU_INFER_SHAPE; shape 1000 OOMs the GPU.
+            // .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
+            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(750))
             .await
             .inspect_err(|_| {
                 ACTIVE.add(-1, &active_attrs);
