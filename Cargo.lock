@@ -6206,6 +6206,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "villar-pso"
+version = "0.1.0"
+source = "git+https://github.com/frenbox/villar-pso#f7187b98b6cb28adaa3b8a29eb4ff3c2718a02a0"
+dependencies = [
+ "cc",
+ "csv",
+ "metal",
+ "rand 0.9.4",
+ "rayon",
+ "serde",
+]
+
+[[package]]
 name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6219,16 +6232,6 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
-name = "villar-pso"
-version = "0.1.0"
-source = "git+https://github.com/frenbox/villar-pso#f7187b98b6cb28adaa3b8a29eb4ff3c2718a02a0"
-dependencies = [
- "cc",
- "csv",
- "metal",
- "rand 0.9.4",
- "rayon",
- "serde",
 ]
 
 [[package]]
