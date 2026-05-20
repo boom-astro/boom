@@ -400,6 +400,9 @@ pub struct ZtfEnrichmentWorker {
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
+    /// Fixed ONNX batch dimension for GPU inference (see
+    /// [`EnrichmentWorkerConfig::gpu_infer_shape`] in `conf.rs`).
+    gpu_infer_shape: usize,
 }
 
 #[cfg(feature = "gpu")]
@@ -448,6 +451,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None => Some(SharedModels::load(None)?),
         };
 
+        let gpu_infer_shape = config
+            .workers
+            .get(&Survey::Ztf)
+            .ok_or(EnrichmentWorkerError::WorkerConfigMissing(Survey::Ztf))?
+            .enrichment
+            .gpu_infer_shape;
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -458,6 +468,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             models,
             babamul,
             gpu_enabled: config.gpu.enabled,
+            gpu_infer_shape,
         })
     }
 
@@ -813,7 +824,7 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
-            return Self::classify_gpu_batch(models, work_items);
+            return self.classify_gpu_batch(models, work_items);
         }
 
         Self::classify_per_item(models, work_items)
@@ -873,19 +884,8 @@ impl ZtfEnrichmentWorker {
         Ok(results)
     }
 
-    /// Fixed ONNX batch dimension for GPU inference. ORT builds — and never
-    /// releases — a separate memory plan per distinct input shape, so a
-    /// varying batch size makes GPU memory spike. Every inference is run at
-    /// exactly this many rows: partial batches are zero-padded and the padding
-    /// outputs discarded, so ORT only ever sees one shape and the arena is
-    /// stable. An RPOP batch larger than this is split into several fixed-size
-    /// chunks; only the final chunk carries any zero-padding.
-    // 1000 was tried and OOMs (~15.7 GB footprint exceeds the 16 GB card);
-    // 750 is stable at ~10.3 GB.
-    // const GPU_INFER_SHAPE: usize = 1000;
-    const GPU_INFER_SHAPE: usize = 750;
-
     fn classify_gpu_batch(
+        &self,
         models: &SharedModels,
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
@@ -939,12 +939,12 @@ impl ZtfEnrichmentWorker {
         }
 
         // Run inference in fixed-size chunks so ORT always sees the same
-        // input shape (see `GPU_INFER_SHAPE`). The final chunk is zero-padded
+        // input shape (`self.gpu_infer_shape`). The final chunk is zero-padded
         // up to the fixed size; padding rows produce scores that are ignored.
-        for chunk in selected_indices.chunks(Self::GPU_INFER_SHAPE) {
-            let mut triplet = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 63, 63, 3));
-            let mut metadata = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 25));
-            let mut btsbot_metadata = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 25));
+        for chunk in selected_indices.chunks(self.gpu_infer_shape) {
+            let mut triplet = ndarray::Array::zeros((self.gpu_infer_shape, 63, 63, 3));
+            let mut metadata = ndarray::Array::zeros((self.gpu_infer_shape, 25));
+            let mut btsbot_metadata = ndarray::Array::zeros((self.gpu_infer_shape, 25));
 
             for (row, idx) in chunk.iter().enumerate() {
                 let tpos = *triplet_pos.get(idx).expect("triplet position missing");
@@ -979,12 +979,10 @@ impl ZtfEnrichmentWorker {
                 ("acai_b", acai_b_scores.len()),
                 ("btsbot", btsbot_scores.len()),
             ] {
-                if got != Self::GPU_INFER_SHAPE {
+                if got != self.gpu_infer_shape {
                     return Err(EnrichmentWorkerError::ConfigurationError(format!(
                         "model {} returned {} scores for {} padded inputs",
-                        name,
-                        got,
-                        Self::GPU_INFER_SHAPE
+                        name, got, self.gpu_infer_shape
                     )));
                 }
             }
