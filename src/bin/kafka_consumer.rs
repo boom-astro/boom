@@ -86,7 +86,11 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
 // trace that grows unboundedly until Tempo rejects it. The survey is already
 // captured in the OTel `service.name` resource attribute, so it doesn't need
 // to be a span field here.
-async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTracerProvider) {
+async fn run(
+    args: Cli,
+    meter_provider: Option<SdkMeterProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+) {
     let date = args.date.unwrap_or_else(|| {
         let today = chrono::Utc::now().naive_utc().date();
         today.and_hms_opt(0, 0, 0).unwrap()
@@ -169,11 +173,15 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTr
         }
     }
 
-    if let Err(error) = meter_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the meter provider");
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
     }
-    if let Err(error) = tracer_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the tracer provider");
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
     }
 }
 
@@ -195,7 +203,7 @@ async fn main() {
     )
     .expect("failed to initialize tracing");
 
-    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), &service_name)
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), &service_name)
         .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 

@@ -12,6 +12,8 @@ use opentelemetry_sdk::{
     Resource,
 };
 
+use crate::utils::o11y::is_otel_disabled;
+
 /// The error type returned when initializing tracing.
 #[derive(Debug, thiserror::Error)]
 pub enum InitTracingError {
@@ -20,6 +22,11 @@ pub enum InitTracingError {
 }
 
 /// Build an OTLP `SdkTracerProvider` for the given service.
+///
+/// Returns `Ok(None)` when `OTEL_SDK_DISABLED=true` is set, in which case the
+/// global tracer is left as the SDK's no-op provider and no exporter is
+/// created. Callers should pass `None` to `build_subscriber_with_otel` in that
+/// case to skip installing the OTel `tracing` layer.
 ///
 /// Reads the OTLP endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT` (default:
 /// `http://localhost:4317`) and the trace sample ratio from
@@ -32,7 +39,11 @@ pub fn init_tracing(
     service_name: String,
     instance_id: uuid::Uuid,
     deployment_env: String,
-) -> Result<SdkTracerProvider, InitTracingError> {
+) -> Result<Option<SdkTracerProvider>, InitTracingError> {
+    if is_otel_disabled() {
+        return Ok(None);
+    }
+
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_string());
 
@@ -63,7 +74,7 @@ pub fn init_tracing(
         .build();
 
     opentelemetry::global::set_tracer_provider(provider.clone());
-    Ok(provider)
+    Ok(Some(provider))
 }
 
 /// Build a `tracing-opentelemetry` layer attached to the given provider.

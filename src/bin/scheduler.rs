@@ -235,7 +235,11 @@ struct Cli {
 // span a descendant of the same root, producing a trace that grows unboundedly
 // until Tempo rejects it. The survey is already encoded in the OTel
 // `service.name` resource attribute, so a span field here is redundant.
-async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTracerProvider) {
+async fn run(
+    args: Cli,
+    meter_provider: Option<SdkMeterProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -374,11 +378,15 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider, tracer_provider: SdkTr
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);
-    if let Err(error) = meter_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the meter provider");
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
     }
-    if let Err(error) = tracer_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the tracer provider");
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
     }
 }
 
@@ -400,7 +408,7 @@ async fn main() {
     )
     .expect("failed to initialize tracing");
 
-    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), &service_name)
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), &service_name)
         .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 

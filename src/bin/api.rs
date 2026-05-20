@@ -39,7 +39,7 @@ async fn main() -> std::io::Result<()> {
     // pipeline (Tempo). actix's `Logger` middleware emits access logs via the
     // `log` crate, so install `LogTracer` to forward them into tracing —
     // tracing-subscriber does NOT do this automatically.
-    let (subscriber, _guard) = build_subscriber_with_otel(Some(&tracer_provider), "api")
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), "api")
         .expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
     tracing_log::LogTracer::init().expect("failed to install LogTracer");
@@ -157,12 +157,16 @@ async fn main() -> std::io::Result<()> {
 
     // Flush any buffered metrics/spans before exiting. Without these, recent
     // telemetry can be lost on shutdown (especially for short-lived dev
-    // restarts).
-    if let Err(error) = meter_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the meter provider");
+    // restarts). Providers are `None` when `OTEL_SDK_DISABLED=true`.
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
     }
-    if let Err(error) = tracer_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the tracer provider");
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
     }
 
     server_result
