@@ -19,7 +19,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{instrument, trace, warn};
+use tracing::{info, instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -548,12 +548,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         // Run ML classification using shared models
+        let classify_start = std::time::Instant::now();
         let classifications_list: Vec<Option<ZtfAlertClassifications>> =
             if let Some(ref models) = self.models {
                 self.classify(&models, &work_items)?
             } else {
                 vec![None; work_items.len()]
             };
+        info!(
+            batch_size = work_items.len(),
+            classify_ms = classify_start.elapsed().as_millis() as u64,
+            "ML classification complete"
+        );
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
             let update_alert_document = if let Some(ref cls) = classifications {
@@ -645,11 +651,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
                 let pso_config = villar_pso::PsoConfig::default();
 
+                let villar_start = std::time::Instant::now();
                 let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
 
-                match batch_result.and_then(|batch| {
+                let fit_result = batch_result.and_then(|batch| {
                     gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
-                }) {
+                });
+                info!(
+                    fittable = source_refs.len(),
+                    villar_ms = villar_start.elapsed().as_millis() as u64,
+                    "Villar PSO batch complete"
+                );
+
+                match fit_result {
                     Ok(results) => {
                         for (result, candid) in results.iter().zip(candids) {
                             let mut set_doc = doc! {
@@ -873,6 +887,18 @@ impl ZtfEnrichmentWorker {
         Ok(results)
     }
 
+    /// Fixed ONNX batch dimension for GPU inference. ORT builds — and never
+    /// releases — a separate memory plan per distinct input shape, so a
+    /// varying batch size makes GPU memory spike. Every inference is run at
+    /// exactly this many rows: partial batches are zero-padded and the padding
+    /// outputs discarded, so ORT only ever sees one shape and the arena is
+    /// stable. An RPOP batch larger than this is split into several fixed-size
+    /// chunks; only the final chunk carries any zero-padding.
+    // 1000 was tried and OOMs (~15.7 GB footprint exceeds the 16 GB card);
+    // 750 is stable at ~10.3 GB.
+    // const GPU_INFER_SHAPE: usize = 1000;
+    const GPU_INFER_SHAPE: usize = 750;
+
     fn classify_gpu_batch(
         models: &SharedModels,
         work_items: &[AlertWork],
@@ -926,61 +952,68 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 63, 63, 3));
-        let mut metadata = ndarray::Array::zeros((selected_indices.len(), 25));
-        let mut btsbot_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+        // Run inference in fixed-size chunks so ORT always sees the same
+        // input shape (see `GPU_INFER_SHAPE`). The final chunk is zero-padded
+        // up to the fixed size; padding rows produce scores that are ignored.
+        for chunk in selected_indices.chunks(Self::GPU_INFER_SHAPE) {
+            let mut triplet = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 63, 63, 3));
+            let mut metadata = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 25));
+            let mut btsbot_metadata = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 25));
 
-        for (row, idx) in selected_indices.iter().enumerate() {
-            let tpos = *triplet_pos.get(idx).expect("triplet position missing");
-            let apos = *acai_pos.get(idx).expect("acai position missing");
-            let bpos = *bts_pos.get(idx).expect("bts position missing");
+            for (row, idx) in chunk.iter().enumerate() {
+                let tpos = *triplet_pos.get(idx).expect("triplet position missing");
+                let apos = *acai_pos.get(idx).expect("acai position missing");
+                let bpos = *bts_pos.get(idx).expect("bts position missing");
 
-            triplet
-                .slice_mut(ndarray::s![row, .., .., ..])
-                .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
-            metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
-            btsbot_metadata
-                .row_mut(row)
-                .assign(&bts_metadata_all.row(bpos));
-        }
-
-        let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
-        let btsbot_scores = models
-            .btsbot
-            .lock()
-            .unwrap()
-            .predict(&btsbot_metadata, &triplet)?;
-
-        let expected = selected_indices.len();
-        for (name, got) in [
-            ("acai_h", acai_h_scores.len()),
-            ("acai_n", acai_n_scores.len()),
-            ("acai_v", acai_v_scores.len()),
-            ("acai_o", acai_o_scores.len()),
-            ("acai_b", acai_b_scores.len()),
-            ("btsbot", btsbot_scores.len()),
-        ] {
-            if got != expected {
-                return Err(EnrichmentWorkerError::ConfigurationError(format!(
-                    "model {} returned {} scores for {} inputs",
-                    name, got, expected
-                )));
+                triplet
+                    .slice_mut(ndarray::s![row, .., .., ..])
+                    .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
+                metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
+                btsbot_metadata
+                    .row_mut(row)
+                    .assign(&bts_metadata_all.row(bpos));
             }
-        }
 
-        for (batch_idx, &item_idx) in selected_indices.iter().enumerate() {
-            results[item_idx] = Some(ZtfAlertClassifications {
-                acai_h: acai_h_scores[batch_idx],
-                acai_n: acai_n_scores[batch_idx],
-                acai_v: acai_v_scores[batch_idx],
-                acai_o: acai_o_scores[batch_idx],
-                acai_b: acai_b_scores[batch_idx],
-                btsbot: btsbot_scores[batch_idx],
-            });
+            let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+            let btsbot_scores = models
+                .btsbot
+                .lock()
+                .unwrap()
+                .predict(&btsbot_metadata, &triplet)?;
+
+            for (name, got) in [
+                ("acai_h", acai_h_scores.len()),
+                ("acai_n", acai_n_scores.len()),
+                ("acai_v", acai_v_scores.len()),
+                ("acai_o", acai_o_scores.len()),
+                ("acai_b", acai_b_scores.len()),
+                ("btsbot", btsbot_scores.len()),
+            ] {
+                if got != Self::GPU_INFER_SHAPE {
+                    return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                        "model {} returned {} scores for {} padded inputs",
+                        name,
+                        got,
+                        Self::GPU_INFER_SHAPE
+                    )));
+                }
+            }
+
+            // Map only the real rows back; padding rows (chunk.len()..) are dropped.
+            for (batch_idx, &item_idx) in chunk.iter().enumerate() {
+                results[item_idx] = Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[batch_idx],
+                    acai_n: acai_n_scores[batch_idx],
+                    acai_v: acai_v_scores[batch_idx],
+                    acai_o: acai_o_scores[batch_idx],
+                    acai_b: acai_b_scores[batch_idx],
+                    btsbot: btsbot_scores[batch_idx],
+                });
+            }
         }
 
         Ok(results)

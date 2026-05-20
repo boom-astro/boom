@@ -223,6 +223,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         }
 
         ACTIVE.add(1, &active_attrs);
+<<<<<<< HEAD
         let candids: Vec<i64> = retry_transient(
             "valkey_rpop",
             DEFAULT_MAX_RETRIES,
@@ -243,6 +244,17 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             ACTIVE.add(-1, &active_attrs);
             BATCH_PROCESSED.add(1, &input_error_attrs);
         })?;
+=======
+        let candids: Vec<i64> = con
+            // Capped at 750 to match GPU_INFER_SHAPE; shape 1000 OOMs the GPU.
+            // .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
+            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(750))
+            .await
+            .inspect_err(|_| {
+                ACTIVE.add(-1, &active_attrs);
+                BATCH_PROCESSED.add(1, &input_error_attrs);
+            })?;
+>>>>>>> 31bdd88 (fixed batch size to 750)
 
         if candids.is_empty() {
             ACTIVE.add(-1, &active_attrs);
