@@ -8,6 +8,7 @@ use boom::{
             metrics::init_metrics,
             tracing::init_tracing,
         },
+        parser::parse_positive_usize,
     },
 };
 
@@ -38,7 +39,7 @@ struct Cli {
     config: String,
 
     /// Number of processes to use to read the Kafka stream in parallel
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
     /// Clear the in-memory (Valkey) queue of alerts already consumed from Kafka
