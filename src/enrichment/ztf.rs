@@ -19,7 +19,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{info, instrument, trace, warn};
+use tracing::{instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -594,18 +594,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         // Run ML classification using shared models
-        let classify_start = std::time::Instant::now();
         let classifications_list: Vec<Option<ZtfAlertClassifications>> =
             if let Some(ref models) = self.models {
                 self.classify(&models, &work_items)?
             } else {
                 vec![None; work_items.len()]
             };
-        info!(
-            batch_size = work_items.len(),
-            classify_ms = classify_start.elapsed().as_millis() as u64,
-            "ML classification complete"
-        );
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
             let update_alert_document = if let Some(ref cls) = classifications {
@@ -697,19 +691,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
                 let pso_config = villar_pso::PsoConfig::default();
 
-                let villar_start = std::time::Instant::now();
                 let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
 
-                let fit_result = batch_result.and_then(|batch| {
+                match batch_result.and_then(|batch| {
                     gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
-                });
-                info!(
-                    fittable = source_refs.len(),
-                    villar_ms = villar_start.elapsed().as_millis() as u64,
-                    "Villar PSO batch complete"
-                );
-
-                match fit_result {
+                }) {
                     Ok(results) => {
                         for (result, candid) in results.iter().zip(candids) {
                             let mut set_doc = doc! {
