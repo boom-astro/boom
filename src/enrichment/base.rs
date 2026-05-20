@@ -235,14 +235,15 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             is_transient_redis_error,
             || record_worker_retry("enrichment", &survey, "valkey_rpop"),
             || {
-                // Clone the (cheaply-clonable) multiplexed connection so the
-                // future owns it, rather than borrowing `con` through the
-                // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
-                // async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
-                // async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(50)).await }
-                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(100)).await }
+                async move {
+                    con.rpop::<&str, Vec<i64>>(
+                        key,
+                        NonZero::new(worker_config.enrichment.batch_size),
+                    )
+                    .await
+                }
             },
         )
         .await
@@ -259,7 +260,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             continue;
         }
 
-        info!(queue = %input_queue, n = candids.len(), "popped candids from queue");
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         let processed_alerts: Vec<String> = enrichment_worker
@@ -270,8 +270,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
-
-        info!(queue = %input_queue, n_in = candids.len(), n_out = processed_alerts.len(), "batch enriched");
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;

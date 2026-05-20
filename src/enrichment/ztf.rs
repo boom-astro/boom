@@ -19,7 +19,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{instrument, trace, warn};
+use tracing::{info, instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -594,12 +594,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         // Run ML classification using shared models
+        let classify_start = std::time::Instant::now();
         let classifications_list: Vec<Option<ZtfAlertClassifications>> =
             if let Some(ref models) = self.models {
                 self.classify(&models, &work_items)?
             } else {
                 vec![None; work_items.len()]
             };
+        info!(
+            batch_size = work_items.len(),
+            classify_ms = classify_start.elapsed().as_millis() as u64,
+            "ML classification complete"
+        );
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
             let update_alert_document = if let Some(ref cls) = classifications {
@@ -691,11 +697,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
                 let pso_config = villar_pso::PsoConfig::default();
 
+                let villar_start = std::time::Instant::now();
                 let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
 
-                match batch_result.and_then(|batch| {
+                let fit_result = batch_result.and_then(|batch| {
                     gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
-                }) {
+                });
+                info!(
+                    fittable = source_refs.len(),
+                    villar_ms = villar_start.elapsed().as_millis() as u64,
+                    "Villar PSO batch complete"
+                );
+
+                match fit_result {
                     Ok(results) => {
                         for (result, candid) in results.iter().zip(candids) {
                             let mut set_doc = doc! {
@@ -940,6 +954,18 @@ impl ZtfEnrichmentWorker {
         Ok(results)
     }
 
+    /// Fixed ONNX batch dimension for GPU inference. ORT builds — and never
+    /// releases — a separate memory plan per distinct input shape, so a
+    /// varying batch size makes GPU memory spike. Every inference is run at
+    /// exactly this many rows: partial batches are zero-padded and the padding
+    /// outputs discarded, so ORT only ever sees one shape and the arena is
+    /// stable. An RPOP batch larger than this is split into several fixed-size
+    /// chunks; only the final chunk carries any zero-padding.
+    // 1000 was tried and OOMs (~15.7 GB footprint exceeds the 16 GB card);
+    // 750 is stable at ~10.3 GB.
+    // const GPU_INFER_SHAPE: usize = 1000;
+    const GPU_INFER_SHAPE: usize = 750;
+
     fn classify_gpu_batch(
         models: &SharedModels,
         work_items: &[AlertWork],
@@ -993,53 +1019,8 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 63, 63, 3));
-        let mut metadata = ndarray::Array::zeros((selected_indices.len(), 25));
-        let mut btsbot_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
-
-        for (row, idx) in selected_indices.iter().enumerate() {
-            let tpos = *triplet_pos.get(idx).expect("triplet position missing");
-            let apos = *acai_pos.get(idx).expect("acai position missing");
-            let bpos = *bts_pos.get(idx).expect("bts position missing");
-
-            triplet
-                .slice_mut(ndarray::s![row, .., .., ..])
-                .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
-            metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
-            btsbot_metadata
-                .row_mut(row)
-                .assign(&bts_metadata_all.row(bpos));
-        }
-
-        let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
-        let btsbot_scores = models
-            .btsbot
-            .lock()
-            .unwrap()
-            .predict(&btsbot_metadata, &triplet)?;
-
-        let expected = selected_indices.len();
-        for (name, got) in [
-            ("acai_h", acai_h_scores.len()),
-            ("acai_n", acai_n_scores.len()),
-            ("acai_v", acai_v_scores.len()),
-            ("acai_o", acai_o_scores.len()),
-            ("acai_b", acai_b_scores.len()),
-            ("btsbot", btsbot_scores.len()),
-        ] {
-            if got != expected {
-                return Err(EnrichmentWorkerError::ConfigurationError(format!(
-                    "model {} returned {} scores for {} inputs",
-                    name, got, expected
-                )));
-            }
-        }
-
-        // Cider batch — failure is non-fatal; affected alerts get no cider fields
+        // CIDER batch on ALL selected alerts at once — failure is non-fatal.
+        let n_sel = selected_indices.len();
         let cider_batch: Option<(Vec<f32>, Vec<f32>)> =
             (|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
                 let cider_alerts: Vec<&ZtfAlertForEnrichment> = selected_indices
@@ -1079,7 +1060,6 @@ impl ZtfEnrichmentWorker {
             })
             .ok();
 
-        let n_sel = selected_indices.len();
         let cider_n_cls = cider_batch
             .as_ref()
             .map(|(p, _)| p.len() / n_sel)
@@ -1089,26 +1069,78 @@ impl ZtfEnrichmentWorker {
             .map(|(_, e)| e.len() / n_sel)
             .unwrap_or(0);
 
-        for (batch_idx, &item_idx) in selected_indices.iter().enumerate() {
-            let cider_fusion = cider_batch.as_ref().and_then(|(probs, _)| {
-                CiderClassProbs::from_probs(
-                    &probs[batch_idx * cider_n_cls..(batch_idx + 1) * cider_n_cls],
-                )
-            });
-            let fusion_embedding = cider_batch.as_ref().map(|(_, emb)| {
-                emb[batch_idx * cider_emb_dim..(batch_idx + 1) * cider_emb_dim].to_vec()
-            });
+        // ACAI/BTSBot in fixed-size padded chunks so ORT always sees the same
+        // input shape (see `GPU_INFER_SHAPE`). Padding rows produce scores that are ignored.
+        for (chunk_idx, chunk) in selected_indices.chunks(Self::GPU_INFER_SHAPE).enumerate() {
+            let mut triplet = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 63, 63, 3));
+            let mut metadata = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 25));
+            let mut btsbot_metadata = ndarray::Array::zeros((Self::GPU_INFER_SHAPE, 25));
 
-            results[item_idx] = Some(ZtfAlertClassifications {
-                acai_h: acai_h_scores[batch_idx],
-                acai_n: acai_n_scores[batch_idx],
-                acai_v: acai_v_scores[batch_idx],
-                acai_o: acai_o_scores[batch_idx],
-                acai_b: acai_b_scores[batch_idx],
-                btsbot: btsbot_scores[batch_idx],
-                cider_fusion,
-                fusion_embedding,
-            });
+            for (row, idx) in chunk.iter().enumerate() {
+                let tpos = *triplet_pos.get(idx).expect("triplet position missing");
+                let apos = *acai_pos.get(idx).expect("acai position missing");
+                let bpos = *bts_pos.get(idx).expect("bts position missing");
+
+                triplet
+                    .slice_mut(ndarray::s![row, .., .., ..])
+                    .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
+                metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
+                btsbot_metadata
+                    .row_mut(row)
+                    .assign(&bts_metadata_all.row(bpos));
+            }
+
+            let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+            let btsbot_scores = models
+                .btsbot
+                .lock()
+                .unwrap()
+                .predict(&btsbot_metadata, &triplet)?;
+
+            for (name, got) in [
+                ("acai_h", acai_h_scores.len()),
+                ("acai_n", acai_n_scores.len()),
+                ("acai_v", acai_v_scores.len()),
+                ("acai_o", acai_o_scores.len()),
+                ("acai_b", acai_b_scores.len()),
+                ("btsbot", btsbot_scores.len()),
+            ] {
+                if got != Self::GPU_INFER_SHAPE {
+                    return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                        "model {} returned {} scores for {} padded inputs",
+                        name,
+                        got,
+                        Self::GPU_INFER_SHAPE
+                    )));
+                }
+            }
+
+            let chunk_start = chunk_idx * Self::GPU_INFER_SHAPE;
+            for (batch_idx, &item_idx) in chunk.iter().enumerate() {
+                let sel_idx = chunk_start + batch_idx;
+                let cider_fusion = cider_batch.as_ref().and_then(|(probs, _)| {
+                    CiderClassProbs::from_probs(
+                        &probs[sel_idx * cider_n_cls..(sel_idx + 1) * cider_n_cls],
+                    )
+                });
+                let fusion_embedding = cider_batch.as_ref().map(|(_, emb)| {
+                    emb[sel_idx * cider_emb_dim..(sel_idx + 1) * cider_emb_dim].to_vec()
+                });
+                results[item_idx] = Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[batch_idx],
+                    acai_n: acai_n_scores[batch_idx],
+                    acai_v: acai_v_scores[batch_idx],
+                    acai_o: acai_o_scores[batch_idx],
+                    acai_b: acai_b_scores[batch_idx],
+                    btsbot: btsbot_scores[batch_idx],
+                    cider_fusion,
+                    fusion_embedding,
+                });
+            }
         }
 
         Ok(results)
