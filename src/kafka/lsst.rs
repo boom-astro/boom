@@ -32,7 +32,7 @@ impl AlertConsumer for LsstAlertConsumer {
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
-    fn survey(&self) -> Survey {
-        Survey::Lsst
+    fn survey(&self) -> &'static str {
+        Survey::Lsst.as_str()
     }
 }
