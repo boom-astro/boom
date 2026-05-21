@@ -88,14 +88,6 @@ config["database"]["host"] = hosts["mongo"]
 config["database"]["port"] = ports["mongo"]
 config["database"]["name"] = "boom-benchmarking"
 config["database"]["password"] = "mongoadminsecret"
-config["redis"]["host"] = hosts["redis"]
-config["redis"]["port"] = ports["redis"]
-config["kafka"]["consumer"]["ztf"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
-config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
-config["kafka"]["producer"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
-config["api"]["port"] = 4000
-config["api"]["auth"]["secret_key"] = "1234"
-config["api"]["auth"]["admin_password"] = "adminsecret"
 config["cutouts_storage"]["type"] = args.cutouts_storage_type
 if args.cutouts_storage_type == "s3":
     config["cutouts_storage"]["access_key"] = "rustfsadmin"
@@ -104,10 +96,18 @@ if args.cutouts_storage_type == "s3":
     config["cutouts_storage"]["cache"]["ttl_seconds"] = args.cache_ttl_seconds
     config["cutouts_storage"]["cache"]["max_memory"] = args.cache_max_memory
 elif args.cutouts_storage_type == "mongo":
-    config["cutouts_storage"]["host"] = "mongo"
+    config["cutouts_storage"]["host"] = hosts["mongo"]
+    config["cutouts_storage"]["port"] = ports["mongo"]
     config["cutouts_storage"]["name"] = "boom-benchmarking"
-    config["cutouts_storage"]["username"] = "mongoadmin"
     config["cutouts_storage"]["password"] = "mongoadminsecret"
+config["redis"]["host"] = hosts["redis"]
+config["redis"]["port"] = ports["redis"]
+config["kafka"]["consumer"]["ztf"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
+config["kafka"]["consumer"]["ztf"]["group_id"] = "throughput-benchmarking"
+config["kafka"]["producer"]["server"] = f"{hosts['kafka']}:{ports['kafka']}"
+config["api"]["port"] = 4000
+config["api"]["auth"]["secret_key"] = "1234"
+config["api"]["auth"]["admin_password"] = "adminsecret"
 config["babamul"]["enabled"] = True
 config["workers"]["ztf"]["alert"]["n_workers"] = args.n_alert_workers
 config["workers"]["ztf"]["enrichment"]["n_workers"] = args.n_enrichment_workers

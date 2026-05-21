@@ -24,6 +24,7 @@ fi
 
 # Paths
 TESTS_DIR="$BOOM_REPO_ROOT/tests"
+PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
 BG_PIDS=()
 
 # Parse args
@@ -62,7 +63,6 @@ else
 fi
 
 # If BOOM_GPU__ENABLED is true and we're on Linux, add the GPU override to enable CUDA support
-PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
 if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
     echo "BOOM_GPU__ENABLED is true and platform is Linux; adding GPU override to Docker Compose configuration (CUDA support)"
     COMPOSE_CONFIG+=("-f" "$TESTS_DIR/throughput/compose.cuda.yaml")
