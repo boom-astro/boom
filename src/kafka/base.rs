@@ -397,7 +397,7 @@ pub enum ConsumerError {
 pub trait AlertConsumer: Sized {
     fn topic_names(&self, timestamp: i64) -> Vec<String>;
     fn output_queue(&self) -> String;
-    fn survey(&self) -> crate::utils::enums::Survey;
+    fn survey(&self) -> &'static str;
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
@@ -432,18 +432,23 @@ pub trait AlertConsumer: Sized {
         let topics = topics.unwrap_or_else(|| self.topic_names(timestamp));
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
-            None => config.kafka.consumer.get(&survey).cloned().ok_or_else(|| {
-                ConsumerError::from(BoomConfigError::MissingKeyError(format!(
-                    "kafka.consumer.{}",
-                    survey.to_string().to_lowercase()
-                )))
-            })?,
+            None => config
+                .kafka
+                .consumer
+                .iter()
+                .find(|(k, _)| k.as_str() == survey)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    ConsumerError::from(BoomConfigError::MissingKeyError(format!(
+                        "kafka.consumer.{}",
+                        survey.to_lowercase()
+                    )))
+                })?,
         };
 
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
 
-        let survey = survey.as_str();
         let mut handles = vec![];
         for i in 0..n_threads {
             let topics = topics.clone();
