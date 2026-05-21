@@ -3,6 +3,7 @@ use crate::{
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
     scheduler::record_kafka_alert_published,
     utils::{
+        cutouts::CutoutStorageError,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
@@ -814,8 +815,8 @@ pub enum FilterWorkerError {
     MissingCutouts(i64),
     #[error("missing cutouts for {0} alerts")]
     MissingCutoutsBatch(usize),
-    #[error("failed to fetch cutouts: {0}")]
-    FetchCutoutsError(String),
+    #[error("cutout storage error")]
+    CutoutStorageError(#[from] CutoutStorageError),
     #[error("failed to fetch alerts: {0}")]
     FetchAlertsError(String),
 }
