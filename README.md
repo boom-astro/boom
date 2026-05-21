@@ -1,4 +1,4 @@
-# Boom web
+# Babamul web
 
 A React + TypeScript + Vite front end for the BOOM application.
 
@@ -12,28 +12,41 @@ A React + TypeScript + Vite front end for the BOOM application.
 ### Setup
 
 1. Clone the front end repo:
+
    ```bash
-   git clone https://github.com/boom-astro/boom-web.git
-   cd boom-web
+   git clone https://github.com/boom-astro/babamul-web.git
+   cd babamul-web
    ```
 
-1. Create a `.env` file for the front end:
+2. Create a `.env` file for the front end:
    ```bash
    cp .env.example .env
    ```
 
-1. Repeat the first two steps for the backend services
+3. Repeat the first two steps for the backend services
    (https://github.com/boom-astro/boom)
    and spin them up for local development:
    ```bash
    make dev
    ```
 
-1. Build and start the front end development container:
+4. Build and start the front end development container:
    ```bash
    docker-compose up --build
    ```
    The app will be available at `http://localhost:5173`
+
+## Developer Notes
+
+### Pre-commit hook
+
+Install our pre-commit hook:
+
+```bash
+pre-commit install
+```
+
+This will check your changes before each commit to ensure that they conform with our code style standards.
 
 ### Notes
 
