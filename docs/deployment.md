@@ -315,4 +315,19 @@ Recommended options (in order of preference):
    host can read or corrupt Kafka data.** Replace it with proper ownership
    (option 2) as soon as access allows.
 
-That's it. Now BOOM will deploy to production on each GitHub release.
+## GitHub deploy safety controls
+
+Production deploys are intentionally constrained by both repository settings and
+the workflow in [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml):
+
+1. A repository ruleset named `Tag creation` is active for tag refs (`~ALL`).
+   It enforces tag creation/update/deletion protections, with bypass actors set
+   to repository roles 2 and 5 (maintainers/admins).
+1. The `production` environment has a deployment branch/tag rule that only
+   allows tags matching `v*`.
+1. The workflow enforces the same model at runtime:
+   - it checks that the actor has `maintain` or `admin` repository access.
+   - it validates that the selected deploy ref is a tag matching `v*`.
+
+In practice, this means only approved release tags can be deployed to
+production, reducing the risk of accidental or unauthorized production changes.

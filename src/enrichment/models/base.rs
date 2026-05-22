@@ -1,5 +1,5 @@
 use crate::{
-    alert::AlertCutout,
+    utils::cutouts::AlertCutout,
     utils::fits::{prepare_triplet, CutoutError},
 };
 use ndarray::{Array, Dim};

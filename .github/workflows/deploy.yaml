@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to deploy (tag, branch, or commit SHA)"
+        description: "Version tag to deploy (must match 'v*')"
         required: true
-        default: "main"
+        default: "v0.0.0"
         type: string
 
 jobs:
@@ -20,6 +20,8 @@ jobs:
     runs-on:
       - self-hosted
       - production
+    permissions:
+      contents: read
     env:
       ENVIRONMENT: production
       DOMAIN: ${{ vars.DOMAIN }}
@@ -55,13 +57,77 @@ jobs:
       BOOM_API_RATE_LIMIT_PERIOD: ${{ vars.BOOM_API_RATE_LIMIT_PERIOD }}
       USE_GPU: false
     steps:
+      - name: Require maintain/admin actor permissions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const username = context.actor;
+
+            let permission;
+            let roleName;
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner,
+                repo,
+                username,
+              });
+              permission = data.permission;
+              roleName = data.role_name;
+            } catch (error) {
+              core.setFailed(
+                `Unable to determine permissions for actor '${username}'. ${error.message}`
+              );
+              return;
+            }
+
+            const allowedRoles = new Set(["maintain", "admin"]);
+            const normalizedRole = (roleName || "").toLowerCase();
+            const normalizedPermission = (permission || "").toLowerCase();
+
+            const isAllowed =
+              allowedRoles.has(normalizedRole) || normalizedPermission === "admin";
+
+            if (!isAllowed) {
+              core.setFailed(
+                `Actor '${username}' has repository role '${normalizedRole || normalizedPermission || "unknown"}'. ` +
+                  "Deploy requires 'maintain' or 'admin'."
+              );
+              return;
+            }
+
+            core.info(
+              `Actor '${username}' authorized with role '${normalizedRole || normalizedPermission}'.`
+            );
+      - name: Validate and normalize deployment tag
+        id: deploy_tag
+        env:
+          RAW_DEPLOY_REF: ${{ github.event.inputs.version || github.ref }}
+        run: |
+          set -euo pipefail
+
+          ref="$RAW_DEPLOY_REF"
+          if [[ "$ref" == refs/tags/v* ]]; then
+            tag_ref="$ref"
+            tag_name="${ref#refs/tags/}"
+          elif [[ "$ref" == v* ]]; then
+            tag_name="$ref"
+            tag_ref="refs/tags/$tag_name"
+          else
+            echo "Only tags matching 'v*' are allowed for deployment. Received: $ref" >&2
+            exit 1
+          fi
+
+          echo "Deploying tag: $tag_name"
+          echo "tag_ref=$tag_ref" >> "$GITHUB_OUTPUT"
       - name: Setup Git LFS
         run: |
           git lfs install
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.inputs.version || github.ref }}
+          ref: ${{ steps.deploy_tag.outputs.tag_ref }}
           lfs: true
       - run: >
           docker compose --profile prod
