@@ -159,7 +159,7 @@ services:
       - /app/scheduler
       - ztf
     environment:
-      RUST_LOG: error,boom=debug
+      RUST_LOG: error,boom=debug,scheduler=info
       OTEL_SDK_DISABLED: "true"
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}

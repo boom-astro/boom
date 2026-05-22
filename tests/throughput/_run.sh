@@ -197,7 +197,7 @@ if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
     START_TIME=$(date +%s)
 
     check_gpu_ready() {
-      docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference"
+      ( set +o pipefail; docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference" )
     }
 
     while ! check_gpu_ready; do
