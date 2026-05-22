@@ -445,9 +445,9 @@ pub struct ZtfEnrichmentWorker {
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
-    /// Fixed ONNX batch dimension for GPU inference (see
-    /// [`EnrichmentWorkerConfig::gpu_infer_shape`] in `conf.rs`).
-    gpu_infer_shape: usize,
+    /// Alerts per batch — also the fixed ONNX inference shape (see
+    /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
+    batch_size: usize,
 }
 
 #[cfg(feature = "gpu")]
@@ -496,12 +496,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None => Some(SharedModels::load(None)?),
         };
 
-        let gpu_infer_shape = config
+        let batch_size = config
             .workers
             .get(&Survey::Ztf)
             .ok_or(EnrichmentWorkerError::WorkerConfigMissing(Survey::Ztf))?
             .enrichment
-            .gpu_infer_shape;
+            .batch_size;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -513,7 +513,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             models,
             babamul,
             gpu_enabled: config.gpu.enabled,
-            gpu_infer_shape,
+            batch_size,
         })
     }
 
@@ -1055,12 +1055,13 @@ impl ZtfEnrichmentWorker {
             .map(|(_, e)| e.len() / n_sel)
             .unwrap_or(0);
 
-        // ACAI/BTSBot in fixed-size padded chunks so ORT always sees the same
-        // input shape (see `GPU_INFER_SHAPE`). Padding rows produce scores that are ignored.
-        for (chunk_idx, chunk) in selected_indices.chunks(self.gpu_infer_shape).enumerate() {
-            let mut triplet = ndarray::Array::zeros((self.gpu_infer_shape, 63, 63, 3));
-            let mut metadata = ndarray::Array::zeros((self.gpu_infer_shape, 25));
-            let mut btsbot_metadata = ndarray::Array::zeros((self.gpu_infer_shape, 25));
+        // Run ACAI/BTSBot in fixed-size padded chunks so ORT always sees the same
+        // input shape (`self.batch_size`). The final chunk is zero-padded
+        // up to the fixed size; padding rows produce scores that are ignored.
+        for (chunk_idx, chunk) in selected_indices.chunks(self.batch_size).enumerate() {
+            let mut triplet = ndarray::Array::zeros((self.batch_size, 63, 63, 3));
+            let mut metadata = ndarray::Array::zeros((self.batch_size, 25));
+            let mut btsbot_metadata = ndarray::Array::zeros((self.batch_size, 25));
 
             for (row, idx) in chunk.iter().enumerate() {
                 let tpos = *triplet_pos.get(idx).expect("triplet position missing");
@@ -1095,15 +1096,15 @@ impl ZtfEnrichmentWorker {
                 ("acai_b", acai_b_scores.len()),
                 ("btsbot", btsbot_scores.len()),
             ] {
-                if got != self.gpu_infer_shape {
+                if got != self.batch_size {
                     return Err(EnrichmentWorkerError::ConfigurationError(format!(
                         "model {} returned {} scores for {} padded inputs",
-                        name, got, self.gpu_infer_shape
+                        name, got, self.batch_size
                     )));
                 }
             }
 
-            let chunk_start = chunk_idx * self.gpu_infer_shape;
+            let chunk_start = chunk_idx * self.batch_size;
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
                 let sel_idx = chunk_start + batch_idx;
                 let cider_fusion = cider_batch.as_ref().and_then(|(probs, _)| {
