@@ -15,13 +15,15 @@ workers:
       n_workers: 8
     enrichment:
       n_workers: 12
+    filter:
+      n_workers: 4
   lsst:
     alert:
       n_workers: 10
     enrichment:
       n_workers: 10
     filter:
-      n_workers: 3
+      n_workers: 4
   decam:
     enrichment:
       n_workers: 1
