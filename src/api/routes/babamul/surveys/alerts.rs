@@ -5,7 +5,7 @@ use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertPr
 use crate::utils::enums::Survey;
 use crate::utils::moc::{
     is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes, moc_to_covering_cones,
-    select_covering_depth,
+    select_covering_depth, HpxMoc,
 };
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
@@ -665,7 +665,7 @@ struct AlertsMocSearchQuery {
 #[post("/surveys/{survey}/alerts/moc-search")]
 pub async fn moc_search_alerts(
     path: web::Path<Survey>,
-    query: web::Json<AlertsMocSearchQuery>,
+    mut query: web::Json<AlertsMocSearchQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
 ) -> HttpResponse {
@@ -689,46 +689,10 @@ pub async fn moc_search_alerts(
         ));
     }
 
-    // Parse the MOC from the request
-    let moc = match (&query.moc_fits_base64, &query.skymap_fits_base64) {
-        (Some(moc_b64), None) => {
-            let bytes = match BASE64_STANDARD.decode(moc_b64) {
-                Ok(b) => b,
-                Err(e) => {
-                    return response::bad_request(&format!(
-                        "Invalid base64 in moc_fits_base64: {}",
-                        e
-                    ));
-                }
-            };
-            match moc_from_fits_bytes(&bytes) {
-                Ok(moc) => moc,
-                Err(e) => {
-                    return response::bad_request(&e);
-                }
-            }
-        }
-        (None, Some(skymap_b64)) => {
-            let credible_level = query.credible_level.unwrap_or(0.9);
-            if !(0.0..=1.0).contains(&credible_level) {
-                return response::bad_request("credible_level must be between 0.0 and 1.0");
-            }
-            let bytes = match BASE64_STANDARD.decode(skymap_b64) {
-                Ok(b) => b,
-                Err(e) => {
-                    return response::bad_request(&format!(
-                        "Invalid base64 in skymap_fits_base64: {}",
-                        e
-                    ));
-                }
-            };
-            match moc_from_skymap_bytes(&bytes, credible_level) {
-                Ok(moc) => moc,
-                Err(e) => {
-                    return response::bad_request(&e);
-                }
-            }
-        }
+    // Validate which MOC source was provided before doing any heavy work.
+    let moc_b64 = query.moc_fits_base64.take();
+    let skymap_b64 = query.skymap_fits_base64.take();
+    match (&moc_b64, &skymap_b64) {
         (Some(_), Some(_)) => {
             return response::bad_request(
                 "Provide exactly one of moc_fits_base64 or skymap_fits_base64, not both",
@@ -739,16 +703,55 @@ pub async fn moc_search_alerts(
                 "Must provide either moc_fits_base64 or skymap_fits_base64",
             );
         }
-    };
+        _ => {}
+    }
+    let credible_level = query.credible_level.unwrap_or(0.9);
 
     let limit = query.limit.unwrap_or(10000).min(10000);
     if limit == 0 {
         return response::bad_request("limit must be between 1 and 10000");
     }
 
-    // Compute covering cones for the MOC
-    let depth = select_covering_depth(&moc);
-    let cones = moc_to_covering_cones(&moc, depth);
+    // Decoding the base64 payload (up to ~70 MB), parsing the MOC/skymap, and
+    // computing the covering cones is pure CPU work with no `.await` points.
+    // Running it on the async worker would block that worker for the whole
+    // computation, so offload it to the blocking thread pool.
+    let computation = web::block(
+        move || -> Result<(HpxMoc, u8, Vec<(f64, f64, f64)>), String> {
+            let moc = match (moc_b64, skymap_b64) {
+                (Some(moc_b64), _) => {
+                    let bytes = BASE64_STANDARD
+                        .decode(moc_b64)
+                        .map_err(|e| format!("Invalid base64 in moc_fits_base64: {}", e))?;
+                    moc_from_fits_bytes(&bytes)?
+                }
+                (None, Some(skymap_b64)) => {
+                    if !(0.0..=1.0).contains(&credible_level) {
+                        return Err("credible_level must be between 0.0 and 1.0".to_string());
+                    }
+                    let bytes = BASE64_STANDARD
+                        .decode(skymap_b64)
+                        .map_err(|e| format!("Invalid base64 in skymap_fits_base64: {}", e))?;
+                    moc_from_skymap_bytes(&bytes, credible_level)?
+                }
+                // Presence is validated above: exactly one source is provided.
+                (None, None) => unreachable!("MOC source presence validated before web::block"),
+            };
+            let depth = select_covering_depth(&moc);
+            let cones = moc_to_covering_cones(&moc, depth);
+            Ok((moc, depth, cones))
+        },
+    )
+    .await;
+
+    let (moc, depth, cones) = match computation {
+        Ok(Ok(result)) => result,
+        Ok(Err(message)) => return response::bad_request(&message),
+        Err(e) => {
+            return response::internal_error(&format!("error processing MOC: {}", e));
+        }
+    };
+
     if cones.is_empty() {
         return response::ok(
             "MOC region is empty, no alerts to search",
