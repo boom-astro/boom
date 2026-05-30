@@ -1,4 +1,9 @@
-use crate::utils::{enums::Survey, o11y::logging::as_error};
+use crate::utils::{
+    cutouts::{CutoutCache, CutoutStorage},
+    enums::Survey,
+    o11y::logging::as_error,
+};
+use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
 use mongodb::bson::doc;
@@ -7,7 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
@@ -27,6 +32,8 @@ pub enum BoomConfigError {
     MissingKeyError(String),
     #[error("failed to deserialize config: {0}")]
     InvalidSecretError(String),
+    #[error("cutout storage error: {0}")]
+    CutoutStorageError(#[from] crate::utils::cutouts::CutoutStorageError),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -41,7 +48,7 @@ pub fn load_dotenv() {
     // Try current directory first
     if std::path::Path::new(".env").exists() {
         match dotenvy::dotenv() {
-            Ok(_) => info!("Loaded environment variables from .env file"),
+            Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
         }
         return;
@@ -50,14 +57,14 @@ pub fn load_dotenv() {
     // Try parent directory (useful when running from subdirectories like api/)
     if std::path::Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
-            Ok(_) => info!("Loaded environment variables from ../.env file"),
+            Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
         }
         return;
     }
 
     // No .env file found - this is fine, environment variables may be set by the system
-    debug!("No .env file found, using system environment variables only");
+    info!("No .env file found, using system environment variables only");
 }
 
 #[instrument(err)]
@@ -83,9 +90,7 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let db_conf = &conf.database;
-
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
     let prefix = match db_conf.srv {
         true => "mongodb+srv://",
         false => "mongodb://",
@@ -128,13 +133,17 @@ async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError
 }
 
 #[instrument(skip_all, err)]
-async fn build_redis(
-    conf: &AppConfig,
-) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
-    let host = &conf.redis.host;
-    let port = conf.redis.port;
+async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+    let db_conf = &conf.database;
 
-    let uri = format!("redis://{}:{}/", host, port);
+    _build_db(db_conf).await
+}
+
+#[instrument(skip_all, err)]
+async fn build_redis_conn(
+    redis_conf: &RedisConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    let uri = format!("redis://{}:{}/", redis_conf.host, redis_conf.port);
 
     let client_redis =
         redis::Client::open(uri).inspect_err(as_error!("failed to connect to redis"))?;
@@ -145,6 +154,109 @@ async fn build_redis(
         .inspect_err(as_error!("failed to get multiplexed connection"))?;
 
     Ok(con)
+}
+
+#[instrument(skip_all, err)]
+async fn build_cutout_cache_conn(
+    cache_conf: &CutoutCacheConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    let uri = format!("redis://{}:{}/", cache_conf.host, cache_conf.port);
+    let client =
+        redis::Client::open(uri).inspect_err(as_error!("failed to connect to cutout cache"))?;
+    let mut con = client
+        .get_multiplexed_async_connection()
+        .await
+        .inspect_err(as_error!(
+            "failed to get multiplexed connection for cutout cache"
+        ))?;
+    if let Err(e) = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("maxmemory")
+        .arg(&cache_conf.max_memory)
+        .query_async::<()>(&mut con)
+        .await
+    {
+        warn!(
+            "Failed to set maxmemory '{}' on cutout cache (may already be configured externally): {:?}",
+            cache_conf.max_memory, e
+        );
+    }
+    Ok(con)
+}
+
+#[instrument(skip_all, err)]
+async fn build_redis(
+    conf: &AppConfig,
+) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
+    build_redis_conn(&conf.redis).await
+}
+
+fn string_to_static_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+#[instrument(skip_all, err)]
+async fn build_cutout_storage(
+    survey: &Survey,
+    conf: &AppConfig,
+) -> Result<CutoutStorage, BoomConfigError> {
+    let storage = match &conf.cutouts_storage {
+        CutoutsStorage::S3(s3_conf) => {
+            let credentials_static_str = string_to_static_str(s3_conf.credentials_provider.clone());
+            let credentials = aws_sdk_s3::config::Credentials::new(
+                s3_conf.access_key.clone(),
+                s3_conf.secret_key.clone(),
+                None,
+                None,
+                credentials_static_str,
+            );
+            let region = aws_sdk_s3::config::Region::new(s3_conf.region.clone());
+
+            let mut s3_config_builder =
+                aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(region)
+                    .credentials_provider(credentials);
+            if let Some(endpoint_url) = &s3_conf.endpoint_url {
+                s3_config_builder = s3_config_builder.endpoint_url(endpoint_url.clone());
+            }
+            let s3_config = s3_config_builder.load().await;
+
+            let rustfs_client = aws_sdk_s3::Client::from_conf(
+                aws_sdk_s3::Config::from(&s3_config)
+                    .to_builder()
+                    .force_path_style(true)
+                    .build(),
+            );
+            let bucket_name = s3_conf.bucket_name.clone();
+            let key_prefix = survey.to_string().to_lowercase();
+
+            let redis_conn =
+                build_cutout_cache_conn(&s3_conf.cache)
+                    .await
+                    .inspect_err(as_error!(
+                        "failed to build redis connection for cutout cache"
+                    ))?;
+            let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds, key_prefix.clone());
+
+            let compress_stamps = matches!(survey, Survey::Lsst);
+            CutoutStorage::from_s3(
+                rustfs_client,
+                bucket_name,
+                key_prefix,
+                None,
+                cache,
+                compress_stamps,
+            )
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?
+        }
+        CutoutsStorage::Mongo(mongo_conf) => {
+            let db = _build_db(&mongo_conf).await?;
+            CutoutStorage::from_mongo(db, survey).await
+        }
+    };
+
+    Ok(storage)
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +399,61 @@ impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     }
 }
 
+fn default_bucket_name() -> String {
+    "boom-cutouts".to_string()
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct S3CutoutsStorageConfig {
+    #[serde(default = "default_bucket_name")]
+    pub bucket_name: String,
+    pub region: String,
+    /// Custom endpoint URL for S3-compatible services (rustfs, MinIO, Wasabi, …).
+    /// Leave unset when pointing at AWS S3 — the SDK derives the endpoint from the region.
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+    pub access_key: String,
+    pub secret_key: String,
+    pub credentials_provider: String,
+    pub cache: CutoutCacheConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum CutoutsStorage {
+    S3(S3CutoutsStorageConfig),
+    Mongo(DatabaseConfig),
+}
+
+impl<'de> Deserialize<'de> for CutoutsStorage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        // Materialise the entire map via serde_json::Value so we can (a) read
+        // the "type" discriminant and (b) re-deserialize into the chosen variant
+        // without fighting the config crate's single-pass deserializer constraint
+        // that prevents #[serde(tag = "type")] from working here.
+        let map = serde_json::Value::deserialize(deserializer).map_err(|e| D::Error::custom(e))?;
+
+        let storage_type = map
+            .get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| D::Error::missing_field("type"))?;
+
+        match storage_type {
+            "mongo" => serde_json::from_value::<DatabaseConfig>(map)
+                .map(CutoutsStorage::Mongo)
+                .map_err(|e| D::Error::custom(e)),
+            "s3" => serde_json::from_value::<S3CutoutsStorageConfig>(map)
+                .map(CutoutsStorage::S3)
+                .map_err(|e| D::Error::custom(e)),
+            other => Err(D::Error::custom(format!(
+                "unknown cutouts_storage type {:?}; expected \"mongo\" or \"s3\"",
+                other
+            ))),
+        }
+    }
+}
+
 fn default_kafka_server() -> String {
     "localhost:9092".to_string()
 }
@@ -374,6 +541,25 @@ impl Default for RedisConfig {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct CutoutCacheConfig {
+    pub host: String,
+    pub port: u16,
+    pub ttl_seconds: u64,
+    pub max_memory: String,
+}
+
+impl Default for CutoutCacheConfig {
+    fn default() -> Self {
+        CutoutCacheConfig {
+            host: "localhost".to_string(),
+            port: 6379,
+            ttl_seconds: 30,
+            max_memory: "1gb".to_string(),
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
@@ -409,12 +595,172 @@ pub struct WorkerConfig {
     pub n_workers: usize,
 }
 
+fn default_filter_refresh_interval_minutes() -> u64 {
+    15
+}
+
+fn deserialize_filter_refresh_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    const MIN_INTERVAL: u64 = 1;
+    const MAX_INTERVAL: u64 = 60;
+    if value < MIN_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "refresh_interval_minutes must be at least {} minutes, got {}",
+            MIN_INTERVAL, value
+        )));
+    }
+    if value > MAX_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "refresh_interval_minutes must be at most {} minutes, got {}",
+            MAX_INTERVAL, value
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_command_interval<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    const MIN_INTERVAL: usize = 100;
+    const MAX_INTERVAL: usize = 60000;
+
+    if value < MIN_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "command_interval must be at least {} ms, got {}",
+            MIN_INTERVAL, value
+        )));
+    }
+    if value > MAX_INTERVAL {
+        return Err(serde::de::Error::custom(format!(
+            "command_interval must be at most {} ms, got {}",
+            MAX_INTERVAL, value
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_max_match_rate<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u8>::deserialize(deserializer)?;
+    if let Some(v) = value {
+        if v == 0 || v > 100 {
+            return Err(serde::de::Error::custom(format!(
+                "max_match_rate must be between 1 and 100, got {}",
+                v
+            )));
+        }
+    }
+    Ok(value)
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct FilterWorkerConfig {
+    pub n_workers: usize,
+    #[serde(
+        default = "default_filter_refresh_interval_minutes",
+        deserialize_with = "deserialize_filter_refresh_interval"
+    )]
+    pub refresh_interval_minutes: u64,
+    /// Maximum percentage of alerts that a filter is allowed
+    /// to match before it is considered too permissive to activate. Required
+    /// alongside `reference_night` to allow filter activation on this survey;
+    /// if either is missing, filters cannot be activated.
+    #[serde(default, deserialize_with = "deserialize_max_match_rate")]
+    pub max_match_rate: Option<u8>,
+    /// Reference observing night used to gauge how selective a filter is.
+    /// Should be a recent, well-populated night for the survey. Required
+    /// alongside `max_match_rate` to allow filter activation on this survey;
+    /// if either is missing, filters cannot be activated.
+    #[serde(default)]
+    pub reference_night: Option<NaiveDate>,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct SurveyWorkerConfig {
-    pub command_interval: u64,
+    #[serde(deserialize_with = "deserialize_command_interval")]
+    pub command_interval: usize, // in milliseconds
     pub alert: WorkerConfig,
     pub enrichment: WorkerConfig,
-    pub filter: WorkerConfig,
+    pub filter: FilterWorkerConfig,
+}
+
+use serde::{de, Deserializer};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GpuConfig {
+    /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
+    /// Models are loaded once at startup and shared across all enrichment workers
+    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU (the BOOM_GPU__ENABLED
+    /// env var is still respected by the ORT session builder).
+    #[serde(default)]
+    pub enabled: bool,
+    /// CUDA device IDs available for GPU work. Default: [0].
+    /// ONNX models are loaded on the first device. Additional devices are
+    /// available for the GPU pool (future lightcurve fitting).
+    /// Example for 8 GPUs: [0, 1, 2, 3, 4, 5, 6, 7].
+    #[serde(
+        default = "default_gpu_device_ids",
+        deserialize_with = "deserialize_device_ids"
+    )]
+    pub device_ids: Vec<i32>,
+}
+
+fn deserialize_device_ids<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DeviceIdsVisitor;
+    impl<'de> de::Visitor<'de> for DeviceIdsVisitor {
+        type Value = Vec<i32>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list of integers or a comma-separated string")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let ids = v
+                .split(',')
+                .map(|s| s.trim().parse::<i32>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| E::custom("invalid integer in device_ids string"))?;
+            Ok(ids)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut ids = Vec::new();
+            while let Some(val) = seq.next_element()? {
+                ids.push(val);
+            }
+            Ok(ids)
+        }
+    }
+    deserializer.deserialize_any(DeviceIdsVisitor)
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        GpuConfig {
+            enabled: false,
+            device_ids: default_gpu_device_ids(),
+        }
+    }
+}
+
+fn default_gpu_device_ids() -> Vec<i32> {
+    vec![0]
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -430,6 +776,9 @@ pub struct AppConfig {
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
+    #[serde(default)]
+    pub gpu: GpuConfig,
+    pub cutouts_storage: CutoutsStorage,
 }
 
 impl AppConfig {
@@ -504,6 +853,23 @@ impl AppConfig {
     pub async fn build_redis(&self) -> Result<redis::aio::MultiplexedConnection, BoomConfigError> {
         build_redis(self).await
     }
+
+    #[instrument(skip_all, err)]
+    pub async fn build_cutout_storage(
+        &self,
+        survey: &Survey,
+    ) -> Result<CutoutStorage, BoomConfigError> {
+        match build_cutout_storage(survey, self).await {
+            Ok(storage) => Ok(storage),
+            Err(e) => {
+                error!(
+                    "Failed to build cutout storage for survey {:?}: {:?}",
+                    survey, e
+                );
+                Err(e)
+            }
+        }
+    }
 }
 
 #[instrument(err)]
@@ -521,7 +887,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
         return Err(BoomConfigError::InvalidSecretError(e));
     }
 
-    info!("Configuration loaded successfully");
+    debug!("Configuration loaded successfully");
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
     debug!("Admin username: {}", app_config.api.auth.admin_username);
@@ -538,4 +904,63 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 pub async fn get_test_db() -> Database {
     let config = AppConfig::from_test_config().expect("Failed to load test config");
     config.build_db().await.unwrap()
+}
+
+pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
+    let config = AppConfig::from_test_config().expect("Failed to load test config");
+    config
+        .build_cutout_storage(survey)
+        .await
+        .expect("Failed to build cutout storage")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gpu_config_defaults() {
+        let config = GpuConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_empty() {
+        let json = "{}";
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_enabled_single_gpu() {
+        let json = r#"{"enabled": true, "device_ids": [0]}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_multi_gpu() {
+        let json = r#"{"enabled": true, "device_ids": [0, 1, 2, 3, 4, 5, 6, 7]}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.device_ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_partial() {
+        let json = r#"{"enabled": true}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.device_ids, vec![0]);
+    }
+
+    #[test]
+    fn test_gpu_config_deserialize_subset_of_devices() {
+        let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
+        let config: GpuConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.device_ids, vec![2, 5]);
+    }
 }

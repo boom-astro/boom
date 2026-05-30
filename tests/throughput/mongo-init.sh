@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 
-# Only import NED alerts if the collection does not exist
+NED_EXPECTED_COUNT=1872544
+
+# Only import NED alerts if the collection does not exist or has the wrong count
 NED_COLLECTION_NAME="NED"
 NED_COLLECTION_EXISTS=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollectionNames().includes('$NED_COLLECTION_NAME')")
+NED_COLLECTION_COUNT=0
+if [ "$NED_COLLECTION_EXISTS" = "true" ]; then
+    NED_COLLECTION_COUNT=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollection('$NED_COLLECTION_NAME').countDocuments()")
+fi
 echo "NED collection exists: $NED_COLLECTION_EXISTS"
+echo "NED collection count: $NED_COLLECTION_COUNT (expected $NED_EXPECTED_COUNT)"
 
-if [ "$NED_COLLECTION_EXISTS" = "false" ]; then
+if [ "$NED_COLLECTION_EXISTS" = "false" ] || [ "${NED_COLLECTION_COUNT:-0}" -ne "$NED_EXPECTED_COUNT" ]; then
+    if [ "$NED_COLLECTION_EXISTS" = "true" ]; then
+        echo "NED collection exists but has wrong count ($NED_COLLECTION_COUNT != $NED_EXPECTED_COUNT); dropping and reimporting"
+        mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
+            --quiet --eval "db.$NED_COLLECTION_NAME.drop()"
+    fi
+
     echo "Creating collection $NED_COLLECTION_NAME"
     mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
         --eval "db.createCollection('$NED_COLLECTION_NAME')"
@@ -20,8 +33,14 @@ if [ "$NED_COLLECTION_EXISTS" = "false" ]; then
         "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin$DB_ADD_URI" \
         --collection $NED_COLLECTION_NAME \
         --jsonArray
+
+    NED_COLLECTION_COUNT=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getCollection('$NED_COLLECTION_NAME').countDocuments()")
+    if [ "${NED_COLLECTION_COUNT:-0}" -ne "$NED_EXPECTED_COUNT" ]; then
+        echo "Failed to import NED alerts: expected $NED_EXPECTED_COUNT documents but got $NED_COLLECTION_COUNT"
+        exit 1
+    fi
 else
-    echo "NED alerts already imported; skipping import"
+    echo "NED alerts already imported with correct count ($NED_COLLECTION_COUNT); skipping import"
 fi
 
 # Always drop ZTF_alerts, ZTF_alerts_aux, ZTF_alerts_cutouts, and filters collections
@@ -57,6 +76,27 @@ for i in $(seq 1 $N_FILTERS); do
         exit 1
     fi
 done
+
+# Now we load the ZTF_alerts_aux table with the history for all the objects detected on 2025-03-11
+echo "Loading ZTF_alerts_aux collection from archive into $DB_NAME"
+mongorestore --uri="mongodb://mongoadmin:mongoadminsecret@mongo:27017/?authSource=admin" \
+    --gzip \
+    --archive=/boom_throughput.ZTF_alerts_aux.dump.gz \
+    --nsInclude='boom_throughput.ZTF_alerts_aux' \
+    --nsFrom='boom_throughput.ZTF_alerts_aux' \
+    --nsTo="$DB_NAME.ZTF_alerts_aux"
+mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \
+    --eval "db.ZTF_alerts_aux.createIndex({ 'coordinates.radec_geojson': '2dsphere' })"
+
+# verify that we have the expected number of documents in the ZTF_alerts_aux collection
+EXPECTED_AUX_ALERTS=27948
+ACTUAL_AUX_ALERTS=$(mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "db.getSiblingDB('$DB_NAME').ZTF_alerts_aux.countDocuments()")
+if [ "$ACTUAL_AUX_ALERTS" -ne "$EXPECTED_AUX_ALERTS" ]; then
+    echo "Expected $EXPECTED_AUX_ALERTS documents in ZTF_alerts_aux collection, but found $ACTUAL_AUX_ALERTS"
+    exit 1
+else
+    echo "Successfully loaded ZTF_alerts_aux collection with $ACTUAL_AUX_ALERTS documents"
+fi
 
 echo "MongoDB initialization script completed successfully"
 exit 0

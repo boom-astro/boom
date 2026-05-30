@@ -1,0 +1,58 @@
+# Include this file when using a dedicated MongoDB container for cutout storage:
+#   docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up
+#
+# For local development, also include docker-compose.override.yaml:
+#   docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml -f docker-compose.override.yaml --profile dev up
+#   (or: make dev-mongo)
+#
+# Set BOOM_CUTOUTS_MONGO_VOLUME to a host path to store cutouts on a separate
+# disk or volume:
+#   BOOM_CUTOUTS_MONGO_VOLUME=/mnt/fast-disk/boom_cutouts docker compose ...
+#
+# Required env var: BOOM_CUTOUTS_STORAGE__PASSWORD
+#   The password boom uses to connect to the cutouts database. Must match the
+#   password this container is initialized with (defaults to BOOM_DATABASE__PASSWORD
+#   in .env.example).
+#
+# The cutouts database name defaults to "boom" (same as in config.yaml).
+# Since this is a dedicated container there is no collision with the alerts DB;
+# change BOOM_CUTOUTS_STORAGE__NAME if you prefer a different name.
+
+volumes:
+  mongodb_cutouts:
+
+services:
+  mongo-cutouts:
+    image: mongo:8.0
+    hostname: mongo-cutouts
+    expose:
+      - "27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${BOOM_CUTOUTS_STORAGE__USERNAME:-mongoadmin}
+      - MONGO_INITDB_ROOT_PASSWORD=${BOOM_CUTOUTS_STORAGE__PASSWORD:?BOOM_CUTOUTS_STORAGE__PASSWORD must be set}
+    volumes:
+      - ${BOOM_CUTOUTS_MONGO_VOLUME:-mongodb_cutouts}:/data/db
+    restart: always
+    networks:
+      - boom
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      start_period: 20s
+
+  # Point all boom services at the dedicated cutouts container instead of the
+  # shared mongo instance set in the base docker-compose.yaml.
+  api: &mongo_cutouts_env
+    environment:
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_CUTOUTS_STORAGE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_CUTOUTS_STORAGE__PASSWORD:?BOOM_CUTOUTS_STORAGE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo-cutouts
+  consumer-ztf:
+    <<: *mongo_cutouts_env
+  consumer-lsst:
+    <<: *mongo_cutouts_env
+  scheduler-ztf:
+    <<: *mongo_cutouts_env
+  scheduler-lsst:
+    <<: *mongo_cutouts_env

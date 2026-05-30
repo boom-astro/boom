@@ -190,7 +190,10 @@ pub struct LsstEnrichmentWorker {
 #[async_trait::async_trait]
 impl EnrichmentWorker for LsstEnrichmentWorker {
     #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
+    async fn new(
+        config_path: &str,
+        _shared_models: Option<std::sync::Arc<crate::enrichment::models::SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db = config.build_db().await?;
         let client = db.client().clone();
@@ -243,6 +246,10 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             alert_pipeline: create_lsst_alert_pipeline(),
             babamul,
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Lsst
     }
 
     fn input_queue_name(&self) -> String {

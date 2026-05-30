@@ -7,6 +7,7 @@ use boom::{
             logging::{build_subscriber, log_error, WARN},
             metrics::init_metrics,
         },
+        parser::parse_positive_usize,
     },
 };
 
@@ -36,7 +37,7 @@ struct Cli {
     config: String,
 
     /// Number of processes to use to read the Kafka stream in parallel
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
     /// Clear the in-memory (Valkey) queue of alerts already consumed from Kafka
@@ -79,7 +80,10 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
 
 #[instrument(skip_all, fields(survey = %args.survey))]
 async fn run(args: Cli, meter_provider: SdkMeterProvider) {
-    let date = args.date.unwrap_or_else(|| chrono::Utc::now().naive_utc());
+    let date = args.date.unwrap_or_else(|| {
+        let today = chrono::Utc::now().naive_utc().date();
+        today.and_hms_opt(0, 0, 0).unwrap()
+    });
     let timestamp = date.and_utc().timestamp();
 
     let exit_on_eof = if args.deployment_env == "dev" {

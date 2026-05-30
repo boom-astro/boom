@@ -1,3 +1,4 @@
+use chrono::NaiveDate;
 use mongodb::{
     bson::{doc, to_document, Document},
     options::IndexOptions,
@@ -36,11 +37,43 @@ pub fn mongify<T: Serialize>(value: &T) -> Document {
 }
 
 #[instrument(skip_all)]
+pub fn mongify_vec<T: Serialize>(value: &Vec<T>) -> Vec<Document> {
+    value.iter().map(|v| mongify(v)).collect()
+}
+
+#[instrument(skip_all)]
 pub fn cutout2bsonbinary(cutout: Vec<u8>) -> mongodb::bson::Binary {
     return mongodb::bson::Binary {
         subtype: mongodb::bson::spec::BinarySubtype::Generic,
         bytes: cutout,
     };
+}
+
+/// Count alerts in `<survey>_alerts` for the observing night labelled by `date`
+/// (local-noon to local-noon JD window).
+///
+/// `programids`:
+/// - `None` → no permission filter (use for surveys without programid, e.g. LSST,
+///   or when caller wants the full unrestricted count).
+/// - `Some(pids)` → restrict to `candidate.programid ∈ pids`.
+#[instrument(skip(db), err)]
+pub async fn count_alerts_for_night(
+    db: &Database,
+    survey: &Survey,
+    date: &NaiveDate,
+    programids: Option<&[i32]>,
+) -> Result<u64, mongodb::error::Error> {
+    let (start_jd, end_jd) = survey.night_jd_window(date);
+    let mut filter = doc! {
+        "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
+    };
+    if *survey == Survey::Ztf {
+        if let Some(pids) = programids {
+            filter.insert("candidate.programid", doc! { "$in": pids });
+        }
+    }
+    let collection: Collection<Document> = db.collection(&format!("{}_alerts", survey));
+    collection.count_documents(filter).await
 }
 
 // This function, for a given survey name (ZTF, LSST), will create
@@ -88,32 +121,47 @@ pub async fn initialize_survey_indexes(
     Ok(())
 }
 
-/// This function updates a timeseries array by appending new values
-/// while deduplicating based on a time field
+/// This function updates a timeseries array by appending new values while deduplicating
+/// based on a time field, maintaining sort order, and removing non-finite values.
 /// (so we have only one measurement per epoch).
 pub fn update_timeseries_op(
     array_field: &str,
     time_field: &str,
     value: &Vec<Document>,
 ) -> Document {
+    let point_field_name = format!("$$point.{}", time_field);
     doc! {
         "$sortArray": {
             "input": {
-                "$reduce": {
+                "$filter": {
                     "input": {
-                        "$concatArrays": [
-                            // handle the case where the array_field is not present
-                            { "$ifNull": [format!("${}", array_field), []] },
-                            value
-                        ]
-                    },
-                    "initialValue": [],
-                    "in": {
-                        "$cond": {
-                            "if": { "$in": [format!("$$this.{}", time_field), format!("$$value.{}", time_field)] },
-                            "then": "$$value",
-                            "else": { "$concatArrays": ["$$value", ["$$this"]] }
+                        "$reduce": {
+                            "input": {
+                                "$concatArrays": [
+                                    // handle the case where the array_field is not present
+                                    { "$ifNull": [format!("${}", array_field), []] },
+                                    value
+                                ]
+                            },
+                            "initialValue": [],
+                            "in": {
+                                "$cond": {
+                                    "if": { "$in": [format!("$$this.{}", time_field), format!("$$value.{}", time_field)] },
+                                    "then": "$$value",
+                                    "else": { "$concatArrays": ["$$value", ["$$this"]] }
+                                }
+                            }
                         }
+                    },
+                    "as": "point",
+                    "cond": doc! {
+                        "$and": [
+                            // filter out non-finite values (including NaN and Infinity)
+                            { "$isNumber": &point_field_name },
+                            { "$eq": [&point_field_name, &point_field_name] },
+                            { "$lt": [&point_field_name, f64::INFINITY] },
+                            { "$gt": [&point_field_name, f64::NEG_INFINITY] }
+                        ]
                     }
                 }
             },

@@ -6,17 +6,26 @@
 # ]
 # ///
 
+import argparse
 from confluent_kafka import Consumer, KafkaException
 
-# Now let's check that we can read all of the alerts from the babamul.ztf.none
-# Kafka topic
+parser = argparse.ArgumentParser(description="Read the Kafka output from the BOOM throughput test.")
+parser.add_argument(
+    "--server",
+    required=False,
+    default="localhost:9092",
+    help="The bootstrap server to connect to."
+)
+args = parser.parse_args()
+
+# Now let's check that we can read all the alerts from babamul.* kafka topics.
 consumer_conf = {
-    "bootstrap.servers": "localhost:9092",
+    "bootstrap.servers": args.server,
     "group.id": "throughput-benchmarking-verify",
     "auto.offset.reset": "earliest",
 }
 consumer = Consumer(consumer_conf)
-topic = "babamul.ztf.none"
+topic = "^babamul.*"
 consumer.subscribe([topic])
 n_alerts = 0
 try:
@@ -30,7 +39,9 @@ try:
 finally:
     consumer.close()
 
-if n_alerts != 28548:
-    raise RuntimeError(f"Expected 28548 alerts, but got {n_alerts}")
+n_expected = 22674
+
+if n_alerts != n_expected:
+    raise RuntimeError(f"Expected {n_expected} alerts, but got {n_alerts}")
 
 print(f"Read {n_alerts} alerts from topic {topic}")

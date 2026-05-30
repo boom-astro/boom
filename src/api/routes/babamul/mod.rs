@@ -1,15 +1,19 @@
+pub mod stats;
 pub mod surveys;
 pub mod tokens;
 
 use crate::api::email::EmailService;
 use crate::api::models::response;
-use crate::api::{auth::AuthProvider, kafka::delete_kafka_credentials_and_acls};
+use crate::api::{
+    auth::{hash_token, AuthProvider},
+    kafka::delete_kafka_credentials_and_acls,
+};
+use crate::utils::enums::Survey;
 use actix_web::{delete, get, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use sha2::{Digest, Sha256};
 use std::process::Command;
 use utoipa::ToSchema;
 
@@ -18,6 +22,25 @@ use aes_gcm::{
     AeadCore, Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose, Engine as _};
+
+/// Subset of [`Survey`] surfaced through the babamul API (no DECam).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum BabamulSurvey {
+    #[serde(alias = "ZTF")]
+    Ztf,
+    #[serde(alias = "LSST")]
+    Lsst,
+}
+
+impl From<BabamulSurvey> for Survey {
+    fn from(s: BabamulSurvey) -> Self {
+        match s {
+            BabamulSurvey::Ztf => Survey::Ztf,
+            BabamulSurvey::Lsst => Survey::Lsst,
+        }
+    }
+}
 
 /// Validate password complexity.
 ///
@@ -365,7 +388,7 @@ pub async fn post_babamul_signup(
 
 /// Generate a random alphanumeric string of specified length
 pub fn generate_random_string(length: usize) -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut rng = rand::rng();
     (0..length)
@@ -868,9 +891,7 @@ pub async fn post_babamul_forgot_password(
 
     // Generate a secure random raw token and store its SHA-256 hash.
     let raw_token = generate_random_string(48);
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
-    let token_hash = format!("{:x}", hasher.finalize());
+    let token_hash = hash_token(&raw_token);
 
     // Expiry: 1 hour from now.
     let expires_at = flare::Time::now().to_utc().timestamp() + 3600;
@@ -964,9 +985,7 @@ pub async fn post_babamul_reset_password(
     }
 
     // Hash the incoming token to look it up in the database.
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
-    let token_hash = format!("{:x}", hasher.finalize());
+    let token_hash = hash_token(&raw_token);
 
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 

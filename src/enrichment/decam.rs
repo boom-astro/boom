@@ -2,6 +2,7 @@ use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
 };
@@ -103,7 +104,10 @@ pub struct DecamEnrichmentWorker {
 #[async_trait::async_trait]
 impl EnrichmentWorker for DecamEnrichmentWorker {
     #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
+    async fn new(
+        config_path: &str,
+        _shared_models: Option<std::sync::Arc<crate::enrichment::models::SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
@@ -119,6 +123,10 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_decam_alert_pipeline(),
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Decam
     }
 
     fn input_queue_name(&self) -> String {

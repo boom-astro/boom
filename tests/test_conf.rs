@@ -45,6 +45,12 @@ fn test_load_workers_config() {
     assert_eq!(ztf_worker_config.enrichment.n_workers, 1);
     assert_eq!(ztf_worker_config.filter.n_workers, 1);
     assert_eq!(ztf_worker_config.command_interval, 500);
+    assert_eq!(ztf_worker_config.filter.refresh_interval_minutes, 15);
+    assert_eq!(ztf_worker_config.filter.max_match_rate, Some(5));
+    assert_eq!(
+        ztf_worker_config.filter.reference_night,
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 16).unwrap())
+    );
 }
 
 #[test]
@@ -120,6 +126,16 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_storage:
+    type: mongo
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -150,6 +166,16 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_storage:
+    type: mongo
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();
@@ -181,6 +207,16 @@ api:
         admin_username: admin
         admin_password: test123
         admin_email: admin@test.com
+cutouts_storage:
+    type: mongo
+    host: localhost
+    port: 27017
+    name: test_db
+    max_pool_size: 200
+    replica_set: null
+    username: test
+    password: test123
+    srv: false
 "#;
     let temp_file = tempfile::NamedTempFile::with_suffix(".yaml").unwrap();
     std::fs::write(temp_file.path(), config_content).unwrap();

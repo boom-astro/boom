@@ -1,24 +1,24 @@
+use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::babamul::{Babamul, BabamulZtfAlert};
-use crate::enrichment::LsstMatch;
+use crate::enrichment::{
+    babamul::{Babamul, BabamulZtfAlert},
+    fetch_alerts,
+    models::{AcaiModel, BtsBotModel, Model, SharedModels},
+    EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
+};
+use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
+use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
     PhotometryMag, ZTF_ZP,
-};
-use crate::{
-    alert::ZtfCandidate,
-    enrichment::{
-        fetch_alert_cutouts, fetch_alerts,
-        models::{AcaiModel, BtsBotModel, Model},
-        EnrichmentWorker, EnrichmentWorkerError,
-    },
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
+use std::sync::Arc;
 use tracing::{instrument, trace, warn};
 
 #[serdavro]
@@ -37,8 +37,11 @@ pub struct ZtfAlertPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
 }
 
@@ -61,8 +64,11 @@ pub struct ZtfForcedPhotometry {
     pub magzpsci: Option<f64>,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
+    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
+    #[allow(dead_code)]
+    #[serde(rename = "snr", default, skip_serializing)]
+    pub snr_legacy: Option<f64>,
     pub programid: i32,
     pub procstatus: Option<String>,
 }
@@ -83,7 +89,6 @@ pub struct ZtfPhotometry {
     pub band: Band,
     pub ra: Option<f64>,
     pub dec: Option<f64>,
-    #[serde(alias = "snr")]
     pub snr_psf: Option<f64>,
     pub programid: i32,
 }
@@ -101,7 +106,7 @@ impl TryFrom<ZtfAlertPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr_psf: phot.snr_psf,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -146,7 +151,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             ra: phot.ra,
             dec: phot.dec,
             band: phot.band,
-            snr_psf: phot.snr_psf,
+            snr_psf: phot.snr_psf.or(phot.snr_legacy),
             programid: phot.programid,
         })
     }
@@ -237,8 +242,8 @@ impl ZtfPhotometry {
     }
 }
 
-pub fn create_ztf_alert_pipeline() -> Vec<Document> {
-    vec![
+pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document> {
+    let mut pipeline = vec![
         doc! {
             "$match": {
                 "_id": {"$in": []}
@@ -293,7 +298,18 @@ pub fn create_ztf_alert_pipeline() -> Vec<Document> {
                 }
             }
         },
-    ]
+    ];
+
+    if include_classifications {
+        // we want to add classifications: 1 in the final project stage only
+        if let Some(project_stage) = pipeline.last_mut() {
+            if let Some(project_doc) = project_stage.get_document_mut("$project").ok() {
+                project_doc.insert("classifications", 1);
+            }
+        }
+    }
+
+    pipeline
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
@@ -357,44 +373,44 @@ pub struct ZtfAlertClassifications {
     pub btsbot: f32,
 }
 
+/// Per-alert intermediate data used during enrichment processing.
+struct AlertWork {
+    candid: i64,
+    programid: i32,
+    properties: ZtfAlertProperties,
+    all_bands_properties: AllBandsProperties,
+    cutouts: AlertCutout,
+    alert: ZtfAlertForEnrichment,
+}
+
 pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
-    alert_cutout_collection: mongodb::Collection<Document>,
+    alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
-    acai_h_model: AcaiModel,
-    acai_n_model: AcaiModel,
-    acai_v_model: AcaiModel,
-    acai_o_model: AcaiModel,
-    acai_b_model: AcaiModel,
-    btsbot_model: BtsBotModel,
+    /// Shared ONNX models (loaded once, shared across all enrichment workers via Arc).
+    models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
+    gpu_enabled: bool,
 }
 
 #[async_trait::async_trait]
 impl EnrichmentWorker for ZtfEnrichmentWorker {
-    #[instrument(err)]
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError> {
+    #[instrument(skip(shared_models), err)]
+    async fn new(
+        config_path: &str,
+        shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
-        let alert_cutout_collection = db.collection("ZTF_alerts_cutouts");
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
-
-        // we load the ACAI models (same architecture, same input/output)
-        let acai_h_model = AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?;
-        let acai_n_model = AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?;
-        let acai_v_model = AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?;
-        let acai_o_model = AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?;
-        let acai_b_model = AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?;
-
-        // we load the btsbot model (different architecture, and input/output then ACAI)
-        let btsbot_model = BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?;
 
         // Detect if Babamul is enabled from the config
         let babamul: Option<Babamul> = if config.babamul.enabled {
@@ -403,21 +419,29 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None
         };
 
+        // Use shared models if provided (GPU path), otherwise load per-worker
+        // models on CPU. Per-worker models avoid mutex contention when multiple
+        // enrichment workers run in parallel on CPU.
+        let models = match shared_models {
+            Some(m) => Some(m),
+            None => Some(SharedModels::load(None)?),
+        };
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
             client,
             alert_collection,
-            alert_cutout_collection,
-            alert_pipeline: create_ztf_alert_pipeline(),
-            acai_h_model,
-            acai_n_model,
-            acai_v_model,
-            acai_o_model,
-            acai_b_model,
-            btsbot_model,
+            alert_cutout_storage,
+            alert_pipeline: create_ztf_alert_pipeline(false),
+            models,
             babamul,
+            gpu_enabled: config.gpu.enabled,
         })
+    }
+
+    fn survey() -> Survey {
+        Survey::Ztf
     }
 
     fn input_queue_name(&self) -> String {
@@ -447,8 +471,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             return Ok(vec![]);
         }
 
-        let mut candid_to_cutouts =
-            fetch_alert_cutouts(&candids, &self.alert_cutout_collection).await?;
+        let mut candid_to_cutouts = self
+            .alert_cutout_storage
+            .retrieve_multiple_cutouts(candids, true)
+            .await?;
 
         if candid_to_cutouts.len() != alerts.len() {
             warn!(
@@ -460,63 +486,46 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
-        // we keep it very simple for now, let's run on 1 alert at a time
-        // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
+
+        let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-
-            // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alert).await?;
+            work_items.push(AlertWork {
+                candid,
+                programid,
+                properties,
+                all_bands_properties,
+                cutouts,
+                alert,
+            });
+        }
 
-            // Now, prepare inputs for ML models and run inference
-            // (we skip ML inference if features cannot be computed, e.g. missing required features)
-            let triplet = self.acai_h_model.get_triplet(&[&cutouts])?;
-            let metadata_result = self.acai_h_model.get_metadata(&[&alert]);
-            let btsbot_metadata_result = self
-                .btsbot_model
-                .get_metadata(&[&alert], &[all_bands_properties.clone()]);
-
-            let classifications = if let (Ok(metadata), Ok(btsbot_metadata)) =
-                (metadata_result, btsbot_metadata_result)
-            {
-                let acai_h_scores = self.acai_h_model.predict(&metadata, &triplet)?;
-                let acai_n_scores = self.acai_n_model.predict(&metadata, &triplet)?;
-                let acai_v_scores = self.acai_v_model.predict(&metadata, &triplet)?;
-                let acai_o_scores = self.acai_o_model.predict(&metadata, &triplet)?;
-                let acai_b_scores = self.acai_b_model.predict(&metadata, &triplet)?;
-                let btsbot_scores = self.btsbot_model.predict(&btsbot_metadata, &triplet)?;
-                Some(ZtfAlertClassifications {
-                    acai_h: acai_h_scores[0],
-                    acai_n: acai_n_scores[0],
-                    acai_v: acai_v_scores[0],
-                    acai_o: acai_o_scores[0],
-                    acai_b: acai_b_scores[0],
-                    btsbot: btsbot_scores[0],
-                })
+        // Run ML classification using shared models
+        let classifications_list: Vec<Option<ZtfAlertClassifications>> =
+            if let Some(ref models) = self.models {
+                self.classify(&models, &work_items)?
             } else {
-                warn!(
-                    "Skipping ML inference for candid {} due to missing features",
-                    candid
-                );
-                None
+                vec![None; work_items.len()]
             };
 
-            let update_alert_document = if let Some(classifications) = classifications {
+        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
+            let update_alert_document = if let Some(ref cls) = classifications {
                 doc! { "$set": {
-                    "classifications": mongify(&classifications),
-                    "properties": mongify(&properties),
+                    "classifications": mongify(cls),
+                    "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
-                    "properties": mongify(&properties),
+                    "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
             };
@@ -524,17 +533,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
-                    .filter(doc! {"_id": candid})
+                    .filter(doc! {"_id": item.candid})
                     .update(update_alert_document)
                     .build(),
             );
 
             updates.push(update);
-            processed_alerts.push(format!("{},{}", programid, candid));
+            processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            // If Babamul is enabled, add the enriched alert to the batch
             if self.babamul.is_some() {
-                let enriched_alert = BabamulZtfAlert::from_alert_and_properties(alert, properties);
+                let enriched_alert =
+                    BabamulZtfAlert::from_alert_and_properties(item.alert, item.properties);
                 enriched_alerts.push(enriched_alert);
             }
         }
@@ -665,5 +674,186 @@ impl ZtfEnrichmentWorker {
             programid,
             lightcurve,
         ))
+    }
+
+    /// Run ONNX classification using shared models.
+    /// Each model is locked individually to minimize contention.
+    fn classify(
+        &self,
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        if self.gpu_enabled {
+            return Self::classify_gpu_batch(models, work_items);
+        }
+
+        Self::classify_per_item(models, work_items)
+    }
+
+    fn classify_per_item(
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        let mut results = Vec::with_capacity(work_items.len());
+        for item in work_items {
+            let triplet = match AcaiModel::get_triplet(&[&item.cutouts]) {
+                Ok(triplet) => triplet,
+                Err(err) => {
+                    warn!(
+                        "Skipping ML inference for candid {} due to invalid cutouts: {}",
+                        item.candid, err
+                    );
+                    results.push(None);
+                    continue;
+                }
+            };
+            let metadata_result = AcaiModel::get_metadata(&[&item.alert]);
+            let btsbot_metadata_result =
+                BtsBotModel::get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
+
+            let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
+                (metadata_result, btsbot_metadata_result)
+            {
+                let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+                let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+                let btsbot_scores = models
+                    .btsbot
+                    .lock()
+                    .unwrap()
+                    .predict(&btsbot_metadata, &triplet)?;
+                Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[0],
+                    acai_n: acai_n_scores[0],
+                    acai_v: acai_v_scores[0],
+                    acai_o: acai_o_scores[0],
+                    acai_b: acai_b_scores[0],
+                    btsbot: btsbot_scores[0],
+                })
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    item.candid
+                );
+                None
+            };
+            results.push(cls);
+        }
+        Ok(results)
+    }
+
+    fn classify_gpu_batch(
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
+        let mut results = vec![None; work_items.len()];
+
+        let all_alerts: Vec<&ZtfAlertForEnrichment> = work_items.iter().map(|w| &w.alert).collect();
+        let all_cutouts: Vec<&AlertCutout> = work_items.iter().map(|w| &w.cutouts).collect();
+        let all_band_props: Vec<AllBandsProperties> = work_items
+            .iter()
+            .map(|w| w.all_bands_properties.clone())
+            .collect();
+
+        let (triplet_indices, triplet_all) = AcaiModel::get_triplet_indexed(&all_cutouts)?;
+        let (acai_indices, acai_metadata_all) = AcaiModel::get_metadata_indexed(&all_alerts)?;
+        let (bts_indices, bts_metadata_all) =
+            BtsBotModel::get_metadata_indexed(&all_alerts, &all_band_props)?;
+
+        let triplet_pos: std::collections::HashMap<usize, usize> = triplet_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, idx)| (*idx, pos))
+            .collect();
+        let acai_pos: std::collections::HashMap<usize, usize> = acai_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, idx)| (*idx, pos))
+            .collect();
+        let bts_pos: std::collections::HashMap<usize, usize> = bts_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, idx)| (*idx, pos))
+            .collect();
+
+        let mut selected_indices: Vec<usize> = Vec::new();
+        for idx in 0..work_items.len() {
+            if triplet_pos.contains_key(&idx)
+                && acai_pos.contains_key(&idx)
+                && bts_pos.contains_key(&idx)
+            {
+                selected_indices.push(idx);
+            } else {
+                warn!(
+                    "Skipping ML inference for candid {} due to missing features",
+                    work_items[idx].candid
+                );
+            }
+        }
+
+        if selected_indices.is_empty() {
+            return Ok(results);
+        }
+
+        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 63, 63, 3));
+        let mut metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+        let mut btsbot_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+
+        for (row, idx) in selected_indices.iter().enumerate() {
+            let tpos = *triplet_pos.get(idx).expect("triplet position missing");
+            let apos = *acai_pos.get(idx).expect("acai position missing");
+            let bpos = *bts_pos.get(idx).expect("bts position missing");
+
+            triplet
+                .slice_mut(ndarray::s![row, .., .., ..])
+                .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
+            metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
+            btsbot_metadata
+                .row_mut(row)
+                .assign(&bts_metadata_all.row(bpos));
+        }
+
+        let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+        let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+        let btsbot_scores = models
+            .btsbot
+            .lock()
+            .unwrap()
+            .predict(&btsbot_metadata, &triplet)?;
+
+        let expected = selected_indices.len();
+        for (name, got) in [
+            ("acai_h", acai_h_scores.len()),
+            ("acai_n", acai_n_scores.len()),
+            ("acai_v", acai_v_scores.len()),
+            ("acai_o", acai_o_scores.len()),
+            ("acai_b", acai_b_scores.len()),
+            ("btsbot", btsbot_scores.len()),
+        ] {
+            if got != expected {
+                return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                    "model {} returned {} scores for {} inputs",
+                    name, got, expected
+                )));
+            }
+        }
+
+        for (batch_idx, &item_idx) in selected_indices.iter().enumerate() {
+            results[item_idx] = Some(ZtfAlertClassifications {
+                acai_h: acai_h_scores[batch_idx],
+                acai_n: acai_n_scores[batch_idx],
+                acai_v: acai_v_scores[batch_idx],
+                acai_o: acai_o_scores[batch_idx],
+                acai_b: acai_b_scores[batch_idx],
+                btsbot: btsbot_scores[batch_idx],
+            });
+        }
+
+        Ok(results)
     }
 }

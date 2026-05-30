@@ -20,6 +20,14 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+gpu:
+  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  # Models are loaded once at startup and shared across all enrichment workers.
+  # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
+  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  # ONNX models are loaded on the first device. Additional devices are available
+  # for the GPU pool (future lightcurve fitting).
+  # Overwrite with BOOM_GPU__DEVICE_IDS environment variable (comma-separated list).
 redis:
   host: localhost
   port: 6379
@@ -29,8 +37,8 @@ kafka:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
     lsst:
-      server: "usdf-alert-stream-dev.lsst.cloud:9094"
-      schema_registry: "https://usdf-alert-schemas-dev.slac.stanford.edu"
+      server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
+      schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
       schema_github_fallback_url: "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
       username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
@@ -40,6 +48,48 @@ kafka:
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
+# cutouts_storage configures where alert cutout images are stored.
+#
+# type: "mongo" (default) stores cutouts in MongoDB.
+#       "s3"    stores them in an S3-compatible bucket (e.g. rustfs).
+# Switch backends without editing this file by setting BOOM_CUTOUTS_STORAGE__TYPE.
+# Every field below can also be overridden via BOOM_CUTOUTS_STORAGE__<FIELD>
+# (e.g. BOOM_CUTOUTS_STORAGE__HOST). For Docker deployments the compose overlays
+# inject the correct type and all infrastructure settings automatically —
+# see README for the three cutout storage modes.
+cutouts_storage:
+  type: mongo  # or set via BOOM_CUTOUTS_STORAGE__TYPE
+
+  # --- MongoDB settings (active when type: mongo) ---
+  host: localhost      # or set via BOOM_CUTOUTS_STORAGE__HOST
+  port: 27017
+  name: boom           # same database as alerts; or set via BOOM_CUTOUTS_STORAGE__NAME
+  max_pool_size: 200
+  replica_set: null
+  username: mongoadmin  # or set via BOOM_CUTOUTS_STORAGE__USERNAME
+  password: ""          # or set via BOOM_CUTOUTS_STORAGE__PASSWORD
+  srv: false
+
+  # --- S3 settings (active when type: s3) ---
+  # All surveys share a single bucket, namespaced by a per-survey key prefix
+  # (e.g. ztf/12345.json, lsst/67890.json). This lets you point boom at a
+  # pre-provisioned remote bucket without creating one bucket per survey.
+  # Per-survey S3 lifecycle rules can still be applied using prefix filters.
+  bucket_name: boom-cutouts         # or set via BOOM_CUTOUTS_STORAGE__BUCKET_NAME
+  region: local                     # or set via BOOM_CUTOUTS_STORAGE__REGION
+  # endpoint_url is optional. Set it for S3-compatible services (rustfs, MinIO, Wasabi, …).
+  # Omit it when pointing at AWS S3 — the SDK derives the endpoint from the region automatically.
+  # Docker compose overlays inject this automatically; set BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
+  # when running binaries directly against a non-AWS provider.
+  endpoint_url: http://rustfs:9000
+  access_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__ACCESS_KEY
+  secret_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__SECRET_KEY
+  credentials_provider: rustfs      # or set via BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER
+  cache:
+    host: valkey-cutouts  # or set via BOOM_CUTOUTS_STORAGE__CACHE__HOST
+    port: 6379             # or set via BOOM_CUTOUTS_STORAGE__CACHE__PORT
+    ttl_seconds: 30        # or set via BOOM_CUTOUTS_STORAGE__CACHE__TTL_SECONDS
+    max_memory: "1024mb"   # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
 workers:
   ztf:
     command_interval: 500
@@ -49,6 +99,11 @@ workers:
       n_workers: 3
     filter:
       n_workers: 3
+      refresh_interval_minutes: 15
+      # On activation, filters are validated against a designated reference night.
+      # If more than max_match_rate percent of alerts pass, the filter is not validated.
+      max_match_rate: 5
+      reference_night: "2026-03-16"
   lsst:
     command_interval: 500
     alert:
@@ -57,6 +112,9 @@ workers:
       n_workers: 3
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night: "2026-02-23"
   decam:
     command_interval: 500
     alert:
@@ -65,6 +123,9 @@ workers:
       n_workers: 0
     filter:
       n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
 crossmatch:
   ztf:
     - catalog: PS1_DR1

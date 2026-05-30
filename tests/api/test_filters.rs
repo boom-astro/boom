@@ -116,10 +116,12 @@ mod tests {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::filters::post_filter_version),
         )
@@ -258,10 +260,12 @@ mod tests {
         let (filter_id, token, database) = create_test_filter().await;
         // Create app for PATCH testing
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::filters::patch_filter)
                 .service(routes::filters::get_filter),
@@ -278,10 +282,12 @@ mod tests {
 
         // first GET the filter and get its current active status
         let filter = get_test_filter(&filter_id, &token).await;
-        assert_eq!(filter["active"], true);
+        // newly created filters default to inactive
+        assert_eq!(filter["active"], false);
         assert_ne!(filter["active_fid"].as_str().unwrap(), active_fid_after);
 
-        // Now patch this filter
+        // Now patch this filter (keep it inactive: activation requires a
+        // real-data check against a reference night).
         let patch_data = serde_json::json!({
             "active": false,
             "active_fid": active_fid_after,

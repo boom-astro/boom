@@ -1,4 +1,5 @@
 // Database related functionality
+use crate::api::routes::babamul::stats::STATS_COLLECTION;
 use crate::api::routes::users::User;
 use crate::conf::{AppConfig, AuthConfig, BoomConfigError};
 
@@ -7,7 +8,8 @@ use mongodb::Database;
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
-pub const PROTECTED_COLLECTION_NAMES: [&str; 3] = ["filters", "babamul_users", "users"];
+pub const PROTECTED_COLLECTION_NAMES: [&str; 4] =
+    ["filters", "babamul_users", "users", STATS_COLLECTION];
 
 async fn init_api_admin_user(
     auth_config: &AuthConfig,
@@ -188,5 +190,19 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
 
 pub async fn get_test_db_api() -> Database {
     let config = AppConfig::from_test_config().unwrap();
-    build_db_api(&config).await.unwrap()
+    let db = build_db_api(&config).await.unwrap();
+
+    // LSST Babamul enrichment requires the LSPSC catalog collection to exist.
+    // In tests we ensure this collection is present even if it is empty.
+    if config.babamul.enabled {
+        let collections = db.list_collection_names().await.unwrap_or_default();
+        if !collections.contains(&"LSPSC".to_string()) {
+            tracing::info!("Creating LSPSC collection for test database");
+            db.create_collection("LSPSC")
+                .await
+                .expect("failed to create LSPSC collection for tests");
+        }
+    }
+
+    db
 }

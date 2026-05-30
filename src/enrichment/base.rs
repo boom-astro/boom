@@ -1,15 +1,16 @@
 use crate::{
-    alert::AlertCutout,
     conf::{self, AppConfig},
-    enrichment::models::ModelError,
+    enrichment::models::{ModelError, SharedModels},
     utils::{
+        cutouts::CutoutStorageError,
+        enums::Survey,
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
     },
 };
 
-use std::{num::NonZero, sync::LazyLock};
+use std::{num::NonZero, sync::Arc, sync::LazyLock};
 
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -64,6 +65,8 @@ pub enum EnrichmentWorkerError {
     Redis(#[from] redis::RedisError),
     #[error("failed to read config")]
     ReadConfigError(#[from] conf::BoomConfigError),
+    #[error("worker config missing for survey: {0}")]
+    WorkerConfigMissing(Survey),
     #[error("failed to run model")]
     RunModelError(#[from] ModelError),
     #[error("could not access cutout images")]
@@ -78,6 +81,8 @@ pub enum EnrichmentWorkerError {
     Serialization(String),
     #[error("kafka error: {0}")]
     Kafka(String),
+    #[error("cutout storage error")]
+    CutoutStorageError(#[from] CutoutStorageError),
     #[error("configuration error: {0}")]
     ConfigurationError(String),
     #[error("Bad processing status code: {0}")]
@@ -90,9 +95,13 @@ pub enum EnrichmentWorkerError {
 
 #[async_trait::async_trait]
 pub trait EnrichmentWorker {
-    async fn new(config_path: &str) -> Result<Self, EnrichmentWorkerError>
+    async fn new(
+        config_path: &str,
+        shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError>
     where
         Self: Sized;
+    fn survey() -> Survey;
     fn input_queue_name(&self) -> String;
     fn output_queue_name(&self) -> String;
     async fn process_alerts(
@@ -143,85 +152,60 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
     Ok(alerts)
 }
 
-#[instrument(skip_all, err)]
-pub async fn fetch_alert_cutouts(
-    candids: &[i64],
-    alert_cutout_collection: &mongodb::Collection<Document>,
-) -> Result<std::collections::HashMap<i64, AlertCutout>, EnrichmentWorkerError> {
-    let filter = doc! {
-        "_id": {"$in": candids}
-    };
-    let mut cursor = alert_cutout_collection.find(filter).await?;
-
-    let mut cutouts_map: std::collections::HashMap<i64, AlertCutout> =
-        std::collections::HashMap::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(document) => {
-                let candid = document.get_i64("_id")?;
-                let cutout_science = document
-                    .get_binary_generic("cutoutScience")
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-                let cutout_template = document
-                    .get_binary_generic("cutoutTemplate")
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-                let cutout_difference = document
-                    .get_binary_generic("cutoutDifference")
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-                let alert_cutout = AlertCutout {
-                    candid,
-                    cutout_science,
-                    cutout_template,
-                    cutout_difference,
-                };
-                cutouts_map.insert(candid, alert_cutout);
-            }
-            _ => {
-                continue;
-            }
-        }
-    }
-
-    Ok(cutouts_map)
-}
-
 #[tokio::main]
 #[instrument(skip_all, err)]
 pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
+    shared_models: Option<Arc<SharedModels>>,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
-    let mut enrichment_worker = T::new(config_path).await?;
+    let mut enrichment_worker = T::new(config_path, shared_models).await?;
 
     let config = AppConfig::from_path(config_path)?;
+    let survey = T::survey();
+    let worker_config = config
+        .workers
+        .get(&survey)
+        .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey.clone()))?;
+
     let mut con = config.build_redis().await?;
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
+    let survey = input_queue
+        .split('_')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
 
-    let command_interval: usize = 500;
+    let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let active_attrs = [worker_id_attr.clone()];
-    let ok_attrs = [worker_id_attr.clone(), KeyValue::new("status", "ok")];
+    let survey_attr = KeyValue::new("survey", survey);
+    let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
+    let ok_attrs = [
+        worker_id_attr.clone(),
+        survey_attr.clone(),
+        KeyValue::new("status", "ok"),
+    ];
     let input_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "input_queue"),
     ];
     let processing_error_attrs = [
         worker_id_attr.clone(),
+        survey_attr.clone(),
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "processing"),
     ];
     let output_error_attrs = [
         worker_id_attr,
+        survey_attr,
         KeyValue::new("status", "error"),
         KeyValue::new("reason", "output_queue"),
     ];
@@ -249,6 +233,8 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             continue;
         }
 
+        command_check_countdown = command_check_countdown.saturating_sub(candids.len());
+
         let processed_alerts: Vec<String> = enrichment_worker
             .process_alerts(&candids)
             .await
@@ -256,7 +242,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
-        command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;

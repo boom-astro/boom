@@ -1,28 +1,52 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
 use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
 use boom::api::email::EmailService;
+use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::cutouts::CutoutStorage;
+use boom::utils::enums::Survey;
+use boom::utils::o11y::metrics::init_metrics;
+use std::collections::HashMap;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
+use uuid::Uuid;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
+
+    // Initialize logging
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
     let config = AppConfig::from_default_path().unwrap();
     let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
     let port = config.api.port;
+    let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or_else(|_| "dev".to_string());
+    let _meter_provider = init_metrics(String::from("api"), Uuid::new_v4(), deployment_env)
+        .expect("failed to initialize metrics");
 
     // Initialize email service
     let email_service = EmailService::new();
 
-    // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    // Build cutout storage for each survey once at startup
+    let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+    for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam] {
+        let storage = config
+            .build_cutout_storage(&survey)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Failed to initialize cutout storage for {}: {}", survey, e)
+            });
+        cutout_storage_map.insert(survey, storage);
+    }
+    let cutout_storages = web::Data::new(cutout_storage_map);
 
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
@@ -40,7 +64,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
-            .app_data(web::Data::new(email_service.clone()));
+            .app_data(web::Data::new(email_service.clone()))
+            .app_data(cutout_storages.clone())
+            .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
         if babamul_is_enabled {
@@ -72,10 +98,13 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::cone_search_alerts)
                     // MOC search has its own larger JSON limit for skymap uploads (70 MB)
                     .service(
-                        actix_web::web::scope("")
+                        web::scope("")
                             .app_data(web::JsonConfig::default().limit(73_400_320))
                             .service(routes::babamul::surveys::moc_search_alerts),
                     )
+                    .service(routes::babamul::stats::get_nightly_stats)
+                    .service(routes::babamul::stats::get_collection_stats)
+                    .service(routes::babamul::stats::get_kafka_stats)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token),
@@ -83,7 +112,7 @@ async fn main() -> std::io::Result<()> {
         }
 
         app.service(
-            actix_web::web::scope("")
+            web::scope("")
                 .wrap(from_fn(auth_middleware))
                 // Public routes
                 .service(Scalar::with_url("/docs", api_doc.clone()))
@@ -109,6 +138,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalog_sample)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
+                .service(routes::surveys::get_cutouts)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)

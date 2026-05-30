@@ -1,43 +1,178 @@
 #!/usr/bin/env bash
 
-COMPOSE_CONFIG="tests/throughput/compose.yaml"
+# Script to benchmark BOOM throughput using Docker containers.
+# Usage: $0 [--keep-up] [logs_dir]
+#   --keep-up     Leave services running after the script finishes
+#   logs_dir      Log directory (optional; default: $BOOM_REPO_ROOT/logs/boom_benchmark)
 
-# Logs folder is the first argument to the script
-LOGS_DIR=${1:-logs/boom}
+set -euo pipefail
+
+YELLOW="\e[33m"
+GREEN="\e[32m"
+RED="\e[31m"
+END="\e[0m"
 
 # A function that returns the current date and time
 current_datetime() {
     TZ=utc date "+%Y-%m-%d %H:%M:%S"
 }
 
+if [ -z "${BOOM_REPO_ROOT:-}" ]; then
+    echo "Error: BOOM_REPO_ROOT is not set; set BOOM_REPO_ROOT environment variable"
+    exit 1
+fi
+
+# Paths
+TESTS_DIR="$BOOM_REPO_ROOT/tests"
+BG_PIDS=()
+
+# Parse args
+KEEP_UP=false
+POSITIONAL_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --keep-up)
+            KEEP_UP=true
+            shift
+            ;;
+        --*)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--keep-up] [logs_dir]"
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+if [ ${#POSITIONAL_ARGS[@]} -gt 1 ]; then
+    echo "Usage: $0 [--keep-up] [logs_dir]"
+    exit 1
+fi
+
+COMPOSE_CONFIG=("-f" "$TESTS_DIR/throughput/compose.yaml")
+
+# Select the cutout storage overlay based on BOOM_CUTOUTS_STORAGE__TYPE (default: mongo)
+CUTOUTS_TYPE="${BOOM_CUTOUTS_STORAGE__TYPE:-mongo}"
+if [ "$CUTOUTS_TYPE" = "s3" ]; then
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-s3.yaml")
+else
+    COMPOSE_CONFIG+=("-f" "$BOOM_REPO_ROOT/tests/throughput/compose.cutouts-mongo.yaml")
+fi
+
+# If BOOM_GPU__ENABLED is true and we're on Linux, add the GPU override to enable CUDA support
+PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
+if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
+    echo "BOOM_GPU__ENABLED is true and platform is Linux; adding GPU override to Docker Compose configuration (CUDA support)"
+    COMPOSE_CONFIG+=("-f" "$TESTS_DIR/throughput/compose.cuda.yaml")
+fi
+
+# If LOW_STORAGE mode is enabled, use the override to prevent volume mounts
+if [ "${LOW_STORAGE:-}" = "true" ]; then
+    COMPOSE_CONFIG+=("-f" "$TESTS_DIR/throughput/compose.low-storage.yaml")
+fi
+
+# Logs folder is the optional positional argument to the script
+LOGS_DIR="${POSITIONAL_ARGS[0]:-$BOOM_REPO_ROOT/logs/boom_benchmark}"
+
+cleanup() {
+    trap '' INT TERM # Ignore further signals during cleanup
+    echo "$(current_datetime) - Cleaning up background processes"
+    if [ ${#BG_PIDS[@]} -gt 0 ]; then
+        kill "${BG_PIDS[@]}" 2>/dev/null || true
+        wait "${BG_PIDS[@]}" 2>/dev/null || true
+    fi
+    stop_all_instances
+}
+
+trap cleanup EXIT INT TERM
+
+stop_all_instances() {
+  if [ "$KEEP_UP" = true ]; then
+      echo -e "$(current_datetime) - ${YELLOW}--keep-up flag is set; leaving BOOM services running${END}"
+      return
+  fi
+  echo -e "$(current_datetime) - ${GREEN}Shutting down BOOM services${END}"
+  docker compose "${COMPOSE_CONFIG[@]}" down
+}
+
+run_mongo_query(){
+    local query="$1"
+    local as_admin="${2:-false}"
+    local auth=""
+    if [ "$as_admin" == "true" ]; then
+        auth="/admin?authSource=admin"
+    fi
+    docker compose "${COMPOSE_CONFIG[@]}" exec -T mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017${auth}" --quiet --eval "$query"
+}
+
+# Run a MongoDB count query and return a clean integer string.
+mongo_count() {
+    local query="$1"
+    local raw
+    raw=$(run_mongo_query "$query")
+    raw=$(printf '%s\n' "$raw" | tail -n 1 | tr -d '\r')
+    raw=$(printf '%s' "$raw" | tr -cd '0-9')
+    echo "${raw:-0}"
+}
+
 # Remove any existing containers
-docker compose -f $COMPOSE_CONFIG down
+docker compose "${COMPOSE_CONFIG[@]}" down
 
 # Spin up BOOM services with Docker Compose
-docker compose -f $COMPOSE_CONFIG up --build -d
+if ! docker compose "${COMPOSE_CONFIG[@]}" up --build -d; then
+    echo "$(current_datetime) - ERROR: Failed to start Docker Compose services"
+    docker compose "${COMPOSE_CONFIG[@]}" logs mongo-init || true
+    exit 1
+fi
 
 # Send the logs to file so we can analyze later
-mkdir -p $LOGS_DIR
-docker compose -f $COMPOSE_CONFIG logs producer > $LOGS_DIR/producer.log &
-docker compose -f $COMPOSE_CONFIG logs consumer -f > $LOGS_DIR/consumer.log &
-docker compose -f $COMPOSE_CONFIG logs scheduler -f > $LOGS_DIR/scheduler.log &
+mkdir -p "$LOGS_DIR"
+docker compose "${COMPOSE_CONFIG[@]}" logs -f producer > "$LOGS_DIR/producer.log" &
+BG_PIDS+=($!)
+docker compose "${COMPOSE_CONFIG[@]}" logs -f consumer > "$LOGS_DIR/consumer.log" &
+BG_PIDS+=($!)
+docker compose "${COMPOSE_CONFIG[@]}" logs -f scheduler > "$LOGS_DIR/scheduler.log" &
+BG_PIDS+=($!)
+docker compose "${COMPOSE_CONFIG[@]}" logs -f mongo-init > "$LOGS_DIR/mongo-init.log" &
+BG_PIDS+=($!)
 # Also log stats from containers for later analysis
-docker compose -f $COMPOSE_CONFIG stats consumer --format json > $LOGS_DIR/consumer.stats.log &
-docker compose -f $COMPOSE_CONFIG stats scheduler --format json > $LOGS_DIR/scheduler.stats.log &
+docker compose "${COMPOSE_CONFIG[@]}" stats consumer --format json > "$LOGS_DIR/consumer.stats.log" &
+BG_PIDS+=($!)
+docker compose "${COMPOSE_CONFIG[@]}" stats scheduler --format json > "$LOGS_DIR/scheduler.stats.log" &
+BG_PIDS+=($!)
+if [ "$CUTOUTS_TYPE" = "s3" ]; then
+    docker compose "${COMPOSE_CONFIG[@]}" stats valkey-cutouts --format json > "$LOGS_DIR/valkey-cutouts.stats.log" &
+    BG_PIDS+=($!)
+fi
 
 EXPECTED_ALERTS=29142
 N_FILTERS=25
-TIMEOUT_SECS=300 # 5 minutes
+TIMEOUT_SECS=${TIMEOUT_SECS:-300} # 5 minutes default
 
+# -----------------------------
 # Wait for the kafka consumer to start expecting messages (when it logs "Consumer received first message, continuing...")
-echo "$(current_datetime) - Waiting for Kafka consumer to start"
+# -----------------------------
+echo && echo "$(current_datetime) - Waiting for Kafka consumer to start"
 START_TIME=$(date +%s)
-while ! docker compose -f $COMPOSE_CONFIG logs consumer | grep -q "Consumer received first message, continuing..."; do
+while true; do
+  docker compose "${COMPOSE_CONFIG[@]}" logs consumer | grep -q "Consumer received first message, continuing..." && break
+    MONGO_INIT_CONTAINER_ID=$(docker compose "${COMPOSE_CONFIG[@]}" ps -aq mongo-init | tail -n 1)
+    if [ -n "$MONGO_INIT_CONTAINER_ID" ]; then
+        MONGO_INIT_EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$MONGO_INIT_CONTAINER_ID" 2>/dev/null || true)
+        if [[ "$MONGO_INIT_EXIT_CODE" =~ ^[0-9]+$ ]] && [ "$MONGO_INIT_EXIT_CODE" -ne 0 ]; then
+            echo "$(current_datetime) - ERROR: mongo-init did not complete successfully (exit $MONGO_INIT_EXIT_CODE)"
+            stop_all_instances
+            exit 1
+        fi
+    fi
+
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-        echo "$(current_datetime) - Timeout reached while waiting for Kafka consumer to start"
-        docker compose -f $COMPOSE_CONFIG down
+        echo -e "$(current_datetime) - ${RED} Timeout reached while waiting for Kafka consumer to start${END}"
+        stop_all_instances
         exit 1
     fi
     sleep 1
@@ -46,15 +181,50 @@ END_TIME=$(date +%s)
 STARTUP_TIME=$((END_TIME - START_TIME))
 echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 
-# Wait until we see all alerts
+# If we are in LOW_STORAGE mode, clean up the downloaded files (producer files are not mounted)
+if [ "${LOW_STORAGE:-}" = "true" ]; then
+    echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up downloaded files to save space"
+    rm -rf ./data/alerts/kowalski.NED.json.gz || true
+    rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
+fi
+
+# If GPU support is enabled, we wait until we have confirmed that GPU inference is working.
+# On some architectures (recent GPUs, mostly) we may have to wait for CUDA to compile
+# some kernels and populate the cache before we see successful GPU inference,
+# so we wait until we see logs indicating that the ONNX CUDA warmup has completed.
+if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
+    echo "$(current_datetime) - GPU support is enabled; waiting for GPUs to be inference-ready"
+    START_TIME=$(date +%s)
+
+    check_gpu_ready() {
+      docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference"
+    }
+
+    while ! check_gpu_ready; do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+        if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
+            echo "$(current_datetime) - Timeout reached while waiting for GPU inference to be validated"
+            exit 1
+        fi
+        sleep 1
+    done
+    END_TIME=$(date +%s)
+    WARMUP_TIME=$((END_TIME - START_TIME))
+    echo "$(current_datetime) - ONNX CUDA warmup completed in $WARMUP_TIME seconds"
+fi
+
+# -----------------------------
+# Wait for alerts ingestion
+# -----------------------------
 echo "$(current_datetime) - Waiting for all alerts to be ingested"
 START_TIME=$(date +%s)
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()") -lt $EXPECTED_ALERTS ]; do
+while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments()")" -lt "$EXPECTED_ALERTS" ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-        echo "$(current_datetime) - Timeout reached while waiting for alerts to be ingested"
-        docker compose -f $COMPOSE_CONFIG down
+        echo -e "$(current_datetime) - ${RED}Timeout reached while waiting for alerts to be ingested${END}"
+        stop_all_instances
         exit 1
     fi
     sleep 1
@@ -63,15 +233,17 @@ END_TIME=$(date +%s)
 INGESTION_TIME=$((END_TIME - START_TIME))
 echo "$(current_datetime) - All $EXPECTED_ALERTS alerts ingested in $INGESTION_TIME seconds"
 
-# Wait until we see all alerts with classifications
+# -----------------------------
+# Wait for alerts classification
+# -----------------------------
 echo "$(current_datetime) - Waiting for all alerts to be classified"
 START_TIME=$(date +%s)
-while [ $(docker compose -f $COMPOSE_CONFIG exec mongo mongosh "mongodb://mongoadmin:mongoadminsecret@localhost:27017" --quiet --eval "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })") -lt $EXPECTED_ALERTS ]; do
+while [ "$(mongo_count "db.getSiblingDB('boom-benchmarking').ZTF_alerts.countDocuments({ classifications: { \$exists: true } })")" -lt "$EXPECTED_ALERTS" ]; do
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
-        echo "$(current_datetime) - Timeout reached while waiting for alerts to be classified"
-        docker compose -f $COMPOSE_CONFIG down
+        echo -e "$(current_datetime) - ${RED}Timeout reached while waiting for alerts to be classified${END}"
+        stop_all_instances
         exit 1
     fi
     sleep 1
@@ -80,19 +252,21 @@ END_TIME=$(date +%s)
 CLASSIFICATION_TIME=$((END_TIME - START_TIME))
 echo "$(current_datetime) - All $EXPECTED_ALERTS alerts classified in $CLASSIFICATION_TIME seconds"
 
-# Wait until we've filtered all alerts
+# -----------------------------
+# Wait for all filters to run on all alerts
+# -----------------------------
 echo "$(current_datetime) - Waiting for filters to run on all alerts"
 START_TIME=$(date +%s)
 PASSED_ALERTS=0
 while [ $PASSED_ALERTS -lt $EXPECTED_ALERTS ]; do
-    PASSED_ALERTS=$(docker compose -f $COMPOSE_CONFIG logs scheduler | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}')
+    PASSED_ALERTS=$(docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep "passed filter" | awk -F'/' '{sum += $NF} END {print sum}' || true)
     PASSED_ALERTS=${PASSED_ALERTS:-0}
     PASSED_ALERTS=$((PASSED_ALERTS / N_FILTERS))
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
     if [ $ELAPSED_TIME -ge $TIMEOUT_SECS ]; then
         echo "$(current_datetime) - Timeout reached while waiting for filters to run on all alerts"
-        docker compose -f $COMPOSE_CONFIG down
+        stop_all_instances
         exit 1
     fi
     sleep 1
@@ -103,11 +277,61 @@ echo "$(current_datetime) - All $EXPECTED_ALERTS alerts filtered in $FILTERING_T
 
 echo "$(current_datetime) - All alerts ingested, classified, and filtered"
 echo "$(current_datetime) - Reading from Kafka output topic"
-uv run tests/throughput/read-kafka-output.py
+uv run "$TESTS_DIR/throughput/read-kafka-output.py"
 
-echo "$(current_datetime) - All tasks completed; shutting down BOOM services"
+# -----------------------------
+# Export MongoDB collection stats to JSON for analysis
+# -----------------------------
+echo "$(current_datetime) - Collecting MongoDB collection stats"
 
-# Shut down the BOOM services
-docker compose -f $COMPOSE_CONFIG down
+MONGO_RESULT="$({ run_mongo_query '
+const dbName = "boom-benchmarking";
+const d = db.getSiblingDB(dbName);
+function collectionStats(name) {
+	const c = d.getCollection(name);
+	const s = c.stats();
+  return {
+	collection: name,
+	count: c.countDocuments(),
+	data_size_bytes: s.size,
+	storage_size_bytes: s.storageSize,
+	total_index_size_bytes: s.totalIndexSize,
+	total_size_bytes: s.totalSize
+  };
+}
+const collectionNames = d
+	.getCollectionInfos({ type: "collection" })
+	.map((info) => info.name)
+	.sort();
+const out = {
+  generated_at_utc: new Date().toISOString(),
+  database: dbName,
+  collections: collectionNames.map(collectionStats)
+};
+print(JSON.stringify(out));
+' "true"; } | tail -n 1)"
+
+if [ -n "$MONGO_RESULT" ]; then
+	mkdir -p "$LOGS_DIR"
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s\n' "$MONGO_RESULT" | jq . > "$LOGS_DIR/collection_stats.json"
+	else
+		printf '%s\n' "$MONGO_RESULT" > "$LOGS_DIR/collection_stats.json"
+	fi
+	echo "$(current_datetime) - Wrote collection stats to $LOGS_DIR/collection_stats.json"
+fi
+
+# -----------------------------
+# Stop all instances
+# -----------------------------
+EXIT_CODE=$(docker compose "${COMPOSE_CONFIG[@]}" ps -aq | xargs docker inspect -f '{{.State.ExitCode}}' | grep -v '^0$' || true)
+if [ -n "$EXIT_CODE" ]; then
+    echo "$(current_datetime) - ERROR: One or more containers exited with a non-zero status"
+    stop_all_instances
+    exit 1
+fi
+
+echo -e "$(current_datetime) - ${GREEN}All tasks completed successfully${END}"
+echo && stop_all_instances
 
 exit 0

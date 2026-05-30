@@ -1,11 +1,12 @@
 use crate::{
     alert::{
         base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
-        decam, lsst, AlertCutout,
+        decam, lsst, LightcurveJdOnly, TimeSeries,
     },
     conf::{self, AppConfig},
     utils::{
-        db::{mongify, update_timeseries_op},
+        cutouts::CutoutStorage,
+        db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
         o11y::logging::as_error,
@@ -20,7 +21,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
-use tracing::{instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
@@ -29,7 +30,6 @@ pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
-pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const ZTF_LSST_XMATCH_RADIUS: f64 =
     (ZTF_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
@@ -121,6 +121,12 @@ pub struct ZtfPrvCandidate {
     pub ap_flux_err: Option<f32>,
     pub snr_ap: Option<f32>,
     pub band: Band,
+}
+
+impl TimeSeries for ZtfPrvCandidate {
+    fn time(&self) -> f64 {
+        self.prv_candidate.jd
+    }
 }
 
 impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
@@ -322,6 +328,12 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             snr_psf,
             band,
         })
+    }
+}
+
+impl TimeSeries for ZtfForcedPhot {
+    fn time(&self) -> f64 {
+        self.fp_hist.jd
     }
 }
 
@@ -636,7 +648,8 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, AvroSchema, ToSchema, Default)]
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Default)]
 pub struct ZtfAliases {
     #[serde(rename = "LSST")]
     pub lsst: Vec<String>,
@@ -671,19 +684,44 @@ pub struct ZtfAlert {
     pub updated_at: f64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AlertAuxForUpdate {
+    #[serde(default)]
+    pub prv_candidates: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub prv_nondetections: Vec<LightcurveJdOnly>,
+    #[serde(default)]
+    pub fp_hists: Vec<LightcurveJdOnly>,
+    pub version: Option<i32>,
+}
+
 pub struct ZtfAlertWorker {
-    stream_name: String,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
-    alert_cutout_collection: mongodb::Collection<AlertCutout>,
+    alert_cutout_storage: CutoutStorage,
+    alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
 }
 
 impl ZtfAlertWorker {
+    #[instrument(skip_all)]
+    fn split_prv_candidates(
+        &self,
+        prv_candidates: Vec<ZtfPrvCandidate>,
+    ) -> (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) {
+        // we split the prv_candidates into detections and non-detections
+        let (new_prv_candidates, prv_nondetections): (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) =
+            prv_candidates
+                .into_iter()
+                .partition(|p| p.prv_candidate.magpsf.is_some());
+
+        (new_prv_candidates, prv_nondetections)
+    }
+
     #[instrument(skip(self), err)]
     async fn get_survey_matches(&self, ra: f64, dec: f64) -> Result<ZtfAliases, AlertError> {
         let lsst_matches = self
@@ -711,12 +749,27 @@ impl ZtfAlertWorker {
         })
     }
 
+    async fn get_existing_aux(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<AlertAuxForUpdate>, AlertError> {
+        let result = self
+            .alert_aux_collection_update
+            .find_one(doc! { "_id": object_id })
+            .projection(
+                doc! { "prv_candidates.jd": 1, "prv_nondetections.jd": 1, "fp_hists.jd": 1, "version": 1 },
+            )
+            .await
+            .inspect_err(as_error!())?;
+        Ok(result)
+    }
+
     #[instrument(
         skip(self, prv_candidates, prv_nondetections, fp_hists, survey_matches),
         err
     )]
-    async fn update_aux(
-        self: &mut Self,
+    async fn update_aux_fallback(
+        &mut self,
         object_id: &str,
         prv_candidates: &Vec<ZtfPrvCandidate>,
         prv_nondetections: &Vec<ZtfPrvCandidate>,
@@ -724,38 +777,119 @@ impl ZtfAlertWorker {
         survey_matches: &Option<ZtfAliases>,
         now: f64,
     ) -> Result<(), AlertError> {
-        let update_pipeline = vec![doc! {
-            "$set": {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &prv_candidates.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &prv_nondetections.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &fp_hists.iter().map(|pc| mongify(pc)).collect::<Vec<Document>>()),
-                "aliases": mongify(survey_matches),
-                "updated_at": now,
-            }
-        }];
-        self.alert_aux_collection
-            .update_one(doc! { "_id": object_id }, update_pipeline)
-            .await?;
-        Ok(())
+        Self::db_only_aux_update(
+            object_id,
+            doc! {
+                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+                "prv_nondetections": update_timeseries_op("prv_nondetections", "jd", &mongify_vec(prv_nondetections)),
+                "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
+            },
+            survey_matches,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
     }
 
-    #[instrument(skip_all)]
-    fn format_prv_candidates(
-        &self,
-        prv_candidates: Vec<ZtfPrvCandidate>,
-        candidate: &ZtfCandidate,
-    ) -> (Vec<ZtfPrvCandidate>, Vec<ZtfPrvCandidate>) {
-        // we split the prv_candidates into detections and non-detections
-        let (mut new_prv_candidates, prv_nondetections): (
-            Vec<ZtfPrvCandidate>,
-            Vec<ZtfPrvCandidate>,
-        ) = prv_candidates
-            .into_iter()
-            .partition(|p| p.prv_candidate.magpsf.is_some());
-        // use the from candidate to create a PrvCandidate and add to new_prv_candidates
-        new_prv_candidates.push(ZtfPrvCandidate::try_from(candidate).unwrap());
+    #[instrument(skip(
+        self,
+        prv_candidates,
+        prv_nondetections,
+        fp_hists,
+        survey_matches,
+        existing_alert_aux
+    ))]
+    async fn update_aux_inner(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<ZtfPrvCandidate>,
+        prv_nondetections: &Vec<ZtfPrvCandidate>,
+        fp_hists: &Vec<ZtfForcedPhot>,
+        survey_matches: &Option<ZtfAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        let current_version = existing_alert_aux.version;
 
-        (new_prv_candidates, prv_nondetections)
+        let prepared_prv_candidates = ZtfPrvCandidate::prepare_timeseries_update(
+            prv_candidates,
+            &existing_alert_aux.prv_candidates,
+            "prv_candidates",
+        )?;
+
+        let prepared_prv_nondetections = ZtfPrvCandidate::prepare_timeseries_update(
+            prv_nondetections,
+            &existing_alert_aux.prv_nondetections,
+            "prv_nondetections",
+        )?;
+
+        let prepared_fp_hists = ZtfForcedPhot::prepare_timeseries_update(
+            fp_hists,
+            &existing_alert_aux.fp_hists,
+            "fp_hists",
+        )?;
+
+        let mut push_updates = Document::new();
+        Self::add_to_push_aux_update(&mut push_updates, "prv_candidates", prepared_prv_candidates);
+        Self::add_to_push_aux_update(
+            &mut push_updates,
+            "prv_nondetections",
+            prepared_prv_nondetections,
+        );
+        Self::add_to_push_aux_update(&mut push_updates, "fp_hists", prepared_fp_hists);
+
+        Self::finalize_aux_update(
+            object_id,
+            push_updates,
+            survey_matches,
+            current_version,
+            now,
+            &self.alert_aux_collection,
+        )
+        .await
+    }
+
+    async fn update_aux(
+        &mut self,
+        object_id: &str,
+        prv_candidates: &Vec<ZtfPrvCandidate>,
+        prv_nondetections: &Vec<ZtfPrvCandidate>,
+        fp_hists: &Vec<ZtfForcedPhot>,
+        survey_matches: &Option<ZtfAliases>,
+        now: f64,
+        existing_alert_aux: &AlertAuxForUpdate,
+    ) -> Result<(), AlertError> {
+        match self
+            .update_aux_inner(
+                object_id,
+                prv_candidates,
+                prv_nondetections,
+                fp_hists,
+                survey_matches,
+                now,
+                existing_alert_aux,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // if we get a concurrent modification error or an error preparing the lightcurves update,
+                // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                match &e {
+                    AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    _ => error!(error = %e),
+                }
+                self.update_aux_fallback(
+                    object_id,
+                    prv_candidates,
+                    prv_nondetections,
+                    fp_hists,
+                    survey_matches,
+                    now,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -778,7 +912,11 @@ impl AlertWorker for ZtfAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
 
         let lsst_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&lsst::ALERT_AUX_COLLECTION);
@@ -787,36 +925,33 @@ impl AlertWorker for ZtfAlertWorker {
             db.collection(&decam::ALERT_AUX_COLLECTION);
 
         let worker = ZtfAlertWorker {
-            stream_name: STREAM_NAME.to_string(),
             xmatch_configs,
             db,
             alert_collection,
             alert_aux_collection,
-            alert_cutout_collection,
+            alert_cutout_storage,
             schema_cache: SchemaCache::default(),
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
+            alert_aux_collection_update,
         };
         Ok(worker)
     }
 
-    fn stream_name(&self) -> String {
-        self.stream_name.clone()
+    fn survey() -> Survey {
+        Survey::Ztf
     }
 
     fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", self.stream_name)
+        format!("{}_alerts_packets_queue", ZtfAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
-        format!("{}_alerts_enrichment_queue", self.stream_name)
+        format!("{}_alerts_enrichment_queue", ZtfAlertWorker::survey())
     }
 
     #[instrument(skip_all, err)]
-    async fn process_alert(
-        self: &mut Self,
-        avro_bytes: &[u8],
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
         let mut avro_alert: ZtfRawAvroAlert = self
             .schema_cache
@@ -828,87 +963,24 @@ impl AlertWorker for ZtfAlertWorker {
         let ra = avro_alert.candidate.candidate.ra;
         let dec = avro_alert.candidate.candidate.dec;
 
-        let prv_candidates = match avro_alert.prv_candidates.take() {
-            Some(candidates) => candidates,
-            None => Vec::new(),
-        };
-        let fp_hists = match avro_alert.fp_hists.take() {
-            Some(hists) => hists,
-            None => Vec::new(),
-        };
-
         let candidate: ZtfCandidate = avro_alert.candidate;
 
-        // add the cutouts, skip processing if the cutouts already exist
-        let cutout_status = self
-            .format_and_insert_cutouts(
-                candid,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_collection,
-            )
-            .await
-            .inspect_err(as_error!())?;
+        let prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
+        let (mut prv_candidates, mut prv_nondetections) = self.split_prv_candidates(prv_candidates);
+        let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
-        if let ProcessAlertStatus::Exists(_) = cutout_status {
-            return Ok(cutout_status);
+        // Add the current candidate as the last point in the prv_candidates, if it's not already there (based on jd)
+        if !prv_candidates
+            .iter()
+            .any(|pc| pc.prv_candidate.jd == candidate.candidate.jd)
+        {
+            prv_candidates.push(ZtfPrvCandidate::try_from(&candidate)?);
         }
 
-        let alert_aux_exists = self
-            .check_alert_aux_exists(&object_id, &self.alert_aux_collection)
-            .await
-            .inspect_err(as_error!())?;
-
-        let (prv_candidates, prv_nondetections) =
-            self.format_prv_candidates(prv_candidates, &candidate);
-
-        let survey_matches = Some(
-            self.get_survey_matches(ra, dec)
-                .await
-                .inspect_err(as_error!())?,
-        );
-
-        if !alert_aux_exists {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
-            let obj = ZtfObject {
-                object_id: object_id.clone(),
-                prv_candidates,
-                prv_nondetections,
-                fp_hists,
-                cross_matches: Some(xmatches),
-                aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec),
-                created_at: now,
-                updated_at: now,
-            };
-            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
-            if let Err(AlertError::AlertAuxExists) = result {
-                self.update_aux(
-                    &object_id,
-                    &obj.prv_candidates,
-                    &obj.prv_nondetections,
-                    &obj.fp_hists,
-                    &obj.aliases,
-                    now,
-                )
-                .await
-                .inspect_err(as_error!())?;
-            } else {
-                result.inspect_err(as_error!())?;
-            }
-        } else {
-            self.update_aux(
-                &object_id,
-                &prv_candidates,
-                &prv_nondetections,
-                &fp_hists,
-                &survey_matches,
-                now,
-            )
-            .await
-            .inspect_err(as_error!())?;
-        }
+        // Sort and deduplicate time series data by jd
+        ZtfPrvCandidate::sanitize_timeseries(&mut prv_candidates);
+        ZtfPrvCandidate::sanitize_timeseries(&mut prv_nondetections);
+        ZtfForcedPhot::sanitize_timeseries(&mut fp_hists);
 
         let alert = ZtfAlert {
             candid,
@@ -924,6 +996,77 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
+        }
+
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
+        );
+
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                &object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
+            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let obj = ZtfObject {
+                object_id: object_id.clone(),
+                prv_candidates,
+                prv_nondetections,
+                fp_hists,
+                cross_matches: Some(xmatches),
+                aliases: survey_matches,
+                coordinates: Coordinates::new(ra, dec),
+                created_at: now,
+                updated_at: now,
+            };
+            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
+            if let Err(AlertError::AlertAuxExists) = result {
+                // use the race-condition free fallback update
+                warn!(
+                    "Alert aux document for object_id {} already exists. Using fallback update.",
+                    object_id
+                );
+                self.update_aux_fallback(
+                    &object_id,
+                    &obj.prv_candidates,
+                    &obj.prv_nondetections,
+                    &obj.fp_hists,
+                    &obj.aliases,
+                    now,
+                )
+                .await
+                .inspect_err(as_error!())?;
+            } else {
+                result.inspect_err(as_error!())?;
+            }
+        }
+
+        let status = self
+            .format_and_insert_cutouts(
+                candid,
+                &object_id,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_storage,
+            )
+            .await
+            .inspect_err(as_error!())?;
+
         Ok(status)
     }
 }
@@ -933,8 +1076,222 @@ mod tests {
     use super::*;
     use crate::utils::{
         enums::Survey,
-        testing::{ztf_alert_worker, AlertRandomizer},
+        testing::{
+            assert_update_aux_branches_and_fallback, drop_alert_from_collections, ztf_alert_worker,
+            AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
+        },
     };
+
+    struct ZtfPrvLightcurveGen {
+        template: ZtfPrvCandidate,
+        next_candid: i64,
+    }
+
+    impl ZtfPrvLightcurveGen {
+        fn new(template: ZtfPrvCandidate, first_candid: i64) -> Self {
+            Self {
+                template,
+                next_candid: first_candid,
+            }
+        }
+
+        fn at_jd(&mut self, jd: f64) -> ZtfPrvCandidate {
+            let mut candidate = self.template.clone();
+            candidate.prv_candidate.jd = jd;
+            candidate.prv_candidate.candid = Some(self.next_candid);
+            self.next_candid += 1;
+            candidate
+        }
+    }
+
+    struct ZtfFpLightcurveGen {
+        template: ZtfForcedPhot,
+        next_pid: i64,
+    }
+
+    impl ZtfFpLightcurveGen {
+        fn new(template: ZtfForcedPhot, first_pid: i64) -> Self {
+            Self {
+                template,
+                next_pid: first_pid,
+            }
+        }
+
+        fn at_jd(&mut self, jd: f64) -> ZtfForcedPhot {
+            let mut fp = self.template.clone();
+            fp.fp_hist.jd = jd;
+            fp.fp_hist.pid = self.next_pid;
+            self.next_pid += 1;
+            fp
+        }
+    }
+
+    async fn seed_ztf_alert(worker: &mut ZtfAlertWorker) -> (i64, String, ZtfRawAvroAlert) {
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+
+        let parsed_alert: ZtfRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&bytes_content)
+            .unwrap();
+
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        (candid, object_id, parsed_alert)
+    }
+
+    async fn load_aux(worker: &ZtfAlertWorker, object_id: &str) -> AlertAuxForUpdate {
+        worker.get_existing_aux(object_id).await.unwrap().unwrap()
+    }
+
+    async fn set_aux_fields(worker: &ZtfAlertWorker, object_id: &str, set_doc: Document) {
+        worker
+            .alert_aux_collection
+            .update_one(doc! { "_id": object_id }, doc! { "$set": set_doc })
+            .await
+            .unwrap();
+    }
+
+    async fn apply_update(
+        worker: &mut ZtfAlertWorker,
+        object_id: &str,
+        prv_candidates: Vec<ZtfPrvCandidate>,
+        prv_nondetections: Vec<ZtfPrvCandidate>,
+        fp_hists: Vec<ZtfForcedPhot>,
+        survey_matches: &Option<ZtfAliases>,
+        existing_aux: &AlertAuxForUpdate,
+    ) {
+        worker
+            .update_aux(
+                object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                survey_matches,
+                Time::now().to_jd(),
+                existing_aux,
+            )
+            .await
+            .unwrap();
+    }
+
+    struct ZtfAuxBranchAdapter {
+        det_gen: ZtfPrvLightcurveGen,
+        nondet_gen: ZtfPrvLightcurveGen,
+        fp_gen: ZtfFpLightcurveGen,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for ZtfAuxBranchAdapter {
+        type Worker = ZtfAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<ZtfAliases>;
+        type Updates = (
+            Vec<ZtfPrvCandidate>,
+            Vec<ZtfPrvCandidate>,
+            Vec<ZtfForcedPhot>,
+        );
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![
+                    existing_aux.prv_candidates.clone(),
+                    existing_aux.prv_nondetections.clone(),
+                    existing_aux.fp_hists.clone(),
+                ],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(ZtfAliases::default())
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            (vec![], vec![], vec![])
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 3);
+            (
+                vec![self.det_gen.at_jd(jds[0])],
+                vec![self.nondet_gen.at_jd(jds[1])],
+                vec![self.fp_gen.at_jd(jds[2])],
+            )
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": 2.0 },
+                        doc! { "jd": 1.0 },
+                        doc! { "jd": 1.0 },
+                    ],
+                    "prv_nondetections": vec![
+                        doc! { "jd": 4.0 },
+                        doc! { "jd": 3.0 },
+                        doc! { "jd": 3.0 },
+                    ],
+                    "fp_hists": vec![
+                        doc! { "jd": 6.0 },
+                        doc! { "jd": 5.0 },
+                        doc! { "jd": 5.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_aux_fields(
+                worker,
+                object_id,
+                doc! {
+                    "prv_candidates": vec![
+                        doc! { "jd": f64::NAN },
+                        doc! { "jd": 1.0 },
+                    ],
+                },
+            )
+            .await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0], vec![3.0, 4.0], vec![5.0, 6.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            let (prv_candidates, prv_nondetections, fp_hists) = updates;
+            apply_update(
+                worker,
+                object_id,
+                prv_candidates,
+                prv_nondetections,
+                fp_hists,
+                survey_matches,
+                existing_aux,
+            )
+            .await;
+        }
+    }
 
     #[tokio::test]
     async fn test_ztf_alert_from_avro_bytes() {
@@ -1122,5 +1479,159 @@ mod tests {
         assert_eq!(avro_alert.cutout_science.len(), 13107);
         assert_eq!(avro_alert.cutout_template.len(), 12410);
         assert_eq!(avro_alert.cutout_difference.len(), 14878);
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_includes_current_candidate_in_prv_candidates() {
+        let mut worker = ztf_alert_worker().await;
+
+        let (candid, object_id, parsed_alert) = seed_ztf_alert(&mut worker).await;
+        let jd = parsed_alert.candidate.candidate.jd;
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .unwrap()
+            .expect("alert aux should exist after processing");
+
+        assert!(
+            aux.prv_candidates.iter().any(|pc| {
+                pc.prv_candidate.candid == Some(candid) && (pc.prv_candidate.jd - jd).abs() < 1e-9
+            }),
+            "current candidate (candid={}, jd={}) should be present in prv_candidates",
+            candid,
+            jd
+        );
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    /// Verify that SchemaCache falls back to the Reader-based path when the
+    /// cached start index is corrupted.
+    ///
+    /// Steps:
+    ///   1. Deserialize a packet once – this populates the cache correctly.
+    ///   2. Corrupt `cached_start_idx` to 0 (the Avro magic-bytes header),
+    ///      which will make `from_avro_datum` fail on the next call.
+    ///   3. Deserialize the same packet again – the fallback should kick in,
+    ///      repair the cache, and return the same alert.
+    #[test]
+    fn test_schema_cache_fallback_on_corrupt_start_idx() {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+
+        let mut cache = SchemaCache::default();
+
+        // First call: normal path, fills the cache.
+        let first: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        assert!(cache.get_cached_start_idx().is_some());
+        let good_idx = cache.get_cached_start_idx().unwrap();
+        assert!(good_idx > 0, "start index should be past the Avro header");
+
+        // Corrupt the cached start index so that it points into the Avro header
+        // (offset 0 – the 'O','b','j',1 magic bytes), causing from_avro_datum
+        // to fail on the next call and triggering the fallback.
+        cache.set_cached_start_idx(0);
+
+        // Second call: fallback path should repair the cache and produce the
+        // same result as the first call.
+        let second: ZtfRawAvroAlert = cache
+            .alert_from_avro_bytes(&avro_bytes)
+            .expect("fallback deserialization should succeed");
+
+        assert_eq!(first.candid, second.candid);
+        assert_eq!(first.object_id, second.object_id);
+        assert_eq!(first.schemavsn, second.schemavsn);
+
+        // The cache should now hold the corrected start index again.
+        assert_eq!(
+            cache.get_cached_start_idx().unwrap(),
+            good_idx,
+            "cache should be repaired after the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_branches_and_fallback() {
+        let mut worker = ztf_alert_worker().await;
+
+        let (candid, object_id, mut parsed_alert) = seed_ztf_alert(&mut worker).await;
+
+        let mut parsed_prv_candidates = parsed_alert.prv_candidates.take().unwrap_or_default();
+        let mut parsed_fp_hists = parsed_alert.fp_hists.take().unwrap_or_default();
+        ZtfPrvCandidate::sanitize_timeseries(&mut parsed_prv_candidates);
+        ZtfForcedPhot::sanitize_timeseries(&mut parsed_fp_hists);
+        let (detections, nondetections) = worker.split_prv_candidates(parsed_prv_candidates);
+
+        let mut adapter = ZtfAuxBranchAdapter {
+            det_gen: ZtfPrvLightcurveGen::new(
+                detections
+                    .first()
+                    .cloned()
+                    .expect("test data should include at least one ZTF detection"),
+                candid + 1,
+            ),
+            nondet_gen: ZtfPrvLightcurveGen::new(
+                nondetections
+                    .first()
+                    .cloned()
+                    .expect("test data should include at least one ZTF non-detection"),
+                candid + 10_000,
+            ),
+            fp_gen: ZtfFpLightcurveGen::new(
+                parsed_fp_hists
+                    .first()
+                    .cloned()
+                    .expect("test data should include at least one ZTF forced photometry point"),
+                candid + 20_000,
+            ),
+        };
+
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_stored_and_retrievable() {
+        let mut worker = ztf_alert_worker().await;
+        let (candid, object_id, parsed_alert) = seed_ztf_alert(&mut worker).await;
+
+        let stored = worker
+            .alert_cutout_storage
+            .retrieve_cutouts(candid, false)
+            .await
+            .expect("cutout should be retrievable after process_alert");
+
+        assert_eq!(stored.candid, candid);
+        assert_eq!(stored.cutout_science, parsed_alert.cutout_science);
+        assert_eq!(stored.cutout_template, parsed_alert.cutout_template);
+        assert_eq!(stored.cutout_difference, parsed_alert.cutout_difference);
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+        let _ = object_id;
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_deduplication() {
+        let mut worker = ztf_alert_worker().await;
+        let (candid, _object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+
+        let first = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(first, ProcessAlertStatus::Added(candid));
+
+        let second = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(second, ProcessAlertStatus::Exists(candid));
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 }

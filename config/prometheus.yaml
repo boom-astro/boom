@@ -1,5 +1,8 @@
-# https://prometheus.io/docs/guides/opentelemetry/#configuring-prometheus
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
 
+# https://prometheus.io/docs/guides/opentelemetry/#configuring-prometheus
 otlp:
   promote_resource_attributes:
     - service.instance.id
@@ -7,3 +10,53 @@ otlp:
     - service.namespace
     - service.version
     - deployment.environment.name
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "otel-collector"
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "kafka-broker"
+
+  - job_name: "valkey"
+    scrape_interval: 2s
+    static_configs:
+      - targets: ["valkey-exporter:9121"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "valkey"
+
+  - job_name: "mongodb"
+    static_configs:
+      - targets: ["mongodb-exporter:9216"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "mongodb"
+
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "cadvisor"
+
+  - job_name: "docker-metadata"
+    static_configs:
+      - targets: ["docker-metadata-exporter:9158"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "docker-metadata-exporter"

@@ -46,6 +46,17 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
         })
         .collect();
 
+    // Collect field names whose schema must be overridden to Schema::Bytes because
+    // they carry `#[serde(with = "serde_avro_bytes")]`.
+    let avro_bytes_fields = collect_serde_avro_bytes_fields(item)?;
+    let avro_bytes_fields_tokens: Vec<TokenStream> = avro_bytes_fields
+        .iter()
+        .map(|s| {
+            let lit = proc_macro2::Literal::string(s);
+            quote!(#lit)
+        })
+        .collect();
+
     // Turn flatten field name strings into tokenized string literals so they
     // can be interpolated into `quote!` repetitions.
     let flatten_fields_tokens: Vec<TokenStream> = flatten_fields
@@ -92,8 +103,15 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
 
                             // Rename pairs emitted as a slice of (from, to) string pairs.
                             let renames: &[(&str, &str)] = &[#(#rename_pairs_tokens),*];
+                            // Fields that use serde_avro_bytes; their AvroSchema-derived type
+                            // is Array(Int) but the correct Avro schema is Bytes.
+                            let avro_bytes_fields: &[&str] = &[#(#avro_bytes_fields_tokens),*];
 
                             for mut field in fake.fields {
+                                // Fix up schema for `#[serde(with = "serde_avro_bytes")]` fields.
+                                if avro_bytes_fields.iter().any(|n| field.name == *n) {
+                                    field.schema = Schema::Bytes;
+                                }
                                 // Apply rename if the field currently matches the original name.
                                 for (from, to) in renames {
                                     if field.name == *from {
@@ -241,6 +259,10 @@ fn collect_flatten_field_names(item: &ItemStruct) -> syn::Result<Vec<String>> {
                                         }
                                     }
                                 }
+                            } else if meta.input.peek(syn::Token![=]) {
+                                // Unknown key-value attribute (e.g. `with`, `skip_serializing_if`);
+                                // consume `= <value>` so parsing can continue to the next item.
+                                let _ = meta.value().and_then(|v| v.parse::<syn::Expr>());
                             }
                             Ok(())
                         });
@@ -282,6 +304,10 @@ fn collect_field_renames(item: &ItemStruct) -> syn::Result<Vec<(String, String)>
                                         }
                                     }
                                 }
+                            } else if meta.input.peek(syn::Token![=]) {
+                                // Unknown key-value attribute (e.g. `with`, `skip_serializing_if`);
+                                // consume `= <value>` so parsing can continue to the next item.
+                                let _ = meta.value().and_then(|v| v.parse::<syn::Expr>());
                             }
                             Ok(())
                         });
@@ -293,6 +319,49 @@ fn collect_field_renames(item: &ItemStruct) -> syn::Result<Vec<(String, String)>
                 }
             }
             Ok(pairs)
+        }
+        _ => Err(syn::Error::new(
+            item.fields.span(),
+            "Only named fields are supported",
+        )),
+    }
+}
+
+// Collect original field names that carry `#[serde(with = "…serde_avro_bytes")]`.
+// Those fields require Schema::Bytes instead of the Schema::Array that AvroSchema
+// would normally derive for Vec<u8>.
+fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<Vec<String>> {
+    match &item.fields {
+        Fields::Named(fields) => {
+            let mut names = Vec::new();
+            for field in fields.named.iter() {
+                let orig = field.ident.clone().unwrap().to_string();
+                for attr in &field.attrs {
+                    if attr.path().is_ident("serde") {
+                        let mut is_avro_bytes = false;
+                        let _ = attr.parse_nested_meta(|meta| {
+                            if meta.path.is_ident("with") {
+                                if let Ok(pbuf) = meta.value() {
+                                    if let Ok(lit) = pbuf.parse::<syn::Lit>() {
+                                        if let syn::Lit::Str(s) = lit {
+                                            if s.value().ends_with("serde_avro_bytes") {
+                                                is_avro_bytes = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if meta.input.peek(syn::Token![=]) {
+                                let _ = meta.value().and_then(|v| v.parse::<syn::Expr>());
+                            }
+                            Ok(())
+                        });
+                        if is_avro_bytes {
+                            names.push(orig.clone());
+                        }
+                    }
+                }
+            }
+            Ok(names)
         }
         _ => Err(syn::Error::new(
             item.fields.span(),
@@ -318,6 +387,10 @@ fn collect_variant_renames(item: &ItemEnum) -> syn::Result<Vec<(String, String)>
                                 }
                             }
                         }
+                    } else if meta.input.peek(syn::Token![=]) {
+                        // Unknown key-value attribute (e.g. `with`);
+                        // consume `= <value>` so parsing can continue to the next item.
+                        let _ = meta.value().and_then(|v| v.parse::<syn::Expr>());
                     }
                     Ok(())
                 });
@@ -368,6 +441,80 @@ mod tests {
         let names = collect_flatten_field_names(&s).unwrap();
         assert!(!names.contains(&"field".to_string()));
         assert!(!names.contains(&"renamed".to_string()));
+    }
+
+    #[test]
+    fn serde_avro_bytes_field_collected() {
+        let s: ItemStruct = syn::parse_str(
+            r#"
+            struct S {
+                #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
+                cutout_science: Vec<u8>,
+                other: String,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let names = collect_serde_avro_bytes_fields(&s).unwrap();
+        // Original field name (pre-rename) must be collected.
+        assert!(names.contains(&"cutout_science".to_string()));
+        assert!(!names.contains(&"other".to_string()));
+
+        // rename must still be captured alongside the with annotation
+        let pairs = collect_field_renames(&s).unwrap();
+        assert!(pairs.contains(&("cutout_science".to_string(), "cutoutScience".to_string())));
+    }
+
+    #[test]
+    fn serde_avro_bytes_qualified_path_collected() {
+        let s: ItemStruct = syn::parse_str(
+            r#"
+            struct S {
+                #[serde(with = "apache_avro::serde_avro_bytes")]
+                data: Vec<u8>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let names = collect_serde_avro_bytes_fields(&s).unwrap();
+        assert!(names.contains(&"data".to_string()));
+    }
+
+    #[test]
+    fn field_rename_with_serde_with_collected() {
+        // `with` appears before `rename` – previously this caused parse_nested_meta to
+        // bail out early so the rename was never captured.
+        let s: ItemStruct = syn::parse_str(
+            r#"
+            struct S {
+                #[serde(with = "my_module", rename = "renamed")]
+                field: i32,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let pairs = collect_field_renames(&s).unwrap();
+        assert!(pairs.contains(&("field".to_string(), "renamed".to_string())));
+    }
+
+    #[test]
+    fn flatten_with_serde_with_collected() {
+        // `with` appearing alongside `flatten` must not prevent flatten detection.
+        let s: ItemStruct = syn::parse_str(
+            r#"
+            struct S {
+                #[serde(with = "my_module", flatten)]
+                nested: Nested,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let names = collect_flatten_field_names(&s).unwrap();
+        assert!(names.contains(&"nested".to_string()));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use boom::conf::{load_dotenv, AppConfig};
-use boom::filter::{Filter, FilterVersion};
+use boom::filter::{Filter, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS, VALID_ZTF_PROGRAMIDS};
 use boom::utils::enums::Survey;
 use clap::Parser;
 use std::collections::HashMap;
@@ -20,6 +20,12 @@ struct Cli {
         default_value = "Added via CLI"
     )]
     description: String,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Comma-separated permission program IDs. Required for surveys with a permission system (e.g. ZTF: 1=public, 2=partnership, 3=Caltech); ignored for others."
+    )]
+    permissions: Option<Vec<i32>>,
 }
 
 fn now_jd() -> f64 {
@@ -43,6 +49,34 @@ async fn main() {
     let description = args.description;
     let survey = args.survey;
     let filter_file = args.filter_file;
+    let permissions = if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
+        let Some(perms) = args.permissions else {
+            eprintln!(
+                "--permissions is required for survey {:?} (e.g. --permissions 1 for public-only)",
+                survey
+            );
+            std::process::exit(1);
+        };
+        let valid: &[i32] = match survey {
+            Survey::Ztf => &VALID_ZTF_PROGRAMIDS,
+            _ => &[],
+        };
+        let invalid: Vec<i32> = perms
+            .iter()
+            .copied()
+            .filter(|p| !valid.contains(p))
+            .collect();
+        if !invalid.is_empty() {
+            eprintln!(
+                "Invalid programid(s) {:?} for survey {:?}; valid values are {:?}",
+                invalid, survey, valid
+            );
+            std::process::exit(1);
+        }
+        HashMap::from([(survey.clone(), perms)])
+    } else {
+        HashMap::new()
+    };
 
     // read the JSON as a string
     let filter_pipeline = match std::fs::read_to_string(&filter_file) {
@@ -57,15 +91,14 @@ async fn main() {
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
     let filter_id: String = uuid::Uuid::new_v4().to_string();
 
-    let permissions = HashMap::from([(Survey::Ztf, vec![1, 2, 3])]);
     let filter = Filter {
         id: filter_id.clone(),
-        name: name,
+        name,
         description: Some(description),
         active: true,
         user_id: "cli".to_string(),
-        survey: survey,
-        permissions: permissions,
+        survey,
+        permissions,
         fv: vec![FilterVersion {
             fid: "v2e0fs".to_string(),
             pipeline: filter_pipeline,

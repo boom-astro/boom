@@ -6,6 +6,7 @@ mod tests {
     use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::{create_test_catalog, delete_test_catalog, read_json_response};
+    use mongodb::bson::doc;
     use mongodb::Database;
 
     /// Test GET /catalogs

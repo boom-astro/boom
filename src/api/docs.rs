@@ -72,6 +72,7 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::count::post_estimated_count_query,
         routes::queries::find::post_find_query,
         routes::queries::cone_search::post_cone_search_query,
+        routes::surveys::cutouts::get_cutouts,
         routes::queries::pipeline::post_pipeline_query
     ),
     security(
@@ -107,6 +108,9 @@ pub struct ApiDoc;
         routes::babamul::surveys::alerts::get_alerts,
         routes::babamul::surveys::alerts::cone_search_alerts,
         routes::babamul::surveys::alerts::moc_search_alerts,
+        routes::babamul::stats::collections::get_collection_stats,
+        routes::babamul::stats::kafka::get_kafka_stats,
+        routes::babamul::stats::nightly::get_nightly_stats,
     ),
     security(
         ("babamul_jwt_token" = [])
