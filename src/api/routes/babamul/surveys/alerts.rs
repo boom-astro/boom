@@ -623,6 +623,67 @@ const MOC_SEARCH_MAX_CONES: usize = 500;
 /// MongoDB server-side query timeout for MOC search (30 seconds).
 const MOC_SEARCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Stream alerts matching `filter_doc`, keep only those whose coordinates fall
+/// inside `moc` (the spatial `$or` is a coarse pre-filter at the cone level), and
+/// build the success response. `coords` extracts (ra, dec) from each alert, which
+/// is the only thing that differs between surveys.
+async fn collect_moc_alerts<T, F>(
+    db: &Database,
+    survey: Survey,
+    filter_doc: Document,
+    moc: &HpxMoc,
+    limit: u32,
+    cones_len: usize,
+    depth: u8,
+    coords: F,
+) -> HttpResponse
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + Unpin,
+    F: Fn(&T) -> (f64, f64),
+{
+    let alerts_collection: Collection<T> = db.collection(&format!("{}_alerts", survey));
+    let mut alert_cursor = match alerts_collection
+        .find(filter_doc)
+        .max_time(MOC_SEARCH_QUERY_TIMEOUT)
+        .await
+    {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            return response::internal_error(&format!(
+                "error retrieving alerts for survey {}: {}",
+                survey, error
+            ));
+        }
+    };
+
+    let mut results: Vec<T> = Vec::new();
+    while let Some(alert_doc) = match alert_cursor.try_next().await {
+        Ok(Some(doc)) => Some(doc),
+        Ok(None) => None,
+        Err(error) => {
+            return response::internal_error(&format!("error getting documents: {}", error));
+        }
+    } {
+        // Post-filter: check that the alert is actually inside the MOC
+        let (ra, dec) = coords(&alert_doc);
+        if is_in_moc(moc, ra, dec) {
+            results.push(alert_doc);
+            if results.len() >= limit as usize {
+                break;
+            }
+        }
+    }
+    response::ok(
+        &format!(
+            "found {} alerts within MOC region ({} covering cones at depth {})",
+            results.len(),
+            cones_len,
+            depth
+        ),
+        serde_json::json!(results),
+    )
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 struct AlertsMocSearchQuery {
     /// Base64-encoded MOC FITS file (exactly one of moc_fits_base64 or skymap_fits_base64 required)
@@ -843,99 +904,35 @@ pub async fn moc_search_alerts(
 
     match survey {
         Survey::Ztf => {
-            let alerts_collection: Collection<EnrichedZtfAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut alert_cursor = match alerts_collection
-                .find(filter_doc)
-                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
-                .await
-            {
-                Ok(cursor) => cursor,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error retrieving alerts for survey {}: {}",
-                        survey, error
-                    ));
-                }
-            };
-
-            let mut results: Vec<EnrichedZtfAlert> = Vec::new();
-            while let Some(alert_doc) = match alert_cursor.try_next().await {
-                Ok(Some(doc)) => Some(doc),
-                Ok(None) => None,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
-            } {
-                // Post-filter: check that the alert is actually inside the MOC
-                let ra = alert_doc.candidate.candidate.ra;
-                let dec = alert_doc.candidate.candidate.dec;
-                if is_in_moc(&moc, ra, dec) {
-                    results.push(alert_doc);
-                    if results.len() >= limit as usize {
-                        break;
-                    }
-                }
-            }
-            response::ok(
-                &format!(
-                    "found {} alerts within MOC region ({} covering cones at depth {})",
-                    results.len(),
-                    cones.len(),
-                    depth
-                ),
-                serde_json::json!(results),
+            collect_moc_alerts::<EnrichedZtfAlert, _>(
+                &db,
+                survey,
+                filter_doc,
+                &moc,
+                limit,
+                cones.len(),
+                depth,
+                |alert| (alert.candidate.candidate.ra, alert.candidate.candidate.dec),
             )
+            .await
         }
         Survey::Lsst => {
-            let alerts_collection: Collection<EnrichedLsstAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut alert_cursor = match alerts_collection
-                .find(filter_doc)
-                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
-                .await
-            {
-                Ok(cursor) => cursor,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error retrieving alerts for survey {}: {}",
-                        survey, error
-                    ));
-                }
-            };
-
-            let mut results: Vec<EnrichedLsstAlert> = Vec::new();
-            while let Some(alert_doc) = match alert_cursor.try_next().await {
-                Ok(Some(doc)) => Some(doc),
-                Ok(None) => None,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
-            } {
-                let ra = alert_doc.candidate.dia_source.ra;
-                let dec = alert_doc.candidate.dia_source.dec;
-                if is_in_moc(&moc, ra, dec) {
-                    results.push(alert_doc);
-                    if results.len() >= limit as usize {
-                        break;
-                    }
-                }
-            }
-            response::ok(
-                &format!(
-                    "found {} alerts within MOC region ({} covering cones at depth {})",
-                    results.len(),
-                    cones.len(),
-                    depth
-                ),
-                serde_json::json!(results),
+            collect_moc_alerts::<EnrichedLsstAlert, _>(
+                &db,
+                survey,
+                filter_doc,
+                &moc,
+                limit,
+                cones.len(),
+                depth,
+                |alert| {
+                    (
+                        alert.candidate.dia_source.ra,
+                        alert.candidate.dia_source.dec,
+                    )
+                },
             )
+            .await
         }
         _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
     }
