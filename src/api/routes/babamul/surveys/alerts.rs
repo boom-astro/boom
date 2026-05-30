@@ -344,6 +344,93 @@ enum AlertsConeSearchResult {
     LsstAlerts(HashMap<String, Vec<EnrichedLsstAlert>>),
 }
 
+/// Run one cone search per coordinate pair and group the matching alerts by object
+/// name. `base_filter_doc` holds the non-spatial filters shared across every cone;
+/// the per-cone `$centerSphere` condition is prepended so the geospatial index is
+/// used. The alert type is the only thing that differs between surveys.
+async fn cone_search_by_coordinates<T>(
+    db: &Database,
+    survey: Survey,
+    coordinates: &HashMap<String, [f64; 2]>,
+    base_filter_doc: Document,
+    radius_radians: f64,
+) -> HttpResponse
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + Unpin,
+{
+    let alerts_collection: Collection<T> = db.collection(&format!("{}_alerts", survey));
+    let mut results: HashMap<String, Vec<T>> = HashMap::new();
+    let mut alert_count = 0;
+    let mut coordinates_with_matches_count = 0;
+    for (object_name, radec) in coordinates {
+        let ra = radec[0];
+        let dec = radec[1];
+        if ra < 0.0 || ra >= 360.0 {
+            return response::bad_request(&format!(
+                "Invalid RA for object {}: must be in [0, 360)",
+                object_name
+            ));
+        }
+        if dec < -90.0 || dec > 90.0 {
+            return response::bad_request(&format!(
+                "Invalid Dec for object {}: must be in [-90, 90]",
+                object_name
+            ));
+        }
+        let center_sphere = doc! {
+            "coordinates.radec_geojson": {
+                "$geoWithin": {
+                    "$centerSphere": [
+                        [ra - 180.0, dec],
+                        radius_radians
+                    ]
+                }
+            }
+        };
+        // we need to make sure that the condition on coordinates is at the start of the
+        // filter document to take advantage of geospatial indexing
+        let filter_doc: Document = center_sphere
+            .into_iter()
+            .chain(base_filter_doc.clone())
+            .collect();
+
+        let mut alert_cursor = match alerts_collection.find(filter_doc).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error retrieving alerts for survey {}: {}",
+                    survey, error
+                ));
+            }
+        };
+
+        let mut alert_results: Vec<T> = Vec::new();
+        while let Some(alert_doc) = match alert_cursor.try_next().await {
+            Ok(Some(doc)) => Some(doc),
+            Ok(None) => None,
+            Err(error) => {
+                return response::internal_error(&format!("error getting documents: {}", error));
+            }
+        } {
+            alert_results.push(alert_doc);
+            alert_count += 1;
+        }
+        if !alert_results.is_empty() {
+            coordinates_with_matches_count += 1;
+        }
+        results.insert(object_name.clone(), alert_results);
+    }
+    response::ok(
+        &format!(
+            "found cross-matches for {}/{} coordinates, with a total {} alerts",
+            coordinates_with_matches_count,
+            coordinates.len(),
+            alert_count
+        ),
+        serde_json::json!(results),
+    )
+}
+
 #[utoipa::path(
     post,
     path = "/babamul/surveys/{survey}/alerts/cone-search",
@@ -448,177 +535,26 @@ pub async fn cone_search_alerts(
 
     match survey {
         Survey::Ztf => {
-            let alerts_collection: Collection<EnrichedZtfAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut results: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
-            let mut alert_count = 0;
-            let mut coordinates_with_matches_count = 0;
-            for (object_name, radec) in coordinates {
-                if radec.len() != 2 {
-                    return response::bad_request(&format!(
-                        "Invalid coordinates for object {}: expected [RA, Dec]",
-                        object_name
-                    ));
-                }
-                let ra = radec[0];
-                let dec = radec[1];
-                if ra < 0.0 || ra >= 360.0 {
-                    return response::bad_request(&format!(
-                        "Invalid RA for object {}: must be in [0, 360)",
-                        object_name
-                    ));
-                }
-                if dec < -90.0 || dec > 90.0 {
-                    return response::bad_request(&format!(
-                        "Invalid Dec for object {}: must be in [-90, 90]",
-                        object_name
-                    ));
-                }
-                let center_sphere = doc! {
-                    "coordinates.radec_geojson": {
-                        "$geoWithin": {
-                            "$centerSphere": [
-                                [ra - 180.0, dec],
-                                radius_radians
-                            ]
-                        }
-                    }
-                };
-                let mut filter_doc = base_filter_doc.clone();
-                // filter_doc.extend(center_sphere);
-                // we need to make sure that the condition on coordinates is at the start of the filter document to take advantage of geospatial indexing
-                filter_doc = center_sphere
-                    .into_iter()
-                    .chain(filter_doc.into_iter())
-                    .collect();
-
-                let mut alert_cursor = match alerts_collection.find(filter_doc).await {
-                    Ok(cursor) => cursor,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error retrieving alerts for survey {}: {}",
-                            survey, error
-                        ));
-                    }
-                };
-
-                let mut alert_results: Vec<EnrichedZtfAlert> = Vec::new();
-                while let Some(alert_doc) = match alert_cursor.try_next().await {
-                    Ok(Some(doc)) => Some(doc),
-                    Ok(None) => None,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error getting documents: {}",
-                            error
-                        ));
-                    }
-                } {
-                    alert_results.push(alert_doc);
-                    alert_count += 1;
-                }
-                if !alert_results.is_empty() {
-                    coordinates_with_matches_count += 1;
-                }
-                results.insert(object_name.clone(), alert_results);
-            }
-            return response::ok(
-                &format!(
-                    "found cross-matches for {}/{} coordinates, with a total {} alerts",
-                    coordinates_with_matches_count,
-                    coordinates.len(),
-                    alert_count
-                ),
-                serde_json::json!(results),
-            );
+            cone_search_by_coordinates::<EnrichedZtfAlert>(
+                &db,
+                survey,
+                coordinates,
+                base_filter_doc,
+                radius_radians,
+            )
+            .await
         }
         Survey::Lsst => {
-            // similar to above but for LSST collection
-            let alerts_collection: Collection<EnrichedLsstAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut results: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
-            let mut alert_count = 0;
-            let mut coordinates_with_matches_count = 0;
-            for (object_name, radec) in coordinates {
-                if radec.len() != 2 {
-                    return response::bad_request(&format!(
-                        "Invalid coordinates for object {}: expected [RA, Dec]",
-                        object_name
-                    ));
-                }
-                let ra = radec[0];
-                let dec = radec[1];
-                if ra < 0.0 || ra >= 360.0 {
-                    return response::bad_request(&format!(
-                        "Invalid RA for object {}: must be in [0, 360)",
-                        object_name
-                    ));
-                }
-                if dec < -90.0 || dec > 90.0 {
-                    return response::bad_request(&format!(
-                        "Invalid Dec for object {}: must be in [-90, 90]",
-                        object_name
-                    ));
-                }
-                let center_sphere = doc! {
-                    "coordinates.radec_geojson": {
-                        "$geoWithin": {
-                            "$centerSphere": [
-                                [ra - 180.0, dec],
-                                radius_radians
-                            ]
-                        }
-                    }
-                };
-                let mut filter_doc = base_filter_doc.clone();
-                // we need to make sure that the condition on coordinates is at the start of the filter document to take advantage of geospatial indexing
-                filter_doc = center_sphere
-                    .into_iter()
-                    .chain(filter_doc.into_iter())
-                    .collect();
-                let mut alert_cursor = match alerts_collection.find(filter_doc).await {
-                    Ok(cursor) => cursor,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error retrieving alerts for survey {}: {}",
-                            survey, error
-                        ));
-                    }
-                };
-
-                let mut alert_results: Vec<EnrichedLsstAlert> = Vec::new();
-                while let Some(alert_doc) = match alert_cursor.try_next().await {
-                    Ok(Some(doc)) => Some(doc),
-                    Ok(None) => None,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error getting documents: {}",
-                            error
-                        ));
-                    }
-                } {
-                    alert_results.push(alert_doc);
-                    alert_count += 1;
-                }
-                if !alert_results.is_empty() {
-                    coordinates_with_matches_count += 1;
-                }
-                results.insert(object_name.clone(), alert_results);
-            }
-            return response::ok(
-                &format!(
-                    "found cross-matches for {}/{} coordinates, with a total {} alerts",
-                    coordinates_with_matches_count,
-                    coordinates.len(),
-                    alert_count
-                ),
-                serde_json::json!(results),
-            );
+            cone_search_by_coordinates::<EnrichedLsstAlert>(
+                &db,
+                survey,
+                coordinates,
+                base_filter_doc,
+                radius_radians,
+            )
+            .await
         }
-        _ => {
-            return response::bad_request(
-                "Invalid survey specified, only ZTF and LSST are supported",
-            );
-        }
+        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
     }
 }
 
