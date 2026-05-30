@@ -711,6 +711,11 @@ pub async fn moc_search_alerts(
         }
         _ => {}
     }
+    if moc_b64.is_some() && query.credible_level.is_some() {
+        return response::bad_request(
+            "credible_level only applies to skymap_fits_base64, not a pre-built moc_fits_base64",
+        );
+    }
     let credible_level = query.credible_level.unwrap_or(0.9);
 
     let limit = query.limit.unwrap_or(10000).min(10000);
