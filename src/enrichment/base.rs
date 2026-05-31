@@ -219,7 +219,10 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
         ACTIVE.add(1, &active_attrs);
         let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
+            .rpop::<&str, Vec<i64>>(
+                &input_queue,
+                NonZero::new(worker_config.enrichment.batch_size),
+            )
             .await
             .inspect_err(|_| {
                 ACTIVE.add(-1, &active_attrs);
