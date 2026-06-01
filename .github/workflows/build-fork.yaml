@@ -2,7 +2,7 @@ name: Build and push BOOM image
 
 on:
   push:
-    branches: [feat/public-filter-endpoints]
+    branches: [feat/public-filter-endpoints, feat/rtf-mtan-encoders]
   workflow_dispatch:
 
 env:
