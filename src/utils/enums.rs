@@ -16,6 +16,14 @@ pub enum Survey {
 }
 
 impl Survey {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Survey::Ztf => "ZTF",
+            Survey::Lsst => "LSST",
+            Survey::Decam => "DECAM",
+        }
+    }
+
     /// Observatory UTC offset in hours.
     ///
     /// - ZTF   (Palomar, CA, USA)       : UTC−7
@@ -68,11 +76,7 @@ impl Survey {
 
 impl std::fmt::Display for Survey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Survey::Ztf => write!(f, "ZTF"),
-            Survey::Lsst => write!(f, "LSST"),
-            Survey::Decam => write!(f, "DECAM"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
