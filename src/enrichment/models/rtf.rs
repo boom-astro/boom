@@ -214,7 +214,7 @@ impl RtfModel {
 
     /// Extract the 30 metadata values from a ZTF candidate in the exact order
     /// matching ALERT_META_KEYS from the RTF Python training pipeline.
-    fn extract_metadata(candidate: &crate::alert::ztf::Candidate) -> [f32; N_META] {
+    fn extract_metadata(candidate: &crate::alert::Candidate) -> [f32; N_META] {
         let opt_f32 = |v: Option<f32>| v.unwrap_or(0.0);
         let opt_f64_as_f32 = |v: Option<f64>| v.unwrap_or(0.0) as f32;
 

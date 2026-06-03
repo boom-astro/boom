@@ -184,7 +184,7 @@ impl MtanModel {
             merged.truncate(MAX_SEQ_LEN);
         }
 
-        let n_steps = merged.len();
+        let _n_steps = merged.len();
 
         // Step 5: Normalize magnitudes — (mag - min_mag) / 2.5
         // Find min magnitude across all observed values
