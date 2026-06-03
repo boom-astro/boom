@@ -1,7 +1,9 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
+    scheduler::record_kafka_alert_published,
     utils::{
+        cutouts::CutoutStorageError,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
         worker::{should_terminate, WorkerCmd},
@@ -59,6 +61,9 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
+
+// Valid ZTF programids: 1 = public, 2 = partnership, 3 = Caltech.
+pub const VALID_ZTF_PROGRAMIDS: [i32; 3] = [1, 2, 3];
 
 #[derive(thiserror::Error, Debug)]
 pub enum FilterError {
@@ -810,8 +815,8 @@ pub enum FilterWorkerError {
     MissingCutouts(i64),
     #[error("missing cutouts for {0} alerts")]
     MissingCutoutsBatch(usize),
-    #[error("failed to fetch cutouts: {0}")]
-    FetchCutoutsError(String),
+    #[error("cutout storage error")]
+    CutoutStorageError(#[from] CutoutStorageError),
     #[error("failed to fetch alerts: {0}")]
     FetchAlertsError(String),
 }
@@ -1028,6 +1033,15 @@ pub async fn run_filter_worker<T: FilterWorker>(
             "Successfully sent total of {}/{} alerts to Kafka topic {}",
             total_sent, total_enqueued, &output_topic
         );
+
+        if total_enqueued > 0 {
+            record_kafka_alert_published(
+                "filter_worker",
+                &survey,
+                &output_topic,
+                total_enqueued as u64,
+            );
+        }
 
         if let Some(error) = enqueue_error {
             ACTIVE.add(-1, &active_attrs);
@@ -1368,7 +1382,7 @@ mod tests {
         let filter_name = format!("test_filter_{}", &filter_id[..8]);
         // first, insert a filter
         let mut permissions = HashMap::new();
-        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
+        permissions.insert(Survey::Ztf, VALID_ZTF_PROGRAMIDS.to_vec());
         let filter = Filter {
             id: filter_id.clone(),
             name: filter_name.clone(),
@@ -1398,7 +1412,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_active_filter_pipeline() {
         let mut permissions = HashMap::new();
-        permissions.insert(Survey::Ztf, vec![1, 2, 3]);
+        permissions.insert(Survey::Ztf, VALID_ZTF_PROGRAMIDS.to_vec());
         let mut filter = Filter {
             id: "test_filter".to_string(),
             name: "test_filter".to_string(),

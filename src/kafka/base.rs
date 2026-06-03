@@ -400,7 +400,7 @@ pub enum ConsumerError {
 pub trait AlertConsumer: Sized {
     fn topic_names(&self, timestamp: i64) -> Vec<String>;
     fn output_queue(&self) -> String;
-    fn survey(&self) -> crate::utils::enums::Survey;
+    fn survey(&self) -> &'static str;
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
@@ -430,6 +430,7 @@ pub trait AlertConsumer: Sized {
         config_path: &str,
     ) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
+        let survey = self.survey();
 
         let topics = topics.unwrap_or_else(|| self.topic_names(timestamp));
         let kafka_config = match kafka_config {
@@ -437,12 +438,13 @@ pub trait AlertConsumer: Sized {
             None => config
                 .kafka
                 .consumer
-                .get(&self.survey())
-                .cloned()
+                .iter()
+                .find(|(k, _)| k.as_str() == survey)
+                .map(|(_, v)| v.clone())
                 .ok_or_else(|| {
                     ConsumerError::from(BoomConfigError::MissingKeyError(format!(
                         "kafka.consumer.{}",
-                        self.survey().to_string().to_lowercase()
+                        survey.to_lowercase()
                     )))
                 })?,
         };
@@ -466,6 +468,7 @@ pub trait AlertConsumer: Sized {
                     &config,
                     &kafka_config,
                     exit_on_eof,
+                    survey,
                 )
                 .await;
                 if let Err(error) = result {
@@ -552,6 +555,7 @@ pub async fn consumer(
     config: &AppConfig,
     survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
+    survey: &'static str,
 ) -> Result<(), ConsumerError> {
     let server = survey_consumer_config.server.clone();
     let group_id = survey_consumer_config.group_id.clone();
@@ -668,6 +672,7 @@ pub async fn consumer(
         KeyValue::new("messaging.operation.name", "poll"),
         KeyValue::new("messaging.operation.type", "receive"),
         KeyValue::new("messaging.client.id", id.to_string()),
+        KeyValue::new("survey", survey),
     ];
     let ok_attrs: Vec<KeyValue> = consumer_attrs
         .iter()

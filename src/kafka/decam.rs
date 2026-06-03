@@ -29,8 +29,8 @@ impl AlertConsumer for DecamAlertConsumer {
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
-    fn survey(&self) -> Survey {
-        Survey::Decam
+    fn survey(&self) -> &'static str {
+        Survey::Decam.as_str()
     }
 }
 

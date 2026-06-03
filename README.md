@@ -32,8 +32,9 @@ BOOM runs on macOS and Linux. You'll need:
 - `Docker` and `docker compose`: used to run the database, cache/task queue, and `Kafka`;
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
+- `git-lfs`: required to pull the large files (e.g. ML models) tracked via Git LFS.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
+- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX runtime setup](#onnx-runtime-setup) section below for details.
 
 **Note:** On Linux, BOOM will fail to start with a clear error if `ORT_DYLIB_PATH` is not set. This is a hard requirement due to ONNX Runtime's dynamic loading behavior. The process will not run without it.
 
@@ -57,7 +58,7 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
 
-- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference-linux) subsection below for more details.
+- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [Linux GPU inference](#gpu-inference) subsection below for more details.
 
 ## Setup
 
@@ -72,8 +73,7 @@ by copying it to `.env`:
 cp .env.example .env
 ```
 
-**Note:** Do not commit `.env` to Git or use the example values
-in production.
+**Note:** Do not commit `.env` to Git or use the example values in production.
 
 #### Email configuration (for notifications)
 
@@ -86,9 +86,143 @@ Babamul activation codes will be printed to the console logs instead,
 and users will need to contact an administrator to retrieve their activation
 code.
 
+### Cutout storage
+
+BOOM supports three backends for storing alert cutout images. Choose one before
+starting the stack, then use the corresponding `make` target.
+
+#### Option 1 — Shared MongoDB (simplest, default)
+
+Cutouts are stored as a `{survey}_alerts_cutouts` collection (e.g.
+`ztf_alerts_cutouts`) inside the same `boom` database and MongoDB instance as
+the alerts. No extra container or credentials needed.
+
+```bash
+make dev
+```
+
+This is the default and requires no configuration beyond the base `.env`. If
+you want to isolate cutouts into a separate database on the same instance, set
+`cutouts_storage.name` in `config.yaml` (or `BOOM_CUTOUTS_STORAGE__NAME`) to a
+different value (e.g. `boom_cutouts`).
+
+#### Option 2 — Dedicated MongoDB container
+
+Cutouts are stored in a separate `mongo-cutouts` container. This lets you put
+the cutout data on a different disk or volume by setting
+`BOOM_CUTOUTS_MONGO_VOLUME` in your `.env`:
+
+```env
+BOOM_CUTOUTS_MONGO_VOLUME=/mnt/large-disk/boom_cutouts
+```
+
+```bash
+make dev-mongo
+```
+
+`BOOM_CUTOUTS_STORAGE__PASSWORD` must be set in `.env` (it defaults to
+`BOOM_DATABASE__PASSWORD` in `.env.example`, which is fine for local dev).
+The compose overlay sets `BOOM_CUTOUTS_STORAGE__HOST=mongo-cutouts` automatically —
+no `config.yaml` edits are needed for Docker deployments.
+
+In production:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up
+```
+
+#### Option 3 — S3-compatible object storage (local rustfs)
+
+Cutouts are stored in a rustfs (S3-compatible) bucket. Best for high-throughput
+workloads or when you want cutout storage decoupled from MongoDB entirely.
+
+This mode also spins up a **dedicated `valkey-cutouts` container** used as a
+read-through cache for cutouts. It is capped at a fixed memory budget
+(`BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY`, default `1024mb`) and uses the `volatile-ttl`
+eviction policy: when full, keys closest to expiry (shortest remaining TTL) are
+evicted first, so the cache degrades gracefully without ever blocking writes.
+
+Required env vars (present in `.env.example`):
+
+- `BOOM_CUTOUTS_STORAGE__ACCESS_KEY`
+- `BOOM_CUTOUTS_STORAGE__SECRET_KEY`
+
+```bash
+make dev-s3
+```
+
+The compose overlay injects all infrastructure-determined settings as environment
+variables (`BOOM_CUTOUTS_STORAGE__TYPE=s3`, endpoint URL, region, credentials
+provider, cache host/port), so **`config.yaml` does not need to be edited for
+Docker deployments** — only the two credentials above are required.
+
+For non-Docker deployments (running the binaries directly), set
+`type: s3` in the `cutouts_storage` block of `config.yaml` (or
+`BOOM_CUTOUTS_STORAGE__TYPE=s3`), then supply credentials and the cache
+host. The S3 fields are already present in `config.yaml` with sensible
+defaults — only these vars need to be set:
+
+```bash
+BOOM_CUTOUTS_STORAGE__TYPE=s3
+BOOM_CUTOUTS_STORAGE__ACCESS_KEY=<your-key>
+BOOM_CUTOUTS_STORAGE__SECRET_KEY=<your-secret>
+BOOM_CUTOUTS_STORAGE__CACHE__HOST=<valkey-host>
+```
+
+In production:
+
+```bash
+# Optionally pin data and cache sizes via env vars
+BOOM_OBJECT_STORAGE_VOLUME=/mnt/fast-disk/cutouts \
+BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY=2gb \
+  docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml up
+```
+
+For local access to the rustfs web UI on port 9000/9001, add a `ports` override
+to your local `docker-compose.override.yaml`:
+
+```yaml
+services:
+  rustfs:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+```
+
+#### Option 4 — External S3 bucket (AWS S3, Wasabi, Backblaze B2, …)
+
+Use this when you already have a bucket on a managed S3 service and do not want
+to run a local rustfs container. All surveys share a single bucket, namespaced
+by per-survey key prefixes (`ztf/`, `lsst/`, …), so per-survey S3 lifecycle
+rules can still be applied using prefix filters.
+
+Required env vars:
+
+- `BOOM_CUTOUTS_STORAGE__ACCESS_KEY` — access key / key ID
+- `BOOM_CUTOUTS_STORAGE__SECRET_KEY` — secret key
+- `BOOM_CUTOUTS_STORAGE__REGION` — bucket region (e.g. `us-east-1`)
+
+Optional env vars:
+
+- `BOOM_CUTOUTS_STORAGE__BUCKET_NAME` — name of the pre-existing bucket (default: `boom-cutouts`)
+- `BOOM_CUTOUTS_STORAGE__ENDPOINT_URL` — custom endpoint for non-AWS providers
+  (e.g. `https://s3.us-west-1.wasabisys.com`). Omit for AWS S3 — the SDK
+  derives the endpoint from the region automatically.
+- `BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY` — memory cap for the read-through cutout cache (default: `1024mb`)
+
+```bash
+make dev-s3-external
+```
+
+In production:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3-external.yaml up
+```
+
 ### Linux only
 
-#### ONNX runtime setup {#linux-onnx-runtime-setup}
+#### ONNX runtime setup
 
 On Linux, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use GPU inference or not. You must set this variable before running any BOOM binary natively.
 
@@ -111,7 +245,7 @@ ls .venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.*
 
 You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
 
-#### GPU inference {#gpu-inference-linux}
+#### GPU inference
 
 For GPU inference on Linux you need, in addition to the above:
 
@@ -144,35 +278,30 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
 
 ### Start services for local development
 
-Bring up the local dev stack with:
+1. Install lfs and pull the large files:
+    ```bash
+    git lfs install
+    git lfs pull
+    ```
+2. Bring up the local dev stack:
 
-```bash
-make dev
-```
+- With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` files:
+  ```bash
+  make dev
+  ```
+  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
+  the supporting Docker services they need.
+  This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
+  To check if the containers are running and healthy, run `docker ps`.
 
-This starts `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
-the supporting Docker services they need.
+  **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
-## Running BOOM
+3. Delete existing ZTF Kafka topics and produce alerts for testing:
 
-### Local dev pipeline (recommended)
-
-For local development, use:
-
-```bash
-make dev
-```
-
-This brings up the hot-reloading API, ZTF consumer, and ZTF scheduler.
-
-To produce alerts for testing, run:
-
-```bash
-make delete-produce-ztf
-```
-
-If you change the producer date or program, make sure the consumer is reading
-the same topic date/program combination.
+    ```bash
+    make delete-produce-ztf
+    ```
+   _If you change the producer date or program, make sure the consumer is reading the same topic date/program combination._
 
 ### Alert Production (not required for production use)
 
@@ -234,6 +363,38 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
+## Running BOOM in production
+
+### Using Docker
+
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, and `scheduler-lsst`. Each of these services starts its binary automatically at container startup.
+
+Bring up the full prod stack with:
+
+```bash
+docker compose --profile prod up -d
+```
+
+Or start individual services:
+
+```bash
+docker compose --profile prod up -d consumer-ztf scheduler-ztf
+```
+
+To run a one-shot operational task, override the service's command with `docker compose run`. This is typically used for database migrations such as `migrate_fp_flux` and `migrate_snr`:
+
+```bash
+docker compose --profile prod run --rm scheduler-ztf /app/migrate_fp_flux
+docker compose --profile prod run --rm scheduler-ztf /app/migrate_snr
+```
+
+To tail logs or open a shell in a running container:
+
+```bash
+docker compose logs -f scheduler-ztf
+docker compose exec scheduler-ztf /bin/bash
+```
+
 The scheduler prints a variety of messages to your terminal, e.g.:
 
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -279,6 +440,40 @@ As a more complete example, the following sets the logging level to DEBUG, with 
 
 ```bash
 RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+```
+
+## Running Benchmark
+
+This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
+This benchmark uses Docker to build the image and run the benchmark.
+The steps to run the benchmark are as follows:
+
+### Download Data
+
+Download the ZTF alerts auxiliary data dump
+
+```
+mkdir -p ./data/alerts
+```
+
+**For Linux:**
+```
+wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+```
+**For macOS:**
+```
+curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+```
+
+Download the NED catalog for crossmatching.
+```
+uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+```
+
+### Start Benchmark
+Using Docker:
+```bash
+uv run tests/throughput/run.py
 ```
 
 ## Contributing

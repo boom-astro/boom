@@ -42,8 +42,8 @@ impl AlertConsumer for ZtfAlertConsumer {
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
-    fn survey(&self) -> Survey {
-        Survey::Ztf
+    fn survey(&self) -> &'static str {
+        Survey::Ztf.as_str()
     }
 }
 
