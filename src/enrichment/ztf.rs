@@ -11,7 +11,7 @@ use crate::{
     alert::ZtfCandidate,
     enrichment::{
         fetch_alert_cutouts, fetch_alerts,
-        models::{AcaiModel, BtsBotModel, Model, SharedModels},
+        models::{AcaiModel, BtsBotModel, MtanModel, Model, RtfModel, SharedModels},
         EnrichmentWorker, EnrichmentWorkerError,
     },
 };
@@ -375,6 +375,15 @@ pub struct ZtfAlertClassifications {
     pub btsbot: f32,
 }
 
+/// RTF + mTAN latent space embeddings computed during enrichment.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+pub struct ZtfAlertEmbeddings {
+    /// 128-dimensional RTF embedding (None if cutout was invalid)
+    pub rtf: Option<Vec<f32>>,
+    /// 2-dimensional mTAN embedding (None if insufficient photometry)
+    pub mtan: Option<Vec<f32>>,
+}
+
 /// Per-alert intermediate data used during enrichment processing.
 struct AlertWork {
     candid: i64,
@@ -516,25 +525,35 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 vec![None; work_items.len()]
             };
 
-        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
-            let update_alert_document = if let Some(ref cls) = classifications {
-                doc! { "$set": {
-                    "classifications": mongify(cls),
-                    "properties": mongify(&item.properties),
-                    "updated_at": now,
-                }}
+        // Compute RTF + mTAN embeddings
+        let embeddings_list: Vec<Option<ZtfAlertEmbeddings>> =
+            if let Some(ref models) = self.models {
+                self.compute_embeddings(&models, &work_items)
             } else {
-                doc! { "$set": {
-                    "properties": mongify(&item.properties),
-                    "updated_at": now,
-                }}
+                vec![None; work_items.len()]
             };
+
+        for ((item, classifications), embeddings) in work_items
+            .into_iter()
+            .zip(classifications_list)
+            .zip(embeddings_list)
+        {
+            let mut set_doc = doc! {
+                "properties": mongify(&item.properties),
+                "updated_at": now,
+            };
+            if let Some(ref cls) = classifications {
+                set_doc.insert("classifications", mongify(cls));
+            }
+            if let Some(ref emb) = embeddings {
+                set_doc.insert("embeddings", mongify(emb));
+            }
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
                     .filter(doc! {"_id": item.candid})
-                    .update(update_alert_document)
+                    .update(doc! { "$set": set_doc })
                     .build(),
             );
 
@@ -856,5 +875,60 @@ impl ZtfEnrichmentWorker {
         }
 
         Ok(results)
+    }
+
+    /// Compute RTF and mTAN embeddings for a batch of alerts.
+    /// Each model is run independently per alert; failures are logged and produce None.
+    fn compute_embeddings(
+        &self,
+        models: &SharedModels,
+        work_items: &[AlertWork],
+    ) -> Vec<Option<ZtfAlertEmbeddings>> {
+        let mut results = Vec::with_capacity(work_items.len());
+
+        for item in work_items {
+            // RTF embedding
+            let rtf_embedding = match RtfModel::prepare_features(&item.alert, &item.cutouts) {
+                Ok((x, pad_mask, images)) => {
+                    match models.rtf_embed.lock().unwrap().embed(&x, &pad_mask, &images) {
+                        Ok(emb) => Some(emb),
+                        Err(e) => {
+                            warn!("RTF inference failed for candid {}: {}", item.candid, e);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("RTF feature prep failed for candid {}: {}", item.candid, e);
+                    None
+                }
+            };
+
+            // mTAN embedding
+            let mtan_embedding = match MtanModel::prepare_features(&item.alert) {
+                Ok((x, time_steps, query_times)) => {
+                    match models
+                        .mtan_embed
+                        .lock()
+                        .unwrap()
+                        .embed_raw(&x, &time_steps, &query_times)
+                    {
+                        Ok(raw) => Some(MtanModel::pool_embedding(&raw, 50)),
+                        Err(e) => {
+                            warn!("mTAN inference failed for candid {}: {}", item.candid, e);
+                            None
+                        }
+                    }
+                }
+                Err(_) => None, // Insufficient photometry, silently skip
+            };
+
+            results.push(Some(ZtfAlertEmbeddings {
+                rtf: rtf_embedding,
+                mtan: mtan_embedding,
+            }));
+        }
+
+        results
     }
 }
