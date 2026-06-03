@@ -20,10 +20,6 @@ spec:
         # Downloads all ONNX model files from HuggingFace into a shared
         # emptyDir volume before the main scheduler container starts.
         # Models are loaded from /app/data/models/ at runtime.
-        #
-        # NOTE: The ACAI and BTSBot models should also be uploaded to
-        # the boom-astro/boomEncoders HuggingFace repository so they
-        # can be downloaded here alongside RTF and mTAN.
         - name: download-models
           image: curlimages/curl:8.7.1
           command:

@@ -3,7 +3,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     fetch_alerts,
-    models::{AcaiModel, BtsBotModel, MtanModel, Model, RtfModel, SharedModels},
+    models::{AcaiModel, BtsBotModel, Model, MtanModel, RtfModel, SharedModels},
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
@@ -527,12 +527,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             };
 
         // Compute RTF + mTAN embeddings
-        let embeddings_list: Vec<Option<ZtfAlertEmbeddings>> =
-            if let Some(ref models) = self.models {
-                self.compute_embeddings(&models, &work_items)
-            } else {
-                vec![None; work_items.len()]
-            };
+        let embeddings_list: Vec<Option<ZtfAlertEmbeddings>> = if let Some(ref models) = self.models
+        {
+            self.compute_embeddings(&models, &work_items)
+        } else {
+            vec![None; work_items.len()]
+        };
 
         for ((item, classifications), embeddings) in work_items
             .into_iter()
@@ -889,15 +889,19 @@ impl ZtfEnrichmentWorker {
         for item in work_items {
             // RTF embedding
             let rtf_embedding = match RtfModel::prepare_features(&item.alert, &item.cutouts) {
-                Ok((x, pad_mask, images)) => {
-                    match models.rtf_embed.lock().unwrap().embed(&x, &pad_mask, &images) {
+                Ok((x, pad_mask, images)) => match models.rtf_embed.lock() {
+                    Ok(mut model) => match model.embed(&x, &pad_mask, &images) {
                         Ok(emb) => Some(emb),
                         Err(e) => {
                             warn!("RTF inference failed for candid {}: {}", item.candid, e);
                             None
                         }
+                    },
+                    Err(e) => {
+                        warn!("RTF mutex poisoned for candid {}: {}", item.candid, e);
+                        None
                     }
-                }
+                },
                 Err(e) => {
                     warn!("RTF feature prep failed for candid {}: {}", item.candid, e);
                     None
@@ -906,27 +910,31 @@ impl ZtfEnrichmentWorker {
 
             // mTAN embedding
             let mtan_embedding = match MtanModel::prepare_features(&item.alert) {
-                Ok((x, time_steps, query_times)) => {
-                    match models
-                        .mtan_embed
-                        .lock()
-                        .unwrap()
-                        .embed_raw(&x, &time_steps, &query_times)
-                    {
+                Ok((x, time_steps, query_times)) => match models.mtan_embed.lock() {
+                    Ok(mut model) => match model.embed_raw(&x, &time_steps, &query_times) {
                         Ok(raw) => Some(MtanModel::pool_embedding(&raw, 50)),
                         Err(e) => {
                             warn!("mTAN inference failed for candid {}: {}", item.candid, e);
                             None
                         }
+                    },
+                    Err(e) => {
+                        warn!("mTAN mutex poisoned for candid {}: {}", item.candid, e);
+                        None
                     }
-                }
+                },
                 Err(_) => None, // Insufficient photometry, silently skip
             };
 
-            results.push(Some(ZtfAlertEmbeddings {
-                rtf: rtf_embedding,
-                mtan: mtan_embedding,
-            }));
+            // Only store embeddings if at least one model succeeded
+            if rtf_embedding.is_some() || mtan_embedding.is_some() {
+                results.push(Some(ZtfAlertEmbeddings {
+                    rtf: rtf_embedding,
+                    mtan: mtan_embedding,
+                }));
+            } else {
+                results.push(None);
+            }
         }
 
         results

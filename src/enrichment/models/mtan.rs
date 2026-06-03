@@ -161,6 +161,9 @@ impl MtanModel {
                 mask: [0.0, 0.0],
             };
 
+            // Within the merge window, later observations overwrite earlier ones
+            // for the same band (last-write-wins). This intentionally matches the
+            // Python training pipeline (fritz_to_mtan.py) for numerical consistency.
             let mut j = i;
             while j < points.len() && (points[j].jd - t).abs() <= MERGE_TOL_DAYS {
                 let band = points[j].band_idx;
@@ -215,10 +218,7 @@ impl MtanModel {
             .map(|mp| ((mp.jd - first_jd) * 24.0) as f32)
             .collect();
 
-        let max_time = times_hours
-            .iter()
-            .copied()
-            .fold(0.0f32, f32::max);
+        let max_time = times_hours.iter().copied().fold(0.0f32, f32::max);
 
         if max_time > 0.0 {
             for t in times_hours.iter_mut() {
