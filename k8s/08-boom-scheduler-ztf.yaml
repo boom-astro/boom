@@ -33,6 +33,16 @@ spec:
               set -e
               HF_BASE="https://huggingface.co/boom-astro/boomEncoders/resolve/main"
 
+              # ACAI classifiers (~35 KB each)
+              for variant in acai_h acai_n acai_v acai_o acai_b; do
+                echo "Downloading ${variant}.d1_dnn_20201130.onnx ..."
+                curl -fsSL "${HF_BASE}/${variant}.d1_dnn_20201130.onnx" -o "/models/${variant}.d1_dnn_20201130.onnx"
+              done
+
+              # BTSBot classifier (~900 KB)
+              echo "Downloading btsbot-v1.0.1.onnx ..."
+              curl -fsSL "${HF_BASE}/btsbot-v1.0.1.onnx" -o /models/btsbot-v1.0.1.onnx
+
               # RTF encoder (8.7 MB)
               echo "Downloading rtf_embed.onnx ..."
               curl -fsSL "${HF_BASE}/rtf_embed.onnx" -o /models/rtf_embed.onnx
