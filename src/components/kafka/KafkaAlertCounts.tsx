@@ -61,7 +61,7 @@ export default function KafkaAlertCounts({ topics, loading, error, splitByMatch 
         return (
           <Card key={survey}>
             <CardHeader>
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start justify-between flex-wrap gap-4">
                 <div>
                   <CardTitle>{survey.toUpperCase()}</CardTitle>
                   <CardDescription>
@@ -88,11 +88,11 @@ export default function KafkaAlertCounts({ topics, loading, error, splitByMatch 
                 const n = matched + noMatch;
                 const pct = total > 0 ? (n / total) * 100 : 0;
                 return (
-                  <div key={name} className="flex items-center gap-3">
+                  <div key={name} className="flex items-center flex-wrap gap-3">
                     <code className="text-xs text-muted-foreground w-64 shrink-0 truncate" title={name}>
                       {name}
                     </code>
-                    <div className="flex-1 h-5 rounded bg-muted overflow-hidden">
+                    <div className="flex-1 min-w-40 h-5 rounded bg-muted overflow-hidden">
                       <div className="h-full flex" style={{ width: `${pct}%` }}>
                         {splitByMatch ? (
                           <div className="h-full w-full" style={{ backgroundColor: isMatchTopic(name) ? MATCH_COLOR : NO_MATCH_COLOR }} />

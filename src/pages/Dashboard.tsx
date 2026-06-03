@@ -342,7 +342,7 @@ export default function Dashboard() {
         <CardHeader>
           <CardTitle>Alert Counts by Kafka Topic</CardTitle>
           <CardDescription>
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center flex-wrap gap-y-2">
               <div>
                 More information about the topics on the <a href="/docs/kafka" className="underline">Kafka documentation page</a>.
               </div>
