@@ -1,0 +1,99 @@
+##############################################
+# BOOM Scheduler ZTF — Deployment
+##############################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boom-scheduler-ztf
+  namespace: umn-babamul
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: boom-scheduler-ztf
+  template:
+    metadata:
+      labels:
+        app: boom-scheduler-ztf
+    spec:
+      initContainers:
+        # Downloads all ONNX model files from HuggingFace into a shared
+        # emptyDir volume before the main scheduler container starts.
+        # Models are loaded from /app/data/models/ at runtime.
+        #
+        # NOTE: The ACAI and BTSBot models should also be uploaded to
+        # the boom-astro/boomEncoders HuggingFace repository so they
+        # can be downloaded here alongside RTF and mTAN.
+        - name: download-models
+          image: curlimages/curl:8.7.1
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              HF_BASE="https://huggingface.co/boom-astro/boomEncoders/resolve/main"
+
+              # RTF encoder (8.7 MB)
+              echo "Downloading rtf_embed.onnx ..."
+              curl -fsSL "${HF_BASE}/rtf_embed.onnx" -o /models/rtf_embed.onnx
+
+              # mTAN encoder (383 KB)
+              echo "Downloading mtan_embed.onnx ..."
+              curl -fsSL "${HF_BASE}/mtan_embed.onnx" -o /models/mtan_embed.onnx
+
+              echo "All models downloaded."
+              ls -lh /models/
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: scheduler-ztf
+          image: ghcr.io/keshavmajithia/boom:latest
+          command: ["/app/scheduler", "ztf"]
+          env:
+            - name: BOOM_DATABASE__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: boom-secrets
+                  key: BOOM_DATABASE__PASSWORD
+            - name: BOOM_API__AUTH__SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: boom-secrets
+                  key: BOOM_API__AUTH__SECRET_KEY
+            - name: BOOM_API__AUTH__ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: boom-secrets
+                  key: BOOM_API__AUTH__ADMIN_PASSWORD
+            - name: BOOM_DATABASE__HOST
+              value: "mongo"
+            - name: BOOM_DATABASE__USERNAME
+              value: "mongoadmin"
+            - name: BOOM_REDIS__HOST
+              value: "valkey"
+            - name: BOOM_BABAMUL__ENABLED
+              value: "false"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+          volumeMounts:
+            - name: boom-config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: models
+              mountPath: /app/data/models
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+      volumes:
+        - name: boom-config
+          configMap:
+            name: boom-config
+        - name: models
+          emptyDir: {}
