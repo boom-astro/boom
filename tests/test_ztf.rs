@@ -1,10 +1,11 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use boom::{
     alert::{
         AlertWorker, ProcessAlertStatus, DECAM_DEC_RANGE, LSST_DEC_RANGE, ZTF_DECAM_XMATCH_RADIUS,
         ZTF_LSST_XMATCH_RADIUS,
     },
-    conf::get_test_db,
-    enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
+    conf::{get_test_cutout_storage, get_test_db},
+    enrichment::{EnrichmentWorker, EnrichmentWorkerError, ZtfEnrichmentWorker},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, Origin, ZtfFilterWorker},
     utils::{
         enums::Survey,
@@ -49,18 +50,12 @@ async fn test_process_ztf_alert() {
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);
 
     // check that the cutouts were inserted
-    let cutout_collection_name = "ZTF_alerts_cutouts";
-    let cutouts = db
-        .collection::<mongodb::bson::Document>(cutout_collection_name)
-        .find_one(filter.clone())
+    let cutout_storage = get_test_cutout_storage(&Survey::Ztf).await;
+    let cutouts = cutout_storage
+        .retrieve_cutouts(candid, false)
         .await
         .unwrap();
-    assert!(cutouts.is_some());
-    let cutouts = cutouts.unwrap();
-    assert_eq!(cutouts.get_i64("_id").unwrap(), candid);
-    assert!(cutouts.contains_key("cutoutScience"));
-    assert!(cutouts.contains_key("cutoutTemplate"));
-    assert!(cutouts.contains_key("cutoutDifference"));
+    assert_eq!(cutouts.candid, candid);
 
     // check that the aux collection was inserted
     let aux_collection_name = "ZTF_alerts_aux";
@@ -84,7 +79,9 @@ async fn test_process_ztf_alert() {
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert_eq!(fp_hists.len(), 10);
 
-    drop_alert_from_collections(candid, "ZTF").await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -412,6 +409,34 @@ async fn test_enrich_ztf_alert() {
     assert!((fading_rate - 0.063829).abs() < 1e-6);
     assert!(fading_red_chi2.is_nan()); // only 2 points after peak
     assert!((fading_dt - 7.956157).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_enrich_ztf_alert_missing_cutout() {
+    let mut alert_worker = ztf_alert_worker().await;
+
+    let (candid, _object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+    // Delete the cutout from storage to simulate a missing cutout
+    let cutout_storage = get_test_cutout_storage(&Survey::Ztf).await;
+    cutout_storage.delete_cutouts(candid).await.unwrap();
+
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
+    assert!(
+        matches!(result, Err(EnrichmentWorkerError::MissingCutouts(c)) if c == candid),
+        "Expected MissingCutouts({candid}), got: {:?}",
+        result
+    );
+
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

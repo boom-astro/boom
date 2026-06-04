@@ -4,13 +4,14 @@ mod tests {
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
     use boom::alert::{AlertWorker, ProcessAlertStatus};
-    use boom::api::auth::{babamul_auth_middleware, get_test_auth};
+    use boom::api::auth::{babamul_auth_middleware, get_test_auth, hash_token};
     use boom::api::db::get_test_db_api;
     use boom::api::email::EmailService;
     use boom::api::routes;
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
+    use boom::utils::cutouts::{AlertCutout, CutoutStorage};
     use boom::utils::enums::Survey;
     use boom::utils::testing::{
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
@@ -18,6 +19,7 @@ mod tests {
     };
     use mongodb::bson::doc;
     use mongodb::Database;
+    use std::collections::HashMap;
 
     /// Helper struct to manage test user lifecycle
     struct TestUser {
@@ -475,6 +477,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
         load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
@@ -482,27 +485,34 @@ mod tests {
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         // Insert test cutout data with unique ID
-        let cutouts_collection =
-            database.collection::<boom::alert::AlertCutout>("ZTF_alerts_cutouts");
-        let test_candid: i64 = uuid::Uuid::new_v4().as_u128() as i64;
+        let ztf_cutouts_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage");
+        let test_candid = uuid::Uuid::new_v4().as_u128() as i64;
 
-        let cutout = boom::alert::AlertCutout {
+        let cutouts = AlertCutout {
             candid: test_candid,
-            cutout_science: vec![1, 2, 3, 4, 5],
-            cutout_template: vec![6, 7, 8, 9, 10],
-            cutout_difference: vec![11, 12, 13, 14, 15],
+            cutout_science: vec![1, 2, 3],
+            cutout_template: vec![4, 5, 6],
+            cutout_difference: vec![7, 8, 9],
         };
 
-        cutouts_collection
-            .insert_one(&cutout)
+        ztf_cutouts_storage
+            .insert_cutouts(cutouts)
             .await
-            .expect("Failed to insert test cutout");
+            .expect("Failed to store test cutout");
+
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, ztf_cutouts_storage);
 
         let app = test::init_service(
             App::new().service(
                 actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(cutout_storage_map))
                     .wrap(from_fn(babamul_auth_middleware))
                     .service(routes::babamul::surveys::get_cutouts),
             ),
@@ -537,8 +547,11 @@ mod tests {
         );
 
         // Clean up
-        cutouts_collection
-            .delete_one(doc! { "_id": test_candid })
+        config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage for cleanup")
+            .delete_cutouts(test_candid)
             .await
             .expect("Failed to delete test cutout");
 
@@ -619,7 +632,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
     }
 
     /// Test GET /babamul/surveys/ztf/alerts
@@ -684,7 +699,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 
     /// Test GET /babamul/surveys/lsst/objects/{object_id}
@@ -744,7 +761,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
 
         // Test retrieval of non-existent object
         let req = test::TestRequest::get()
@@ -817,7 +836,9 @@ mod tests {
         );
 
         // Clean up
-        drop_alert_from_collections(candid, "ZTF").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
 
         // Test retrieval of non-existent object
         let req = test::TestRequest::get()
@@ -917,6 +938,221 @@ mod tests {
                 value
             );
         }
+    }
+
+    /// Test GET /babamul/objects with ra/dec/radius (cross-survey cone search)
+    #[actix_rt::test]
+    async fn test_get_objects_cone_search() {
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        // Random position away from poles so arcsec offsets are well-behaved
+        let ztf_ra: f64 = rng.random_range(10.0..350.0);
+        let ztf_dec: f64 = rng.random_range(-70.0..70.0);
+        // LSST object ~3 arcsec away in both axes
+        let offset_arcsec = 3.0_f64 / 3600.0;
+        let lsst_ra = ztf_ra + offset_arcsec;
+        let lsst_dec = ztf_dec + offset_arcsec;
+
+        // Ensure the 2dsphere index on coordinates.radec_geojson exists for both surveys
+        // so $nearSphere works regardless of test execution order.
+        boom::utils::db::initialize_survey_indexes(&Survey::Ztf, &database)
+            .await
+            .expect("Failed to initialize ZTF indexes");
+        boom::utils::db::initialize_survey_indexes(&Survey::Lsst, &database)
+            .await
+            .expect("Failed to initialize LSST indexes");
+
+        // Insert one ZTF and one LSST object close to each other
+        let ztf_aux: mongodb::Collection<boom::alert::ZtfObject> =
+            database.collection("ZTF_alerts_aux");
+        let lsst_aux: mongodb::Collection<boom::alert::LsstObject> =
+            database.collection("LSST_alerts_aux");
+
+        let ztf_id = format!("ZTF24conetest_{}", unique_suffix);
+        let lsst_id = format!("111{}", unique_suffix);
+
+        ztf_aux
+            .insert_one(boom::alert::ZtfObject {
+                object_id: ztf_id.clone(),
+                coordinates: Coordinates::new(ztf_ra, ztf_dec),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert ZTF test object");
+
+        lsst_aux
+            .insert_one(boom::alert::LsstObject {
+                object_id: lsst_id.clone(),
+                coordinates: Coordinates::new(lsst_ra, lsst_dec),
+                prv_candidates: vec![],
+                fp_hists: vec![],
+                is_sso: false,
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert LSST test object");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_objects),
+            ),
+        )
+        .await;
+
+        // Successful cone search: both objects should be returned (within 10 arcsec)
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?ra={}&dec={}&radius=10&limit=10",
+                ztf_ra, ztf_dec
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Cone search should succeed (error: {})",
+            read_str_response(resp).await
+        );
+
+        let body = read_json_response(resp).await;
+        let results = body["data"].as_array().expect("data should be an array");
+        let ids: Vec<&str> = results
+            .iter()
+            .filter_map(|r| r["objectId"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&ztf_id.as_str()),
+            "ZTF object should be in results"
+        );
+        assert!(
+            ids.contains(&lsst_id.as_str()),
+            "LSST object should be in results"
+        );
+
+        // Results must be sorted nearest-first
+        let distances: Vec<f64> = results
+            .iter()
+            .filter_map(|r| r["distance_arcsec"].as_f64())
+            .collect();
+        assert!(
+            distances.windows(2).all(|w| w[0] <= w[1]),
+            "Results should be sorted by distance ascending"
+        );
+
+        // Tiny radius — no objects expected
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?ra={}&dec={}&radius=0.001&limit=10",
+                ztf_ra + 1.0,
+                ztf_dec + 1.0
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["data"].as_array().unwrap().len(),
+            0,
+            "Should return no results for tiny radius far from test objects"
+        );
+
+        // Providing both object_id and ra/dec/radius should be rejected
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?object_id=ZTF24abc&ra={}&dec={}&radius=10",
+                ztf_ra, ztf_dec
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject both object_id and ra/dec/radius"
+        );
+
+        // Missing one of ra/dec/radius should be rejected
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/objects?ra={}&dec={}", ztf_ra, ztf_dec))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject incomplete position params (missing radius)"
+        );
+
+        // Invalid RA
+        let req = test::TestRequest::get()
+            .uri("/babamul/objects?ra=400&dec=0&radius=10")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject RA out of range"
+        );
+
+        // Invalid radius
+        let req = test::TestRequest::get()
+            .uri("/babamul/objects?ra=83&dec=-5&radius=700")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject radius > 600"
+        );
+
+        // No params at all should be rejected
+        let req = test::TestRequest::get()
+            .uri("/babamul/objects")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject request with no search params"
+        );
+
+        // Clean up
+        ztf_aux.delete_one(doc! { "_id": &ztf_id }).await.ok();
+        lsst_aux.delete_one(doc! { "_id": &lsst_id }).await.ok();
     }
 
     /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
@@ -2447,19 +2683,11 @@ mod tests {
 
     // ─── Password reset tests ─────────────────────────────────────────────────
 
-    /// Helper: compute the SHA-256 hex digest of a string (mirrors the production code).
-    fn sha256_hex(input: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(input.as_bytes());
-        format!("{:x}", h.finalize())
-    }
-
     /// Helper: insert a password-reset token directly into the DB for a user.
     async fn set_reset_token(database: &Database, user_id: &str, raw_token: &str, expires_at: i64) {
         let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
             database.collection("babamul_users");
-        let token_hash = sha256_hex(raw_token);
+        let token_hash = hash_token(raw_token);
         col.update_one(
             doc! { "_id": user_id },
             doc! {

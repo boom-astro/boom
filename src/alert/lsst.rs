@@ -1,13 +1,14 @@
 use crate::{
     alert::{
         base::{
-            AlertCutout, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
-            ProcessAlertStatus, SchemaRegistry,
+            AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly, ProcessAlertStatus,
+            SchemaRegistry,
         },
         decam, ztf, TimeSeries,
     },
     conf::{self, AppConfig, BoomConfigError},
     utils::{
+        cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
@@ -24,7 +25,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
-use tracing::{instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "LSST";
@@ -32,16 +33,65 @@ pub const LSST_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
 pub const LSST_POSITION_UNCERTAINTY: f64 = 0.1; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
-pub const ALERT_CUTOUT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_cutouts");
 
 pub const LSST_ZTF_XMATCH_RADIUS: f64 =
     (LSST_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 pub const LSST_DECAM_XMATCH_RADIUS: f64 =
     (LSST_POSITION_UNCERTAINTY.max(decam::DECAM_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
-pub const LSST_SCHEMA_REGISTRY_URL: &str = "https://usdf-alert-schemas-dev.slac.stanford.edu";
+pub const LSST_SCHEMA_REGISTRY_URL: &str =
+    "https://rubin-alert-schemas.slac.stanford.edu/schema-registry";
 pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
     "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema";
+
+/// Serde-with adapter that accepts both an Avro union (nullable field) and a plain Avro value
+/// (non-optional field), deserializing both into `Option<T>`. This preserves backwards
+/// compatibility when an Avro schema makes a previously-optional field mandatory, while our
+/// Rust structs keep the field as `Option<T>`.
+///
+/// Currently implemented for `visit_i32` only, covering the Avro `int` fields that went from
+/// optional to non-optional in LSST alert schema v10 → v11 (`long`/`i64` fields were
+/// unaffected). If future schema versions make other field types mandatory (e.g. `long`,
+/// `float`, `boolean`), extend this visitor with the corresponding `visit_*` method and apply
+/// `#[serde_as(deserialize_as = "FlexibleOption")]` to the newly affected fields.
+///
+/// Wire-format cases handled:
+///   Union(Null)   → visit_unit  → None
+///   Union(Int(n)) → visit_i32   → Some(n)   (v10: field was nullable)
+///   Int(n)        → visit_i32   → Some(n)   (v11: field is non-optional)
+struct FlexibleOption;
+
+struct FlexibleOptionVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for FlexibleOptionVisitor<T> {
+    type Value = Option<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an optional or plain Avro value")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, de: D) -> Result<Option<T>, D::Error> {
+        T::deserialize(de).map(Some)
+    }
+
+    fn visit_i32<E: serde::de::Error>(self, v: i32) -> Result<Option<T>, E> {
+        T::deserialize(serde::de::value::I32Deserializer::<E>::new(v)).map(Some)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> serde_with::DeserializeAs<'de, Option<T>> for FlexibleOption {
+    fn deserialize_as<D: Deserializer<'de>>(de: D) -> Result<Option<T>, D::Error> {
+        de.deserialize_any(FlexibleOptionVisitor(std::marker::PhantomData))
+    }
+}
 
 #[serde_as]
 #[skip_serializing_none]
@@ -110,6 +160,7 @@ pub struct DiaSource {
     pub psf_chi2: Option<f32>,
     /// The number of data points (pixels) used to fit the point source model.
     #[serde(rename = "psfNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub psf_ndata: Option<i32>,
     /// Failure to derive linear least-squares fit of psf model. Another psfFlux flag field should also be set to provide more information.
     #[serde(rename = "psfFlux_flag")]
@@ -155,6 +206,7 @@ pub struct DiaSource {
     pub trail_chi2: Option<f32>,
     /// The number of data points (pixels) used to fit the trailed source model.
     #[serde(rename = "trailNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub trail_ndata: Option<i32>,
     /// This flag is set if a trailed source extends onto or past edge pixels.
     pub trail_flag_edge: Option<bool>,
@@ -500,6 +552,7 @@ pub struct DiaObject {
     pub u_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute u_psfFluxChi2.
     #[serde(rename = "u_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub u_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for u filter.
     #[serde(rename = "u_fpFluxMean")]
@@ -518,6 +571,7 @@ pub struct DiaObject {
     pub g_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute g_psfFluxChi2.
     #[serde(rename = "g_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub g_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for g filter.
     #[serde(rename = "g_fpFluxMean")]
@@ -536,6 +590,7 @@ pub struct DiaObject {
     pub r_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute r_psfFluxChi2.
     #[serde(rename = "r_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub r_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for r filter.
     #[serde(rename = "r_fpFluxMean")]
@@ -554,6 +609,7 @@ pub struct DiaObject {
     pub i_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute i_psfFluxChi2.
     #[serde(rename = "i_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub i_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for i filter.
     #[serde(rename = "i_fpFluxMean")]
@@ -572,6 +628,7 @@ pub struct DiaObject {
     pub z_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute z_psfFluxChi2.
     #[serde(rename = "z_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub z_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for z filter.
     #[serde(rename = "z_fpFluxMean")]
@@ -590,6 +647,7 @@ pub struct DiaObject {
     pub y_psf_flux_chi2: Option<f32>,
     /// The number of data points used to compute y_psfFluxChi2.
     #[serde(rename = "y_psfFluxNdata")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
     pub y_psf_flux_ndata: Option<i32>,
     /// Weighted mean forced photometry flux for y filter.
     #[serde(rename = "y_fpFluxMean")]
@@ -894,8 +952,8 @@ pub struct LsstAlertWorker {
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
+    alert_cutout_storage: CutoutStorage,
     alert_aux_collection_update: mongodb::Collection<AlertAuxForUpdate>,
-    alert_cutout_collection: mongodb::Collection<AlertCutout>,
     ztf_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
 }
@@ -964,10 +1022,7 @@ impl LsstAlertWorker {
         .await
     }
 
-    #[instrument(
-        skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux),
-        err
-    )]
+    #[instrument(skip(self, prv_candidates, fp_hists, survey_matches, existing_alert_aux))]
     async fn update_aux_inner(
         &mut self,
         object_id: &str,
@@ -1031,9 +1086,13 @@ impl LsstAlertWorker {
             .await
         {
             Ok(_) => Ok(()),
-            Err(_) => {
+            Err(e) => {
                 // if we get a concurrent modification error or an error preparing the lightcurves update,
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                match &e {
+                    AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    _ => error!(error = %e),
+                }
                 self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
                     .await
             }
@@ -1080,8 +1139,11 @@ impl AlertWorker for LsstAlertWorker {
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Lsst)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
         let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_collection = db.collection(&ALERT_CUTOUT_COLLECTION);
 
         let ztf_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&ztf::ALERT_AUX_COLLECTION);
@@ -1099,8 +1161,8 @@ impl AlertWorker for LsstAlertWorker {
             db,
             alert_collection,
             alert_aux_collection,
+            alert_cutout_storage,
             alert_aux_collection_update,
-            alert_cutout_collection,
             ztf_alert_aux_collection,
             decam_alert_aux_collection,
         };
@@ -1148,19 +1210,23 @@ impl AlertWorker for LsstAlertWorker {
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
 
-        let cutout_status = self
-            .format_and_insert_cutouts(
-                candid,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_collection,
-            )
+        let alert = LsstAlert {
+            candid,
+            object_id: object_id.clone(),
+            ss_object_id: ss_object_id.clone(),
+            candidate,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
-        if let ProcessAlertStatus::Exists(_) = cutout_status {
-            return Ok(cutout_status);
+        if let ProcessAlertStatus::Exists(_) = status {
+            return Ok(status);
         }
 
         let survey_matches = Some(
@@ -1224,18 +1290,15 @@ impl AlertWorker for LsstAlertWorker {
             }
         }
 
-        let alert = LsstAlert {
-            candid,
-            object_id: object_id.clone(),
-            ss_object_id: ss_object_id,
-            candidate,
-            coordinates: Coordinates::new(ra, dec),
-            created_at: now,
-            updated_at: now,
-        };
-
         let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+            .format_and_insert_cutouts(
+                candid,
+                &object_id,
+                avro_alert.cutout_science,
+                avro_alert.cutout_template,
+                avro_alert.cutout_difference,
+                &self.alert_cutout_storage,
+            )
             .await
             .inspect_err(as_error!())?;
 
@@ -1489,6 +1552,53 @@ mod tests {
 
         assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 
-        drop_alert_from_collections(candid, "LSST").await.unwrap();
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_stored_and_retrievable() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        let parsed_alert: LsstRawAvroAlert = worker
+            .schema_registry
+            .alert_from_avro_bytes(&bytes_content)
+            .await
+            .unwrap();
+
+        let stored = worker
+            .alert_cutout_storage
+            .retrieve_cutouts(candid, false)
+            .await
+            .expect("cutout should be retrievable after process_alert");
+
+        assert_eq!(stored.candid, candid);
+        assert_eq!(stored.cutout_science, parsed_alert.cutout_science);
+        assert_eq!(stored.cutout_template, parsed_alert.cutout_template);
+        assert_eq!(stored.cutout_difference, parsed_alert.cutout_difference);
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+        let _ = object_id;
+    }
+
+    #[tokio::test]
+    async fn test_process_alert_cutout_deduplication() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, _object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Lsst).get().await;
+
+        let first = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(first, ProcessAlertStatus::Added(candid));
+
+        let second = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(second, ProcessAlertStatus::Exists(candid));
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
     }
 }
