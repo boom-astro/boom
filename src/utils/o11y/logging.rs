@@ -377,29 +377,57 @@ pub fn build_subscriber_with_otel(
             .boxed()
     });
 
-    // Collect the *present* optional layers into a `Vec` rather than attaching
-    // each `Option<Layer>` to the registry directly. This is a deliberate
-    // perf fix, not a style choice: `<Option<L> as Layer>::register_callsite`
-    // returns `Interest::always()` when the layer is `None` (see
-    // tracing-subscriber `layer/mod.rs`). Because the fmt layer uses a
-    // *per-layer* filter (`with_filter(env_filter)`), an `always()` from a
-    // sibling global layer prevents callsites from being cached as
-    // `Interest::never()` — so every disabled callsite (e.g. the `mongodb`
-    // driver's own `debug!`/`trace!` events, which `error,boom=debug` filters
-    // out) is re-evaluated through `EnvFilter::enabled` on *every* call instead
-    // of being statically skipped. That per-call cost scales with MongoDB
-    // operation volume, which is why it showed up as a ~25% throughput
-    // regression in the mongo-cutout test (CPU-bound) but not the s3 test
-    // (I/O-bound). An *empty* `Vec` layer returns `Interest::never()`, so when
-    // both optional layers are absent the registry behaves exactly as it did
-    // before observability was added.
-    let mut optional_layers: Vec<Box<dyn Layer<_> + Send + Sync>> = Vec::new();
-    optional_layers.extend(flame_layer);
-    optional_layers.extend(otel);
+    // Attach all layers as a single `Vec` in which every element carries its
+    // own per-layer filter: the fmt layer with `env_filter`, plus (when
+    // present) the otel layer with `otel_filter`. tracing-subscriber treats a
+    // `Vec` as per-layer filtered only when *all* of its elements are filtered,
+    // which lets it cache filtered-out callsites as `Interest::never()` rather
+    // than re-checking them on every event — important for hot, noisy callsites
+    // like the `mongodb` driver's own `debug!`/`trace!`.
+    //
+    // Keep the fmt layer inside this `Vec` rather than attaching the optional
+    // layers as separate unfiltered siblings of it. An unfiltered sibling
+    // breaks the caching above: an absent (empty) one reports `never()` for
+    // every callsite and suppresses all logs, and an `Option::None` one reports
+    // `always()` and forces a per-event filter re-check. Holding the fmt layer
+    // here keeps the `Vec` non-empty and avoids both.
+    let mut layers: Vec<Box<dyn Layer<_> + Send + Sync>> = Vec::new();
+    layers.push(fmt_layer.with_filter(env_filter).boxed());
+    layers.extend(flame_layer);
+    layers.extend(otel);
 
-    let subscriber = tracing_subscriber::registry()
-        .with(fmt_layer.with_filter(env_filter))
-        .with(optional_layers);
+    let subscriber = tracing_subscriber::registry().with(layers);
 
     Ok((Box::new(subscriber), guard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the throughput-test log suppression.
+    ///
+    /// `build_subscriber()` passes `tracer_provider = None`, so when
+    /// `BOOM_FLAME_FILE` is also unset (as in the throughput compose) there are
+    /// no optional layers. A previous implementation attached an *empty* `Vec`
+    /// as a global sibling of the fmt layer; because that sibling has no
+    /// per-layer filter and its `register_callsite` returns `Interest::never()`,
+    /// `Layered::pick_interest` short-circuited and cached *every* callsite as
+    /// disabled — silently dropping all logs. The throughput harness waits for
+    /// the consumer to log "Consumer received first message, continuing..." and
+    /// timed out because that line (and every other) was suppressed.
+    #[test]
+    fn boom_events_enabled_without_optional_layers() {
+        std::env::remove_var("BOOM_FLAME_FILE");
+
+        let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            assert!(
+                tracing::enabled!(target: "boom", tracing::Level::INFO),
+                "boom INFO events must stay enabled when no optional layers are present"
+            );
+        });
+    }
 }
