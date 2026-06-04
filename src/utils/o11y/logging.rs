@@ -377,10 +377,29 @@ pub fn build_subscriber_with_otel(
             .boxed()
     });
 
+    // Collect the *present* optional layers into a `Vec` rather than attaching
+    // each `Option<Layer>` to the registry directly. This is a deliberate
+    // perf fix, not a style choice: `<Option<L> as Layer>::register_callsite`
+    // returns `Interest::always()` when the layer is `None` (see
+    // tracing-subscriber `layer/mod.rs`). Because the fmt layer uses a
+    // *per-layer* filter (`with_filter(env_filter)`), an `always()` from a
+    // sibling global layer prevents callsites from being cached as
+    // `Interest::never()` — so every disabled callsite (e.g. the `mongodb`
+    // driver's own `debug!`/`trace!` events, which `error,boom=debug` filters
+    // out) is re-evaluated through `EnvFilter::enabled` on *every* call instead
+    // of being statically skipped. That per-call cost scales with MongoDB
+    // operation volume, which is why it showed up as a ~25% throughput
+    // regression in the mongo-cutout test (CPU-bound) but not the s3 test
+    // (I/O-bound). An *empty* `Vec` layer returns `Interest::never()`, so when
+    // both optional layers are absent the registry behaves exactly as it did
+    // before observability was added.
+    let mut optional_layers: Vec<Box<dyn Layer<_> + Send + Sync>> = Vec::new();
+    optional_layers.extend(flame_layer);
+    optional_layers.extend(otel);
+
     let subscriber = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))
-        .with(flame_layer)
-        .with(otel);
+        .with(optional_layers);
 
     Ok((Box::new(subscriber), guard))
 }
