@@ -1,8 +1,12 @@
-use crate::{conf, utils::o11y::logging::as_error};
+use crate::{
+    api::catalogs::WATCHLIST_PREFIX,
+    conf,
+    utils::{enums::Survey, o11y::logging::as_error},
+};
 use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
 use itertools::Itertools;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Bson};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{instrument, warn};
@@ -21,6 +25,12 @@ pub enum XmatchError {
     NullDistanceMaxNear,
     #[error("failed to convert the bson data into a document")]
     AsDocumentError,
+}
+
+/// Field on a watchlist catalog document under which we record the alert
+/// object_ids of each survey that crossmatched against it.
+fn watchlist_match_field(survey: &Survey) -> String {
+    format!("matching_{}_objects", survey.to_string().to_lowercase())
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -79,6 +89,8 @@ fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
 pub async fn xmatch(
     ra: f64,
     dec: f64,
+    object_id: &str,
+    survey: &Survey,
     xmatch_configs: &Vec<conf::CatalogXmatchConfig>,
     db: &mongodb::Database,
 ) -> Result<HashMap<String, Vec<mongodb::bson::Document>>, XmatchError> {
@@ -311,6 +323,39 @@ pub async fn xmatch(
                 .get_mut(catalog)
                 .unwrap()
                 .extend(matches_filtered);
+        }
+    }
+
+    // Watchlist catalogs are kept out of the alert _aux.cross_matches (they
+    // would otherwise leak through the API). Instead, we record the alert's
+    // object_id on each matched watchlist document under a per-survey field.
+    let watchlist_catalogs: Vec<String> = xmatch_results
+        .keys()
+        .filter(|name| name.starts_with(WATCHLIST_PREFIX))
+        .cloned()
+        .collect();
+    if !watchlist_catalogs.is_empty() {
+        let field = watchlist_match_field(survey);
+        for catalog in watchlist_catalogs {
+            let matches = xmatch_results.remove(&catalog).unwrap_or_default();
+            if matches.is_empty() {
+                continue;
+            }
+            let matched_ids: Vec<Bson> = matches
+                .iter()
+                .filter_map(|m| m.get("_id").cloned())
+                .collect();
+            if matched_ids.is_empty() {
+                continue;
+            }
+            let collection: mongodb::Collection<mongodb::bson::Document> = db.collection(&catalog);
+            collection
+                .update_many(
+                    doc! { "_id": { "$in": &matched_ids } },
+                    doc! { "$addToSet": { &field: object_id } },
+                )
+                .await
+                .inspect_err(as_error!("failed to record watchlist crossmatch"))?;
         }
     }
 

@@ -458,7 +458,15 @@ impl AlertWorker for DecamAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Decam,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
             let obj = DecamObject {
                 object_id: object_id.clone(),
                 prv_candidates,

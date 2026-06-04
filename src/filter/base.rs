@@ -582,8 +582,9 @@ pub struct Filter {
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
     /// Optional watchlist catalog name (must start with "watchlist_"). When set,
-    /// a `$match` on `cross_matches.<watchlist>.0` is injected at load time, and
-    /// all matches are routed to a private Kafka topic equal to this catalog name.
+    /// a `$lookup` against the watchlist catalog is injected at load time so the
+    /// filter only sees alerts whose `objectId` is recorded in the watchlist
+    /// document's `matching_<survey>_objects` array.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchlist: Option<String>,
     pub survey: Survey,
@@ -599,10 +600,6 @@ pub struct LoadedFilter {
     pub name: String,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
-    /// Kafka topic this filter publishes to. Resolved at load time:
-    /// `filter.watchlist` if the filter is bound to a watchlist, otherwise the
-    /// worker's default topic. Always concrete — no per-routing fallback needed.
-    pub output_topic: String,
 }
 
 /// Retrieves an active filter from the database.
@@ -699,7 +696,6 @@ pub async fn build_filter_pipeline(
 /// # Arguments
 /// * `filter_id` - The ID of the filter to load.
 /// * `survey` - The survey type, from crate::utils::enums::Survey.
-/// * `default_topic` - Kafka topic to assign when the filter is not bound to a watchlist.
 /// * `filter_collection` - The MongoDB collection containing filter documents.
 ///
 /// # Returns
@@ -708,7 +704,6 @@ pub async fn build_filter_pipeline(
 pub async fn build_loaded_filter(
     filter_id: &str,
     survey: &Survey,
-    default_topic: &str,
     filter_collection: &mongodb::Collection<Filter>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
@@ -757,7 +752,6 @@ pub async fn build_loaded_filter(
 /// # Arguments
 /// * `filter_ids` - An optional vector of filter IDs to load. If None, all active filters are loaded.
 /// * `survey` - The survey type, from crate::utils::enums::Survey.
-/// * `default_topic` - Kafka topic assigned to filters that are not bound to a watchlist.
 /// * `filter_collection` - The MongoDB collection containing filter documents.
 ///
 /// # Returns
@@ -766,7 +760,6 @@ pub async fn build_loaded_filter(
 pub async fn build_loaded_filters(
     filter_ids: &Option<Vec<String>>,
     survey: &Survey,
-    default_topic: &str,
     filter_collection: &mongodb::Collection<Filter>,
 ) -> Result<Vec<LoadedFilter>, FilterError> {
     let all_filter_ids: Vec<String> = filter_collection
@@ -795,7 +788,7 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        match build_loaded_filter(&filter_id, survey, default_topic, filter_collection).await {
+        match build_loaded_filter(&filter_id, survey, filter_collection).await {
             Ok(filter) => filters.push(filter),
             Err(err) => {
                 warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);
@@ -857,72 +850,10 @@ pub trait FilterWorker {
         Self: Sized;
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError>;
     fn input_queue_name(&self) -> String;
+    fn output_topic_name(&self) -> String;
     fn has_filters(&self) -> bool;
     fn survey() -> Survey;
-    /// Returns the matched alerts already grouped by destination Kafka topic.
-    /// Implementations route via each filter's `LoadedFilter.output_topic`
-    /// (Some = watchlist topic, None = the worker's default topic).
-    async fn process_alerts(
-        &mut self,
-        alerts: &[String],
-    ) -> Result<HashMap<String, Vec<Alert>>, FilterWorkerError>;
-}
-
-/// Helper used by per-survey FilterWorker implementations: takes a flat list of
-/// matched alerts and groups them per destination topic. The topic for each
-/// FilterResults is read from the corresponding LoadedFilter's `output_topic`,
-/// which has already been resolved at load time (default vs watchlist). In the
-/// common case (one matched filter) the alert is moved into the map without a
-/// clone.
-pub fn group_alerts_by_topic(
-    alerts: Vec<Alert>,
-    filters: &[LoadedFilter],
-) -> HashMap<String, Vec<Alert>> {
-    // Build the filter_id -> topic lookup once per batch instead of doing a
-    // linear scan for every FilterResults of every alert.
-    let topic_by_filter_id: HashMap<&str, &str> = filters
-        .iter()
-        .map(|f| (f.id.as_str(), f.output_topic.as_str()))
-        .collect();
-
-    let mut out: HashMap<String, Vec<Alert>> = HashMap::new();
-    for mut alert in alerts {
-        let mut alert_by_topic: HashMap<String, Vec<FilterResults>> = HashMap::new();
-        for fr in &alert.filters {
-            let topic = match topic_by_filter_id.get(fr.filter_id.as_str()) {
-                Some(t) => t.to_string(),
-                None => {
-                    // Cannot happen unless the loaded-filter list was mutated
-                    // between match-time and routing-time; emit a loud warning
-                    // rather than silently swallowing the alert.
-                    warn!(
-                        "filter_id {} produced a match but is not in the loaded \
-                         filter list — skipping this match",
-                        fr.filter_id
-                    );
-                    continue;
-                }
-            };
-            alert_by_topic.entry(topic).or_default().push(fr.clone());
-        }
-        if alert_by_topic.is_empty() {
-            continue;
-        }
-        if alert_by_topic.len() == 1 {
-            // Fast path: consume the alert without cloning.
-            let (topic, filters) = alert_by_topic.into_iter().next().unwrap();
-            alert.filters = filters;
-            out.entry(topic).or_default().push(alert);
-        } else {
-            // Slow path: alert lands on multiple topics, clone for each.
-            for (topic, filters) in alert_by_topic {
-                let mut copy = alert.clone();
-                copy.filters = filters;
-                out.entry(topic).or_default().push(copy);
-            }
-        }
-    }
-    out
+    async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError>;
 }
 
 #[tokio::main]
@@ -1055,8 +986,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        let alerts_by_topic = match filter_worker.process_alerts(&alerts).await {
-            Ok(by_topic) => by_topic,
+        let matched_alerts = match filter_worker.process_alerts(&alerts).await {
+            Ok(matched) => matched,
             Err(error) => {
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
                 ACTIVE.add(-1, &active_attrs);
@@ -1064,37 +995,33 @@ pub async fn run_filter_worker<T: FilterWorker>(
             }
         };
 
-        let total_emitted: usize = alerts_by_topic.values().map(|v| v.len()).sum();
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(
-            alerts.len().saturating_sub(total_emitted) as u64,
+            alerts.len().saturating_sub(matched_alerts.len()) as u64,
             &ok_excluded_attrs,
         );
 
+        let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
         let mut enqueue_error = None;
-        // `outer label allows us to break out of both loops at once using "break `outer"
-        'outer: for (topic, alerts) in &alerts_by_topic {
-            for alert in alerts {
-                match send_alert_to_kafka(alert, &schema, &producer, topic).await {
-                    Ok(delivery_future) => {
-                        delivery_futures.push(delivery_future);
-                        total_enqueued += 1;
-                    }
-                    Err(error) => {
-                        ALERT_PROCESSED.add(1, &output_error_attrs);
-                        enqueue_error = Some(error);
-                        break 'outer;
-                    }
+        for alert in &matched_alerts {
+            match send_alert_to_kafka(alert, &schema, &producer, &output_topic).await {
+                Ok(delivery_future) => {
+                    delivery_futures.push(delivery_future);
+                    total_enqueued += 1;
+                }
+                Err(error) => {
+                    ALERT_PROCESSED.add(1, &output_error_attrs);
+                    enqueue_error = Some(error);
+                    break;
                 }
             }
         }
 
         debug!(
-            "Enqueued total of {} alerts across {} Kafka topics",
-            total_enqueued,
-            alerts_by_topic.len()
+            "Enqueued total of {} alerts to Kafka topic {}",
+            total_enqueued, output_topic
         );
 
         // Wait for all futures to complete and check for errors

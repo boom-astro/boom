@@ -1183,7 +1183,15 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Lsst,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
             let obj = LsstObject {
                 object_id: object_id.clone(),
                 prv_candidates,

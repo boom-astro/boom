@@ -23,7 +23,7 @@ struct Cli {
     description: String,
     #[arg(
         long,
-        help = "Optional watchlist catalog name to bind the filter to (must start with 'watchlist_'). Output is routed to a private Kafka topic of the same name."
+        help = "Optional watchlist catalog name to bind the filter to (must start with 'watchlist_')."
     )]
     watchlist: Option<String>,
 }
