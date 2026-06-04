@@ -716,32 +716,37 @@ pub async fn build_loaded_filter(
         return Err(FilterError::InvalidFilterPermissions);
     }
 
-    let mut pipeline = get_active_filter_pipeline(&filter)?;
+    let pipeline = get_active_filter_pipeline(&filter)?;
+    let mut pipeline =
+        build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
-    // If the filter is bound to a watchlist, inject a $match stage in the pipeline
-    // to only keep alerts that have a match in the corresponding watchlist catalog.
+    // If bound to a watchlist, keep only alerts whose objectId is in the
+    // watchlist's `matching_<survey>_objects` array. Injected after the initial
+    // $match + $project (so objectId is available) and after build (so the
+    // $lookup bypasses the user-pipeline validator that forbids it).
     if let Some(watchlist) = filter.watchlist.as_deref() {
-        pipeline.insert(
-            0,
-            serde_json::json!({
-                "$match": {
-                    format!("cross_matches.{}.0", watchlist): { "$exists": true }
-                }
-            }),
-        );
+        let foreign_field = format!("matching_{}_objects", survey.to_string().to_lowercase());
+        let lookup = doc! {
+            "$lookup": {
+                "from": watchlist,
+                "localField": "objectId",
+                "foreignField": &foreign_field,
+                "as": "_watchlist_match",
+            }
+        };
+        let match_stage = doc! {
+            "$match": { "_watchlist_match.0": { "$exists": true } }
+        };
+        let insert_at = pipeline.len().min(2);
+        pipeline.insert(insert_at, lookup);
+        pipeline.insert(insert_at + 1, match_stage);
     }
 
-    let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
-
-    let output_topic = filter
-        .watchlist
-        .unwrap_or_else(|| default_topic.to_string());
     let loaded = LoadedFilter {
         id: filter.id.clone(),
         name: filter.name.clone(),
         pipeline,
         permissions: filter.permissions,
-        output_topic,
     };
     Ok(loaded)
 }
