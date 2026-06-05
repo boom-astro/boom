@@ -115,20 +115,18 @@ jobs:
             echo "link=_no successful main run found_" >> "$GITHUB_OUTPUT"
           fi
       - name: Download Mongo baseline logs
+        if: steps.baseline.outputs.run_id != ''
         uses: dawidd6/action-download-artifact@v11
         with:
-          workflow: test-throughput.yaml
-          branch: main
           run_id: ${{ steps.baseline.outputs.run_id }}
           name: throughput-logs-mongo
           path: ./mongo/baseline
           if_no_artifact_found: warn
         continue-on-error: true
       - name: Download S3 baseline logs
+        if: steps.baseline.outputs.run_id != ''
         uses: dawidd6/action-download-artifact@v11
         with:
-          workflow: test-throughput.yaml
-          branch: main
           run_id: ${{ steps.baseline.outputs.run_id }}
           name: throughput-logs-s3
           path: ./s3/baseline
