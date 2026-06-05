@@ -95,11 +95,31 @@ jobs:
         with:
           name: throughput-logs-s3
           path: ./s3/current
+      - name: Resolve baseline run
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The baseline is the artifacts from the most recent *successful* run
+          # of this workflow on main (the same selection dawidd6 makes by
+          # default). Resolve it explicitly so we can both pin the downloads
+          # below to it and link to it from the PR comment, guaranteeing the
+          # link matches the artifacts actually used.
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow test-throughput.yaml --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          if [ -n "$run_id" ]; then
+            echo "link=[\`$run_id\`](https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id)" >> "$GITHUB_OUTPUT"
+          else
+            echo "link=_no successful main run found_" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download Mongo baseline logs
         uses: dawidd6/action-download-artifact@v11
         with:
           workflow: test-throughput.yaml
           branch: main
+          run_id: ${{ steps.baseline.outputs.run_id }}
           name: throughput-logs-mongo
           path: ./mongo/baseline
           if_no_artifact_found: warn
@@ -109,6 +129,7 @@ jobs:
         with:
           workflow: test-throughput.yaml
           branch: main
+          run_id: ${{ steps.baseline.outputs.run_id }}
           name: throughput-logs-s3
           path: ./s3/baseline
           if_no_artifact_found: warn
@@ -159,6 +180,8 @@ jobs:
           body: |
             Throughput results (`${{ github.sha }}`):
             ${{ steps.aggregate.outputs.table }}
+
+            Baseline: ${{ steps.baseline.outputs.link }}
           edit-mode: replace
       - name: Fail if wall time increased too much (PR only)
         run: |
