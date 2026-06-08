@@ -11,8 +11,9 @@ use crate::enrichment::{
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
     parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
-    FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -588,6 +589,9 @@ pub struct ZtfFilterWorker {
     filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
     filters_by_permission: HashMap<i32, Vec<String>>,
+    /// watchlist catalog name -> config projection, used to surface watchlist
+    /// fields under `annotations.watchlist` when a filter is bound to one.
+    watchlist_projections: HashMap<String, Document>,
 }
 
 #[async_trait::async_trait]
@@ -606,7 +610,14 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Ztf, &filter_collection).await?;
+        let watchlist_projections = watchlist_projections(&config, &Survey::Ztf);
+        let filters = build_loaded_filters(
+            &filter_ids,
+            &Survey::Ztf,
+            &filter_collection,
+            &watchlist_projections,
+        )
+        .await?;
 
         // Create a hashmap of filters per programid (permissions)
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
@@ -629,13 +640,19 @@ impl FilterWorker for ZtfFilterWorker {
             filter_ids,
             filters,
             filters_by_permission,
+            watchlist_projections,
         })
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing ZTF filters from database");
-        let filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Ztf, &self.filter_collection).await?;
+        let filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Ztf,
+            &self.filter_collection,
+            &self.watchlist_projections,
+        )
+        .await?;
 
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {

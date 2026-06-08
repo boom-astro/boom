@@ -29,7 +29,7 @@ pub enum XmatchError {
 
 /// Field on a watchlist catalog document under which we record the alert
 /// object_ids of each survey that crossmatched against it.
-fn watchlist_match_field(survey: &Survey) -> String {
+pub fn watchlist_match_field(survey: &Survey) -> String {
     format!("matching_{}_objects", survey.to_string().to_lowercase())
 }
 

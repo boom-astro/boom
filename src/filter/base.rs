@@ -1,4 +1,5 @@
 use crate::{
+    api::catalogs::WATCHLIST_PREFIX,
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
     scheduler::record_kafka_alert_published,
@@ -710,6 +711,7 @@ pub async fn build_loaded_filter(
     filter_id: &str,
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
+    watchlist_projections: &HashMap<String, Document>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
     if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
@@ -725,26 +727,39 @@ pub async fn build_loaded_filter(
     let mut pipeline =
         build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
-    // If bound to a watchlist, keep only alerts whose objectId is in the
-    // watchlist's `matching_<survey>_objects` array. Injected after the initial
-    // $match + $project (so objectId is available) and after build (so the
-    // $lookup bypasses the user-pipeline validator that forbids it).
+    // If bound to a watchlist, keep only alerts matching its
+    // `matching_<survey>_objects` array.
     if let Some(watchlist) = filter.watchlist.as_deref() {
         let foreign_field = format!("matching_{}_objects", survey.to_string().to_lowercase());
-        let lookup = doc! {
+        pipeline.push(doc! {
             "$lookup": {
                 "from": watchlist,
                 "localField": "objectId",
                 "foreignField": &foreign_field,
                 "as": "_watchlist_match",
             }
-        };
-        let match_stage = doc! {
+        });
+        pipeline.push(doc! {
             "$match": { "_watchlist_match.0": { "$exists": true } }
-        };
-        let insert_at = pipeline.len().min(2);
-        pipeline.insert(insert_at, lookup);
-        pipeline.insert(insert_at + 1, match_stage);
+        });
+
+        // Surface the matched watchlist docs (projected to the configured fields)
+        // under `annotations.watchlist` as an array.
+        if let Some(projection) = watchlist_projections.get(watchlist) {
+            let mut projected_fields = Document::new();
+            for key in projection.keys() {
+                projected_fields.insert(key.clone(), format!("$$w.{}", key));
+            }
+            let watchlist_array = doc! {
+                "$map": {
+                    "input": "$_watchlist_match",
+                    "as": "w",
+                    "in": projected_fields,
+                }
+            };
+            pipeline.push(doc! { "$set": { "annotations.watchlist": watchlist_array } });
+            pipeline.push(doc! { "$unset": "_watchlist_match" });
+        }
     }
 
     let loaded = LoadedFilter {
@@ -754,6 +769,21 @@ pub async fn build_loaded_filter(
         permissions: filter.permissions,
     };
     Ok(loaded)
+}
+
+/// Build the map of watchlist catalog name -> config projection for a survey.
+/// Only catalogs whose name starts with the watchlist prefix are included; the
+/// projection lists which watchlist-document fields a bound filter surfaces
+/// under `annotations.watchlist`.
+pub fn watchlist_projections(config: &AppConfig, survey: &Survey) -> HashMap<String, Document> {
+    config
+        .crossmatch
+        .get(survey)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.catalog.starts_with(WATCHLIST_PREFIX))
+        .map(|c| (c.catalog.clone(), c.projection.clone()))
+        .collect()
 }
 
 /// Builds a vector of LoadedFilter objects for the specified filter IDs and survey.
@@ -771,6 +801,7 @@ pub async fn build_loaded_filters(
     filter_ids: &Option<Vec<String>>,
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
+    watchlist_projections: &HashMap<String, Document>,
 ) -> Result<Vec<LoadedFilter>, FilterError> {
     let all_filter_ids: Vec<String> = filter_collection
         .distinct("_id", doc! {"active": true, "survey": survey.to_string()})
@@ -798,7 +829,9 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        match build_loaded_filter(&filter_id, survey, filter_collection).await {
+        match build_loaded_filter(&filter_id, survey, filter_collection, watchlist_projections)
+            .await
+        {
             Ok(filter) => filters.push(filter),
             Err(err) => {
                 warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);

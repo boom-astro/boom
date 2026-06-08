@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 
 use boom::{
+    api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
         data::make_progress_bar,
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
-            cm_radius_arcsec, distance_kpc_from_arcsec, get_f64_from_doc, xmatch, Coordinates,
+            cm_radius_arcsec, distance_kpc_from_arcsec, get_f64_from_doc, watchlist_match_field,
+            xmatch, Coordinates,
         },
     },
 };
@@ -30,6 +32,12 @@ const QUEUE_MULTIPLIER: usize = 2;
 /// `crossmatch.<survey>` in config.yaml leaves pre-existing alerts_aux records with
 /// no entry for it, so this binary fills in those gaps. It can also be used to reprocess existing
 /// crossmatches if the matching parameters (e.g. radius) for a catalog are changed.
+///
+/// Watchlist catalogs (name prefixed with `watchlist_`) are handled differently: instead of
+/// writing onto `alerts_aux.cross_matches`, ingestion records the matching alert object_ids on
+/// the watchlist document itself under `matching_<survey>_objects`. For those, this binary loops
+/// over the (small) watchlist entries and `$addToSet`s the object_ids of every alerts_aux record
+/// within radius. `$addToSet` is idempotent, so re-running is safe and concurrent with live ingest.
 #[derive(Parser)]
 struct Cli {
     #[arg(long, value_enum)]
@@ -165,11 +173,11 @@ async fn objects_worker(
     while let Ok(item) = rx.recv().await {
         batch.push(item);
         if batch.len() >= batch_size {
-            flush_objects_batch(&db, &client, &aux_ns, &catalogs, &mut batch, &pb).await?;
+            flush_objects_batch(&db, &client, &aux_ns, &survey, &catalogs, &mut batch, &pb).await?;
         }
     }
     if !batch.is_empty() {
-        flush_objects_batch(&db, &client, &aux_ns, &catalogs, &mut batch, &pb).await?;
+        flush_objects_batch(&db, &client, &aux_ns, &survey, &catalogs, &mut batch, &pb).await?;
     }
     Ok(())
 }
@@ -178,6 +186,7 @@ async fn flush_objects_batch(
     db: &mongodb::Database,
     client: &mongodb::Client,
     aux_ns: &Namespace,
+    survey: &Survey,
     catalogs: &[CatalogXmatchConfig],
     batch: &mut Vec<AuxIdAndCoords>,
     pb: &ProgressBar,
@@ -185,7 +194,7 @@ async fn flush_objects_batch(
     let mut writes = Vec::with_capacity(batch.len());
     for obj in batch.drain(..) {
         let (ra, dec) = obj.coordinates.get_radec();
-        let xmatches = match xmatch(ra, dec, catalogs, db).await {
+        let xmatches = match xmatch(ra, dec, &obj.object_id, survey, catalogs, db).await {
             Ok(r) => r,
             Err(e) => {
                 warn!(object_id = %obj.object_id, error = %e, "xmatch failed, skipping");
@@ -210,6 +219,152 @@ async fn flush_objects_batch(
     if !writes.is_empty() {
         client.bulk_write(writes).await?;
     }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// watchlist-driven: stream the (small) watchlist entries, fan out to N workers
+// that geo-lookup every alerts_aux record within radius and `$addToSet` their
+// object_ids onto the watchlist document under `matching_<survey>_objects`.
+// This mirrors the side effect ingestion's xmatch() performs, but for records
+// that already existed in the DB when the watchlist was added. `$addToSet` is
+// idempotent so re-running is safe and never races with live ingest.
+// -----------------------------------------------------------------------------
+async fn run_watchlist_driven(
+    survey: &Survey,
+    watchlist_config: CatalogXmatchConfig,
+    db: mongodb::Database,
+    batch_size: usize,
+    processes: usize,
+) -> Result<(), mongodb::error::Error> {
+    let wl_collection: mongodb::Collection<Document> = db.collection(&watchlist_config.catalog);
+    let estimated = wl_collection.estimated_document_count().await.unwrap_or(0);
+    let pb = make_progress_bar(estimated, format!("watchlist→{}", watchlist_config.catalog));
+
+    let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
+    let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
+
+    let mut workers = Vec::with_capacity(processes);
+    for _ in 0..processes {
+        let rx = rx.clone();
+        let pb = pb.clone();
+        let survey = survey.clone();
+        let db = db.clone();
+        let watchlist_config = watchlist_config.clone();
+        workers.push(tokio::spawn(async move {
+            watchlist_worker(survey, db, watchlist_config, rx, pb).await
+        }));
+    }
+    drop(rx);
+
+    // Only `_id` and `coordinates` are needed: coordinates.radec_geojson is
+    // guaranteed present (ingestion's geo match relies on it).
+    let mut cursor = wl_collection
+        .find(doc! {})
+        .projection(doc! { "_id": 1, "coordinates": 1 })
+        .no_cursor_timeout(true)
+        .await?;
+    while let Some(d) = cursor.try_next().await? {
+        if tx.send(d).await.is_err() {
+            break;
+        }
+    }
+    drop(tx);
+
+    let mut first_err: Option<mongodb::error::Error> = None;
+    for h in workers {
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("worker failed: {}", e);
+                first_err.get_or_insert(e);
+            }
+            Err(e) => {
+                error!("worker join failed: {}", e);
+            }
+        }
+    }
+    pb.finish();
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(())
+}
+
+async fn watchlist_worker(
+    survey: Survey,
+    db: mongodb::Database,
+    watchlist_config: CatalogXmatchConfig,
+    rx: async_channel::Receiver<Document>,
+    pb: ProgressBar,
+) -> Result<(), mongodb::error::Error> {
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
+    let wl_collection: mongodb::Collection<Document> = db.collection(&watchlist_config.catalog);
+    let field = watchlist_match_field(&survey);
+
+    while let Ok(wl_doc) = rx.recv().await {
+        pb.inc(1);
+        if let Err(e) = process_watchlist_doc(
+            &aux_collection,
+            &wl_collection,
+            &watchlist_config,
+            &field,
+            &wl_doc,
+        )
+        .await
+        {
+            warn!(error = %e, "watchlist row processing failed, skipping");
+        }
+    }
+    Ok(())
+}
+
+async fn process_watchlist_doc(
+    aux_collection: &mongodb::Collection<Document>,
+    wl_collection: &mongodb::Collection<Document>,
+    watchlist_config: &CatalogXmatchConfig,
+    field: &str,
+    wl_doc: &Document,
+) -> Result<(), mongodb::error::Error> {
+    let wl_id = match wl_doc.get("_id") {
+        Some(v) => v.clone(),
+        None => return Ok(()),
+    };
+    let (wl_ra, wl_dec) = match extract_radec(wl_doc) {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    let wl_ra_geojson = wl_ra - 180.0;
+    let aux_filter = doc! {
+        "coordinates.radec_geojson": {
+            "$geoWithin": {
+                "$centerSphere": [[wl_ra_geojson, wl_dec], watchlist_config.radius]
+            }
+        },
+    };
+    let mut aux_cursor = aux_collection
+        .find(aux_filter)
+        .projection(doc! { "_id": 1 })
+        .await?;
+
+    let mut object_ids: Vec<mongodb::bson::Bson> = Vec::new();
+    while let Some(aux_doc) = aux_cursor.try_next().await? {
+        if let Ok(id) = aux_doc.get_str("_id") {
+            object_ids.push(mongodb::bson::Bson::String(id.to_string()));
+        }
+    }
+    if object_ids.is_empty() {
+        return Ok(());
+    }
+
+    wl_collection
+        .update_one(
+            doc! { "_id": wl_id },
+            doc! { "$addToSet": { field: { "$each": object_ids } } },
+        )
+        .await?;
     Ok(())
 }
 
@@ -624,10 +779,22 @@ async fn main() {
         }
     }
 
+    // Watchlist catalogs use a dedicated path (loop over watchlist entries, $addToSet
+    // object_ids onto the watchlist doc) — the `--direction` flag does not apply to them.
+    let mut watchlist_catalogs: Vec<CatalogXmatchConfig> = Vec::new();
+    let mut non_watchlist: Vec<CatalogXmatchConfig> = Vec::new();
+    for cat in resolved {
+        if cat.catalog.starts_with(WATCHLIST_PREFIX) {
+            watchlist_catalogs.push(cat);
+        } else {
+            non_watchlist.push(cat);
+        }
+    }
+
     // If direction is Auto, split catalogs into two groups based on which collection is smaller.
     let mut objects_catalogs: Vec<CatalogXmatchConfig> = Vec::new();
     let mut catalog_catalogs: Vec<CatalogXmatchConfig> = Vec::new();
-    for cat in resolved {
+    for cat in non_watchlist {
         let direction = match args.direction {
             Direction::Auto => pick_direction(&args.survey, &cat, &db).await,
             d => d,
@@ -640,13 +807,30 @@ async fn main() {
     }
 
     info!(
-        "starting reprocess: survey={} processes={} batch_size={} objects_driven={:?} catalogs_driven={:?}",
+        "starting reprocess: survey={} processes={} batch_size={} objects_driven={:?} catalogs_driven={:?} watchlist_driven={:?}",
         args.survey,
         args.processes,
         args.batch_size,
         objects_catalogs.iter().map(|c| &c.catalog).collect::<Vec<_>>(),
         catalog_catalogs.iter().map(|c| &c.catalog).collect::<Vec<_>>(),
+        watchlist_catalogs.iter().map(|c| &c.catalog).collect::<Vec<_>>(),
     );
+
+    for cat in watchlist_catalogs {
+        let name = cat.catalog.clone();
+        if let Err(e) = run_watchlist_driven(
+            &args.survey,
+            cat,
+            db.clone(),
+            args.batch_size,
+            args.processes,
+        )
+        .await
+        {
+            error!("watchlist-driven run for '{}' failed: {}", name, e);
+            std::process::exit(1);
+        }
+    }
 
     if !objects_catalogs.is_empty() {
         if let Err(e) = run_objects_driven(
