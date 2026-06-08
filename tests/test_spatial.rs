@@ -16,9 +16,16 @@ async fn test_xmatch() {
     let ra = 323.233462;
     let dec = 14.112528;
 
-    let xmatches = spatial::xmatch(ra, dec, &catalog_xmatch_configs, &db)
-        .await
-        .unwrap();
+    let xmatches = spatial::xmatch(
+        ra,
+        dec,
+        "ZTF18aaayemv",
+        &boom::utils::enums::Survey::Ztf,
+        &catalog_xmatch_configs,
+        &db,
+    )
+    .await
+    .unwrap();
     assert_eq!(xmatches.len(), 4);
 
     let _ps1_xmatch = xmatches.get("PS1_DR1").unwrap();

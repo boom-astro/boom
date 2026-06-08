@@ -1,4 +1,5 @@
 use crate::{
+    api::catalogs::WATCHLIST_PREFIX,
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
     scheduler::record_kafka_alert_published,
@@ -586,6 +587,12 @@ pub struct Filter {
     pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
+    /// Optional watchlist catalog name (must start with "watchlist_"). When set,
+    /// a `$lookup` against the watchlist catalog is injected at load time so the
+    /// filter only sees alerts whose `objectId` is recorded in the watchlist
+    /// document's `matching_<survey>_objects` array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchlist: Option<String>,
     pub survey: Survey,
     pub active: bool,
     pub active_fid: String,
@@ -704,6 +711,7 @@ pub async fn build_loaded_filter(
     filter_id: &str,
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
+    watchlist_projections: &HashMap<String, Document>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
     if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
@@ -716,15 +724,66 @@ pub async fn build_loaded_filter(
     }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
-    let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
+    let mut pipeline =
+        build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
+
+    // If bound to a watchlist, keep only alerts matching its
+    // `matching_<survey>_objects` array.
+    if let Some(watchlist) = filter.watchlist.as_deref() {
+        let foreign_field = format!("matching_{}_objects", survey.to_string().to_lowercase());
+        pipeline.push(doc! {
+            "$lookup": {
+                "from": watchlist,
+                "localField": "objectId",
+                "foreignField": &foreign_field,
+                "as": "_watchlist_match",
+            }
+        });
+        pipeline.push(doc! {
+            "$match": { "_watchlist_match.0": { "$exists": true } }
+        });
+
+        // Surface the matched watchlist docs (projected to the configured fields)
+        // under `annotations.watchlist` as an array.
+        if let Some(projection) = watchlist_projections.get(watchlist) {
+            let mut projected_fields = Document::new();
+            for key in projection.keys() {
+                projected_fields.insert(key.clone(), format!("$$w.{}", key));
+            }
+            let watchlist_array = doc! {
+                "$map": {
+                    "input": "$_watchlist_match",
+                    "as": "w",
+                    "in": projected_fields,
+                }
+            };
+            pipeline.push(doc! { "$set": { "annotations.watchlist": watchlist_array } });
+            pipeline.push(doc! { "$unset": "_watchlist_match" });
+        }
+    }
 
     let loaded = LoadedFilter {
         id: filter.id.clone(),
         name: filter.name.clone(),
-        pipeline: pipeline,
+        pipeline,
         permissions: filter.permissions,
     };
     Ok(loaded)
+}
+
+/// Build the map of watchlist catalog name -> config projection for a survey.
+/// Only catalogs whose name starts with the watchlist prefix are included; the
+/// projection lists which watchlist-document fields a bound filter surfaces
+/// under `annotations.watchlist`.
+pub fn watchlist_projections(config: &AppConfig, survey: &Survey) -> HashMap<String, Document> {
+    config
+        .crossmatch
+        .get(survey)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.catalog.starts_with(WATCHLIST_PREFIX))
+        .map(|c| (c.catalog.clone(), c.projection.clone()))
+        .collect()
 }
 
 /// Builds a vector of LoadedFilter objects for the specified filter IDs and survey.
@@ -742,6 +801,7 @@ pub async fn build_loaded_filters(
     filter_ids: &Option<Vec<String>>,
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
+    watchlist_projections: &HashMap<String, Document>,
 ) -> Result<Vec<LoadedFilter>, FilterError> {
     let all_filter_ids: Vec<String> = filter_collection
         .distinct("_id", doc! {"active": true, "survey": survey.to_string()})
@@ -769,7 +829,9 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        match build_loaded_filter(&filter_id, survey, filter_collection).await {
+        match build_loaded_filter(&filter_id, survey, filter_collection, watchlist_projections)
+            .await
+        {
             Ok(filter) => filters.push(filter),
             Err(err) => {
                 warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);
@@ -859,7 +921,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
-    let output_topic = filter_worker.output_topic_name();
     let survey = input_queue
         .split('_')
         .next()
@@ -968,8 +1029,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        let alerts_output = match filter_worker.process_alerts(&alerts).await {
-            Ok(alerts_output) => alerts_output,
+        let matched_alerts = match filter_worker.process_alerts(&alerts).await {
+            Ok(matched) => matched,
             Err(error) => {
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
                 ACTIVE.add(-1, &active_attrs);
@@ -979,15 +1040,16 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(
-            (alerts.len() - alerts_output.len()) as u64,
+            alerts.len().saturating_sub(matched_alerts.len()) as u64,
             &ok_excluded_attrs,
         );
 
+        let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
         let mut enqueue_error = None;
-        for alert in alerts_output {
-            match send_alert_to_kafka(&alert, &schema, &producer, &output_topic).await {
+        for alert in &matched_alerts {
+            match send_alert_to_kafka(alert, &schema, &producer, &output_topic).await {
                 Ok(delivery_future) => {
                     delivery_futures.push(delivery_future);
                     total_enqueued += 1;
@@ -1002,7 +1064,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         debug!(
             "Enqueued total of {} alerts to Kafka topic {}",
-            total_enqueued, &output_topic
+            total_enqueued, output_topic
         );
 
         // Wait for all futures to complete and check for errors
@@ -1012,17 +1074,11 @@ pub async fn run_filter_worker<T: FilterWorker>(
             let result = r.map_err(|e| {
                 ALERT_PROCESSED.add(1, &output_error_attrs);
                 ACTIVE.add(-1, &active_attrs);
-                FilterWorkerError::Kafka(format!(
-                    "Failed to deliver alert to Kafka topic {}: {}",
-                    &output_topic, e
-                ))
+                FilterWorkerError::Kafka(format!("Failed to deliver alert to Kafka: {}", e))
             })?;
             if let Err((e, _)) = result {
                 ALERT_PROCESSED.add(1, &output_error_attrs);
-                error!(
-                    "Failed to deliver alert to Kafka topic {}: {}",
-                    &output_topic, e
-                );
+                error!("Failed to deliver alert to Kafka: {}", e);
             } else {
                 total_sent += 1;
                 ALERT_PROCESSED.add(1, &ok_included_attrs);
@@ -1030,8 +1086,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         debug!(
-            "Successfully sent total of {}/{} alerts to Kafka topic {}",
-            total_sent, total_enqueued, &output_topic
+            "Successfully sent total of {}/{} alerts to Kafka",
+            total_sent, total_enqueued
         );
 
         if total_enqueued > 0 {
@@ -1389,6 +1445,7 @@ mod tests {
             description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
+            watchlist: None,
             survey: Survey::Ztf,
             active: true,
             active_fid: "v1".to_string(),
@@ -1419,6 +1476,7 @@ mod tests {
             description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
+            watchlist: None,
             survey: Survey::Ztf,
             active: true,
             active_fid: "v1".to_string(),

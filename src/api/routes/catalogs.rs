@@ -1,5 +1,9 @@
 /// Routes for data catalogs.
-use crate::api::{catalogs::catalog_exists, db::PROTECTED_COLLECTION_NAMES, models::response};
+use crate::api::{
+    catalogs::{catalog_accessible, is_catalog_name_visible},
+    models::response,
+    routes::users::User,
+};
 
 use actix_web::{get, web, HttpResponse};
 use futures::StreamExt;
@@ -32,7 +36,12 @@ impl Default for CatalogsQueryParams {
 pub async fn get_catalogs(
     db: web::Data<Database>,
     params: Option<web::Query<CatalogsQueryParams>>,
+    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
     // Get collection names in alphabetical order
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
@@ -40,12 +49,11 @@ pub async fn get_catalogs(
             return response::internal_error(&format!("Error getting catalog info: {}", e));
         }
     };
-    // Catalogs can't be part of the protected names and can't start with "system."
+    // Filters out empty names, Mongo system.* internals, protected operational
+    // collections, and watchlists the current user does not have access to.
     let mut catalog_names = collection_names
         .into_iter()
-        .filter(|name| {
-            !PROTECTED_COLLECTION_NAMES.contains(&name.as_str()) && !name.starts_with("system.")
-        })
+        .filter(|name| is_catalog_name_visible(name, Some(&current_user)))
         .collect::<Vec<String>>();
     catalog_names.sort();
     let mut catalogs = Vec::new();
@@ -108,8 +116,13 @@ pub async fn get_catalogs(
 pub async fn get_catalog_indexes(
     db: web::Data<Database>,
     catalog_name: web::Path<String>,
+    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    if !catalog_exists(&db, &catalog_name).await {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    if !catalog_accessible(&db, &catalog_name, Some(&current_user)).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();
@@ -166,8 +179,13 @@ pub async fn get_catalog_sample(
     db: web::Data<Database>,
     catalog_name: web::Path<String>,
     params: web::Query<SampleQuery>,
+    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
-    if !catalog_exists(&db, &catalog_name).await {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    if !catalog_accessible(&db, &catalog_name, Some(&current_user)).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();
