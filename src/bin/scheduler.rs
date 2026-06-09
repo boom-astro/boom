@@ -308,21 +308,21 @@ async fn run(
         None
     };
 
-    let alert_pool = ThreadPool::new(
+    let mut alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
         args.survey.clone(),
         config_path.clone(),
         None,
     );
-    let enrichment_pool = ThreadPool::new(
+    let mut enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
         n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
         shared_model_pool,
     );
-    let filter_pool = ThreadPool::new(
+    let mut filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
         args.survey.clone(),
@@ -330,39 +330,54 @@ async fn run(
         None,
     );
 
-    let record_pool_metrics = || {
-        record_worker_pool_state(
-            &args.survey,
-            "alert",
-            alert_pool.live_worker_count(),
-            alert_pool.total_worker_count(),
-        );
-        record_worker_pool_state(
-            &args.survey,
-            "enrichment",
-            enrichment_pool.live_worker_count(),
-            enrichment_pool.total_worker_count(),
-        );
-        record_worker_pool_state(
-            &args.survey,
-            "filter",
-            filter_pool.live_worker_count(),
-            filter_pool.total_worker_count(),
-        );
-    };
+    // Takes the pools by reference (rather than capturing them) so the
+    // supervision tick below can still borrow them mutably.
+    let record_pool_metrics =
+        |survey: &Survey, alert: &ThreadPool, enrichment: &ThreadPool, filter: &ThreadPool| {
+            record_worker_pool_state(
+                survey,
+                "alert",
+                alert.live_worker_count(),
+                alert.total_worker_count(),
+            );
+            record_worker_pool_state(
+                survey,
+                "enrichment",
+                enrichment.live_worker_count(),
+                enrichment.total_worker_count(),
+            );
+            record_worker_pool_state(
+                survey,
+                "filter",
+                filter.live_worker_count(),
+                filter.total_worker_count(),
+            );
+        };
 
     // Emit an initial sample so dashboards show running workers immediately.
-    record_pool_metrics();
+    record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
 
-    // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
+    // Supervise the pools frequently so a crashed worker is respawned within
+    // seconds, but only record metrics / log the heartbeat once a minute.
     let mut shutdown_rx = shutdown_rx;
+    let mut supervise_tick = tokio::time::interval(Duration::from_secs(5));
+    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(60));
+    // Consume the immediate first ticks so the first heartbeat lands ~60s in
+    // (the initial metric sample above already covers t=0).
+    supervise_tick.tick().await;
+    heartbeat_tick.tick().await;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                record_pool_metrics();
+            _ = supervise_tick.tick() => {
+                alert_pool.supervise();
+                enrichment_pool.supervise();
+                filter_pool.supervise();
+            }
+            _ = heartbeat_tick.tick() => {
+                record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
                 info!(
                     alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
                     enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),

@@ -1,11 +1,15 @@
 use crate::{
     conf::{self, AppConfig},
     enrichment::models::{ModelError, SharedModels},
+    scheduler::record_worker_retry,
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
         fits::CutoutError,
         o11y::metrics::SCHEDULER_METER,
+        retry::{
+            is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
+        },
         worker::{should_terminate, WorkerCmd},
     },
 };
@@ -171,7 +175,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         .get(&survey)
         .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey.clone()))?;
 
-    let mut con = config.build_redis().await?;
+    let con = config.build_redis().await?;
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
@@ -185,7 +189,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let mut command_check_countdown = command_interval;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
-    let survey_attr = KeyValue::new("survey", survey);
+    let survey_attr = KeyValue::new("survey", survey.clone());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
     let ok_attrs = [
         worker_id_attr.clone(),
@@ -219,13 +223,26 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         }
 
         ACTIVE.add(1, &active_attrs);
-        let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, &input_error_attrs);
-            })?;
+        let candids: Vec<i64> = retry_transient(
+            "valkey_rpop",
+            DEFAULT_MAX_RETRIES,
+            DEFAULT_BASE_BACKOFF,
+            is_transient_redis_error,
+            || record_worker_retry("enrichment", &survey, "valkey_rpop"),
+            || {
+                // Clone the (cheaply-clonable) multiplexed connection so the
+                // future owns it, rather than borrowing `con` through the
+                // FnMut closure.
+                let mut con = con.clone();
+                let key: &str = &input_queue;
+                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
+            },
+        )
+        .await
+        .inspect_err(|_| {
+            ACTIVE.add(-1, &active_attrs);
+            BATCH_PROCESSED.add(1, &input_error_attrs);
+        })?;
 
         if candids.is_empty() {
             ACTIVE.add(-1, &active_attrs);
@@ -251,12 +268,24 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             ALERT_PROCESSED.add(candids.len() as u64, attributes);
             continue;
         }
-        con.lpush::<&str, Vec<String>, usize>(&output_queue, processed_alerts)
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, &output_error_attrs);
-            })?;
+        retry_transient(
+            "valkey_lpush",
+            DEFAULT_MAX_RETRIES,
+            DEFAULT_BASE_BACKOFF,
+            is_transient_redis_error,
+            || record_worker_retry("enrichment", &survey, "valkey_lpush"),
+            || {
+                let mut con = con.clone();
+                let key: &str = &output_queue;
+                let values: &Vec<String> = &processed_alerts;
+                async move { con.lpush::<&str, &Vec<String>, usize>(key, values).await }
+            },
+        )
+        .await
+        .inspect_err(|_| {
+            ACTIVE.add(-1, &active_attrs);
+            BATCH_PROCESSED.add(1, &output_error_attrs);
+        })?;
 
         let attributes = &ok_attrs;
         ACTIVE.add(-1, &active_attrs);

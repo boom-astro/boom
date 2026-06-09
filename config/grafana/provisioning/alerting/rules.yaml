@@ -244,3 +244,55 @@ groups:
         annotations:
           summary: 'Valkey queue {{ $labels.key }} > 50k entries'
           description: 'A worker pool is not draining its upstream queue. Check scheduler logs/traces and worker health.'
+
+      - uid: scheduler-worker-pool-degraded
+        title: Scheduler worker pool degraded (dead workers)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # Number of configured workers that are not currently live, per
+              # survey/worker_type. > 0 means workers have crashed and the
+              # supervisor has not (or can no longer) respawn them. The `for`
+              # below is longer than the supervisor's restart backoff so a
+              # transient crash that self-heals does not page.
+              expr: |
+                max by (survey, worker_type) (scheduler_worker_total)
+                  - max by (survey, worker_type) (scheduler_worker_live)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.survey }} {{ $labels.worker_type }} worker pool degraded'
+          description: 'One or more {{ $labels.survey }} {{ $labels.worker_type }} workers have died and not been respawned (the scheduler''s supervisor gives up after repeated rapid crashes). The corresponding Valkey queue will stop draining. Check scheduler logs for "{{ $labels.worker_type }} worker failed" and the attached error.'
