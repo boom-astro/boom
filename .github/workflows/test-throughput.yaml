@@ -3,7 +3,7 @@ name: Throughput test
 on:
   push:
     branches: ["main"]
-  pull_request:
+  pull_request: write
   workflow_dispatch:
 
 env:
