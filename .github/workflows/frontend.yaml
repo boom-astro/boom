@@ -1,0 +1,25 @@
+name: Frontend Build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yaml"
+
+jobs:
+  build:
+    name: Build frontend image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create default .env file
+        run: cp .env.example .env
+
+      # Build the production (nginx) frontend image, which runs `tsc -b && vite
+      # build` and so fails on type or build errors. Use only the base compose
+      # file so the dev override (Vite dev server) doesn't take over the target.
+      - name: Build frontend Docker image
+        run: docker compose -f docker-compose.yaml --profile frontend build frontend

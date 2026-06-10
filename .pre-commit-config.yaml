@@ -8,6 +8,20 @@ repos:
         language: rust
         files: \.rs$
         args: []
+      - id: frontend-tsc
+        name: frontend tsc
+        description: Type-check the frontend.
+        entry: bash -c 'cd frontend && bun run tsc --noEmit'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+      - id: frontend-lint
+        name: frontend lint
+        description: Lint the frontend with ESLint.
+        entry: bash -c 'cd frontend && bun run lint'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
 
 # pre-commit.ci bot configuration
 ci:

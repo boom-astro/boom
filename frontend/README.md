@@ -2,73 +2,34 @@
 
 A React + TypeScript + Vite front end for the BOOM application.
 
-## Local development
-
-### Prerequisites
-
-- Docker and Docker Compose installed
-- Environment variables configured (see below)
-
-### Setup
-
-1. Clone the front end repo:
-
-   ```bash
-   git clone https://github.com/boom-astro/babamul-web.git
-   cd babamul-web
-   ```
-
-2. Create a `.env` file for the front end:
-   ```bash
-   cp .env.example .env
-   ```
-
-3. Repeat the first two steps for the backend services
-   (https://github.com/boom-astro/boom)
-   and spin them up for local development:
-   ```bash
-   make dev
-   ```
-
-4. Build and start the front end development container:
-   ```bash
-   docker-compose up --build
-   ```
-   The app will be available at `http://localhost:5173`
-
-## Developer Notes
-
-### Pre-commit hook
-
-Install our pre-commit hook:
+This is part of the [BOOM](https://github.com/boom-astro/boom) monorepo. There is a
+**single setup process for the whole stack** (backend + frontend) — see
+[**Setup** and **Start services for local development**](../README.md#setup) in the root
+README. In short, from the repository root:
 
 ```bash
-pre-commit install
+make dev
 ```
 
-This will check your changes before each commit to ensure that they conform with our code style standards.
+This starts the Vite dev server (with hot module reload) alongside the API and supporting
+services. The web app is served at [http://localhost:5173](http://localhost:5173) and proxies
+`/api` requests to the API at [http://localhost:4000](http://localhost:4000). Editing files under
+`frontend/src` triggers a live rebuild in the container.
 
-### Notes
+Linting and type-checking run via the repo's pre-commit hooks (`frontend-lint`, `frontend-tsc`).
+To run them manually:
 
-- `docker-compose.override.yaml` is automatically applied for local development
-  - It exposes port 5173 for local access
-  - It uses a local network instead of requiring an external Traefik network
-- For production deployments, only `docker-compose.yaml` is used by
-  explicitly specifying it with `docker compose -f docker-compose.yaml up`
-- Do not commit local `.env` files to version control
+```bash
+cd frontend
+bun run lint
+bun run tsc --noEmit
+```
 
-## Template info
+## ESLint configuration
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
-
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-### Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+This project uses [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react)
+(Babel) for Fast Refresh. If you are expanding the ESLint configuration, we recommend enabling
+type-aware lint rules:
 
 ```js
 export default tseslint.config({
@@ -90,7 +51,9 @@ export default tseslint.config({
 })
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x)
+and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom)
+for React-specific lint rules:
 
 ```js
 // eslint.config.js
