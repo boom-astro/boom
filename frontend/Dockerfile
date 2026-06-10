@@ -1,5 +1,5 @@
-# Stage 0, "build-stage", based on Node.js, to build and compile the frontend
-FROM oven/bun AS build-stage
+# Stage 0, "deps", install dependencies once and share across build/dev stages
+FROM oven/bun AS deps
 
 WORKDIR /app
 
@@ -7,6 +7,10 @@ COPY package.json /app/
 COPY bun.lock /app/
 
 RUN bun install
+
+
+# Stage 1, "build-stage", based on Node.js, to build and compile the frontend
+FROM deps AS build-stage
 
 COPY ./ /app/
 
@@ -45,3 +49,15 @@ RUN printf '#!/bin/sh\nset -e\nORIGIN=https://${VITE_API_PROXY_TARGET}\n# Replac
 EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]
+
+
+# Dev stage: run the Vite dev server with hot module reload. Reuses the
+# installed deps (no production build); source is bind-mounted at runtime (see
+# docker-compose.override.yaml) so edits trigger live rebuilds in the container.
+FROM deps AS dev
+
+COPY ./ /app/
+
+EXPOSE 5173
+
+CMD ["bun", "run", "dev", "--host", "0.0.0.0", "--port", "5173"]

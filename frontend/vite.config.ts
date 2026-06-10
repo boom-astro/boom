@@ -70,6 +70,15 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
+      // Listen on all interfaces so the dev server is reachable from outside
+      // the container, and accept the container hostname.
+      host: true,
+      allowedHosts: true,
+      // Bind-mounted source on Docker Desktop (macOS/Windows) doesn't deliver
+      // native filesystem events reliably, so poll to keep HMR working.
+      watch: {
+        usePolling: true,
+      },
       // Dev proxy to avoid CORS when backend runs on localhost:4000
       proxy: {
         '/api': {
