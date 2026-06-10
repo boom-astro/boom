@@ -4,8 +4,9 @@ use boom::{
     utils::{
         enums::{ProgramId, Survey},
         o11y::{
-            logging::{build_subscriber, log_error, WARN},
+            logging::{build_subscriber_with_otel, log_error, WARN},
             metrics::init_metrics,
+            tracing::init_tracing,
         },
         parser::parse_positive_usize,
     },
@@ -14,7 +15,8 @@ use boom::{
 use chrono::{NaiveDate, NaiveDateTime};
 use clap::Parser;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use tracing::{error, info, instrument};
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing::{error, info};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -78,8 +80,17 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
     Ok(date.and_hms_opt(0, 0, 0).unwrap())
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli, meter_provider: SdkMeterProvider) {
+// `run` deliberately is NOT `#[instrument]`'d. It runs for the entire lifetime
+// of the consumer; wrapping it in a single span would make every per-batch /
+// per-alert child span a descendant of the same root span, producing a single
+// trace that grows unboundedly until Tempo rejects it. The survey is already
+// captured in the OTel `service.name` resource attribute, so it doesn't need
+// to be a span field here.
+async fn run(
+    args: Cli,
+    meter_provider: Option<SdkMeterProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+) {
     let date = args.date.unwrap_or_else(|| {
         let today = chrono::Utc::now().naive_utc().date();
         today.and_hms_opt(0, 0, 0).unwrap()
@@ -162,8 +173,15 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         }
     }
 
-    if let Err(error) = meter_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the meter provider");
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
+    }
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
     }
 }
 
@@ -173,16 +191,24 @@ async fn main() {
     load_dotenv();
 
     let args = Cli::parse();
-    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
-    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
     let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
-    let meter_provider = init_metrics(
-        String::from("consumer"),
+    // Match the Compose service name (consumer-ztf, consumer-lsst, ...) so
+    // Grafana can correlate traces, logs, and metrics on a single label.
+    let service_name = format!("consumer-{}", args.survey.to_string().to_lowercase());
+    let tracer_provider = init_tracing(
+        service_name.clone(),
         instance_id,
         args.deployment_env.clone(),
     )
-    .expect("failed to initialize metrics");
+    .expect("failed to initialize tracing");
 
-    run(args, meter_provider).await;
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), &service_name)
+        .expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+
+    let meter_provider = init_metrics(service_name, instance_id, args.deployment_env.clone())
+        .expect("failed to initialize metrics");
+
+    run(args, meter_provider, tracer_provider).await;
 }
