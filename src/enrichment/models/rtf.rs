@@ -11,7 +11,7 @@
 //! ONNX output:
 //!   - output:   (B, 128)      latent embedding
 
-use crate::alert::AlertCutout;
+use crate::utils::cutouts::AlertCutout;
 use crate::enrichment::models::{load_model, load_model_on_device, ModelError};
 use crate::enrichment::ztf::ZtfAlertForEnrichment;
 use crate::utils::fits::prepare_triplet;
@@ -219,36 +219,36 @@ impl RtfModel {
         let opt_f64_as_f32 = |v: Option<f64>| v.unwrap_or(0.0) as f32;
 
         [
-            opt_f32(candidate.sgscore1),    // 0: sgscore1
-            opt_f32(candidate.sgscore2),    // 1: sgscore2
-            opt_f32(candidate.distpsnr1),   // 2: distpsnr1
-            opt_f32(candidate.distpsnr2),   // 3: distpsnr2
-            candidate.nmtchps as f32,       // 4: nmtchps
-            opt_f32(candidate.sharpnr),     // 5: sharpnr
+            opt_f32(candidate.sgscore1),     // 0: sgscore1
+            opt_f32(candidate.sgscore2),     // 1: sgscore2
+            opt_f32(candidate.distpsnr1),    // 2: distpsnr1
+            opt_f32(candidate.distpsnr2),    // 3: distpsnr2
+            candidate.nmtchps as f32,        // 4: nmtchps
+            opt_f32(candidate.sharpnr),      // 5: sharpnr
             opt_f64_as_f32(candidate.scorr), // 6: scorr
-            opt_f32(candidate.diffmaglim),  // 7: diffmaglim
-            opt_f32(candidate.sky),         // 8: sky
-            candidate.ndethist as f32,      // 9: ndethist
-            candidate.ncovhist as f32,      // 10: ncovhist
-            candidate.sigmapsf,             // 11: sigmapsf
-            opt_f32(candidate.chinr),       // 12: chinr
-            opt_f32(candidate.classtar),    // 13: classtar
-            opt_f32(candidate.rb),          // 14: rb
-            opt_f32(candidate.chipsf),      // 15: chipsf
-            opt_f32(candidate.distnr),      // 16: distnr
-            opt_f32(candidate.magnr),       // 17: magnr
-            opt_f32(candidate.fwhm),        // 18: fwhm
-            opt_f32(candidate.srmag1),      // 19: srmag1
-            opt_f32(candidate.sgmag1),      // 20: sgmag1
-            opt_f32(candidate.simag1),      // 21: simag1
-            opt_f32(candidate.szmag1),      // 22: szmag1
-            opt_f32(candidate.srmag2),      // 23: srmag2
-            opt_f32(candidate.sgmag2),      // 24: sgmag2
-            opt_f32(candidate.simag2),      // 25: simag2
-            opt_f32(candidate.szmag2),      // 26: szmag2
-            opt_f32(candidate.clrcoeff),    // 27: clrcoeff
-            opt_f32(candidate.clrcounc),    // 28: clrcounc
-            0.0,                            // 29: zpclrcov (not in Candidate struct)
+            opt_f32(candidate.diffmaglim),   // 7: diffmaglim
+            opt_f32(candidate.sky),          // 8: sky
+            candidate.ndethist as f32,       // 9: ndethist
+            candidate.ncovhist as f32,       // 10: ncovhist
+            candidate.sigmapsf,              // 11: sigmapsf
+            opt_f32(candidate.chinr),        // 12: chinr
+            opt_f32(candidate.classtar),     // 13: classtar
+            opt_f32(candidate.rb),           // 14: rb
+            opt_f32(candidate.chipsf),       // 15: chipsf
+            opt_f32(candidate.distnr),       // 16: distnr
+            opt_f32(candidate.magnr),        // 17: magnr
+            opt_f32(candidate.fwhm),         // 18: fwhm
+            opt_f32(candidate.srmag1),       // 19: srmag1
+            opt_f32(candidate.sgmag1),       // 20: sgmag1
+            opt_f32(candidate.simag1),       // 21: simag1
+            opt_f32(candidate.szmag1),       // 22: szmag1
+            opt_f32(candidate.srmag2),       // 23: srmag2
+            opt_f32(candidate.sgmag2),       // 24: sgmag2
+            opt_f32(candidate.simag2),       // 25: simag2
+            opt_f32(candidate.szmag2),       // 26: szmag2
+            opt_f32(candidate.clrcoeff),     // 27: clrcoeff
+            opt_f32(candidate.clrcounc),     // 28: clrcounc
+            0.0,                             // 29: zpclrcov (not in Candidate struct)
         ]
     }
 }
