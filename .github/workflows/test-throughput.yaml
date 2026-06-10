@@ -80,9 +80,7 @@ jobs:
   aggregate:
     name: Aggregate and report throughput results
     runs-on: ubuntu-latest
-    permissions: 
-      issues: write
-      pull-requests: write
+    permissions: write-all
     needs: test
     if: github.event_name == 'pull_request'
     steps:
