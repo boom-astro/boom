@@ -88,6 +88,8 @@ pub enum FilterError {
     InvalidFilterId,
     #[error("error during filter execution")]
     FilterExecutionError(String),
+    #[error("invalid watchlist catalog name '{0}': must start with '{WATCHLIST_PREFIX}'")]
+    InvalidWatchlist(String),
 }
 
 pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
@@ -730,6 +732,9 @@ pub async fn build_loaded_filter(
     // If bound to a watchlist, keep only alerts matching its
     // `matching_<survey>_objects` array.
     if let Some(watchlist) = filter.watchlist.as_deref() {
+        if !watchlist.starts_with(WATCHLIST_PREFIX) {
+            return Err(FilterError::InvalidWatchlist(watchlist.to_string()));
+        }
         let foreign_field = format!("matching_{}_objects", survey.to_string().to_lowercase());
         pipeline.push(doc! {
             "$lookup": {

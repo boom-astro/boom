@@ -2,7 +2,7 @@
 use boom::{
     alert::AlertWorker,
     conf::get_test_db,
-    filter::{build_loaded_filter, run_filter, Filter, FilterVersion},
+    filter::{build_loaded_filter, run_filter, Filter, FilterError, FilterVersion},
     utils::{
         enums::Survey,
         testing::{
@@ -268,6 +268,59 @@ async fn test_build_filter_with_watchlist() {
         loaded.pipeline[n - 1],
         doc! { "$unset": "_watchlist_match" }
     );
+}
+
+// A filter whose watchlist name does not start with the watchlist prefix must be
+// rejected at load time, rather than injected as an arbitrary `$lookup.from`
+// collection. Insertion paths validate this, but a doc inserted straight into
+// Mongo could bypass them.
+#[tokio::test]
+async fn test_build_filter_rejects_non_prefixed_watchlist() {
+    let db = get_test_db().await;
+    let filter_collection: mongodb::Collection<Filter> = db.collection("filters");
+
+    let now = flare::Time::now().to_jd();
+    let filter_id = uuid::Uuid::new_v4().to_string();
+    let pipeline_str = r#"[
+        {"$match": {"candidate.drb": {"$gt": 0.5}}},
+        {"$project": {"objectId": 1}}
+    ]"#;
+    let mut permissions = std::collections::HashMap::new();
+    permissions.insert(Survey::Ztf, vec![1]);
+    let filter = Filter {
+        id: filter_id.clone(),
+        name: format!("watchlist_filter_{}", &filter_id[..8]),
+        description: Some("Watchlist test filter".to_string()),
+        survey: Survey::Ztf,
+        user_id: "test_user".to_string(),
+        watchlist: Some("secret_collection".to_string()),
+        permissions,
+        active: true,
+        active_fid: "v1".to_string(),
+        fv: vec![FilterVersion {
+            fid: "v1".to_string(),
+            pipeline: pipeline_str.to_string(),
+            changelog: None,
+            created_at: now,
+        }],
+        created_at: now,
+        updated_at: now,
+    };
+    filter_collection.insert_one(&filter).await.unwrap();
+
+    let result = build_loaded_filter(
+        &filter_id,
+        &Survey::Ztf,
+        &filter_collection,
+        &HashMap::new(),
+    )
+    .await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+
+    assert!(matches!(
+        result,
+        Err(FilterError::InvalidWatchlist(name)) if name == "secret_collection"
+    ));
 }
 
 // End-to-end regression test for the watchlist feature: a watchlist-bound filter
