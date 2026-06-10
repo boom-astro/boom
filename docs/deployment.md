@@ -185,8 +185,130 @@ configure secrets for the environment variables you need,
 the same ones described above, including `SECRET_KEY`, etc.
 Follow the [official GitHub guide for setting repository secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository).
 
-See [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml)
-for the secrets that should be set.
+See [.github/workflows/deploy.yaml](/.github/workflows/deploy.yaml)
+for the secrets and GitHub environment variables that should be set.
+
+For generated production configs, [sync-configs workflow](/.github/workflows/sync-configs.yaml)
+runs `make configs` on every pull request.
+For pull requests opened from branches in this repository, it commits any
+generated config changes back to the PR branch automatically.
+For fork-based pull requests, GitHub does not safely allow that write-back, so
+the workflow fails if generated configs are stale.
+The same workflow also runs `make check-configs`, which validates every
+generated config at `config/prod/*/config.yaml` via the BOOM parser.
+Under the hood, it calls `check_config {path}` for each generated config and
+fails if any config is invalid.
+
+At minimum, the production GitHub environment should define these variables in
+addition to the usual secrets used by the deploy workflow:
+
+- `BOOM_CONFIG_PATH`
+- `BOOM_DATA_MONGODB_PATH` if you want a MongoDB bind mount instead of a Docker volume
+- `BOOM_DATA_VALKEY_PATH` if you want a Valkey bind mount instead of a Docker volume
+- `BOOM_DATA_KAFKA_PATH` if you want a Kafka bind mount instead of a Docker volume
+- `DOMAIN`
+
+### Production config layout
+
+The repository keeps the development baseline in [config.yaml](../config.yaml).
+Production-specific changes live under deployment-specific directories in
+`config/prod`, for example:
+
+```text
+config/prod/
+   caltech/
+      overrides.yaml
+      config.yaml
+   umn/
+      overrides.yaml
+      config.yaml
+```
+
+- `overrides.yaml` is the only file you edit for a deployment-specific config.
+- `config.yaml` in each deployment directory is generated from the base config
+   plus that deployment's overrides.
+- Generated files are intended to be committed so the final production config
+   is reviewable in pull requests.
+
+To regenerate all committed production configs, run:
+
+```bash
+make configs
+```
+
+This target scans `config/prod/*/overrides.yaml` and writes the merged config
+to `config/prod/*/config.yaml`.
+
+For production, set `BOOM_CONFIG_PATH` in the GitHub Actions environment to the
+generated config you want to deploy, for example:
+
+```text
+./config/prod/caltech/config.yaml
+```
+
+If `BOOM_CONFIG_PATH` is not set, Docker Compose falls back to `./config.yaml`.
+That fallback is useful for local development, but production environments
+should always set `BOOM_CONFIG_PATH` explicitly.
+
+### Data volume configuration
+
+The main Compose file uses parameterized volume sources for stateful services:
+
+- `BOOM_DATA_MONGODB_PATH` controls MongoDB storage.
+- `BOOM_DATA_VALKEY_PATH` controls Valkey storage.
+- `BOOM_DATA_KAFKA_PATH` controls Kafka storage.
+
+If these variables are unset, Docker Compose falls back to named Docker
+volumes:
+
+- `mongodb`
+- `valkey`
+- `kafka_data`
+
+That default is appropriate for local development because it requires no host
+filesystem preparation.
+
+For production, you can keep using Docker named volumes, or point each variable
+at a host path if you want explicit bind mounts for backup and storage
+management, for example:
+
+```text
+BOOM_DATA_MONGODB_PATH=/srv/boom/mongodb
+BOOM_DATA_VALKEY_PATH=/srv/boom/valkey
+BOOM_DATA_KAFKA_PATH=/srv/boom/kafka
+```
+
+When using host paths in production:
+
+1. Create the directories on the deployment host before the first deploy.
+2. Ensure the Docker daemon can read and write those directories.
+3. Keep those paths stable across deploys.
+
+Kafka bind mounts need one extra check. The Kafka container user must be able
+to write to `BOOM_DATA_KAFKA_PATH`. If you see permission errors during broker
+startup, fix ownership or permissions on the host directory.
+
+Recommended options (in order of preference):
+
+1. **Prefer Docker named volumes** (`kafka_data`) when possible, which avoids
+   host filesystem permission management entirely.
+2. **Fix ownership for the Kafka container's runtime user.** Kafka typically
+   runs as UID 1000 in the container:
+
+   ```bash
+   sudo chown -R 1000:1000 /srv/boom/kafka
+   sudo chmod 750 /srv/boom/kafka
+   ```
+
+3. **Use infrastructure provisioning** (cloud-init, Ansible, Terraform, etc.)
+   to pre-provision the target directory with correct ownership and permissions
+   at deploy time, ensuring repeatable deploys.
+
+If you are still seeing permission errors after one of the above, confirm the
+UID/GID the Kafka image actually runs as (it can differ between image versions)
+and `chown` the directory to match. Avoid world-writable (`chmod 777`)
+permissions, even temporarily — on a shared host any process could read or
+corrupt Kafka data.
 
 ## GitHub deploy safety controls
 
