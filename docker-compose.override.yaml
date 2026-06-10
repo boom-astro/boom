@@ -183,6 +183,15 @@ services:
   prometheus:
     ports:
       - "9090:9090"
+  loki:
+    ports:
+      - "3100:3100"
+  tempo:
+    ports:
+      - "3200:3200"
+  node-exporter:
+    ports:
+      - "9100:9100"
   kafka-exporter:
     ports:
       - "9308:9308"
