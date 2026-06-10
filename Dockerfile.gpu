@@ -28,7 +28,6 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
     cp "${ORT_CAPI_DIR}/libonnxruntime_providers_tensorrt.so" /opt/ort/ && \
     rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
-COPY data/models/btsbot-v1.0.1.onnx /app/data/models/btsbot-v1.0.1.onnx
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock /app/
 

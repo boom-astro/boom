@@ -28,14 +28,19 @@ impl Model for BtsBotModel {
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError> {
         let model_inputs = inputs! {
-            "triplet" => TensorRef::from_array_view(image_features)?,
+            "image" => TensorRef::from_array_view(image_features)?,
             "metadata" => TensorRef::from_array_view(metadata_features)?,
         };
 
         let outputs = self.model.run(model_inputs)?;
 
-        match outputs["fc_out"].try_extract_tensor::<f32>() {
-            Ok((_, scores)) => Ok(scores.to_vec()),
+        // BTSbot v2 outputs logits, and not probabilities, so we need
+        // to apply the sigmoid function to convert them to probabilities.
+        match outputs["logits"].try_extract_tensor::<f32>() {
+            Ok((_, logits)) => Ok(logits
+                .iter()
+                .map(|&x| 1.0f32 / (1.0 + (-x).exp()))
+                .collect()),
             Err(_) => Err(ModelError::ModelOutputToVecError),
         }
     }
