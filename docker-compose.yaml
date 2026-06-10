@@ -252,6 +252,7 @@ services:
     # TODO: investigate further and consider merging into single consumer with multiple topics if the issue is resolved
     image: boom-astro/boom:latest
     hostname: consumer-ztf-public
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
@@ -285,6 +286,7 @@ services:
   consumer-ztf-partnership:
     image: boom-astro/boom:latest
     hostname: consumer-ztf-partnership
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
@@ -318,6 +320,7 @@ services:
   consumer-ztf-caltech:
     image: boom-astro/boom:latest
     hostname: consumer-ztf-caltech
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
@@ -351,6 +354,7 @@ services:
   consumer-lsst:
     image: boom-astro/boom:latest
     hostname: consumer-lsst
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
@@ -383,6 +387,7 @@ services:
   scheduler-ztf:
     image: boom-astro/boom:latest
     hostname: scheduler-ztf
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
@@ -417,6 +422,7 @@ services:
   scheduler-lsst:
     image: boom-astro/boom:latest
     hostname: scheduler-lsst
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
