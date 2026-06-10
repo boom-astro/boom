@@ -304,16 +304,11 @@ Recommended options (in order of preference):
    to pre-provision the target directory with correct ownership and permissions
    at deploy time, ensuring repeatable deploys.
 
-4. **As a last resort only** — if you cannot control host ownership or run
-   provisioning — use world-writable permissions for temporary troubleshooting:
-
-   ```bash
-   sudo chmod 777 /srv/boom/kafka
-   ```
-
-   ⚠️ **This leaves the directory world-writable, meaning any process on the
-   host can read or corrupt Kafka data.** Replace it with proper ownership
-   (option 2) as soon as access allows.
+If you are still seeing permission errors after one of the above, confirm the
+UID/GID the Kafka image actually runs as (it can differ between image versions)
+and `chown` the directory to match. Avoid world-writable (`chmod 777`)
+permissions, even temporarily — on a shared host any process could read or
+corrupt Kafka data.
 
 ## GitHub deploy safety controls
 
