@@ -482,6 +482,43 @@ untouched; the only downtime is the stop/start gap.
 > name (so `<project>_<volume>` resolves to the same physical volume) or to
 > declare the volumes `external`, rather than copying volume contents.
 
+### Monitoring data (Prometheus & Grafana): optional, best-effort
+
+Unlike Mongo, Kafka, and Valkey, the monitoring data does **not** carry over
+automatically, and it is not mission-critical:
+
+- The old stack stored Prometheus and Grafana data on host bind mounts
+  (`BOOM_DATA_PROMETHEUS_PATH`, `BOOM_DATA_GRAFANA_PATH`).
+- This stack stores them in **named Docker volumes** (`prometheus_data`,
+  `grafana_data`) that are not parameterized to host paths, so pointing a
+  variable at the old directory will not work the way it does for Mongo/Kafka.
+- Loki, Tempo, and Promtail are new in this stack and start empty.
+
+The recommended default is to **let them start fresh**:
+
+- Grafana datasources and dashboards are provisioned as code from
+  `./config/grafana/provisioning` and `./config/grafana/dashboards`, so they are
+  recreated on startup. Only ad-hoc dashboards, users, annotations, and alert
+  state live in `grafana_data`.
+- Prometheus data is just historical metrics; new metrics accumulate
+  immediately after cutover.
+
+If you do want to preserve the history, copy the old host-path data into the new
+named volumes during the cutover window (Phase 3), after the new stack has
+created the volumes (run `docker volume ls` to find their exact
+`<project>_<volume>` names):
+
+```bash
+docker run --rm \
+  -v boom_prometheus_data:/dest -v /old/path/prometheus:/src:ro \
+  alpine sh -c 'cp -a /src/. /dest/'
+docker run --rm \
+  -v boom_grafana_data:/dest -v /old/path/grafana:/src:ro \
+  alpine sh -c 'cp -a /src/. /dest/'
+```
+
+Then restart the affected services so they pick up the copied data.
+
 ### Phase 4: Verify
 
 1. Confirm all services are healthy: `docker compose --profile prod ps` shows
