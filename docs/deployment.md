@@ -349,6 +349,11 @@ the repo level,
 which will allow us to continue deploying from the separate repo until it is
 archived.
 
+In this case there was also a separate front end repo started manually with
+Docker Compose.
+Here we are also merging the front end server into the main stack, so both
+of the old projects will need to be stopped.
+
 1. Ensure all variables and secrets from the deployment repo have been copied
    over to the main repo. Since we want app behavior to remain the same, it's
    important that these are identical.
