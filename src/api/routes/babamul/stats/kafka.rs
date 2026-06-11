@@ -137,20 +137,12 @@ pub async fn get_realtime_alerts() -> HttpResponse {
     match reqwest::get(&collector_url).await {
         Ok(resp) => match resp.text().await {
             Ok(text) => match parse_otel_metrics(&text, gathered_at) {
-                Ok(metrics) => {
-                    response::ok("realtime alerts", serde_json::json!(metrics))
-                }
-                Err(e) => {
-                    response::internal_error(&format!("Failed to parse metrics: {}", e))
-                }
+                Ok(metrics) => response::ok("realtime alerts", serde_json::json!(metrics)),
+                Err(e) => response::internal_error(&format!("Failed to parse metrics: {}", e)),
             },
-            Err(e) => {
-                response::internal_error(&format!("Failed to read OTel response: {}", e))
-            }
+            Err(e) => response::internal_error(&format!("Failed to read OTel response: {}", e)),
         },
-        Err(e) => {
-            response::internal_error(&format!("Failed to query OTel Collector: {}", e))
-        }
+        Err(e) => response::internal_error(&format!("Failed to query OTel Collector: {}", e)),
     }
 }
 
@@ -180,7 +172,11 @@ fn parse_otel_metrics(text: &str, gathered_at: i64) -> Result<Vec<RealtimeAlertM
                 // Try to parse the numeric value
                 match value_part.trim().parse::<u32>() {
                     Ok(n_alerts) => {
-                        metrics.push(RealtimeAlertMetrics { survey, n_alerts, gathered_at });
+                        metrics.push(RealtimeAlertMetrics {
+                            survey,
+                            n_alerts,
+                            gathered_at,
+                        });
                     }
                     Err(_) => {
                         // Skip lines that don't have valid numeric values
