@@ -326,3 +326,29 @@ the workflow in [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml
 
 In practice, this means only approved release tags can be deployed to
 production, reducing the risk of accidental or unauthorized production changes.
+
+## Migrating from a dedicated deploy repo to this one
+
+If the initial deployment had its own repo with BOOM in it as a submodule,
+this section describes how
+to migrate to deploying directly from here.
+The benefit of this approach is that new services added to the stack
+and new configuration changes don't need to be manually migrated
+to the separate repo,
+which reduces the amount of manual work required to make changes and
+deploy.
+We seek to make deployments as automated and painless as possible so we
+realize a constant stream of safe changes into production.
+
+In this example, we are using a single node as a GitHub Actions self-hosted
+runner, which is already running a production instance that we want to
+migrate over to deploying from this repo.
+We therefore want to retain all of the production data and minimize downtime.
+We will move the self-hosted runner to the organization level rather than
+the repo level,
+which will allow us to continue deploying from the separate repo until it is
+archived.
+
+1. Ensure all variables and secrets from the deployment repo have been copied
+   over to the main repo. Since we want app behavior to remain the same, it's
+   important that these are identical.
