@@ -326,3 +326,225 @@ the workflow in [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml
 
 In practice, this means only approved release tags can be deployed to
 production, reducing the risk of accidental or unauthorized production changes.
+
+## Migrating from a dedicated deploy repo to this one
+
+If the initial deployment had its own repo with BOOM in it as a submodule,
+this section describes how
+to migrate to deploying directly from here.
+The benefit of this approach is that new services added to the stack
+and new configuration changes don't need to be manually migrated
+to the separate repo,
+which reduces the amount of manual work required to make changes and
+deploy.
+We seek to make deployments as automated and painless as possible so we
+realize a constant stream of safe changes into production.
+
+In this example, we are using a single node as a GitHub Actions self-hosted
+runner, which is already running a production instance that we want to
+migrate over to deploying from this repo.
+We therefore want to retain all of the production data and minimize downtime.
+We will move the self-hosted runner to the organization level rather than
+the repo level,
+which will allow us to continue deploying from the separate repo until it is
+archived.
+
+In this case there was also a separate front end repo started manually with
+Docker Compose.
+Here we are also merging the front end server into the main stack, so both
+of the old projects will need to be stopped.
+
+### Phase 0: Inventory the existing deployment
+
+Before touching anything, capture the current state so the cutover is
+mechanical and reversible.
+
+1. Record the data locations the old stack is actually using. On the host,
+   inspect the running containers and the old repo's environment to resolve the
+   absolute paths behind `BOOM_DATA_MONGODB_PATH`, `BOOM_DATA_VALKEY_PATH`, and
+   `BOOM_DATA_KAFKA_PATH`:
+
+   ```bash
+   docker inspect mongo broker valkey \
+     --format '{{.Name}}{{range .Mounts}} {{.Source}} -> {{.Destination}}{{end}}'
+   ```
+
+   The old repo required these variables to be host bind mounts (no Docker
+   named-volume fallback), so all stateful data — including the Mongo and Kafka
+   data we must preserve — lives at host paths, not in Docker volumes. This is
+   what makes a fast, copy-free swap possible. **Caution:** if the old paths
+   were set relative (e.g. `./data/kafka`), the data physically lives inside the
+   old runner's checkout directory. Resolve them to absolute paths now.
+1. Note the old runner's labels (`self-hosted`, `production`) and confirm the
+   new repo's [deploy workflow](/.github/workflows/deploy.yaml) targets the same
+   labels — it does (`runs-on: [self-hosted, production]`). This is why a single
+   org-level runner can serve both repos during the transition.
+1. Note the old project/stack names so you can find their containers and
+   networks later (`docker compose ls`, `docker network ls`). Remember there are
+   two old Compose projects to stop: the BOOM stack in `../boom-deploy-kaboom`
+   and the separately-started front end project (now merged into this stack).
+
+### Phase 1: Preparation (no downtime, done ahead of time)
+
+1. Ensure all variables and secrets from the deployment repo have been copied
+   over to the main repo. Since we want app behavior to remain the same, it's
+   important that these are identical.
+1. **Stabilize the data paths.** If the old `BOOM_DATA_*_PATH` values were
+   relative to the old checkout, move the data to stable, checkout-independent
+   absolute locations so neither repo's working directory matters, for example
+   `/srv/boom/{mongodb,valkey,kafka}`. Do this while the old stack is still up
+   only if you use a live-safe method; otherwise defer the move into the cutover
+   window (Phase 3) to avoid copying a hot database. Set the new repo's
+   `BOOM_DATA_MONGODB_PATH`, `BOOM_DATA_VALKEY_PATH`, and `BOOM_DATA_KAFKA_PATH`
+   production variables to these absolute paths. Because these are bind mounts,
+   pointing the new stack at the same paths reuses the exact on-disk Mongo and
+   Kafka data with zero copying — no Docker volume migration is required.
+1. Pre-stage everything that doesn't require stopping the old stack: push the
+   release tag to the new repo, confirm `make check-configs` passes in CI, and
+   confirm the Traefik `traefik-public` network already exists on the host (it
+   is shared and should not be torn down).
+
+### Phase 2: Move the self-hosted runner to the organization level
+
+The runner is currently registered at the old repo level. We move it to the
+org so both the old repo (temporarily) and this repo can deploy to it. This
+lets us validate the new deployment and fall back to the old repo if needed,
+before archiving it.
+
+1. Remove the repo-level runner service on the host:
+
+   ```bash
+   cd /home/github/actions-runner
+   sudo ./svc.sh stop
+   sudo ./svc.sh uninstall
+   ./config.sh remove --token <REPO_REMOVAL_TOKEN>
+   ```
+
+1. Re-register the same runner against the organization, keeping the
+   `production` label, then reinstall the service:
+
+   ```bash
+   ./config.sh --url https://github.com/<org> --token <ORG_TOKEN> \
+     --labels production
+   sudo ./svc.sh install github
+   sudo ./svc.sh start
+   sudo ./svc.sh status
+   ```
+
+1. In the org runner settings, grant runner-group access to both the old deploy
+   repo and this repo so either can dispatch jobs during the transition.
+1. Sanity check: trigger a no-op or `workflow_dispatch` deploy from the **old**
+   repo and confirm it still lands on the org runner. At this point nothing has
+   changed for production except where the runner is registered.
+
+### Phase 3: Cutover (the short downtime window)
+
+The goal is a fast swap with no data loss. Because the stateful data is on host
+bind mounts, `docker compose down` (without `-v`) leaves all data on disk
+untouched; the only downtime is the stop/start gap.
+
+1. Quiesce the old stack to get a clean Kafka/Mongo shutdown, then stop both old
+   projects **without removing volumes or data**. From the old repo checkout:
+
+   ```bash
+   # NEVER pass -v here — that would delete data. Bind-mounted data survives
+   # `down` regardless, but stay disciplined.
+   docker compose -f docker-compose.yaml down
+   ```
+
+   Then stop the separate front end project the same way (`docker compose down`
+   in its directory).
+1. If you deferred the data move from Phase 1, do it now while everything is
+   stopped (a cold copy is consistent):
+
+   ```bash
+   rsync -aHAX --delete /old/path/mongodb/  /srv/boom/mongodb/
+   rsync -aHAX --delete /old/path/kafka/    /srv/boom/kafka/
+   rsync -aHAX --delete /old/path/valkey/   /srv/boom/valkey/
+   ```
+
+   If instead you keep the original paths, skip the copy and simply point the
+   new repo's `BOOM_DATA_*_PATH` variables at those existing directories.
+1. Re-apply the Kafka directory ownership the broker image needs (see the
+   "Data volume configuration" section above) so the new stack's broker can
+   write to `BOOM_DATA_KAFKA_PATH`.
+1. Deploy from this repo: publish the release (or run the `Deploy to production`
+   workflow via `workflow_dispatch` with the `v*` tag). The job runs on the
+   org-level runner, checks out this repo, and brings up the merged stack —
+   including the front end — with `docker compose --profile prod up -d`, using
+   the same Mongo and Kafka data on disk.
+
+> Note on Docker named volumes: this repo's Compose file falls back to named
+> volumes (`mongodb`, `valkey`, `kafka_data`) only when `BOOM_DATA_*_PATH` is
+> unset. Since we set those paths to the old host directories, no named-volume
+> swap is needed. If a future deployment did rely on named volumes, the
+> equivalent "swap" would be to set `COMPOSE_PROJECT_NAME` to the old project
+> name (so `<project>_<volume>` resolves to the same physical volume) or to
+> declare the volumes `external`, rather than copying volume contents.
+
+### Monitoring data (Prometheus & Grafana): optional, best-effort
+
+Unlike Mongo, Kafka, and Valkey, the monitoring data does **not** carry over
+automatically, and it is not mission-critical:
+
+- The old stack stored Prometheus and Grafana data on host bind mounts
+  (`BOOM_DATA_PROMETHEUS_PATH`, `BOOM_DATA_GRAFANA_PATH`).
+- This stack stores them in **named Docker volumes** (`prometheus_data`,
+  `grafana_data`) that are not parameterized to host paths, so pointing a
+  variable at the old directory will not work the way it does for Mongo/Kafka.
+- Loki, Tempo, and Promtail are new in this stack and start empty.
+
+The recommended default is to **let them start fresh**:
+
+- Grafana datasources and dashboards are provisioned as code from
+  `./config/grafana/provisioning` and `./config/grafana/dashboards`, so they are
+  recreated on startup. Only ad-hoc dashboards, users, annotations, and alert
+  state live in `grafana_data`.
+- Prometheus data is just historical metrics; new metrics accumulate
+  immediately after cutover.
+
+If you do want to preserve the history, copy the old host-path data into the new
+named volumes during the cutover window (Phase 3), after the new stack has
+created the volumes (run `docker volume ls` to find their exact
+`<project>_<volume>` names):
+
+```bash
+docker run --rm \
+  -v boom_prometheus_data:/dest -v /old/path/prometheus:/src:ro \
+  alpine sh -c 'cp -a /src/. /dest/'
+docker run --rm \
+  -v boom_grafana_data:/dest -v /old/path/grafana:/src:ro \
+  alpine sh -c 'cp -a /src/. /dest/'
+```
+
+Then restart the affected services so they pick up the copied data.
+
+### Phase 4: Verify
+
+1. Confirm all services are healthy: `docker compose --profile prod ps` shows
+   everything `running`/`healthy`.
+1. Verify data continuity: Mongo collection counts and recent documents match
+   pre-cutover expectations, and Kafka topics/offsets and consumer group lag are
+   intact (the consumers resume from their committed offsets).
+1. Confirm the public endpoints (API, front end, Traefik dashboard) respond over
+   HTTPS through the shared `traefik-public` proxy.
+
+### Phase 5: Decommission the old repo
+
+1. Once the new deployment is verified stable, remove the old deploy repo's
+   access to the org runner group and disable/delete its deploy workflow so it
+   can no longer deploy.
+1. Archive `../boom-deploy-kaboom` (and the old front end repo).
+1. After a safe retention period, clean up any now-unused old data directories
+   if you copied to new absolute paths in Phase 3 (keep them as a backup until
+   you are confident in the new deployment).
+
+### Rollback
+
+If the new deployment misbehaves before Phase 5, roll back quickly:
+
+1. `docker compose --profile prod down` on the new stack (no `-v`).
+1. Re-deploy from the old repo against the org runner (its workflow still
+   targets the same labels), pointing at the original — or restored — data
+   paths. Because no data was destroyed and the old repo retained runner access
+   until Phase 5, this returns you to the prior known-good state.

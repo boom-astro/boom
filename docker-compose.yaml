@@ -246,6 +246,42 @@ services:
       # Enable www redirection for HTTP and HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
+  frontend:
+    image: boom-astro/boom-frontend:latest
+    hostname: frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        BOOM_API__DOMAIN: ${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}
+        BOOM_KAFKA__DOMAIN: ${DOMAIN?Variable not set}:9093
+        VITE_PRERELEASE_MODE: ${VITE_PRERELEASE_MODE:-false}
+        VITE_PUBLIC_POSTHOG_KEY: ${VITE_PUBLIC_POSTHOG_KEY:-}
+        VITE_PUBLIC_POSTHOG_HOST: ${VITE_PUBLIC_POSTHOG_HOST:-}
+    environment:
+      BOOM_API__DOMAIN: ${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}
+    restart: always
+    networks:
+      - boom
+      - traefik-public
+    profiles:
+      - prod
+      - frontend
+      - dev
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      - traefik.http.services.${STACK_NAME?Variable not set}-frontend.loadbalancer.server.port=80
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.rule=Host(`${WEBAPP_DOMAIN:-${DOMAIN?Variable not set}}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.entrypoints=http
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.rule=Host(`${WEBAPP_DOMAIN:-${DOMAIN?Variable not set}}`)
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.entrypoints=https
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.tls=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.tls.certresolver=le
+      - traefik.http.middlewares.${STACK_NAME?Variable not set}-frontend-compress.compress=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-frontend-compress
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.middlewares=${STACK_NAME?Variable not set}-frontend-compress
   consumer-ztf-public:
     # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)

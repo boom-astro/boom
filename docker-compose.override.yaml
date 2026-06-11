@@ -137,6 +137,39 @@ services:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     ports:
       - "4000:4000"
+  # Run the frontend in dev mode with the Vite dev server, which provides hot
+  # module reload: source is bind-mounted, so edits on the host rebuild live in
+  # the container. /api requests are proxied to the api service over the network.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /app
+    command:
+      - bun
+      - run
+      - dev
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5173"
+    environment:
+      VITE_API_PROXY_TARGET: http://api:4000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - ./frontend/tsconfig.app.json:/app/tsconfig.app.json
+      - ./frontend/tsconfig.node.json:/app/tsconfig.node.json
+      - ./frontend/components.json:/app/components.json
+      # Anonymous volume so the host (which has no node_modules) doesn't shadow
+      # the dependencies installed in the image.
+      - /app/node_modules
+    ports:
+      - "5173:5173"
   # Run consumer in dev mode with cargo-watch, which automatically rebuilds and
   # restarts the container when source files change.
   consumer-ztf:
