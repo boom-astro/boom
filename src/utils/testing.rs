@@ -1,7 +1,8 @@
 use crate::{
     alert::{
-        AlertWorker, DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker, SchemaRegistry,
-        ZtfAlertWorker, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
+        sanitize_winter_avro, AlertWorker, DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker,
+        SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
+        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -44,6 +45,13 @@ pub async fn decam_alert_worker() -> DecamAlertWorker {
         .await
         .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn winter_alert_worker() -> WinterAlertWorker {
+    initialize_survey_indexes(&Survey::Wntr, &conf::get_test_db().await)
+        .await
+        .unwrap();
+    WinterAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 // drops alert collections from the database
@@ -103,6 +111,7 @@ pub async fn drop_alert_from_collections(
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const WNTR_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
     filter_id: &str,
@@ -169,6 +178,7 @@ pub async fn insert_test_filter(
         (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
         (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
         (Survey::Lsst, _) => LSST_TEST_PIPELINE,
+        (Survey::Wntr, _) => WNTR_TEST_PIPELINE,
         _ => {
             return Err(Box::from(format!(
                 "Unsupported survey for test filter: {}",
@@ -441,7 +451,7 @@ pub async fn assert_update_aux_branches_and_fallback<A>(
 pub fn randomize_object_id(survey: &Survey) -> String {
     let mut rng = rand::rng();
     match survey {
-        Survey::Ztf | Survey::Decam => {
+        Survey::Ztf | Survey::Decam | Survey::Wntr => {
             let mut object_id = survey.to_string();
             for _ in 0..2 {
                 object_id.push(rng.random_range('0'..='9'));
@@ -491,12 +501,18 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf | Survey::Decam => {
+            Survey::Ztf | Survey::Decam | Survey::Wntr => {
                 let payload = match survey {
                     Survey::Ztf => {
                         fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
                     }
                     Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    // The upstream WINTER schema has a duplicate field name; sanitize
+                    // it so the strict avro Reader can parse the container.
+                    Survey::Wntr => {
+                        let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
+                        sanitize_winter_avro(&raw).unwrap()
+                    }
                     _ => unreachable!(),
                 };
                 let reader = Reader::new(&payload[..]).unwrap();
@@ -664,8 +680,9 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf | Survey::Decam => {
-                // Use the same logic for ZTF/Decam, just different objectId prefix
+            Survey::Ztf | Survey::Decam | Survey::Wntr => {
+                // Use the same logic for ZTF/Decam/WINTER, just different objectId
+                // prefix (and lowercase `objectid` key for WINTER).
                 let mut candid = self.candid;
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
@@ -679,6 +696,10 @@ impl AlertRandomizer {
                             }
                             Survey::Decam => {
                                 fs::read("tests/data/alerts/decam/alert.avro").unwrap()
+                            }
+                            Survey::Wntr => {
+                                let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
+                                sanitize_winter_avro(&raw).unwrap()
                             }
                             _ => panic!("Unsupported survey for test payload"),
                         };
@@ -697,7 +718,8 @@ impl AlertRandomizer {
                 for i in 0..record.len() {
                     let (key, value) = &mut record[i];
                     match key.as_str() {
-                        "objectId" => {
+                        // ZTF/Decam use "objectId"; WINTER uses lowercase "objectid".
+                        "objectId" | "objectid" => {
                             if let Some(ref id) = object_id {
                                 *value = Value::String(id.clone());
                             } else {
