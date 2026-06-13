@@ -3,7 +3,12 @@ use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
+use crate::utils::moc::{
+    is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes, moc_to_covering_cones,
+    select_covering_depth, HpxMoc,
+};
 use actix_web::{get, post, web, HttpResponse};
+use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, Document},
@@ -339,6 +344,93 @@ enum AlertsConeSearchResult {
     LsstAlerts(HashMap<String, Vec<EnrichedLsstAlert>>),
 }
 
+/// Run one cone search per coordinate pair and group the matching alerts by object
+/// name. `base_filter_doc` holds the non-spatial filters shared across every cone;
+/// the per-cone `$centerSphere` condition is prepended so the geospatial index is
+/// used. The alert type is the only thing that differs between surveys.
+async fn cone_search_by_coordinates<T>(
+    db: &Database,
+    survey: Survey,
+    coordinates: &HashMap<String, [f64; 2]>,
+    base_filter_doc: Document,
+    radius_radians: f64,
+) -> HttpResponse
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + Unpin,
+{
+    let alerts_collection: Collection<T> = db.collection(&format!("{}_alerts", survey));
+    let mut results: HashMap<String, Vec<T>> = HashMap::new();
+    let mut alert_count = 0;
+    let mut coordinates_with_matches_count = 0;
+    for (object_name, radec) in coordinates {
+        let ra = radec[0];
+        let dec = radec[1];
+        if ra < 0.0 || ra >= 360.0 {
+            return response::bad_request(&format!(
+                "Invalid RA for object {}: must be in [0, 360)",
+                object_name
+            ));
+        }
+        if dec < -90.0 || dec > 90.0 {
+            return response::bad_request(&format!(
+                "Invalid Dec for object {}: must be in [-90, 90]",
+                object_name
+            ));
+        }
+        let center_sphere = doc! {
+            "coordinates.radec_geojson": {
+                "$geoWithin": {
+                    "$centerSphere": [
+                        [ra - 180.0, dec],
+                        radius_radians
+                    ]
+                }
+            }
+        };
+        // we need to make sure that the condition on coordinates is at the start of the
+        // filter document to take advantage of geospatial indexing
+        let filter_doc: Document = center_sphere
+            .into_iter()
+            .chain(base_filter_doc.clone())
+            .collect();
+
+        let mut alert_cursor = match alerts_collection.find(filter_doc).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error retrieving alerts for survey {}: {}",
+                    survey, error
+                ));
+            }
+        };
+
+        let mut alert_results: Vec<T> = Vec::new();
+        while let Some(alert_doc) = match alert_cursor.try_next().await {
+            Ok(Some(doc)) => Some(doc),
+            Ok(None) => None,
+            Err(error) => {
+                return response::internal_error(&format!("error getting documents: {}", error));
+            }
+        } {
+            alert_results.push(alert_doc);
+            alert_count += 1;
+        }
+        if !alert_results.is_empty() {
+            coordinates_with_matches_count += 1;
+        }
+        results.insert(object_name.clone(), alert_results);
+    }
+    response::ok(
+        &format!(
+            "found cross-matches for {}/{} coordinates, with a total {} alerts",
+            coordinates_with_matches_count,
+            coordinates.len(),
+            alert_count
+        ),
+        serde_json::json!(results),
+    )
+}
+
 #[utoipa::path(
     post,
     path = "/babamul/surveys/{survey}/alerts/cone-search",
@@ -443,176 +535,347 @@ pub async fn cone_search_alerts(
 
     match survey {
         Survey::Ztf => {
-            let alerts_collection: Collection<EnrichedZtfAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut results: HashMap<String, Vec<EnrichedZtfAlert>> = HashMap::new();
-            let mut alert_count = 0;
-            let mut coordinates_with_matches_count = 0;
-            for (object_name, radec) in coordinates {
-                if radec.len() != 2 {
-                    return response::bad_request(&format!(
-                        "Invalid coordinates for object {}: expected [RA, Dec]",
-                        object_name
-                    ));
-                }
-                let ra = radec[0];
-                let dec = radec[1];
-                if ra < 0.0 || ra >= 360.0 {
-                    return response::bad_request(&format!(
-                        "Invalid RA for object {}: must be in [0, 360)",
-                        object_name
-                    ));
-                }
-                if dec < -90.0 || dec > 90.0 {
-                    return response::bad_request(&format!(
-                        "Invalid Dec for object {}: must be in [-90, 90]",
-                        object_name
-                    ));
-                }
-                let center_sphere = doc! {
-                    "coordinates.radec_geojson": {
-                        "$geoWithin": {
-                            "$centerSphere": [
-                                [ra - 180.0, dec],
-                                radius_radians
-                            ]
-                        }
-                    }
-                };
-                let mut filter_doc = base_filter_doc.clone();
-                // filter_doc.extend(center_sphere);
-                // we need to make sure that the condition on coordinates is at the start of the filter document to take advantage of geospatial indexing
-                filter_doc = center_sphere
-                    .into_iter()
-                    .chain(filter_doc.into_iter())
-                    .collect();
-
-                let mut alert_cursor = match alerts_collection.find(filter_doc).await {
-                    Ok(cursor) => cursor,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error retrieving alerts for survey {}: {}",
-                            survey, error
-                        ));
-                    }
-                };
-
-                let mut alert_results: Vec<EnrichedZtfAlert> = Vec::new();
-                while let Some(alert_doc) = match alert_cursor.try_next().await {
-                    Ok(Some(doc)) => Some(doc),
-                    Ok(None) => None,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error getting documents: {}",
-                            error
-                        ));
-                    }
-                } {
-                    alert_results.push(alert_doc);
-                    alert_count += 1;
-                }
-                if !alert_results.is_empty() {
-                    coordinates_with_matches_count += 1;
-                }
-                results.insert(object_name.clone(), alert_results);
-            }
-            return response::ok(
-                &format!(
-                    "found cross-matches for {}/{} coordinates, with a total {} alerts",
-                    coordinates_with_matches_count,
-                    coordinates.len(),
-                    alert_count
-                ),
-                serde_json::json!(results),
-            );
+            cone_search_by_coordinates::<EnrichedZtfAlert>(
+                &db,
+                survey,
+                coordinates,
+                base_filter_doc,
+                radius_radians,
+            )
+            .await
         }
         Survey::Lsst => {
-            // similar to above but for LSST collection
-            let alerts_collection: Collection<EnrichedLsstAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut results: HashMap<String, Vec<EnrichedLsstAlert>> = HashMap::new();
-            let mut alert_count = 0;
-            let mut coordinates_with_matches_count = 0;
-            for (object_name, radec) in coordinates {
-                if radec.len() != 2 {
-                    return response::bad_request(&format!(
-                        "Invalid coordinates for object {}: expected [RA, Dec]",
-                        object_name
-                    ));
-                }
-                let ra = radec[0];
-                let dec = radec[1];
-                if ra < 0.0 || ra >= 360.0 {
-                    return response::bad_request(&format!(
-                        "Invalid RA for object {}: must be in [0, 360)",
-                        object_name
-                    ));
-                }
-                if dec < -90.0 || dec > 90.0 {
-                    return response::bad_request(&format!(
-                        "Invalid Dec for object {}: must be in [-90, 90]",
-                        object_name
-                    ));
-                }
-                let center_sphere = doc! {
-                    "coordinates.radec_geojson": {
-                        "$geoWithin": {
-                            "$centerSphere": [
-                                [ra - 180.0, dec],
-                                radius_radians
-                            ]
-                        }
-                    }
-                };
-                let mut filter_doc = base_filter_doc.clone();
-                // we need to make sure that the condition on coordinates is at the start of the filter document to take advantage of geospatial indexing
-                filter_doc = center_sphere
-                    .into_iter()
-                    .chain(filter_doc.into_iter())
-                    .collect();
-                let mut alert_cursor = match alerts_collection.find(filter_doc).await {
-                    Ok(cursor) => cursor,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error retrieving alerts for survey {}: {}",
-                            survey, error
-                        ));
-                    }
-                };
+            cone_search_by_coordinates::<EnrichedLsstAlert>(
+                &db,
+                survey,
+                coordinates,
+                base_filter_doc,
+                radius_radians,
+            )
+            .await
+        }
+        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
+    }
+}
 
-                let mut alert_results: Vec<EnrichedLsstAlert> = Vec::new();
-                while let Some(alert_doc) = match alert_cursor.try_next().await {
-                    Ok(Some(doc)) => Some(doc),
-                    Ok(None) => None,
-                    Err(error) => {
-                        return response::internal_error(&format!(
-                            "error getting documents: {}",
-                            error
-                        ));
-                    }
-                } {
-                    alert_results.push(alert_doc);
-                    alert_count += 1;
-                }
-                if !alert_results.is_empty() {
-                    coordinates_with_matches_count += 1;
-                }
-                results.insert(object_name.clone(), alert_results);
+/// Maximum time window for MOC search queries (7 days).
+const MOC_SEARCH_MAX_TIME_WINDOW_JD: f64 = 7.0;
+/// Maximum number of covering cones before rejecting the query.
+const MOC_SEARCH_MAX_CONES: usize = 500;
+/// MongoDB server-side query timeout for MOC search (30 seconds).
+const MOC_SEARCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Stream alerts matching `filter_doc`, keep only those whose coordinates fall
+/// inside `moc` (the spatial `$or` is a coarse pre-filter at the cone level), and
+/// build the success response. `coords` extracts (ra, dec) from each alert, which
+/// is the only thing that differs between surveys.
+async fn collect_moc_alerts<T, F>(
+    db: &Database,
+    survey: Survey,
+    filter_doc: Document,
+    moc: &HpxMoc,
+    limit: u32,
+    cones_len: usize,
+    depth: u8,
+    coords: F,
+) -> HttpResponse
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + Unpin,
+    F: Fn(&T) -> (f64, f64),
+{
+    let alerts_collection: Collection<T> = db.collection(&format!("{}_alerts", survey));
+    let mut alert_cursor = match alerts_collection
+        .find(filter_doc)
+        .max_time(MOC_SEARCH_QUERY_TIMEOUT)
+        .await
+    {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            return response::internal_error(&format!(
+                "error retrieving alerts for survey {}: {}",
+                survey, error
+            ));
+        }
+    };
+
+    let mut results: Vec<T> = Vec::new();
+    while let Some(alert_doc) = match alert_cursor.try_next().await {
+        Ok(Some(doc)) => Some(doc),
+        Ok(None) => None,
+        Err(error) => {
+            return response::internal_error(&format!("error getting documents: {}", error));
+        }
+    } {
+        // Post-filter: check that the alert is actually inside the MOC
+        let (ra, dec) = coords(&alert_doc);
+        if is_in_moc(moc, ra, dec) {
+            results.push(alert_doc);
+            if results.len() >= limit as usize {
+                break;
             }
-            return response::ok(
-                &format!(
-                    "found cross-matches for {}/{} coordinates, with a total {} alerts",
-                    coordinates_with_matches_count,
-                    coordinates.len(),
-                    alert_count
-                ),
-                serde_json::json!(results),
-            );
         }
-        _ => {
+    }
+    response::ok(
+        &format!(
+            "found {} alerts within MOC region ({} covering cones at depth {})",
+            results.len(),
+            cones_len,
+            depth
+        ),
+        serde_json::json!(results),
+    )
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+struct AlertsMocSearchQuery {
+    /// Base64-encoded MOC FITS file (exactly one of moc_fits_base64 or skymap_fits_base64 required)
+    moc_fits_base64: Option<String>,
+    /// Base64-encoded HEALPix skymap FITS file
+    skymap_fits_base64: Option<String>,
+    /// Credible level for skymap thresholding (optional, defaults to 0.9 if omitted when skymap_fits_base64 is provided)
+    credible_level: Option<f64>,
+    /// Start of time window (required, Julian Date)
+    start_jd: f64,
+    /// End of time window (required, Julian Date, max 7 days after start_jd)
+    end_jd: f64,
+    min_magpsf: Option<f64>,
+    max_magpsf: Option<f64>,
+    #[serde(alias = "min_reliability")]
+    min_drb: Option<f64>,
+    #[serde(alias = "max_reliability")]
+    max_drb: Option<f64>,
+    is_rock: Option<bool>,
+    is_star: Option<bool>,
+    is_near_brightstar: Option<bool>,
+    is_stationary: Option<bool>,
+    limit: Option<u32>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/alerts/moc-search",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    request_body = AlertsMocSearchQuery,
+    responses(
+        (status = 200, description = "Alerts within the MOC region", body = AlertsQueryResult),
+        (status = 400, description = "Invalid query parameters or MOC data"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/alerts/moc-search")]
+pub async fn moc_search_alerts(
+    path: web::Path<Survey>,
+    mut query: web::Json<AlertsMocSearchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    let survey = path.into_inner();
+
+    // Validate time window (required, capped at 7 days)
+    let time_window = query.end_jd - query.start_jd;
+    if time_window <= 0.0 {
+        return response::bad_request("end_jd must be greater than start_jd");
+    }
+    if time_window > MOC_SEARCH_MAX_TIME_WINDOW_JD {
+        return response::bad_request(&format!(
+            "Time window too large ({:.1} days), maximum allowed is {} days",
+            time_window, MOC_SEARCH_MAX_TIME_WINDOW_JD
+        ));
+    }
+
+    // Validate which MOC source was provided before doing any heavy work.
+    let moc_b64 = query.moc_fits_base64.take();
+    let skymap_b64 = query.skymap_fits_base64.take();
+    match (&moc_b64, &skymap_b64) {
+        (Some(_), Some(_)) => {
             return response::bad_request(
-                "Invalid survey specified, only ZTF and LSST are supported",
+                "Provide exactly one of moc_fits_base64 or skymap_fits_base64, not both",
             );
         }
+        (None, None) => {
+            return response::bad_request(
+                "Must provide either moc_fits_base64 or skymap_fits_base64",
+            );
+        }
+        _ => {}
+    }
+    if moc_b64.is_some() && query.credible_level.is_some() {
+        return response::bad_request(
+            "credible_level only applies to skymap_fits_base64, not a pre-built moc_fits_base64",
+        );
+    }
+    let credible_level = query.credible_level.unwrap_or(0.9);
+
+    let limit = query.limit.unwrap_or(10000).min(10000);
+    if limit == 0 {
+        return response::bad_request("limit must be between 1 and 10000");
+    }
+
+    // Decoding the base64 payload (up to ~70 MB), parsing the MOC/skymap, and
+    // computing the covering cones is pure CPU work with no `.await` points.
+    // Running it on the async worker would block that worker for the whole
+    // computation, so offload it to the blocking thread pool.
+    let computation = web::block(
+        move || -> Result<(HpxMoc, u8, Vec<(f64, f64, f64)>), String> {
+            let moc = match (moc_b64, skymap_b64) {
+                (Some(moc_b64), _) => {
+                    let bytes = BASE64_STANDARD
+                        .decode(moc_b64)
+                        .map_err(|e| format!("Invalid base64 in moc_fits_base64: {}", e))?;
+                    moc_from_fits_bytes(&bytes)?
+                }
+                (None, Some(skymap_b64)) => {
+                    if !(0.0..=1.0).contains(&credible_level) {
+                        return Err("credible_level must be between 0.0 and 1.0".to_string());
+                    }
+                    let bytes = BASE64_STANDARD
+                        .decode(skymap_b64)
+                        .map_err(|e| format!("Invalid base64 in skymap_fits_base64: {}", e))?;
+                    moc_from_skymap_bytes(&bytes, credible_level)?
+                }
+                // Presence is validated above: exactly one source is provided.
+                (None, None) => unreachable!("MOC source presence validated before web::block"),
+            };
+            let depth = select_covering_depth(&moc);
+            let cones = moc_to_covering_cones(&moc, depth);
+            Ok((moc, depth, cones))
+        },
+    )
+    .await;
+
+    let (moc, depth, cones) = match computation {
+        Ok(Ok(result)) => result,
+        Ok(Err(message)) => return response::bad_request(&message),
+        Err(e) => {
+            return response::internal_error(&format!("error processing MOC: {}", e));
+        }
+    };
+
+    if cones.is_empty() {
+        return response::ok(
+            "MOC region is empty, no alerts to search",
+            serde_json::json!([]),
+        );
+    }
+    if cones.len() > MOC_SEARCH_MAX_CONES {
+        return response::bad_request(&format!(
+            "MOC region too large: {} covering cones at depth {} (max {}). Use a smaller credible level or a more targeted MOC.",
+            cones.len(),
+            depth,
+            MOC_SEARCH_MAX_CONES
+        ));
+    }
+
+    // Build the query with JD range first (uses the candidate.jd index to narrow quickly),
+    // then spatial $or to filter by sky region, then post-filter with the full-resolution MOC.
+    let jd_filter = doc! { "candidate.jd": { "$gte": query.start_jd, "$lte": query.end_jd } };
+
+    let or_conditions: Vec<Document> = cones
+        .iter()
+        .map(|&(ra, dec, radius_rad)| {
+            doc! {
+                "coordinates.radec_geojson": {
+                    "$geoWithin": {
+                        "$centerSphere": [
+                            [ra - 180.0, dec],
+                            radius_rad
+                        ]
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Start with JD filter (indexed), then add spatial $or, then other filters
+    let mut filter_doc = jd_filter;
+    filter_doc.insert("$or", or_conditions);
+
+    if survey == Survey::Ztf {
+        filter_doc.insert("candidate.programid", 1);
+    }
+    if query.min_magpsf.is_some() || query.max_magpsf.is_some() {
+        let mut magpsf_filter = Document::new();
+        if let Some(min_magpsf) = query.min_magpsf {
+            magpsf_filter.insert("$gte", min_magpsf);
+        }
+        if let Some(max_magpsf) = query.max_magpsf {
+            magpsf_filter.insert("$lte", max_magpsf);
+        }
+        filter_doc.insert("candidate.magpsf", magpsf_filter);
+    }
+    if query.min_drb.is_some() || query.max_drb.is_some() {
+        let drb_key = match survey {
+            Survey::Ztf => "candidate.drb",
+            Survey::Lsst => "candidate.reliability",
+            _ => {
+                return response::bad_request(
+                    "Invalid survey specified, only ZTF and LSST are supported",
+                );
+            }
+        };
+        let mut drb_filter = Document::new();
+        if let Some(min_drb) = query.min_drb {
+            drb_filter.insert("$gte", min_drb);
+        }
+        if let Some(max_drb) = query.max_drb {
+            drb_filter.insert("$lte", max_drb);
+        }
+        filter_doc.insert(drb_key, drb_filter);
+    }
+    if let Some(is_rock) = query.is_rock {
+        filter_doc.insert("properties.rock", is_rock);
+    }
+    if let Some(is_star) = query.is_star {
+        filter_doc.insert("properties.star", is_star);
+    }
+    if let Some(is_near_brightstar) = query.is_near_brightstar {
+        filter_doc.insert("properties.near_brightstar", is_near_brightstar);
+    }
+    if let Some(is_stationary) = query.is_stationary {
+        filter_doc.insert("properties.stationary", is_stationary);
+    }
+
+    match survey {
+        Survey::Ztf => {
+            collect_moc_alerts::<EnrichedZtfAlert, _>(
+                &db,
+                survey,
+                filter_doc,
+                &moc,
+                limit,
+                cones.len(),
+                depth,
+                |alert| (alert.candidate.candidate.ra, alert.candidate.candidate.dec),
+            )
+            .await
+        }
+        Survey::Lsst => {
+            collect_moc_alerts::<EnrichedLsstAlert, _>(
+                &db,
+                survey,
+                filter_doc,
+                &moc,
+                limit,
+                cones.len(),
+                depth,
+                |alert| {
+                    (
+                        alert.candidate.dia_source.ra,
+                        alert.candidate.dia_source.dec,
+                    )
+                },
+            )
+            .await
+        }
+        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
     }
 }

@@ -113,12 +113,18 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::stats::get_kafka_stats)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
-                    .service(routes::babamul::tokens::delete_token),
+                    .service(routes::babamul::tokens::delete_token)
+                    // MOC search has its own larger JSON limit for skymap uploads (70 MB)
+                    .service(
+                        web::scope("")
+                            .app_data(web::JsonConfig::default().limit(73_400_320))
+                            .service(routes::babamul::surveys::moc_search_alerts),
+                    ),
             )
         }
 
         app.service(
-            actix_web::web::scope("")
+            web::scope("")
                 .wrap(from_fn(auth_middleware))
                 // Public routes
                 .service(Scalar::with_url("/docs", api_doc.clone()))
