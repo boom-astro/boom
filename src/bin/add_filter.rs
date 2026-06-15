@@ -121,6 +121,19 @@ async fn main() {
             );
             std::process::exit(1);
         }
+        // Validate the watchlist is configured for crossmatch on this survey
+        let configured = config
+            .crossmatch
+            .get(&survey)
+            .map(|cats| cats.iter().any(|c| c.catalog == *name))
+            .unwrap_or(false);
+        if !configured {
+            eprintln!(
+                "watchlist '{}' is not configured for crossmatch on survey {:?}.",
+                name, survey
+            );
+            std::process::exit(1);
+        }
     }
 
     // Create a bson document with id, active, catalog, permissions
