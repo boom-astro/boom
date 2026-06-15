@@ -13,8 +13,8 @@ pub enum Survey {
     Lsst,
     #[serde(alias = "decam")]
     Decam,
-    #[serde(alias = "wntr", alias = "winter")]
-    Wntr,
+    #[serde(alias = "winter", alias = "wntr")]
+    Winter,
 }
 
 impl Survey {
@@ -23,7 +23,7 @@ impl Survey {
             Survey::Ztf => "ZTF",
             Survey::Lsst => "LSST",
             Survey::Decam => "DECAM",
-            Survey::Wntr => "WNTR",
+            Survey::Winter => "WINTER",
         }
     }
 
@@ -38,7 +38,7 @@ impl Survey {
             Survey::Ztf => -7.0,
             Survey::Lsst => -3.0,
             Survey::Decam => -4.0,
-            Survey::Wntr => -7.0,
+            Survey::Winter => -7.0,
         }
     }
 

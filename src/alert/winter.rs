@@ -25,19 +25,19 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use tracing::{debug, error, instrument, warn};
 
-pub const STREAM_NAME: &str = "WNTR";
+pub const STREAM_NAME: &str = "WINTER";
 // WINTER observes from Palomar; it covers roughly the same northern sky as ZTF.
-pub const WNTR_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
+pub const WINTER_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
 // Position uncertainty in arcsec used to set cross-match radii. WINTER's astrometry
 // is comparable to ZTF's; Kowalski cross-matches WINTER against ZTF using a 2" cone.
-pub const WNTR_POSITION_UNCERTAINTY: f64 = 2.0;
+pub const WINTER_POSITION_UNCERTAINTY: f64 = 2.0;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 
-pub const WNTR_ZTF_XMATCH_RADIUS: f64 =
-    (WNTR_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
-pub const WNTR_LSST_XMATCH_RADIUS: f64 =
-    (WNTR_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
+pub const WINTER_ZTF_XMATCH_RADIUS: f64 =
+    (WINTER_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
+pub const WINTER_LSST_XMATCH_RADIUS: f64 =
+    (WINTER_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
 /// Map a WINTER filter id to a photometric [`Band`].
 ///
@@ -486,7 +486,7 @@ impl WinterAlertWorker {
                 ra,
                 dec,
                 ztf::ZTF_DEC_RANGE,
-                WNTR_ZTF_XMATCH_RADIUS,
+                WINTER_ZTF_XMATCH_RADIUS,
                 &self.ztf_alert_aux_collection,
             )
             .await?;
@@ -496,7 +496,7 @@ impl WinterAlertWorker {
                 ra,
                 dec,
                 lsst::LSST_DEC_RANGE,
-                WNTR_LSST_XMATCH_RADIUS,
+                WINTER_LSST_XMATCH_RADIUS,
                 &self.lsst_alert_aux_collection,
             )
             .await?;
@@ -608,7 +608,7 @@ impl AlertWorker for WinterAlertWorker {
 
         let xmatch_configs = config
             .crossmatch
-            .get(&Survey::Wntr)
+            .get(&Survey::Winter)
             .cloned()
             .unwrap_or_default();
 
@@ -620,7 +620,7 @@ impl AlertWorker for WinterAlertWorker {
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_storage = config
-            .build_cutout_storage(&Survey::Wntr)
+            .build_cutout_storage(&Survey::Winter)
             .await
             .inspect_err(as_error!("failed to create cutout storage"))?;
         let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
@@ -646,7 +646,7 @@ impl AlertWorker for WinterAlertWorker {
     }
 
     fn survey() -> Survey {
-        Survey::Wntr
+        Survey::Winter
     }
 
     fn input_queue_name(&self) -> String {

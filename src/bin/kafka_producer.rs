@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let producer = DecamAlertProducer::new(date, limit, &server_url, true);
             producer.produce(None).await?;
         }
-        Survey::Wntr => {
+        Survey::Winter => {
             let producer = WinterAlertProducer::new(date, limit, &server_url, true);
             producer.produce(None).await?;
         }

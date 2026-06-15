@@ -48,7 +48,7 @@ pub async fn decam_alert_worker() -> DecamAlertWorker {
 }
 
 pub async fn winter_alert_worker() -> WinterAlertWorker {
-    initialize_survey_indexes(&Survey::Wntr, &conf::get_test_db().await)
+    initialize_survey_indexes(&Survey::Winter, &conf::get_test_db().await)
         .await
         .unwrap();
     WinterAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
@@ -111,7 +111,7 @@ pub async fn drop_alert_from_collections(
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
-const WNTR_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const WINTER_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
     filter_id: &str,
@@ -178,7 +178,7 @@ pub async fn insert_test_filter(
         (Survey::Ztf, true) => ZTF_TEST_PIPELINE_PRV_CANDIDATES,
         (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
         (Survey::Lsst, _) => LSST_TEST_PIPELINE,
-        (Survey::Wntr, _) => WNTR_TEST_PIPELINE,
+        (Survey::Winter, _) => WINTER_TEST_PIPELINE,
         _ => {
             return Err(Box::from(format!(
                 "Unsupported survey for test filter: {}",
@@ -451,7 +451,7 @@ pub async fn assert_update_aux_branches_and_fallback<A>(
 pub fn randomize_object_id(survey: &Survey) -> String {
     let mut rng = rand::rng();
     match survey {
-        Survey::Ztf | Survey::Decam | Survey::Wntr => {
+        Survey::Ztf | Survey::Decam | Survey::Winter => {
             let mut object_id = survey.to_string();
             for _ in 0..2 {
                 object_id.push(rng.random_range('0'..='9'));
@@ -501,7 +501,7 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf | Survey::Decam | Survey::Wntr => {
+            Survey::Ztf | Survey::Decam | Survey::Winter => {
                 let payload = match survey {
                     Survey::Ztf => {
                         fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
@@ -509,7 +509,7 @@ impl AlertRandomizer {
                     Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
                     // The upstream WINTER schema has a duplicate field name; sanitize
                     // it so the strict avro Reader can parse the container.
-                    Survey::Wntr => {
+                    Survey::Winter => {
                         let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
                         sanitize_winter_avro(&raw).unwrap()
                     }
@@ -680,7 +680,7 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf | Survey::Decam | Survey::Wntr => {
+            Survey::Ztf | Survey::Decam | Survey::Winter => {
                 // Use the same logic for ZTF/Decam/WINTER, just different objectId
                 // prefix (and lowercase `objectid` key for WINTER).
                 let mut candid = self.candid;
@@ -697,7 +697,7 @@ impl AlertRandomizer {
                             Survey::Decam => {
                                 fs::read("tests/data/alerts/decam/alert.avro").unwrap()
                             }
-                            Survey::Wntr => {
+                            Survey::Winter => {
                                 let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
                                 sanitize_winter_avro(&raw).unwrap()
                             }

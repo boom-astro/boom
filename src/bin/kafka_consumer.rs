@@ -173,7 +173,7 @@ async fn run(
                 Err(e) => error!("Failed to consume alerts: {}", e),
             };
         }
-        Survey::Wntr => {
+        Survey::Winter => {
             let consumer = WinterAlertConsumer::new(None);
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config).await;

@@ -4,7 +4,7 @@ use crate::{
 };
 use tracing::info;
 
-const WNTR_DEFAULT_NB_PARTITIONS: usize = 15;
+const WINTER_DEFAULT_NB_PARTITIONS: usize = 15;
 
 pub struct WinterAlertConsumer {
     output_queue: String,
@@ -13,7 +13,7 @@ pub struct WinterAlertConsumer {
 impl WinterAlertConsumer {
     pub fn new(output_queue: Option<&str>) -> Self {
         let output_queue = output_queue
-            .unwrap_or("WNTR_alerts_packets_queue")
+            .unwrap_or("WINTER_alerts_packets_queue")
             .to_string();
 
         WinterAlertConsumer { output_queue }
@@ -31,7 +31,7 @@ impl AlertConsumer for WinterAlertConsumer {
         self.output_queue.clone()
     }
     fn survey(&self) -> &'static str {
-        Survey::Wntr.as_str()
+        Survey::Winter.as_str()
     }
 }
 
@@ -71,17 +71,17 @@ impl AlertProducer for WinterAlertProducer {
         self.verbose
     }
     fn default_nb_partitions(&self) -> usize {
-        WNTR_DEFAULT_NB_PARTITIONS
+        WINTER_DEFAULT_NB_PARTITIONS
     }
     async fn download_alerts_from_archive(&self) -> Result<i64, Box<dyn std::error::Error>> {
         // there is no public WINTER archive, so we just check if the directory exists
         let data_folder = self.data_directory();
-        info!("Checking for WNTR alerts in folder {}", data_folder);
+        info!("Checking for WINTER alerts in folder {}", data_folder);
         std::fs::create_dir_all(&data_folder)?;
         let count = count_files_in_dir(&data_folder, Some(&["avro"]))?;
         if count < 1 {
             return Err(format!(
-                "WNTR has no public archive to download from, and no alerts found in {}",
+                "WINTER has no public archive to download from, and no alerts found in {}",
                 data_folder
             )
             .into());

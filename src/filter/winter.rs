@@ -15,7 +15,7 @@ use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{mag2flux, Band, LSST_ZP_AB_NJY};
 
-/// Lightcurve point as fetched from the WNTR aux collection for building the
+/// Lightcurve point as fetched from the WINTER aux collection for building the
 /// alert packet sent downstream.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct WinterPhotometry {
@@ -64,7 +64,7 @@ fn create_winter_filter_alert_pipeline() -> Vec<Document> {
         },
         doc! {
             "$lookup": {
-                "from": "WNTR_alerts_aux",
+                "from": "WINTER_alerts_aux",
                 "localField": "objectId",
                 "foreignField": "_id",
                 "as": "aux"
@@ -181,10 +181,10 @@ pub async fn build_winter_alerts(
                 jd: doc.jd,
                 flux,
                 flux_err,
-                band: format!("wntr{}", doc.band),
+                band: format!("winter{}", doc.band),
                 origin: Origin::Alert,
                 programid: 1,
-                survey: Survey::Wntr,
+                survey: Survey::Winter,
                 ra: doc.ra,
                 dec: doc.dec,
             });
@@ -210,7 +210,7 @@ pub async fn build_winter_alerts(
             cutout_science: cutouts.cutout_science,
             cutout_template: cutouts.cutout_template,
             cutout_difference: cutouts.cutout_difference,
-            survey: Survey::Wntr,
+            survey: Survey::Winter,
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
@@ -225,7 +225,7 @@ pub async fn build_winter_alerts(
 
 /// Builds a MongoDB aggregation pipeline for WINTER filter execution.
 ///
-/// Augments the user filter pipeline with WNTR aux lookups (prv_candidates,
+/// Augments the user filter pipeline with WINTER aux lookups (prv_candidates,
 /// cross_matches, aliases) based on which fields the filter references.
 pub async fn build_winter_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
@@ -303,7 +303,7 @@ pub async fn build_winter_filter_pipeline(
         if insert_aux_pipeline && i == insert_aux_index {
             pipeline.push(doc! {
                 "$lookup": doc! {
-                    "from": "WNTR_alerts_aux",
+                    "from": "WINTER_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -340,14 +340,15 @@ impl FilterWorker for WinterFilterWorker {
     ) -> Result<Self, FilterWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
-        let alert_collection = db.collection("WNTR_alerts");
+        let alert_collection = db.collection("WINTER_alerts");
         let filter_collection = db.collection("filters");
-        let alert_cutout_storage = config.build_cutout_storage(&Survey::Wntr).await?;
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Winter).await?;
 
-        let input_queue = "WNTR_alerts_filter_queue".to_string();
-        let output_topic = "WNTR_alerts_results".to_string();
+        let input_queue = "WINTER_alerts_filter_queue".to_string();
+        let output_topic = "WINTER_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Wntr, &filter_collection).await?;
+        let filters =
+            build_loaded_filters(&filter_ids, &Survey::Winter, &filter_collection).await?;
 
         Ok(WinterFilterWorker {
             alert_pipeline: create_winter_filter_alert_pipeline(),
@@ -362,18 +363,19 @@ impl FilterWorker for WinterFilterWorker {
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
-        info!("refreshing WNTR filters from database");
+        info!("refreshing WINTER filters from database");
         self.filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Wntr, &self.filter_collection).await?;
+            build_loaded_filters(&self.filter_ids, &Survey::Winter, &self.filter_collection)
+                .await?;
         info!(
-            "refreshed WNTR filters from database; now tracking {} filters",
+            "refreshed WINTER filters from database; now tracking {} filters",
             self.filters.len()
         );
         Ok(())
     }
 
     fn survey() -> Survey {
-        Survey::Wntr
+        Survey::Winter
     }
 
     fn input_queue_name(&self) -> String {
@@ -410,7 +412,7 @@ impl FilterWorker for WinterFilterWorker {
                 continue;
             } else {
                 info!(
-                    "{} alerts passed wntr filter {}",
+                    "{} alerts passed winter filter {}",
                     out_documents.len(),
                     filter.id,
                 );

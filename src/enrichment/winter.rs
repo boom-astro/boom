@@ -25,7 +25,7 @@ pub fn create_winter_alert_pipeline() -> Vec<Document> {
         },
         doc! {
             "$lookup": {
-                "from": "WNTR_alerts_aux",
+                "from": "WINTER_alerts_aux",
                 "localField": "objectId",
                 "foreignField": "_id",
                 "as": "aux"
@@ -94,10 +94,10 @@ impl EnrichmentWorker for WinterEnrichmentWorker {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
-        let alert_collection = db.collection("WNTR_alerts");
+        let alert_collection = db.collection("WINTER_alerts");
 
-        let input_queue = "WNTR_alerts_enrichment_queue".to_string();
-        let output_queue = "WNTR_alerts_filter_queue".to_string();
+        let input_queue = "WINTER_alerts_enrichment_queue".to_string();
+        let output_queue = "WINTER_alerts_filter_queue".to_string();
 
         Ok(WinterEnrichmentWorker {
             input_queue,
@@ -109,7 +109,7 @@ impl EnrichmentWorker for WinterEnrichmentWorker {
     }
 
     fn survey() -> Survey {
-        Survey::Wntr
+        Survey::Winter
     }
 
     fn input_queue_name(&self) -> String {

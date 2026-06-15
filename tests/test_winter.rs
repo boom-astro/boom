@@ -33,7 +33,7 @@ async fn test_process_winter_alert() {
     let mut alert_worker = winter_alert_worker().await;
 
     let (candid, object_id, ra, dec, bytes_content) =
-        AlertRandomizer::new_randomized(Survey::Wntr).get().await;
+        AlertRandomizer::new_randomized(Survey::Winter).get().await;
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok(), "{:?}", result);
     assert_eq!(result.unwrap(), ProcessAlertStatus::Added(candid));
@@ -45,7 +45,7 @@ async fn test_process_winter_alert() {
     let db = get_test_db().await;
     let filter = doc! {"_id": candid};
     let alert = db
-        .collection::<mongodb::bson::Document>("WNTR_alerts")
+        .collection::<mongodb::bson::Document>("WINTER_alerts")
         .find_one(filter.clone())
         .await
         .unwrap();
@@ -60,7 +60,7 @@ async fn test_process_winter_alert() {
     assert!(candidate.get_str("band").is_ok());
 
     // cutouts inserted
-    let cutout_storage = get_test_cutout_storage(&Survey::Wntr).await;
+    let cutout_storage = get_test_cutout_storage(&Survey::Winter).await;
     let cutouts = cutout_storage
         .retrieve_cutouts(candid, false)
         .await
@@ -69,7 +69,7 @@ async fn test_process_winter_alert() {
 
     // aux collection inserted with prv_candidates (at least the current detection)
     let aux = db
-        .collection::<mongodb::bson::Document>("WNTR_alerts_aux")
+        .collection::<mongodb::bson::Document>("WINTER_alerts_aux")
         .find_one(doc! {"_id": &object_id})
         .await
         .unwrap();
@@ -79,7 +79,7 @@ async fn test_process_winter_alert() {
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert!(!prv_candidates.is_empty());
 
-    drop_alert_from_collections(candid, &Survey::Wntr)
+    drop_alert_from_collections(candid, &Survey::Winter)
         .await
         .unwrap();
 }

@@ -367,7 +367,7 @@ impl Worker {
                     Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
                     Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                     Survey::Decam => run_alert_worker::<DecamAlertWorker>,
-                    Survey::Wntr => run_alert_worker::<WinterAlertWorker>,
+                    Survey::Winter => run_alert_worker::<WinterAlertWorker>,
                 };
                 run(receiver, &config_path, id).unwrap_or_else(as_error!("alert worker failed"));
             }),
@@ -378,7 +378,7 @@ impl Worker {
                 let run = match survey_name {
                     Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
                     Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
-                    Survey::Wntr => run_filter_worker::<WinterFilterWorker>,
+                    Survey::Winter => run_filter_worker::<WinterFilterWorker>,
                     _ => {
                         error!(
                             "Filter worker not implemented for survey: {:?}",
@@ -396,7 +396,7 @@ impl Worker {
                 let run = match survey_name {
                     Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
                     Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
-                    Survey::Wntr => run_enrichment_worker::<WinterEnrichmentWorker>,
+                    Survey::Winter => run_enrichment_worker::<WinterEnrichmentWorker>,
                     _ => {
                         error!(
                             "Enrichment worker not implemented for survey: {:?}",

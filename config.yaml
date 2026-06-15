@@ -46,9 +46,9 @@ kafka:
     decam:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
-    wntr:
+    winter:
       server: "localhost:9092"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__WNTR__GROUP_ID environment variable
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 # cutouts_storage configures where alert cutout images are stored.
@@ -129,7 +129,7 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 5
       reference_night:
-  wntr:
+  winter:
     command_interval: 500
     alert:
       n_workers: 1
@@ -239,7 +239,7 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
   decam: []
-  wntr:
+  winter:
     - catalog: PS1_DR1
       radius: 2.0 # 2 arcseconds
       use_distance: false

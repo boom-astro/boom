@@ -18,7 +18,7 @@ pub use lsst::{
 };
 pub use winter::{
     sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterCandidate, WinterObject,
-    WinterPrvCandidate, WinterRawAvroAlert, WNTR_DEC_RANGE,
+    WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
 };
 pub use ztf::{
     deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist,
