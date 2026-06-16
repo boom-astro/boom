@@ -417,15 +417,27 @@ before archiving it.
    cd /home/github/actions-runner
    sudo ./svc.sh stop
    sudo ./svc.sh uninstall
+   # config.sh must run as the github user, not root: it writes into the
+   # runner dir, and on this host the home lives under /scr where root is
+   # squashed. `sudo su -` is a login shell, so cd back into the runner dir.
+   sudo su - github
+   cd ~/actions-runner
    ./config.sh remove --token <REPO_REMOVAL_TOKEN>
+   exit
    ```
+
+   The account home may not be under `/home` (on this host it is `/scr/github`).
+   Run `getent passwd github` to find the real path if `cd` fails.
 
 1. Re-register the same runner against the organization, keeping the
    `production` label, then reinstall the service:
 
    ```bash
+   sudo su - github
+   cd ~/actions-runner
    ./config.sh --url https://github.com/<org> --token <ORG_TOKEN> \
      --labels production
+   exit
    sudo ./svc.sh install github
    sudo ./svc.sh start
    sudo ./svc.sh status
