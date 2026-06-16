@@ -14,6 +14,12 @@ fn is_safe_catalog_name(catalog_name: &str) -> bool {
         && !PROTECTED_COLLECTION_NAMES.contains(&catalog_name)
 }
 
+/// Whether the name is a well-formed watchlist catalog name: it carries the
+/// `watchlist_` prefix and passes the general catalog-name safety checks.
+pub fn is_valid_watchlist_name(catalog_name: &str) -> bool {
+    catalog_name.starts_with(WATCHLIST_PREFIX) && is_safe_catalog_name(catalog_name)
+}
+
 async fn collection_exists(db: &Database, collection_name: &str) -> bool {
     match db.list_collection_names().await {
         Ok(names) => names.iter().any(|n| n == collection_name),

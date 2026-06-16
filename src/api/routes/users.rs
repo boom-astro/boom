@@ -171,6 +171,7 @@ pub struct WatchlistAccessResponse {
     request_body = WatchlistAccessPatch,
     responses(
         (status = 200, description = "Watchlist access updated", body = WatchlistAccessResponse),
+        (status = 400, description = "Invalid watchlist catalog name"),
         (status = 403, description = "Forbidden"),
         (status = 404, description = "User not found"),
         (status = 500, description = "Internal server error")
@@ -193,12 +194,24 @@ pub async fn patch_watchlist_access(
     }
     let user_id = path.into_inner();
     let user_collection: Collection<User> = db.collection("users");
-    let new_list: Vec<String> = body
+
+    // Reject the whole request if any name is not a well-formed watchlist catalog name.
+    if let Some(invalid) = body
         .watchlist_access
         .iter()
-        .filter(|w| !w.is_empty())
-        .cloned()
-        .collect();
+        .find(|w| !crate::api::catalogs::is_valid_watchlist_name(w))
+    {
+        return HttpResponse::BadRequest().body(format!(
+            "invalid watchlist catalog name '{}': must start with '{}' and be a valid catalog name",
+            invalid,
+            crate::api::catalogs::WATCHLIST_PREFIX
+        ));
+    }
+
+    let mut new_list: Vec<String> = body.watchlist_access.iter().cloned().collect();
+    new_list.sort();
+    new_list.dedup();
+
     let update = doc! { "$set": { "watchlist_access": &new_list } };
     match user_collection
         .find_one_and_update(doc! { "_id": &user_id }, update)
