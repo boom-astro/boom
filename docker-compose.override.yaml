@@ -134,7 +134,7 @@ services:
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - target:/app/target
-      - ${PWD}/config.yaml:/app/config.yaml
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     ports:
       - "4000:4000"
   # Run consumer in dev mode with cargo-watch, which automatically rebuilds and
@@ -183,6 +183,15 @@ services:
   prometheus:
     ports:
       - "9090:9090"
+  loki:
+    ports:
+      - "3100:3100"
+  tempo:
+    ports:
+      - "3200:3200"
+  node-exporter:
+    ports:
+      - "9100:9100"
   kafka-exporter:
     ports:
       - "9308:9308"

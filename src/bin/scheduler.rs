@@ -6,8 +6,9 @@ use boom::{
         db::initialize_survey_indexes,
         enums::Survey,
         o11y::{
-            logging::{build_subscriber, log_error, WARN},
+            logging::{build_subscriber_with_otel, log_error, WARN},
             metrics::init_metrics,
+            tracing::init_tracing,
         },
         worker::WorkerType,
     },
@@ -19,8 +20,9 @@ use clap::Parser;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::oneshot;
-use tracing::{info, info_span, instrument, warn, Instrument};
+use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -228,8 +230,16 @@ struct Cli {
     deployment_env: String,
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli, meter_provider: SdkMeterProvider) {
+// `run` deliberately is NOT `#[instrument]`'d. The scheduler runs for the full
+// process lifetime; wrapping it in a single span would make every per-alert
+// span a descendant of the same root, producing a trace that grows unboundedly
+// until Tempo rejects it. The survey is already encoded in the OTel
+// `service.name` resource attribute, so a span field here is redundant.
+async fn run(
+    args: Cli,
+    meter_provider: Option<SdkMeterProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -298,21 +308,21 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         None
     };
 
-    let alert_pool = ThreadPool::new(
+    let mut alert_pool = ThreadPool::new(
         WorkerType::Alert,
         n_alert as usize,
         args.survey.clone(),
         config_path.clone(),
         None,
     );
-    let enrichment_pool = ThreadPool::new(
+    let mut enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
         n_enrichment as usize,
         args.survey.clone(),
         config_path.clone(),
         shared_model_pool,
     );
-    let filter_pool = ThreadPool::new(
+    let mut filter_pool = ThreadPool::new(
         WorkerType::Filter,
         n_filter as usize,
         args.survey.clone(),
@@ -320,39 +330,54 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         None,
     );
 
-    let record_pool_metrics = || {
-        record_worker_pool_state(
-            &args.survey,
-            "alert",
-            alert_pool.live_worker_count(),
-            alert_pool.total_worker_count(),
-        );
-        record_worker_pool_state(
-            &args.survey,
-            "enrichment",
-            enrichment_pool.live_worker_count(),
-            enrichment_pool.total_worker_count(),
-        );
-        record_worker_pool_state(
-            &args.survey,
-            "filter",
-            filter_pool.live_worker_count(),
-            filter_pool.total_worker_count(),
-        );
-    };
+    // Takes the pools by reference (rather than capturing them) so the
+    // supervision tick below can still borrow them mutably.
+    let record_pool_metrics =
+        |survey: &Survey, alert: &ThreadPool, enrichment: &ThreadPool, filter: &ThreadPool| {
+            record_worker_pool_state(
+                survey,
+                "alert",
+                alert.live_worker_count(),
+                alert.total_worker_count(),
+            );
+            record_worker_pool_state(
+                survey,
+                "enrichment",
+                enrichment.live_worker_count(),
+                enrichment.total_worker_count(),
+            );
+            record_worker_pool_state(
+                survey,
+                "filter",
+                filter.live_worker_count(),
+                filter.total_worker_count(),
+            );
+        };
 
     // Emit an initial sample so dashboards show running workers immediately.
-    record_pool_metrics();
+    record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
 
-    // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
+    // Supervise the pools frequently so a crashed worker is respawned within
+    // seconds, but only record metrics / log the heartbeat once a minute.
     let mut shutdown_rx = shutdown_rx;
+    let mut supervise_tick = tokio::time::interval(Duration::from_secs(5));
+    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(60));
+    // Consume the immediate first ticks so the first heartbeat lands ~60s in
+    // (the initial metric sample above already covers t=0).
+    supervise_tick.tick().await;
+    heartbeat_tick.tick().await;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                record_pool_metrics();
+            _ = supervise_tick.tick() => {
+                alert_pool.supervise();
+                enrichment_pool.supervise();
+                filter_pool.supervise();
+            }
+            _ = heartbeat_tick.tick() => {
+                record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
                 info!(
                     alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
                     enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),
@@ -368,8 +393,15 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);
-    if let Err(error) = meter_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the meter provider");
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
+    }
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
     }
 }
 
@@ -380,18 +412,25 @@ async fn main() {
 
     let args = Cli::parse();
 
-    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
-    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
-
     let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
-    let meter_provider = init_metrics(
-        String::from("scheduler"),
+    // Match the Compose service name (scheduler-ztf, scheduler-lsst, ...) so
+    // Grafana can correlate traces, logs, and metrics on a single label.
+    let service_name = format!("scheduler-{}", args.survey.to_string().to_lowercase());
+    let tracer_provider = init_tracing(
+        service_name.clone(),
         instance_id,
         args.deployment_env.clone(),
     )
-    .expect("failed to initialize metrics");
+    .expect("failed to initialize tracing");
 
-    run(args, meter_provider).await;
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), &service_name)
+        .expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+
+    let meter_provider = init_metrics(service_name, instance_id, args.deployment_env.clone())
+        .expect("failed to initialize metrics");
+
+    run(args, meter_provider, tracer_provider).await;
 }
 
 #[cfg(all(test, target_os = "linux"))]
