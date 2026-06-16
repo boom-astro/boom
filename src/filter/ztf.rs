@@ -1,6 +1,6 @@
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
@@ -711,10 +711,23 @@ impl FilterWorker for ZtfFilterWorker {
         for (programid, candids) in alerts_by_programid {
             let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
 
-            let filter_ids_with_perms = self
-                .filters_by_permission
-                .get(&programid)
-                .ok_or(FilterWorkerError::GetFilterByQueueError)?;
+            // No active filter has permission for this programid, so there is
+            // nothing to run these alerts through. Skip them rather than
+            // treating it as a fatal error: an unmatched programid is a normal
+            // condition (e.g. public alerts arriving while only proprietary
+            // filters are configured), not a worker failure. Returning an error
+            // here would kill the worker and stall the queue indefinitely.
+            let filter_ids_with_perms = match self.filters_by_permission.get(&programid) {
+                Some(filter_ids) => filter_ids,
+                None => {
+                    debug!(
+                        programid,
+                        n_alerts = candids.len(),
+                        "no active filter has permission for programid; skipping alerts"
+                    );
+                    continue;
+                }
+            };
 
             for filter in &self.filters {
                 // If the filter ID is not in the list of filter IDs for this

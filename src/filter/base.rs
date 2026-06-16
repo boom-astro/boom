@@ -2,11 +2,14 @@ use crate::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{self, AppConfig},
     filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
-    scheduler::record_kafka_alert_published,
+    scheduler::{record_kafka_alert_published, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
+        retry::{
+            is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
+        },
         worker::{should_terminate, WorkerCmd},
     },
 };
@@ -866,8 +869,6 @@ pub enum FilterWorkerError {
     LoadConfigError(#[from] conf::BoomConfigError),
     #[error("filter error")]
     FilterError(#[from] FilterError),
-    #[error("failed to get filter by queue")]
-    GetFilterByQueueError,
     #[error("could not find alert")]
     AlertNotFound,
     #[error("filter not found")]
@@ -905,7 +906,8 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
-#[instrument(skip_all, err)]
+// No `#[instrument]`: this is the long-lived filter worker loop; a wrapping
+// span would put every per-alert span under a single root trace.
 pub async fn run_filter_worker<T: FilterWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
@@ -923,7 +925,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut filter_worker = T::new(config_path, None).await?;
 
     // in a never ending loop, loop over the queues
-    let mut con = config.build_redis().await?;
+    let con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
     let survey = input_queue
@@ -1013,9 +1015,21 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         ACTIVE.add(1, &active_attrs);
-        let alerts: Vec<String> = match con
-            .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
-            .await
+        let alerts: Vec<String> = match retry_transient(
+            "valkey_rpop",
+            DEFAULT_MAX_RETRIES,
+            DEFAULT_BASE_BACKOFF,
+            is_transient_redis_error,
+            || record_worker_retry("filter", &survey, "valkey_rpop"),
+            || {
+                // Clone the multiplexed connection so the future owns it rather
+                // than borrowing `con` through the FnMut closure.
+                let mut con = con.clone();
+                let key: &str = &input_queue;
+                async move { con.rpop::<&str, Vec<String>>(key, NonZero::new(1000)).await }
+            },
+        )
+        .await
         {
             Ok(alerts) => alerts,
             Err(error) => {
@@ -1054,7 +1068,19 @@ pub async fn run_filter_worker<T: FilterWorker>(
         let mut delivery_futures = Vec::new();
         let mut enqueue_error = None;
         for alert in &matched_alerts {
-            match send_alert_to_kafka(alert, &schema, &producer, &output_topic).await {
+            // Enqueue errors are typically transient producer backpressure
+            // (local queue full); retry those before giving up. Encoding errors
+            // are not Kafka errors and fall through immediately.
+            let send_result = retry_transient(
+                "kafka_send",
+                DEFAULT_MAX_RETRIES,
+                DEFAULT_BASE_BACKOFF,
+                |error: &FilterWorkerError| matches!(error, FilterWorkerError::Kafka(_)),
+                || record_worker_retry("filter", &survey, "kafka_send"),
+                || send_alert_to_kafka(&alert, &schema, &producer, &output_topic),
+            )
+            .await;
+            match send_result {
                 Ok(delivery_future) => {
                     delivery_futures.push(delivery_future);
                     total_enqueued += 1;

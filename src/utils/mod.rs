@@ -7,6 +7,7 @@ pub mod fits;
 pub mod lightcurves;
 pub mod o11y;
 pub mod parser;
+pub mod retry;
 pub mod spatial;
 pub mod testing;
 pub mod worker;

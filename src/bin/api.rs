@@ -10,7 +10,11 @@ use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::cutouts::CutoutStorage;
 use boom::utils::enums::Survey;
-use boom::utils::o11y::metrics::init_metrics;
+use boom::utils::o11y::{
+    logging::{build_subscriber_with_otel, log_error, WARN},
+    metrics::init_metrics,
+    tracing::init_tracing,
+};
 use std::collections::HashMap;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
@@ -20,17 +24,25 @@ use uuid::Uuid;
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
-
-    // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-
     let config = AppConfig::from_default_path().unwrap();
     let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
     let port = config.api.port;
     let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or_else(|_| "dev".to_string());
-    let _meter_provider = init_metrics(String::from("api"), Uuid::new_v4(), deployment_env)
+    let instance_id = Uuid::new_v4();
+    let tracer_provider = init_tracing(String::from("api"), instance_id, deployment_env.clone())
+        .expect("failed to initialize tracing");
+    let meter_provider = init_metrics(String::from("api"), instance_id, deployment_env)
         .expect("failed to initialize metrics");
+
+    // Install a tracing subscriber that fans out to stdout and the OTLP
+    // pipeline (Tempo). actix's `Logger` middleware emits access logs via the
+    // `log` crate, so install `LogTracer` to forward them into tracing —
+    // tracing-subscriber does NOT do this automatically.
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), "api")
+        .expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+    tracing_log::LogTracer::init().expect("failed to install LogTracer");
 
     // Initialize email service
     let email_service = EmailService::new();
@@ -59,7 +71,7 @@ async fn main() -> std::io::Result<()> {
     let api_doc = ApiDoc::openapi();
     let babamul_doc = BabamulApiDoc::openapi();
 
-    HttpServer::new(move || {
+    let server_result = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
@@ -142,5 +154,21 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(("0.0.0.0", port))?
     .run()
-    .await
+    .await;
+
+    // Flush any buffered metrics/spans before exiting. Without these, recent
+    // telemetry can be lost on shutdown (especially for short-lived dev
+    // restarts). Providers are `None` when `OTEL_SDK_DISABLED=true`.
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
+    }
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
+    }
+
+    server_result
 }
