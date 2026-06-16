@@ -9,6 +9,7 @@ ARG SCALA_VERSION
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates curl bash tar xz-utils gcc g++ python3 python3-venv libhdf5-dev \
+    libcfitsio-dev \
     perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
@@ -58,7 +59,7 @@ ARG SCALA_VERSION=2.13
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates curl bash libsasl2-2 default-jre-headless && \
+    ca-certificates curl bash libsasl2-2 default-jre-headless libcfitsio10t64 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
