@@ -3,6 +3,7 @@ pub mod cutouts;
 pub mod objects;
 pub mod schemas;
 
+pub use alerts::alerts_skymap_3d_search;
 pub use alerts::cone_search_alerts;
 pub use alerts::get_alerts;
 pub use alerts::moc_search_alerts;

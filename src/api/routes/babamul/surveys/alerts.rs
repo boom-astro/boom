@@ -2,16 +2,18 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
+use crate::utils::cosmology::luminosity_distance_mpc;
 use crate::utils::enums::Survey;
 use crate::utils::moc::{
-    is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes, moc_to_covering_cones,
-    select_covering_depth, HpxMoc,
+    credible_volume_to_2d_moc, is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes,
+    moc_to_covering_cones, parse_3d_skymap_bytes, select_covering_depth, CredibleVolumeIndex,
+    HpxMoc,
 };
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, Document},
+    bson::{doc, Bson, Document},
     Collection, Database,
 };
 use std::collections::HashMap;
@@ -875,6 +877,457 @@ pub async fn moc_search_alerts(
                 },
             )
             .await
+        }
+        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
+    }
+}
+
+// ── 3D credible-volume search ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct AlertsSkymap3dSearchQuery {
+    /// Base64-encoded LIGO BAYESTAR FITS file (required)
+    pub bayestar_fits_base64: String,
+    /// Credible level for the 3D volume test (defaults to 0.9)
+    pub credible_level: Option<f64>,
+    /// Start of time window (Julian Date, required)
+    pub start_jd: f64,
+    /// End of time window (Julian Date, required; max 7 days after start_jd)
+    pub end_jd: f64,
+    pub min_magpsf: Option<f64>,
+    pub max_magpsf: Option<f64>,
+    #[serde(alias = "min_reliability")]
+    pub min_drb: Option<f64>,
+    #[serde(alias = "max_reliability")]
+    pub max_drb: Option<f64>,
+    pub is_rock: Option<bool>,
+    pub is_star: Option<bool>,
+    pub is_near_brightstar: Option<bool>,
+    pub is_stationary: Option<bool>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Serialize, ToSchema)]
+pub struct ZtfAlertSkymap3dResult {
+    #[serde(flatten)]
+    pub alert: EnrichedZtfAlert,
+    /// Best searched_prob_vol across NED cross-match candidates (None if no NED match with valid z).
+    pub host_searched_prob_vol: Option<f64>,
+}
+
+#[derive(Debug, serde::Serialize, ToSchema)]
+pub struct LsstAlertSkymap3dResult {
+    #[serde(flatten)]
+    pub alert: EnrichedLsstAlert,
+    /// Best searched_prob_vol across NED cross-match candidates (None if no NED match with valid z).
+    pub host_searched_prob_vol: Option<f64>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/alerts/skymap-3d-search",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    request_body = AlertsSkymap3dSearchQuery,
+    responses(
+        (status = 200, description = "Alerts inside the 3D credible volume", body = Vec<ZtfAlertSkymap3dResult>),
+        (status = 400, description = "Invalid query parameters or FITS data"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/alerts/skymap-3d-search")]
+pub async fn alerts_skymap_3d_search(
+    path: web::Path<Survey>,
+    query: web::Json<AlertsSkymap3dSearchQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let _current_user = match current_user {
+        Some(user) => user,
+        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    let survey = path.into_inner();
+
+    let time_window = query.end_jd - query.start_jd;
+    if time_window <= 0.0 {
+        return response::bad_request("end_jd must be greater than start_jd");
+    }
+    if time_window > MOC_SEARCH_MAX_TIME_WINDOW_JD {
+        return response::bad_request(&format!(
+            "Time window too large ({:.1} days), maximum allowed is {} days",
+            time_window, MOC_SEARCH_MAX_TIME_WINDOW_JD
+        ));
+    }
+
+    let credible_level = query.credible_level.unwrap_or(0.9);
+    if !(0.0..=1.0).contains(&credible_level) {
+        return response::bad_request("credible_level must be between 0.0 and 1.0");
+    }
+
+    // Decode and parse the BAYESTAR FITS
+    let fits_bytes = match BASE64_STANDARD.decode(&query.bayestar_fits_base64) {
+        Ok(b) => b,
+        Err(e) => {
+            return response::bad_request(&format!("Invalid base64 in bayestar_fits_base64: {}", e))
+        }
+    };
+    let skymap = match parse_3d_skymap_bytes(&fits_bytes) {
+        Ok(s) => s,
+        Err(e) => return response::bad_request(&format!("Failed to parse BAYESTAR FITS: {}", e)),
+    };
+
+    // Build the density-sorted index and 2D MOC prefilter
+    let idx = CredibleVolumeIndex::build(&skymap, 200);
+    let moc_2d = credible_volume_to_2d_moc(&skymap, &idx, credible_level);
+
+    let depth = select_covering_depth(&moc_2d);
+    let cones = moc_to_covering_cones(&moc_2d, depth);
+    if cones.is_empty() {
+        return response::ok(
+            "3D credible volume projects to an empty sky region",
+            serde_json::json!([]),
+        );
+    }
+    if cones.len() > MOC_SEARCH_MAX_CONES {
+        return response::bad_request(&format!(
+            "2D projection too large: {} covering cones at depth {} (max {}). Use a smaller credible level.",
+            cones.len(), depth, MOC_SEARCH_MAX_CONES
+        ));
+    }
+
+    let limit = query.limit.unwrap_or(10000).min(10000);
+    if limit == 0 {
+        return response::bad_request("limit must be between 1 and 10000");
+    }
+
+    // Build the MongoDB filter (same structure as moc_search_alerts)
+    let jd_filter = doc! { "candidate.jd": { "$gte": query.start_jd, "$lte": query.end_jd } };
+    let or_conditions: Vec<Document> = cones
+        .iter()
+        .map(|&(ra, dec, radius_rad)| {
+            doc! {
+                "coordinates.radec_geojson": {
+                    "$geoWithin": {
+                        "$centerSphere": [[ra - 180.0, dec], radius_rad]
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let mut filter_doc = jd_filter;
+    filter_doc.insert("$or", or_conditions);
+
+    if survey == Survey::Ztf {
+        filter_doc.insert("candidate.programid", 1);
+    }
+    if query.min_magpsf.is_some() || query.max_magpsf.is_some() {
+        let mut f = Document::new();
+        if let Some(v) = query.min_magpsf {
+            f.insert("$gte", v);
+        }
+        if let Some(v) = query.max_magpsf {
+            f.insert("$lte", v);
+        }
+        filter_doc.insert("candidate.magpsf", f);
+    }
+    if query.min_drb.is_some() || query.max_drb.is_some() {
+        let drb_key = match survey {
+            Survey::Ztf => "candidate.drb",
+            Survey::Lsst => "candidate.reliability",
+            _ => {
+                return response::bad_request(
+                    "Invalid survey specified, only ZTF and LSST are supported",
+                )
+            }
+        };
+        let mut f = Document::new();
+        if let Some(v) = query.min_drb {
+            f.insert("$gte", v);
+        }
+        if let Some(v) = query.max_drb {
+            f.insert("$lte", v);
+        }
+        filter_doc.insert(drb_key, f);
+    }
+    if let Some(v) = query.is_rock {
+        filter_doc.insert("properties.rock", v);
+    }
+    if let Some(v) = query.is_star {
+        filter_doc.insert("properties.star", v);
+    }
+    if let Some(v) = query.is_near_brightstar {
+        filter_doc.insert("properties.near_brightstar", v);
+    }
+    if let Some(v) = query.is_stationary {
+        filter_doc.insert("properties.stationary", v);
+    }
+
+    match survey {
+        Survey::Ztf => {
+            let alerts_col: Collection<EnrichedZtfAlert> =
+                db.collection(&format!("{}_alerts", survey));
+            let mut cursor = match alerts_col
+                .find(filter_doc)
+                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return response::internal_error(&format!("error querying alerts: {}", e))
+                }
+            };
+
+            // Phase 1: spatial post-filter
+            const SPATIAL_CAP: usize = 50_000;
+            let mut spatial_candidates: Vec<EnrichedZtfAlert> = Vec::new();
+            loop {
+                match cursor.try_next().await {
+                    Ok(Some(doc)) => {
+                        let ra = doc.candidate.candidate.ra;
+                        let dec = doc.candidate.candidate.dec;
+                        if is_in_moc(&moc_2d, ra, dec) {
+                            spatial_candidates.push(doc);
+                            if spatial_candidates.len() >= SPATIAL_CAP {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return response::internal_error(&format!("error reading cursor: {}", e))
+                    }
+                }
+            }
+
+            // Phase 2: batch aux lookup for NED cross-matches
+            let object_ids: Vec<Bson> = spatial_candidates
+                .iter()
+                .map(|a| Bson::String(a.object_id.clone()))
+                .collect();
+
+            let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
+            let mut aux_cursor = match aux_col
+                .find(doc! { "_id": { "$in": object_ids } })
+                .projection(doc! { "_id": 1, "cross_matches": 1 })
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => return response::internal_error(&format!("error querying aux: {}", e)),
+            };
+
+            // objectId → best z from NED (already converted to d_L Mpc)
+            let mut ned_z_map: HashMap<String, Vec<f64>> = HashMap::new();
+            loop {
+                match aux_cursor.try_next().await {
+                    Ok(Some(aux_doc)) => {
+                        let oid = match aux_doc.get_str("_id") {
+                            Ok(s) => s.to_string(),
+                            Err(_) => continue,
+                        };
+                        let z_values: Vec<f64> = aux_doc
+                            .get_document("cross_matches")
+                            .ok()
+                            .and_then(|cm| cm.get_array("NED").ok())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_document())
+                            .filter_map(|m| m.get_f64("z").ok())
+                            .filter(|&z| z.is_finite() && z > 0.0)
+                            .collect();
+                        ned_z_map.insert(oid, z_values);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return response::internal_error(&format!(
+                            "error reading aux cursor: {}",
+                            e
+                        ))
+                    }
+                }
+            }
+
+            // Phase 3: 3D test per alert
+            let mut results: Vec<ZtfAlertSkymap3dResult> = Vec::new();
+            for alert in spatial_candidates {
+                let ra = alert.candidate.candidate.ra;
+                let dec = alert.candidate.candidate.dec;
+
+                let z_values = ned_z_map
+                    .get(&alert.object_id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+
+                if z_values.is_empty() {
+                    // No NED match with valid z — pass through on 2D test alone
+                    results.push(ZtfAlertSkymap3dResult {
+                        alert,
+                        host_searched_prob_vol: None,
+                    });
+                } else {
+                    // Find best (lowest) searched_prob_vol across all NED matches
+                    let best_spv = z_values
+                        .iter()
+                        .filter_map(|&z| {
+                            let d_mpc = luminosity_distance_mpc(z);
+                            idx.searched_prob_vol_at(&skymap, ra, dec, d_mpc)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+
+                    if best_spv.is_finite() && best_spv <= credible_level {
+                        results.push(ZtfAlertSkymap3dResult {
+                            alert,
+                            host_searched_prob_vol: Some(best_spv),
+                        });
+                    }
+                    // else: has NED matches but none inside the credible volume — drop
+                }
+
+                if results.len() >= limit as usize {
+                    break;
+                }
+            }
+
+            response::ok(
+                &format!(
+                    "found {} alerts inside {:.0}% 3D credible volume ({} covering cones at depth {})",
+                    results.len(),
+                    credible_level * 100.0,
+                    cones.len(),
+                    depth
+                ),
+                serde_json::json!(results),
+            )
+        }
+        Survey::Lsst => {
+            let alerts_col: Collection<EnrichedLsstAlert> =
+                db.collection(&format!("{}_alerts", survey));
+            let mut cursor = match alerts_col
+                .find(filter_doc)
+                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return response::internal_error(&format!("error querying alerts: {}", e))
+                }
+            };
+
+            const SPATIAL_CAP: usize = 50_000;
+            let mut spatial_candidates: Vec<EnrichedLsstAlert> = Vec::new();
+            loop {
+                match cursor.try_next().await {
+                    Ok(Some(doc)) => {
+                        let ra = doc.candidate.dia_source.ra;
+                        let dec = doc.candidate.dia_source.dec;
+                        if is_in_moc(&moc_2d, ra, dec) {
+                            spatial_candidates.push(doc);
+                            if spatial_candidates.len() >= SPATIAL_CAP {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return response::internal_error(&format!("error reading cursor: {}", e))
+                    }
+                }
+            }
+
+            let object_ids: Vec<Bson> = spatial_candidates
+                .iter()
+                .map(|a| Bson::String(a.object_id.clone()))
+                .collect();
+
+            let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
+            let mut aux_cursor = match aux_col
+                .find(doc! { "_id": { "$in": object_ids } })
+                .projection(doc! { "_id": 1, "cross_matches": 1 })
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => return response::internal_error(&format!("error querying aux: {}", e)),
+            };
+
+            let mut ned_z_map: HashMap<String, Vec<f64>> = HashMap::new();
+            loop {
+                match aux_cursor.try_next().await {
+                    Ok(Some(aux_doc)) => {
+                        let oid = match aux_doc.get_str("_id") {
+                            Ok(s) => s.to_string(),
+                            Err(_) => continue,
+                        };
+                        let z_values: Vec<f64> = aux_doc
+                            .get_document("cross_matches")
+                            .ok()
+                            .and_then(|cm| cm.get_array("NED").ok())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_document())
+                            .filter_map(|m| m.get_f64("z").ok())
+                            .filter(|&z| z.is_finite() && z > 0.0)
+                            .collect();
+                        ned_z_map.insert(oid, z_values);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return response::internal_error(&format!(
+                            "error reading aux cursor: {}",
+                            e
+                        ))
+                    }
+                }
+            }
+
+            let mut results: Vec<LsstAlertSkymap3dResult> = Vec::new();
+            for alert in spatial_candidates {
+                let ra = alert.candidate.dia_source.ra;
+                let dec = alert.candidate.dia_source.dec;
+
+                let z_values = ned_z_map
+                    .get(&alert.object_id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+
+                if z_values.is_empty() {
+                    results.push(LsstAlertSkymap3dResult {
+                        alert,
+                        host_searched_prob_vol: None,
+                    });
+                } else {
+                    let best_spv = z_values
+                        .iter()
+                        .filter_map(|&z| {
+                            let d_mpc = luminosity_distance_mpc(z);
+                            idx.searched_prob_vol_at(&skymap, ra, dec, d_mpc)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+
+                    if best_spv.is_finite() && best_spv <= credible_level {
+                        results.push(LsstAlertSkymap3dResult {
+                            alert,
+                            host_searched_prob_vol: Some(best_spv),
+                        });
+                    }
+                }
+
+                if results.len() >= limit as usize {
+                    break;
+                }
+            }
+
+            response::ok(
+                &format!(
+                    "found {} alerts inside {:.0}% 3D credible volume ({} covering cones at depth {})",
+                    results.len(),
+                    credible_level * 100.0,
+                    cones.len(),
+                    depth
+                ),
+                serde_json::json!(results),
+            )
         }
         _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
     }

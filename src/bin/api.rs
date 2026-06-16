@@ -115,7 +115,8 @@ async fn main() -> std::io::Result<()> {
                     .service(
                         actix_web::web::scope("")
                             .app_data(web::JsonConfig::default().limit(73_400_320))
-                            .service(routes::babamul::surveys::moc_search_alerts),
+                            .service(routes::babamul::surveys::moc_search_alerts)
+                            .service(routes::babamul::surveys::alerts_skymap_3d_search),
                     )
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
