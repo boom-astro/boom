@@ -539,6 +539,97 @@ Then restart the affected services so they pick up the copied data.
    if you copied to new absolute paths in Phase 3 (keep them as a backup until
    you are confident in the new deployment).
 
+### Phase 6: Migrate open front end pull requests onto the `frontend` subtree
+
+The front end now lives in this repo as a git subtree under `frontend/` (added
+with `git subtree add --prefix=frontend …`). Any pull requests still open
+against the old, standalone front end repo cannot be deployed from there
+anymore, so their work has to come across into the `frontend/` subtree here.
+
+There are two ways to do this. Pick per PR based on how far along it is:
+
+- **Option A (merge upstream, then subtree-pull)** — best for PRs that are
+  essentially ready. Let them complete their normal review and merge in the
+  front end repo, then sync those merged commits into the subtree here. Keeps
+  the original review threads, authors, and CI, and needs no path rewriting.
+- **Option B (replay patches)** — best for half-finished drafts you would rather
+  move wholesale and re-review here, or when you want to stop using the old repo
+  immediately. Nothing needs to merge upstream.
+
+Whichever you use, the subtree shifts every path down by one directory: a file
+at `src/App.tsx` in the front end repo lives at `frontend/src/App.tsx` here.
+
+#### Option A: Merge in the front end repo, then subtree-pull
+
+1. In the **front end repo**, take each open PR through its normal review and
+   merge it into that repo's `main`. This is the last round of work that repo
+   will ever do, so once the queue is drained it is ready to archive.
+1. In **this repo**, add the front end repo as a remote (once) and fetch it:
+
+   ```bash
+   git remote add frontend-upstream <front-end-repo-url>   # once
+   git fetch frontend-upstream
+   ```
+
+1. On a branch off `main`, pull the merged upstream changes into the subtree.
+   `git subtree` rewrites the paths under `frontend/` for you. Do this once per
+   PR (or in batches) so each sync is a reviewable PR here:
+
+   ```bash
+   git switch -c frontend/sync-<pr-slug> main
+   git subtree pull --prefix=frontend frontend-upstream main --squash
+   ```
+
+1. Verify the front end still builds and type-checks (the same checks CI runs),
+   then push and open a PR **against this repo**:
+
+   ```bash
+   cd frontend && bun install && bun run tsc --noEmit && bun run lint
+   ```
+
+#### Option B: Replay the PR's commits with `git am`
+
+`git am --directory=frontend/` reapplies commits under the subtree prefix: it
+prepends `frontend/` to every path in the patch.
+
+1. In the **front end repo**, export the PR's commits as patches from the branch
+   point. With the PR branch checked out:
+
+   ```bash
+   git format-patch <base-branch>..<pr-branch> -o /tmp/frontend-pr/
+   ```
+
+   (`<base-branch>` is whatever the PR targeted, e.g. `origin/main`.)
+
+1. In **this repo**, create a branch off `main` and apply the patches with the
+   subtree prefix so the paths land under `frontend/`:
+
+   ```bash
+   git switch -c frontend/<pr-slug> main
+   git am --directory=frontend/ /tmp/frontend-pr/*.patch
+   ```
+
+   If a patch conflicts (the front end has moved on since the PR was opened),
+   resolve the conflicts under `frontend/`, then continue:
+
+   ```bash
+   git am --continue   # or: git am --skip / git am --abort
+   ```
+
+1. Verify the front end still builds and type-checks, then push and open a PR
+   **against this repo**:
+
+   ```bash
+   cd frontend && bun install && bun run tsc --noEmit && bun run lint
+   ```
+
+1. **Close the original PR** in the front end repo with a comment linking to the
+   new one so history and review context are preserved.
+
+Once all open front end PRs have been migrated (or explicitly abandoned), the
+old front end repo has no remaining work and can be archived as part of Phase
+5's decommissioning.
+
 ### Rollback
 
 If the new deployment misbehaves before Phase 5, roll back quickly:
