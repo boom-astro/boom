@@ -1212,3 +1212,63 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
         serde_json::json!(schema),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conf::{get_test_db, CatalogXmatchConfig};
+
+    fn admin() -> User {
+        User {
+            id: "admin".to_string(),
+            username: "admin".to_string(),
+            email: "admin@example.com".to_string(),
+            password: "x".to_string(),
+            is_admin: true,
+            watchlist_access: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_watchlist() {
+        let db = get_test_db().await;
+        let mut config = AppConfig::from_test_config().unwrap();
+        let admin = admin();
+        let name = format!("watchlist_validate_{}", Uuid::new_v4().simple());
+
+        assert!(
+            validate_watchlist(&db, "not_a_watchlist", &Survey::Ztf, &admin, &config)
+                .await
+                .is_err()
+        );
+
+        let collection: Collection<Document> = db.collection(&name);
+        collection.insert_one(doc! { "x": 1 }).await.unwrap();
+
+        // Accessible and well-named, but not configured for crossmatch on the survey.
+        assert!(
+            validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config)
+                .await
+                .is_err()
+        );
+
+        config
+            .crossmatch
+            .entry(Survey::Ztf)
+            .or_default()
+            .push(CatalogXmatchConfig::new(
+                &name,
+                2.0,
+                doc! { "_id": 1 },
+                false,
+                None,
+                None,
+                None,
+                None,
+            ));
+        let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
+
+        collection.drop().await.unwrap();
+        assert!(result.is_ok());
+    }
+}

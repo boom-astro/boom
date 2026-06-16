@@ -281,3 +281,33 @@ pub async fn delete_user(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(is_admin: bool, watchlist_access: &[&str]) -> User {
+        User {
+            id: "u".to_string(),
+            username: "u".to_string(),
+            email: "u@example.com".to_string(),
+            password: "x".to_string(),
+            is_admin,
+            watchlist_access: watchlist_access.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_can_access_catalog() {
+        assert!(user(false, &[]).can_access_catalog("public_cat"));
+
+        let no_access = user(false, &[]);
+        assert!(!no_access.can_access_catalog("watchlist_foo"));
+
+        let with_access = user(false, &["watchlist_foo"]);
+        assert!(with_access.can_access_catalog("watchlist_foo"));
+        assert!(!with_access.can_access_catalog("watchlist_bar"));
+
+        assert!(user(true, &[]).can_access_catalog("watchlist_foo"));
+    }
+}
