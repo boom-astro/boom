@@ -1118,8 +1118,8 @@ pub async fn alerts_skymap_3d_search(
                 Err(e) => return response::internal_error(&format!("error querying aux: {}", e)),
             };
 
-            // objectId → best z from NED (already converted to d_L Mpc)
-            let mut ned_z_map: HashMap<String, Vec<f64>> = HashMap::new();
+            // objectId → best z from NED + DESI_DR1
+            let mut host_z_map: HashMap<String, Vec<f64>> = HashMap::new();
             loop {
                 match aux_cursor.try_next().await {
                     Ok(Some(aux_doc)) => {
@@ -1127,17 +1127,29 @@ pub async fn alerts_skymap_3d_search(
                             Ok(s) => s.to_string(),
                             Err(_) => continue,
                         };
-                        let z_values: Vec<f64> = aux_doc
-                            .get_document("cross_matches")
-                            .ok()
-                            .and_then(|cm| cm.get_array("NED").ok())
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|v| v.as_document())
-                            .filter_map(|m| m.get_f64("z").ok())
-                            .filter(|&z| z.is_finite() && z > 0.0)
+                        let cm = aux_doc.get_document("cross_matches").ok();
+                        let z_values: Vec<f64> = [("NED", "z"), ("DESI_DR1", "z")]
+                            .iter()
+                            .flat_map(|(catalog, z_key)| {
+                                cm.and_then(|cm| cm.get_array(*catalog).ok())
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|v| v.as_document())
+                                    .filter(|m| {
+                                        if *catalog == "DESI_DR1" {
+                                            m.get_str("spectype")
+                                                .map(|s| s != "STAR")
+                                                .unwrap_or(true)
+                                        } else {
+                                            true
+                                        }
+                                    })
+                                    .filter_map(|m| m.get_f64(*z_key).ok())
+                                    .filter(|&z| z.is_finite() && z > 0.0)
+                                    .collect::<Vec<_>>()
+                            })
                             .collect();
-                        ned_z_map.insert(oid, z_values);
+                        host_z_map.insert(oid, z_values);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -1155,7 +1167,7 @@ pub async fn alerts_skymap_3d_search(
                 let ra = alert.candidate.candidate.ra;
                 let dec = alert.candidate.candidate.dec;
 
-                let z_values = ned_z_map
+                let z_values = host_z_map
                     .get(&alert.object_id)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
@@ -1251,7 +1263,7 @@ pub async fn alerts_skymap_3d_search(
                 Err(e) => return response::internal_error(&format!("error querying aux: {}", e)),
             };
 
-            let mut ned_z_map: HashMap<String, Vec<f64>> = HashMap::new();
+            let mut host_z_map: HashMap<String, Vec<f64>> = HashMap::new();
             loop {
                 match aux_cursor.try_next().await {
                     Ok(Some(aux_doc)) => {
@@ -1259,17 +1271,29 @@ pub async fn alerts_skymap_3d_search(
                             Ok(s) => s.to_string(),
                             Err(_) => continue,
                         };
-                        let z_values: Vec<f64> = aux_doc
-                            .get_document("cross_matches")
-                            .ok()
-                            .and_then(|cm| cm.get_array("NED").ok())
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|v| v.as_document())
-                            .filter_map(|m| m.get_f64("z").ok())
-                            .filter(|&z| z.is_finite() && z > 0.0)
+                        let cm = aux_doc.get_document("cross_matches").ok();
+                        let z_values: Vec<f64> = [("NED", "z"), ("DESI_DR1", "z")]
+                            .iter()
+                            .flat_map(|(catalog, z_key)| {
+                                cm.and_then(|cm| cm.get_array(*catalog).ok())
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|v| v.as_document())
+                                    .filter(|m| {
+                                        if *catalog == "DESI_DR1" {
+                                            m.get_str("spectype")
+                                                .map(|s| s != "STAR")
+                                                .unwrap_or(true)
+                                        } else {
+                                            true
+                                        }
+                                    })
+                                    .filter_map(|m| m.get_f64(*z_key).ok())
+                                    .filter(|&z| z.is_finite() && z > 0.0)
+                                    .collect::<Vec<_>>()
+                            })
                             .collect();
-                        ned_z_map.insert(oid, z_values);
+                        host_z_map.insert(oid, z_values);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -1286,7 +1310,7 @@ pub async fn alerts_skymap_3d_search(
                 let ra = alert.candidate.dia_source.ra;
                 let dec = alert.candidate.dia_source.dec;
 
-                let z_values = ned_z_map
+                let z_values = host_z_map
                     .get(&alert.object_id)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
