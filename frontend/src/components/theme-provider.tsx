@@ -35,7 +35,7 @@ export function ThemeProvider({
 
     root.classList.remove("light", "dark")
 
-    // if themse is not one of system, light, dark
+    // if theme is not one of system, light, dark
     // we set it to system
     if (theme !== "system" && theme !== "light" && theme !== "dark") {
       setTheme("system")

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { LoginForm } from "@/components/login-form";
 import * as analytics from "@/lib/analytics";
@@ -8,6 +9,8 @@ type Props = {
 };
 
 export default function Login({ onLoginSuccess }: Props) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [prefilledFromSignup, setPrefilledFromSignup] = useState(false);
@@ -15,20 +18,17 @@ export default function Login({ onLoginSuccess }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('signup_prefill');
-      if (raw) {
-        const parsed = JSON.parse(raw) as { email?: string; password?: string };
-        if (parsed.email) setEmail(parsed.email);
-        if (parsed.password) setPassword(parsed.password);
-        // remember that we applied prefill so we can show a banner
-        setPrefilledFromSignup(true);
-        localStorage.removeItem('signup_prefill');
-      }
-    } catch {
-      // ignore
+    // Credentials are handed off from signup via in-memory navigation state
+    // (never persisted to web storage). Consume them once and clear the state
+    // so they don't survive a refresh or back-navigation.
+    const state = location.state as { prefillEmail?: string; prefillPassword?: string } | null;
+    if (state?.prefillEmail || state?.prefillPassword) {
+      if (state.prefillEmail) setEmail(state.prefillEmail);
+      if (state.prefillPassword) setPassword(state.prefillPassword);
+      setPrefilledFromSignup(true);
+      navigate(location.pathname, { replace: true, state: null });
     }
-  }, []);
+  }, [location, navigate]);
 
   async function submit(e?: React.FormEvent) {
     e?.preventDefault();

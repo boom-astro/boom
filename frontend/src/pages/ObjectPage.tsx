@@ -33,7 +33,6 @@ export default function ObjectPage() {
           const cross = data ? (data['cross_matches'] as Record<string, unknown> | undefined) : undefined;
           if (!cross) return undefined;
           // determine source coordinates (try candidate, then top-level keys)
-          // determine source coordinates (try candidate, then top-level keys)
           const candidate = data && (data['candidate'] as Record<string, unknown> | undefined);
           const srcRa = candidate?.['ra'] ?? data?.['ra'] ?? data?.['ra_deg'] ?? data?.['RA'] ?? null;
           const srcDec = candidate?.['dec'] ?? data?.['dec'] ?? data?.['dec_deg'] ?? data?.['DEC'] ?? null;

@@ -2,9 +2,10 @@ import { useState, useEffect, useRef } from "react";
 import mermaid from "mermaid";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
-
-const BABAMUL_DOCS_URL = "https://raw.githubusercontent.com/boom-astro/boom/refs/heads/main/docs/babamul.md";
+// Bundled at build time from the canonical doc (see frontend/Dockerfile), so
+// the page renders offline and is pinned to the deployed commit rather than
+// fetching whatever is on main at runtime.
+import babamulDocs from "@docs/babamul.md?raw";
 
 /**
  * Extract the markdown content starting from "## Object appearance in output topics" heading.
@@ -26,7 +27,10 @@ function MermaidBlock({ code }: { code: string }) {
 
     mermaid.initialize({
       startOnLoad: false,
-      securityLevel: 'loose',
+      // 'antiscript' allows the harmless HTML (e.g. <br/>) the diagram labels
+      // use while stripping <script> tags, so the rendered SVG injected via
+      // innerHTML below can't carry executable markup.
+      securityLevel: 'antiscript',
       theme: 'dark',
       themeVariables: {
         noteBkgColor: '#1a1a1a',
@@ -57,7 +61,6 @@ function MarkdownWithMermaid({ content }: { content: string }) {
     <div className="prose prose-sm dark:prose-invert max-w-none [&>p]:mb-4">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
         components={{
           h1: ({ children }) => <h1 className="text-2xl font-bold mt-6 mb-4">{children}</h1>,
           h2: ({ children }) => <h2 className="text-xl font-bold mt-5 mb-3">{children}</h2>,
@@ -89,34 +92,14 @@ function MarkdownWithMermaid({ content }: { content: string }) {
 }
 
 export default function KafkaMarkdownDocs() {
-  const [objectAppearanceMarkdown, setObjectAppearanceMarkdown] = useState<string>("");
-
-  // Load mermaid diagram from GitHub
-  useEffect(() => {
-    async function loadDiagram() {
-      try {
-        const response = await fetch(BABAMUL_DOCS_URL);
-        const markdown = await response.text();
-        const section = extractObjectAppearanceSection(markdown);
-        if (section) {
-          console.log('Loaded markdown section:', section.substring(0, 200));
-          setObjectAppearanceMarkdown(section);
-        } else {
-          console.error('Failed to extract section from markdown');
-        }
-      } catch (err) {
-        console.error('Failed to load markdown content:', err);
-      }
-    }
-    loadDiagram();
-  }, []);
+  const objectAppearanceMarkdown = extractObjectAppearanceSection(babamulDocs);
 
   return (
     <div>
       {objectAppearanceMarkdown ? (
         <MarkdownWithMermaid content={objectAppearanceMarkdown} />
       ) : (
-        <div className="text-sm text-muted-foreground">Loading documentation...</div>
+        <div className="text-sm text-muted-foreground">Documentation section not found.</div>
       )}
     </div>
   )

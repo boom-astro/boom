@@ -1,7 +1,16 @@
+import fs from "fs"
 import path from "path"
 import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig, loadEnv } from "vite"
+
+// Canonical docs live at repo-root docs/. The Docker build flattens frontend/
+// to the image root so docs/ sits beside it (<root>/docs); on a host checkout
+// the repo root is one level up from this config. Resolve whichever exists so
+// the `@docs` alias works in both layouts.
+const docsDir = fs.existsSync(path.resolve(__dirname, "docs"))
+  ? path.resolve(__dirname, "docs")
+  : path.resolve(__dirname, "../docs")
 
 const mermaidChunk = [
   "mermaid",
@@ -9,7 +18,6 @@ const mermaidChunk = [
   "katex",
   "react-markdown",
   "remark-gfm",
-  "rehype-raw",
 ]
 const largeDeps = [
   "chevrotain",
@@ -30,6 +38,7 @@ export default defineConfig(({mode}) => {
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),
+        "@docs": docsDir,
       },
     },
     optimizeDeps: {
@@ -71,13 +80,28 @@ export default defineConfig(({mode}) => {
     },
     server: {
       // Listen on all interfaces so the dev server is reachable from outside
-      // the container, and accept the container hostname.
+      // the container.
       host: true,
-      allowedHosts: true,
+      // Only accept requests for known hostnames (defends against DNS-rebinding
+      // now that the server binds all interfaces). localhost is always allowed;
+      // set VITE_ALLOWED_HOSTS (comma-separated) to add dev domains/container
+      // hostnames as needed.
+      allowedHosts: [
+        "localhost",
+        "127.0.0.1",
+        ...(env.VITE_ALLOWED_HOSTS
+          ? env.VITE_ALLOWED_HOSTS.split(",").map((h) => h.trim()).filter(Boolean)
+          : []),
+      ],
       // Bind-mounted source on Docker Desktop (macOS/Windows) doesn't deliver
       // native filesystem events reliably, so poll to keep HMR working.
       watch: {
         usePolling: true,
+      },
+      // Allow serving the bundled docs dir when it lives outside the Vite root
+      // (host checkout); inside the container it's already under the root.
+      fs: {
+        allow: [path.resolve(__dirname), docsDir],
       },
       // Dev proxy to avoid CORS when backend runs on localhost:4000
       proxy: {

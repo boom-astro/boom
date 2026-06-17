@@ -262,14 +262,13 @@ export default function SignupPage() {
                             <p className="mt-3 font-medium">This is the only time this password will be displayed. Copy or save it now.</p>
                             <div className="flex gap-2 mt-3">
                                 <Button onClick={() => navigator.clipboard.writeText(password)}>Copy password</Button>
-                                <Button onClick={async () => {
+                                <Button onClick={() => {
                                 if (!password) return;
-                                try {
-                                  localStorage.setItem('signup_prefill', JSON.stringify({ email, password }));
-                                } catch (err) {
-                                  console.warn('Failed to persist signup prefill', err);
-                                }
-                                navigate('/login');
+                                // Pass the freshly generated credentials via in-memory
+                                // navigation state instead of localStorage: the password
+                                // never touches persistent web storage (readable by any
+                                // script on the origin and surviving across sessions).
+                                navigate('/login', { state: { prefillEmail: email, prefillPassword: password } });
                                 }}>Proceed to login</Button>
                             </div>
                       </AlertDescription>

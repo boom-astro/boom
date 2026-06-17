@@ -142,8 +142,9 @@ services:
   # the container. /api requests are proxied to the api service over the network.
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      # Root context so the build can bundle docs/babamul.md (see frontend/Dockerfile).
+      context: .
+      dockerfile: frontend/Dockerfile
       target: dev
     working_dir: /app
     command:
@@ -165,6 +166,9 @@ services:
       - ./frontend/tsconfig.app.json:/app/tsconfig.app.json
       - ./frontend/tsconfig.node.json:/app/tsconfig.node.json
       - ./frontend/components.json:/app/components.json
+      # Bundled docs source, kept live so edits to the canonical doc show up in
+      # dev (imported via ?raw in src/components/KafkaMarkdownDocs.tsx).
+      - ./docs/babamul.md:/app/docs/babamul.md:ro
       # Anonymous volume so the host (which has no node_modules) doesn't shadow
       # the dependencies installed in the image.
       - /app/node_modules
