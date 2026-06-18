@@ -199,14 +199,74 @@ generated config at `config/prod/*/config.yaml` via the BOOM parser.
 Under the hood, it calls `check_config {path}` for each generated config and
 fails if any config is invalid.
 
-At minimum, the production GitHub environment should define these variables in
-addition to the usual secrets used by the deploy workflow:
+#### Checklist of GitHub environment variables and secrets
 
-- `BOOM_CONFIG_PATH`
-- `BOOM_DATA_MONGODB_PATH` if you want a MongoDB bind mount instead of a Docker volume
-- `BOOM_DATA_VALKEY_PATH` if you want a Valkey bind mount instead of a Docker volume
-- `BOOM_DATA_KAFKA_PATH` if you want a Kafka bind mount instead of a Docker volume
-- `DOMAIN`
+The `production` environment must define everything the
+[deploy workflow](/.github/workflows/deploy.yaml) references. The runner checks
+out a clean tree on every deploy (no `.env` file), so every value below comes
+from a GitHub Actions **variable** (non-sensitive) or **secret** (sensitive) —
+nothing is read from a file on the host. A required value that is missing makes
+`docker compose` fail at interpolation time, before anything starts.
+
+App settings that are not in this list (e.g. `babamul.webapp_url`, the admin
+username/email, crossmatch catalogs) are read from
+`config/prod/<deployment>/config.yaml` and intentionally do **not** have env vars
+here. Only values that compose interpolates — image build args, Traefik labels,
+volume paths, and the specific env keys injected into containers — belong here.
+
+**Variables** (`vars.*`):
+
+| Variable | Required? | Notes |
+| --- | --- | --- |
+| `DOMAIN` | Yes | Apex domain, e.g. `boom.caltech.edu`. |
+| `BOOM_CONFIG_PATH` | Yes | Generated prod config, e.g. `./config/prod/caltech/config.yaml`. |
+| `STACK_NAME` | No | Hard-coded to `boom` in the workflow; not a GitHub var. |
+| `BOOM_API__DOMAIN` | No | Defaults to `api.${DOMAIN}`. |
+| `WEBAPP_DOMAIN` | No | Host the web app is served on; defaults to `DOMAIN`. |
+| `VITE_PRERELEASE_MODE` | No | `true` gates unreleased features; defaults to `false`. |
+| `VITE_PUBLIC_POSTHOG_KEY` | No | PostHog analytics; blank disables analytics. |
+| `VITE_PUBLIC_POSTHOG_HOST` | No | PostHog host; blank disables analytics. |
+| `BOOM_BABAMUL__ENABLED` | No | Defaults to `false`. |
+| `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. The workflow forces `false` when unset because the model loader's own default is `true` (it reads this env var directly, not `config.gpu.enabled`). |
+| `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`); defaults to `0`. Only relevant when `BOOM_GPU__ENABLED=true`. |
+| `BOOM_DATA_MONGODB_PATH` | No | Host bind mount for MongoDB; falls back to a named volume. |
+| `BOOM_DATA_VALKEY_PATH` | No | Host bind mount for Valkey; falls back to a named volume. |
+| `BOOM_DATA_KAFKA_PATH` | No | Host bind mount for Kafka; falls back to a named volume. |
+| `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. |
+| `BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID` | Yes | ZTF consumer group ID (per-program suffix added by compose). |
+| `BOOM_KAFKA__CONSUMER__LSST__GROUP_ID` | Yes | LSST consumer group ID. |
+| `BOOM_KAFKA__CONSUMER__LSST__USERNAME` | Yes | LSST SASL username. |
+| `KAFKA_EXTERNAL_HOST` | No | Public Kafka hostname for the EXTERNAL listener; defaults to `localhost`. |
+| `PROMETHEUS_USER` | Yes | Basic-auth user for the Prometheus endpoint. |
+| `GRAFANA_ADMIN_USER` | No | Grafana admin user; defaults to `admin`. |
+| `SMTP_SERVER` | No | Blank disables outbound email. |
+| `SMTP_FROM_ADDRESS` | No | From address for outbound email. |
+| `BOOM_API_RATE_LIMIT_AVERAGE` | No | Traefik rate limit; defaults to `50`. |
+| `BOOM_API_RATE_LIMIT_BURST` | No | Traefik rate limit; defaults to `200`. |
+| `BOOM_API_RATE_LIMIT_PERIOD` | No | Traefik rate limit; defaults to `1s`. |
+
+**Secrets** (`secrets.*`):
+
+| Secret | Required? | Notes |
+| --- | --- | --- |
+| `BOOM_DATABASE__PASSWORD` | Yes | MongoDB root password (also used for cutout storage). |
+| `BOOM_API__AUTH__SECRET_KEY` | Yes | JWT signing key (32+ chars). |
+| `BOOM_API__AUTH__ADMIN_PASSWORD` | Yes | Bootstrap admin password. |
+| `KAFKA_ADMIN_PASSWORD` | Yes | SASL admin password used by the ACL init script. |
+| `KAFKA_READONLY_PASSWORD` | Yes | SASL read-only password for external Kafka access. |
+| `BOOM_KAFKA__CONSUMER__LSST__PASSWORD` | Yes | LSST SASL password. |
+| `PROMETHEUS_HASHED_PASSWORD` | Yes | bcrypt hash for Prometheus basic auth (store the raw hash; do **not** `$$`-escape it as you would in a `.env`). |
+| `GRAFANA_ADMIN_PASSWORD` | Yes | Grafana admin password. |
+| `SLACK_WEBHOOK_URL` | No | Grafana alerting webhook; blank uses a placeholder (alerts still fire, POSTs 404). |
+| `SMTP_USERNAME` | No | Required only if sending email. |
+| `SMTP_PASSWORD` | No | Required only if sending email. |
+
+When migrating from the old deploy repo, note these are **new** in this stack
+and won't exist there yet: the `SMTP_USERNAME`, `SMTP_PASSWORD`, and
+`SLACK_WEBHOOK_URL` secrets, and the frontend variables carried over from the
+old standalone web app (`WEBAPP_DOMAIN`, `VITE_PRERELEASE_MODE`,
+`VITE_PUBLIC_POSTHOG_KEY`, `VITE_PUBLIC_POSTHOG_HOST`). Copy the PostHog/web
+values from the front end repo, not the deploy repo.
 
 ### Production config layout
 
