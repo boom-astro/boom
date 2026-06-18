@@ -196,8 +196,13 @@ pub async fn patch_watchlist_access(
     let user_collection: Collection<User> = db.collection("users");
 
     // Reject the whole request if any name is not a well-formed watchlist catalog name.
-    if let Some(invalid) = body
+    let mut new_list: Vec<String> = body
         .watchlist_access
+        .iter()
+        .filter(|w| !w.is_empty())
+        .cloned()
+        .collect();
+    if let Some(invalid) = new_list
         .iter()
         .find(|w| !crate::api::catalogs::is_valid_watchlist_name(w))
     {
@@ -208,7 +213,6 @@ pub async fn patch_watchlist_access(
         ));
     }
 
-    let mut new_list: Vec<String> = body.watchlist_access.iter().cloned().collect();
     new_list.sort();
     new_list.dedup();
 
