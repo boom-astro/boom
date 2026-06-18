@@ -1128,27 +1128,97 @@ pub async fn alerts_skymap_3d_search(
                             Err(_) => continue,
                         };
                         let cm = aux_doc.get_document("cross_matches").ok();
-                        let z_values: Vec<f64> = [("NED", "z"), ("DESI_DR1", "z")]
-                            .iter()
-                            .flat_map(|(catalog, z_key)| {
-                                cm.and_then(|cm| cm.get_array(*catalog).ok())
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|v| v.as_document())
-                                    .filter(|m| {
-                                        if *catalog == "DESI_DR1" {
-                                            m.get_str("spectype")
-                                                .map(|s| s != "STAR")
-                                                .unwrap_or(true)
-                                        } else {
-                                            true
-                                        }
-                                    })
-                                    .filter_map(|m| m.get_f64(*z_key).ok())
+                        // Collect all catalog matches as (priority, ra, dec, z).
+                        // Priority: 0=DESI spec zwarn=0, 1=NED SPEC, 2=DESI spec zwarn!=0,
+                        //           3=NED PHOT, 4=LS_DR10_PHOTOZ photo-z.
+                        // Then deduplicate by 3-arcsec proximity (same source, different
+                        // catalog), keeping the highest-priority (lowest number) z for
+                        // each unique source.
+                        let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new();
+
+                        if let Some(arr) = cm.and_then(|cm| cm.get_array("DESI_DR1").ok()) {
+                            for v in arr {
+                                let Some(m) = v.as_document() else { continue };
+                                if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
+                                    continue;
+                                }
+                                let Some(z) =
+                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
+                                else {
+                                    continue;
+                                };
+                                let Some(ra) = m.get_f64("ra").ok() else {
+                                    continue;
+                                };
+                                let Some(dec) = m.get_f64("dec").ok() else {
+                                    continue;
+                                };
+                                let priority = if m.get_i64("zwarn").unwrap_or(1) == 0 {
+                                    0
+                                } else {
+                                    2
+                                };
+                                ranked.push((priority, ra, dec, z));
+                            }
+                        }
+                        if let Some(arr) = cm.and_then(|cm| cm.get_array("NED").ok()) {
+                            for v in arr {
+                                let Some(m) = v.as_document() else { continue };
+                                let Some(z) =
+                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
+                                else {
+                                    continue;
+                                };
+                                let Some(ra) = m.get_f64("ra").ok() else {
+                                    continue;
+                                };
+                                let Some(dec) = m.get_f64("dec").ok() else {
+                                    continue;
+                                };
+                                let priority =
+                                    if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
+                                        1
+                                    } else {
+                                        3
+                                    };
+                                ranked.push((priority, ra, dec, z));
+                            }
+                        }
+                        if let Some(arr) = cm.and_then(|cm| cm.get_array("LS_DR10_PHOTOZ").ok()) {
+                            for v in arr {
+                                let Some(m) = v.as_document() else { continue };
+                                let Some(z) = m
+                                    .get_f64("z_phot")
+                                    .ok()
                                     .filter(|&z| z.is_finite() && z > 0.0)
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect();
+                                else {
+                                    continue;
+                                };
+                                let Some(ra) = m.get_f64("ra").ok() else {
+                                    continue;
+                                };
+                                let Some(dec) = m.get_f64("dec").ok() else {
+                                    continue;
+                                };
+                                ranked.push((4, ra, dec, z));
+                            }
+                        }
+
+                        // Sort best priority first, then deduplicate by 3-arcsec proximity.
+                        ranked.sort_by_key(|&(p, _, _, _)| p);
+                        const DEDUP_ARCSEC: f64 = 3.0;
+                        let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
+                        for (_, ra, dec, z) in ranked {
+                            let is_dup = kept.iter().any(|&(kra, kdec, _)| {
+                                let dra = (ra - kra) * dec.to_radians().cos();
+                                let ddec = dec - kdec;
+                                (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
+                            });
+                            if !is_dup {
+                                kept.push((ra, dec, z));
+                            }
+                        }
+                        let z_values: Vec<f64> = kept.into_iter().map(|(_, _, z)| z).collect();
                         host_z_map.insert(oid, z_values);
                     }
                     Ok(None) => break,
@@ -1272,27 +1342,97 @@ pub async fn alerts_skymap_3d_search(
                             Err(_) => continue,
                         };
                         let cm = aux_doc.get_document("cross_matches").ok();
-                        let z_values: Vec<f64> = [("NED", "z"), ("DESI_DR1", "z")]
-                            .iter()
-                            .flat_map(|(catalog, z_key)| {
-                                cm.and_then(|cm| cm.get_array(*catalog).ok())
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|v| v.as_document())
-                                    .filter(|m| {
-                                        if *catalog == "DESI_DR1" {
-                                            m.get_str("spectype")
-                                                .map(|s| s != "STAR")
-                                                .unwrap_or(true)
-                                        } else {
-                                            true
-                                        }
-                                    })
-                                    .filter_map(|m| m.get_f64(*z_key).ok())
+                        // Collect all catalog matches as (priority, ra, dec, z).
+                        // Priority: 0=DESI spec zwarn=0, 1=NED SPEC, 2=DESI spec zwarn!=0,
+                        //           3=NED PHOT, 4=LS_DR10_PHOTOZ photo-z.
+                        // Then deduplicate by 3-arcsec proximity (same source, different
+                        // catalog), keeping the highest-priority (lowest number) z for
+                        // each unique source.
+                        let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new();
+
+                        if let Some(arr) = cm.and_then(|cm| cm.get_array("DESI_DR1").ok()) {
+                            for v in arr {
+                                let Some(m) = v.as_document() else { continue };
+                                if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
+                                    continue;
+                                }
+                                let Some(z) =
+                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
+                                else {
+                                    continue;
+                                };
+                                let Some(ra) = m.get_f64("ra").ok() else {
+                                    continue;
+                                };
+                                let Some(dec) = m.get_f64("dec").ok() else {
+                                    continue;
+                                };
+                                let priority = if m.get_i64("zwarn").unwrap_or(1) == 0 {
+                                    0
+                                } else {
+                                    2
+                                };
+                                ranked.push((priority, ra, dec, z));
+                            }
+                        }
+                        if let Some(arr) = cm.and_then(|cm| cm.get_array("NED").ok()) {
+                            for v in arr {
+                                let Some(m) = v.as_document() else { continue };
+                                let Some(z) =
+                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
+                                else {
+                                    continue;
+                                };
+                                let Some(ra) = m.get_f64("ra").ok() else {
+                                    continue;
+                                };
+                                let Some(dec) = m.get_f64("dec").ok() else {
+                                    continue;
+                                };
+                                let priority =
+                                    if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
+                                        1
+                                    } else {
+                                        3
+                                    };
+                                ranked.push((priority, ra, dec, z));
+                            }
+                        }
+                        if let Some(arr) = cm.and_then(|cm| cm.get_array("LS_DR10_PHOTOZ").ok()) {
+                            for v in arr {
+                                let Some(m) = v.as_document() else { continue };
+                                let Some(z) = m
+                                    .get_f64("z_phot")
+                                    .ok()
                                     .filter(|&z| z.is_finite() && z > 0.0)
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect();
+                                else {
+                                    continue;
+                                };
+                                let Some(ra) = m.get_f64("ra").ok() else {
+                                    continue;
+                                };
+                                let Some(dec) = m.get_f64("dec").ok() else {
+                                    continue;
+                                };
+                                ranked.push((4, ra, dec, z));
+                            }
+                        }
+
+                        // Sort best priority first, then deduplicate by 3-arcsec proximity.
+                        ranked.sort_by_key(|&(p, _, _, _)| p);
+                        const DEDUP_ARCSEC: f64 = 3.0;
+                        let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
+                        for (_, ra, dec, z) in ranked {
+                            let is_dup = kept.iter().any(|&(kra, kdec, _)| {
+                                let dra = (ra - kra) * dec.to_radians().cos();
+                                let ddec = dec - kdec;
+                                (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
+                            });
+                            if !is_dup {
+                                kept.push((ra, dec, z));
+                            }
+                        }
+                        let z_values: Vec<f64> = kept.into_iter().map(|(_, _, z)| z).collect();
                         host_z_map.insert(oid, z_values);
                     }
                     Ok(None) => break,

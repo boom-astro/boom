@@ -111,20 +111,23 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::stats::get_nightly_stats)
                     .service(routes::babamul::stats::get_collection_stats)
                     .service(routes::babamul::stats::get_kafka_stats)
-                    // MOC search has its own larger JSON limit for skymap uploads (70 MB)
+                    // MOC/3D search has its own larger JSON limit for skymap uploads (200 MB)
                     .service(
                         actix_web::web::scope("")
-                            .app_data(web::JsonConfig::default().limit(73_400_320))
+                            // 200 MB: bayestar fits ~97 MB base64-encodes to ~130 MB
+                            // .app_data(web::JsonConfig::default().limit(73_400_320))
+                            .app_data(web::JsonConfig::default().limit(209_715_200))
                             .service(routes::babamul::surveys::moc_search_alerts)
                             .service(routes::babamul::surveys::alerts_skymap_3d_search),
                     )
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token)
-                    // MOC search has its own larger JSON limit for skymap uploads (70 MB)
+                    // MOC search has its own larger JSON limit for skymap uploads (200 MB)
                     .service(
                         web::scope("")
-                            .app_data(web::JsonConfig::default().limit(73_400_320))
+                            // .app_data(web::JsonConfig::default().limit(73_400_320))
+                            .app_data(web::JsonConfig::default().limit(209_715_200))
                             .service(routes::babamul::surveys::moc_search_alerts),
                     ),
             )
