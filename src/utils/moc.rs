@@ -414,8 +414,34 @@ pub fn credible_volume_to_2d_moc(
 ) -> HpxMoc {
     let threshold = idx.density_threshold(credible_level);
 
+    // 2D probability floor: require pixels to also lie within the 2D credible
+    // region at the same credible_level. Without this, pixels with near-zero sky
+    // probability can pass the 3D threshold purely due to a high DISTNORM, pulling
+    // in sky regions with no real GW localization support.
+    let mut sorted_prob: Vec<f64> = skymap.prob.clone();
+    sorted_prob.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let cumsum: Vec<f64> = sorted_prob
+        .iter()
+        .scan(0.0, |acc, &p| {
+            *acc += p;
+            Some(*acc)
+        })
+        .collect();
+    // # let cutoff_idx = cumsum.partition_point(|&s| s <= 0.99);
+    let cutoff_idx = cumsum.partition_point(|&s| s <= credible_level);
+    let prob_floor_2d = if cutoff_idx < sorted_prob.len() {
+        sorted_prob[cutoff_idx]
+    } else {
+        0.0
+    };
+
     let included = (0..skymap.prob.len())
         .filter(|&row| {
+            // Must be within the 2D credible region at credible_level to suppress
+            // low-probability sky pixels artificially boosted by tight distance constraints
+            if skymap.prob[row] < prob_floor_2d {
+                return false;
+            }
             // Peak density occurs at D = DISTMU; pixel_dpdv evaluated there gives (PROB/area)·DISTNORM/(σ√2π)
             skymap
                 .pixel_dpdv(row, skymap.distmu[row])
