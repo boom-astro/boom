@@ -103,12 +103,19 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
-    // if survey is LSST, create an index on the ss_object_id field of the alerts collection
+    // if survey is LSST, create an index on the ss_object_id field of the alerts collection,
+    // and on the designation field of the aux collection (used to look up a moving object by
+    // its MPC designation, independent of any cross-survey position match)
     if survey == &Survey::Lsst {
         let index = doc! {
             "ss_object_id": 1,
         };
         create_index(&alerts_collection, index, false).await?;
+
+        let index = doc! {
+            "designation": 1,
+        };
+        create_index(&alerts_aux_collection, index, false).await?;
     }
 
     Ok(())
