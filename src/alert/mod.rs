@@ -13,7 +13,7 @@ pub use decam::{
 };
 pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,
-    LsstForcedPhot, LsstObject, LsstPrvCandidate, LsstRawAvroAlert, LSST_DEC_RANGE,
+    LsstForcedPhot, LsstObject, LsstPrvCandidate, LsstRawAvroAlert, SsSource, LSST_DEC_RANGE,
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use winter::{
