@@ -1,4 +1,4 @@
-use crate::alert::LsstCandidate;
+use crate::alert::{LsstCandidate, SsSource};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulLsstAlert},
@@ -130,6 +130,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
             "$project": {
                 "objectId": 1,
                 "ssObjectId": 1,
+                "ss_source": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
@@ -185,6 +186,7 @@ pub struct LsstAlertForEnrichment {
     pub object_id: String,
     #[serde(rename = "ssObjectId")]
     pub ss_object_id: Option<String>,
+    pub ss_source: Option<SsSource>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
