@@ -1,0 +1,25 @@
+# This workflow exists so we can restrict the self-hosted runner to only run the
+# deploy.yaml workflow, i.e., no other workflows are allowed to run on our
+# production deployment machine.
+# These need to be separate because GitHub requires a ref for the workflow
+# restriction, and we want to be able to deploy on published releases,
+# which are tag refs.
+name: Trigger deployment to production
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to deploy/rollback to (e.g., v1.0.4)"
+        required: true
+        type: string
+
+jobs:
+  trigger-deployment:
+    uses: boom-astro/boom/.github/workflows/deploy.yaml@refs/heads/main
+    with:
+      # If triggered manually, use the input version. If triggered by a release, use the release tag ref.
+      tag_ref: ${{ github.event.inputs.version || github.ref }}
