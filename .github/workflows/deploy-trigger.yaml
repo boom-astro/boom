@@ -19,7 +19,7 @@ on:
 
 jobs:
   trigger-deployment:
-    uses: boom-astro/boom/.github/workflows/deploy.yaml@refs/heads/main
+    uses: boom-astro/boom/.github/workflows/deploy.yaml@main
     # Reusable workflows don't receive the caller's repository/org secrets unless
     # passed. The deploy job references many secrets.* values, so inherit them.
     secrets: inherit
