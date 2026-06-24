@@ -20,6 +20,9 @@ on:
 jobs:
   trigger-deployment:
     uses: boom-astro/boom/.github/workflows/deploy.yaml@refs/heads/main
+    # Reusable workflows don't receive the caller's repository/org secrets unless
+    # passed. The deploy job references many secrets.* values, so inherit them.
+    secrets: inherit
     with:
       # If triggered manually, use the input version. If triggered by a release, use the release tag ref.
       tag_ref: ${{ github.event.inputs.version || github.ref }}
