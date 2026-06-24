@@ -253,6 +253,10 @@ services:
       # Root context so the build can bundle docs/babamul.md (see frontend/Dockerfile).
       context: .
       dockerfile: frontend/Dockerfile
+      # Build the nginx production stage (port 80). Without this, Docker builds
+      # the last stage in the Dockerfile (`dev`, bun on 5173), which the Traefik
+      # labels can't reach -> 502 Bad Gateway.
+      target: prod
       args:
         BOOM_API__DOMAIN: ${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}
         BOOM_KAFKA__DOMAIN: ${DOMAIN?Variable not set}:9093
