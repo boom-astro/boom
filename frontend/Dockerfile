@@ -36,7 +36,7 @@ RUN bun run build
 
 
 # Stage 1, based on Nginx, to have only the compiled app, ready for production with Nginx
-FROM nginx:1
+FROM nginx:1 AS prod
 
 ARG BOOM_API__DOMAIN
 ENV BOOM_API__DOMAIN=${BOOM_API__DOMAIN}
