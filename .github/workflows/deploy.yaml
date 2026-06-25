@@ -24,6 +24,8 @@ jobs:
       BOOM_DATA_MONGODB_PATH: ${{ vars.BOOM_DATA_MONGODB_PATH }}
       BOOM_DATA_VALKEY_PATH: ${{ vars.BOOM_DATA_VALKEY_PATH }}
       BOOM_DATA_KAFKA_PATH: ${{ vars.BOOM_DATA_KAFKA_PATH }}
+      BOOM_CUTOUTS_MONGO_VOLUME: ${{ vars.BOOM_DATA_CUTOUTS_MONGODB_PATH }}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
       # Toggles babamul on without editing config.yaml — compose injects it into
       # the api and schedulers. Other babamul settings (webapp_url, etc.) and the
       # admin username/email are read from config/prod/<deployment>/config.yaml
@@ -144,7 +146,9 @@ jobs:
           lfs: true
       - run: >
           docker compose --profile prod
-          -f docker-compose.yaml build
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml build
       - run: >
           docker compose --profile prod
-          -f docker-compose.yaml up -d
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml up -d
