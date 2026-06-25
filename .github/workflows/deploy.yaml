@@ -146,8 +146,7 @@ jobs:
           lfs: true
       - run: >
           docker compose --profile prod
-          -f docker-compose.yaml
-          -f docker-compose.cutouts-mongo.yaml build
+          -f docker-compose.yaml build
       - run: >
           docker compose --profile prod
           -f docker-compose.yaml
