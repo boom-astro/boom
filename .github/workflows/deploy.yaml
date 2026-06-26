@@ -56,6 +56,15 @@ jobs:
       BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${{ secrets.BOOM_KAFKA__CONSUMER__LSST__PASSWORD }}
       BOOM_KAFKA__CONSUMER__ZTF__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID }}
+      # WINTER shares ZTF's broker (same host, unauthenticated/no SASL), so its
+      # consumer reuses BOOM_KAFKA__CONSUMER__ZTF__SERVER rather than a duplicate
+      # variable. The group ID is its own value: it's the lever that lets a
+      # broker-reachable attacker join our group and steal/skip partitions, so
+      # it's injected here rather than committed to this public repo (the
+      # config.yaml winter value is an example, not the real prod group). The
+      # real fix is broker-side ACLs on WINTER's end.
+      BOOM_KAFKA__CONSUMER__WINTER__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
+      BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID }}
       KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST }}
       SMTP_SERVER: ${{ vars.SMTP_SERVER }}
       SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}

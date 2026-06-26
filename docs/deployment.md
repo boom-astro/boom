@@ -232,10 +232,11 @@ volume paths, and the specific env keys injected into containers — belong here
 | `BOOM_DATA_MONGODB_PATH` | No | Host bind mount for MongoDB; falls back to a named volume. |
 | `BOOM_DATA_VALKEY_PATH` | No | Host bind mount for Valkey; falls back to a named volume. |
 | `BOOM_DATA_KAFKA_PATH` | No | Host bind mount for Kafka; falls back to a named volume. |
-| `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. |
+| `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. Reused for the WINTER consumer, which shares the same (unauthenticated) broker. |
 | `BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID` | Yes | ZTF consumer group ID (per-program suffix added by compose). |
 | `BOOM_KAFKA__CONSUMER__LSST__GROUP_ID` | Yes | LSST consumer group ID. |
 | `BOOM_KAFKA__CONSUMER__LSST__USERNAME` | Yes | LSST SASL username. |
+| `BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID` | Yes | WINTER consumer group ID (the broker itself comes from `BOOM_KAFKA__CONSUMER__ZTF__SERVER`). Kept here, not in the committed config, because the repo is public and the group ID is what an attacker would reuse to join our group and disrupt ingestion on the unauthenticated broker. |
 | `KAFKA_EXTERNAL_HOST` | No | Public Kafka hostname for the EXTERNAL listener; defaults to `localhost`. |
 | `PROMETHEUS_USER` | Yes | Basic-auth user for the Prometheus endpoint. |
 | `GRAFANA_ADMIN_USER` | No | Grafana admin user; defaults to `admin`. |

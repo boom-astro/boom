@@ -425,6 +425,40 @@ services:
     command:
       - /app/kafka_consumer
       - lsst
+  consumer-winter:
+    image: boom-astro/boom:latest
+    hostname: consumer-winter
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      # WINTER's Kafka stream is unauthenticated (no SASL), so only the broker
+      # address and consumer group id are required (cf. the LSST consumer).
+      BOOM_KAFKA__CONSUMER__WINTER__SERVER: ${BOOM_KAFKA__CONSUMER__WINTER__SERVER:?BOOM_KAFKA__CONSUMER__WINTER__SERVER must be set}
+      BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID: ${BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID:?BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/kafka_consumer
+      - winter
   scheduler-ztf:
     image: boom-astro/boom:latest
     hostname: scheduler-ztf
@@ -495,6 +529,38 @@ services:
     command:
       - /app/scheduler
       - lsst
+  scheduler-winter:
+    image: boom-astro/boom:latest
+    hostname: scheduler-winter
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - prod
+    # Unlike the ZTF/LSST schedulers, the WINTER scheduler runs no ML enrichment,
+    # so it mounts neither data/models nor the LSST footprint MOC.
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/scheduler
+      - winter
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     volumes:
