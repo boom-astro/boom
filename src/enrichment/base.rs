@@ -24,7 +24,7 @@ use opentelemetry::{
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -240,7 +240,9 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
-                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
+                // async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
+                // async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(50)).await }
+                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(100)).await }
             },
         )
         .await
@@ -250,21 +252,26 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         })?;
 
         if candids.is_empty() {
+            debug!(queue = %input_queue, "queue empty, sleeping 500ms");
             ACTIVE.add(-1, &active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
         }
 
+        info!(queue = %input_queue, n = candids.len(), "popped candids from queue");
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         let processed_alerts: Vec<String> = enrichment_worker
             .process_alerts(&candids)
             .await
-            .inspect_err(|_| {
+            .inspect_err(|e| {
+                warn!(queue = %input_queue, error = %e, "process_alerts failed");
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
+
+        info!(queue = %input_queue, n_in = candids.len(), n_out = processed_alerts.len(), "batch enriched");
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;
