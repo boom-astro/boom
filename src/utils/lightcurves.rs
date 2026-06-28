@@ -49,6 +49,13 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
+    // Near-infrared bands (e.g. WINTER: fid 0=Y, 1=J, 2=H, 3=K)
+    #[serde(rename = "j")]
+    J,
+    #[serde(rename = "h")]
+    H,
+    #[serde(rename = "k")]
+    K,
 }
 
 impl std::fmt::Display for Band {
@@ -60,6 +67,9 @@ impl std::fmt::Display for Band {
             Band::Z => write!(f, "z"),
             Band::Y => write!(f, "y"),
             Band::U => write!(f, "u"),
+            Band::J => write!(f, "j"),
+            Band::H => write!(f, "h"),
+            Band::K => write!(f, "k"),
         }
     }
 }
@@ -115,6 +125,9 @@ pub struct PerBandProperties {
     pub z: Option<BandProperties>,
     pub y: Option<BandProperties>,
     pub u: Option<BandProperties>,
+    pub j: Option<BandProperties>,
+    pub h: Option<BandProperties>,
+    pub k: Option<BandProperties>,
 }
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
@@ -281,6 +294,9 @@ pub fn analyze_photometry(
         z: None,
         y: None,
         u: None,
+        j: None,
+        h: None,
+        k: None,
     };
     for (band, mags) in &bands {
         if mags.is_empty() {
@@ -435,6 +451,9 @@ pub fn analyze_photometry(
             Band::Z => results.z = Some(band_properties),
             Band::Y => results.y = Some(band_properties),
             Band::U => results.u = Some(band_properties),
+            Band::J => results.j = Some(band_properties),
+            Band::H => results.h = Some(band_properties),
+            Band::K => results.k = Some(band_properties),
         }
     }
 

@@ -248,6 +248,8 @@ pub enum AlertError {
     AlertAuxFallbackUpdateFailed(String),
     #[error("concurrent aux update detected for {0}")]
     ConcurrentAuxUpdate(String),
+    #[error("failed to decode/repair avro packet: {0}")]
+    DecodeError(String),
 }
 
 #[derive(Debug, PartialEq)]

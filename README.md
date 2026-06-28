@@ -17,7 +17,7 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 
 1. The `Kafka` consumer(s), reading alerts from astronomical surveys' `Kafka` topics to transfer them to `Redis`/`Valkey` in-memory queues.
 2. The Alert Ingestion workers, reading alerts from the `Redis`/`Valkey` queues, responsible of formatting them to BSON documents, and enriching them with crossmatches from archival astronomical catalogs and other surveys before writing the formatted alert packets to a `MongoDB` database.
-3. The enrichment workers, running alerts through a series of enrichment classifiers, and writing the results back to the `MongoDB` database.
+3. The enrichment workers, running alerts through a series of enrichment classifiers (ML inference) and per-alert light-curve fitting (Villar fits, GPU-accelerated when enabled), and writing the results back to the `MongoDB` database.
 4. The Filter workers, running user-defined filters on the alerts, and sending the results to Kafka topics for other services to consume.
 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
@@ -289,10 +289,19 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
   ```bash
   make dev
   ```
-  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
-  the supporting Docker services they need.
+  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, the
+  `frontend` web app with the Vite dev server (hot module reload), plus the supporting Docker services
+  they need.
   This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
   To check if the containers are running and healthy, run `docker ps`.
+
+  Once the stack is up:
+  - The web app is served at [http://localhost:5173](http://localhost:5173)
+  - The API is served at [http://localhost:4000](http://localhost:4000)
+
+  The frontend lives in [`frontend/`](frontend/) (React + TypeScript + Vite). Editing files under
+  `frontend/src` triggers a live rebuild in the container — no restart needed. The dev server proxies
+  `/api` requests to the `api` service, so the full stack works locally out of the box.
 
   **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
@@ -367,7 +376,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, and `scheduler-lsst`. Each of these services starts its binary automatically at container startup.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, `scheduler-lsst`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
 
 Bring up the full prod stack with:
 

@@ -1,0 +1,9 @@
+# Dependabot version updates.
+# See: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: "bun" # Frontend (React + Vite) dependencies
+    directory: "/frontend"
+    schedule:
+      interval: "monthly"
