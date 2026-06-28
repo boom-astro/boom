@@ -223,7 +223,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         }
 
         ACTIVE.add(1, &active_attrs);
-<<<<<<< HEAD
         let candids: Vec<i64> = retry_transient(
             "valkey_rpop",
             DEFAULT_MAX_RETRIES,
@@ -244,18 +243,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             ACTIVE.add(-1, &active_attrs);
             BATCH_PROCESSED.add(1, &input_error_attrs);
         })?;
-=======
-        let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(
-                &input_queue,
-                NonZero::new(worker_config.enrichment.batch_size),
-            )
-            .await
-            .inspect_err(|_| {
-                ACTIVE.add(-1, &active_attrs);
-                BATCH_PROCESSED.add(1, &input_error_attrs);
-            })?;
->>>>>>> 31bdd88 (fixed batch size to 750)
 
         if candids.is_empty() {
             ACTIVE.add(-1, &active_attrs);
