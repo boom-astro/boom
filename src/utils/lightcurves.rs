@@ -129,6 +129,20 @@ pub struct AllBandsProperties {
     pub faintest_band: Band,
     pub first_jd: f64,
     pub last_jd: f64,
+    // per-band g quantities (None if no g-band observations)
+    pub days_since_peak_g: Option<f32>, // last_jd - peak_jd_g
+    pub days_to_peak_g: Option<f32>,    // peak_jd_g - first_jd_g
+    pub peakmag_g: Option<f32>,         // brightest (lowest) g-band mag
+    pub maxmag_g: Option<f32>,          // faintest (highest) g-band mag
+    // per-band r quantities (None if no r-band observations)
+    pub days_since_peak_r: Option<f32>,
+    pub days_to_peak_r: Option<f32>,
+    pub peakmag_r: Option<f32>,
+    pub maxmag_r: Option<f32>,
+    // photometry counts
+    pub n_photometry_total: f32,
+    pub n_photometry_g: f32,
+    pub n_photometry_r: f32,
 }
 
 /// Performs weighted least squares fit for y = a*x + b (centered for numerical stability)
@@ -249,6 +263,16 @@ pub fn analyze_photometry(
             .push(mag);
     }
 
+    // Per-band g/r trackers for AllBandsProperties extra fields
+    let mut g_peak_jd: Option<f64> = None;
+    let mut g_first_jd: Option<f64> = None;
+    let mut g_peakmag: Option<f32> = None;
+    let mut g_maxmag: Option<f32> = None;
+    let mut r_peak_jd: Option<f64> = None;
+    let mut r_first_jd: Option<f64> = None;
+    let mut r_peakmag: Option<f32> = None;
+    let mut r_maxmag: Option<f32> = None;
+
     // let mut results = HashMap::new();
     let mut results: PerBandProperties = PerBandProperties {
         g: None,
@@ -258,7 +282,7 @@ pub fn analyze_photometry(
         y: None,
         u: None,
     };
-    for (band, mags) in bands {
+    for (band, mags) in &bands {
         if mags.is_empty() {
             continue;
         }
@@ -393,8 +417,20 @@ pub fn analyze_photometry(
             fading: fading_properties,
         };
         match band {
-            Band::G => results.g = Some(band_properties),
-            Band::R => results.r = Some(band_properties),
+            Band::G => {
+                g_peak_jd = Some(peak_jd);
+                g_first_jd = Some(mags.first().unwrap().time);
+                g_peakmag = Some(peak_mag);
+                g_maxmag = Some(faintest_mag);
+                results.g = Some(band_properties);
+            }
+            Band::R => {
+                r_peak_jd = Some(peak_jd);
+                r_first_jd = Some(mags.first().unwrap().time);
+                r_peakmag = Some(peak_mag);
+                r_maxmag = Some(faintest_mag);
+                results.r = Some(band_properties);
+            }
             Band::I => results.i = Some(band_properties),
             Band::Z => results.z = Some(band_properties),
             Band::Y => results.y = Some(band_properties),
@@ -413,6 +449,17 @@ pub fn analyze_photometry(
         faintest_band: global_faintest_band,
         first_jd,
         last_jd,
+        days_since_peak_g: g_peak_jd.map(|p| (last_jd - p) as f32),
+        days_to_peak_g: g_peak_jd.zip(g_first_jd).map(|(p, f)| (p - f) as f32),
+        peakmag_g: g_peakmag,
+        maxmag_g: g_maxmag,
+        days_since_peak_r: r_peak_jd.map(|p| (last_jd - p) as f32),
+        days_to_peak_r: r_peak_jd.zip(r_first_jd).map(|(p, f)| (p - f) as f32),
+        peakmag_r: r_peakmag,
+        maxmag_r: r_maxmag,
+        n_photometry_total: sorted_photometry.len() as f32,
+        n_photometry_g: bands.get(&Band::G).map_or(0, |v| v.len()) as f32,
+        n_photometry_r: bands.get(&Band::R).map_or(0, |v| v.len()) as f32,
     };
 
     (results, all_bands_properties, stationary)
@@ -910,5 +957,161 @@ mod tests {
         let rising_dt = rising_stats.dt;
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_per_band_properties_both_bands() {
+        // g: faint → bright → faint (peak at middle point)
+        // r: bright → faint (monotonically fading, peak at first point)
+        // last JD = 2459003.5 (the final r-band point)
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.5,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 18.0,
+                mag_err: 0.1,
+                band: Band::G,
+            }, // g peak
+            PhotometryMag {
+                time: 2459002.5,
+                mag: 19.5,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459001.0,
+                mag: 17.5,
+                mag_err: 0.1,
+                band: Band::R,
+            }, // r peak
+            PhotometryMag {
+                time: 2459003.5,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        // last_jd = 2459003.5 (the final observation across all bands)
+        let last_jd = 2459003.5_f64;
+
+        // g-band: peak at JD 2459001.5, first g at JD 2459000.5
+        assert!((props.peakmag_g.unwrap() - 18.0).abs() < 1e-5);
+        assert!((props.maxmag_g.unwrap() - 20.5).abs() < 1e-5);
+        assert!((props.days_to_peak_g.unwrap() - 1.0).abs() < 1e-4); // 2459001.5 - 2459000.5
+        assert!((props.days_since_peak_g.unwrap() - (last_jd - 2459001.5) as f32).abs() < 1e-4);
+
+        // r-band: peak at JD 2459001.0, first r at JD 2459001.0
+        assert!((props.peakmag_r.unwrap() - 17.5).abs() < 1e-5);
+        assert!((props.maxmag_r.unwrap() - 21.0).abs() < 1e-5);
+        assert!((props.days_to_peak_r.unwrap() - 0.0).abs() < 1e-4); // peak == first r obs
+        assert!((props.days_since_peak_r.unwrap() - (last_jd - 2459001.0) as f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_per_band_properties_r_only() {
+        // Only r-band observations — g-band fields must all be None.
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+            PhotometryMag {
+                time: 2459002.5,
+                mag: 18.5,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+            PhotometryMag {
+                time: 2459004.5,
+                mag: 19.5,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        assert!(props.peakmag_g.is_none());
+        assert!(props.maxmag_g.is_none());
+        assert!(props.days_to_peak_g.is_none());
+        assert!(props.days_since_peak_g.is_none());
+
+        // r-band: peak at JD 2459002.5 (mag 18.5), first r at JD 2459000.5
+        assert!((props.peakmag_r.unwrap() - 18.5).abs() < 1e-5);
+        assert!((props.maxmag_r.unwrap() - 20.0).abs() < 1e-5);
+        assert!((props.days_to_peak_r.unwrap() - 2.0).abs() < 1e-4);
+        assert!((props.days_since_peak_r.unwrap() - 2.0).abs() < 1e-4); // last_jd - peak = 4.5 - 2.5 = 2.0
+    }
+
+    #[test]
+    fn test_per_band_properties_g_only() {
+        // Only g-band observations — r-band fields must all be None.
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: Band::G,
+            }, // peak
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        assert!(props.peakmag_r.is_none());
+        assert!(props.maxmag_r.is_none());
+        assert!(props.days_to_peak_r.is_none());
+        assert!(props.days_since_peak_r.is_none());
+
+        assert!((props.peakmag_g.unwrap() - 19.0).abs() < 1e-5);
+        assert!((props.maxmag_g.unwrap() - 21.0).abs() < 1e-5);
+        assert!((props.days_to_peak_g.unwrap() - 1.0).abs() < 1e-4);
+        assert!((props.days_since_peak_g.unwrap() - 0.0).abs() < 1e-4); // peak == last obs
+    }
+
+    #[test]
+    fn test_per_band_properties_single_obs_per_band() {
+        // Single observation in each band: days_to_peak = 0, days_since_peak = 0.
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 18.5,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        assert!((props.days_to_peak_g.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.days_since_peak_g.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.days_to_peak_r.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.days_since_peak_r.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.peakmag_g.unwrap() - 19.0).abs() < 1e-5);
+        assert!((props.peakmag_r.unwrap() - 18.5).abs() < 1e-5);
+        // single obs: peakmag == maxmag
+        assert!((props.maxmag_g.unwrap() - 19.0).abs() < 1e-5);
+        assert!((props.maxmag_r.unwrap() - 18.5).abs() < 1e-5);
     }
 }

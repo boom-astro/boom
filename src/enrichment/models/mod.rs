@@ -1,10 +1,15 @@
 mod acai;
 mod base;
 mod btsbot;
+mod cider;
 
 pub use acai::AcaiModel;
-pub use base::{load_model, load_model_on_device, Model, ModelError};
+pub use base::{
+    load_model, load_model_on_device, load_model_on_device_with_cpu_fallback, FusionModel, Model,
+    ModelError,
+};
 pub use btsbot::BtsBotModel;
+pub use cider::CiderFusionModel;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +29,7 @@ pub struct SharedModels {
     pub acai_o: Mutex<AcaiModel>,
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
+    pub cider: Mutex<cider::CiderFusionModel>,
 }
 
 impl std::fmt::Debug for SharedModels {
@@ -63,6 +69,10 @@ impl SharedModels {
                     "data/models/btsbot-v1.0.1.onnx",
                     id,
                 )?),
+                cider: Mutex::new(cider::CiderFusionModel::new_on_device(
+                    "data/models/cider_fusion_plus_embedding.onnx",
+                    id,
+                )?),
             },
             None => Self {
                 acai_h: Mutex::new(AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?),
@@ -71,6 +81,9 @@ impl SharedModels {
                 acai_o: Mutex::new(AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?),
                 acai_b: Mutex::new(AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?),
                 btsbot: Mutex::new(BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?),
+                cider: Mutex::new(cider::CiderFusionModel::new(
+                    "data/models/cider_fusion_plus_embedding.onnx",
+                )?),
             },
         };
         info!("all ONNX models loaded successfully");

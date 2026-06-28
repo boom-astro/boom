@@ -35,6 +35,13 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     load_model_on_device(path, None)
 }
 
+pub fn load_model_on_device_with_cpu_fallback(
+    path: &str,
+    device_id: Option<i32>,
+) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, true)
+}
+
 fn env_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -43,16 +50,24 @@ fn env_truthy(value: &str) -> bool {
 }
 
 pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, false)
+}
+
+fn load_model_on_device_inner(
+    path: &str,
+    device_id: Option<i32>,
+    allow_cpu_fallback: bool,
+) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
     let use_gpu = env::var("BOOM_GPU__ENABLED")
         .map(|v| env_truthy(&v))
         .unwrap_or(true);
 
-    #[cfg(target_os = "linux")]
-    if env::var_os("ORT_DYLIB_PATH").is_none() {
-        return Err(ModelError::MissingOrtDylibPath);
-    }
+    // #[cfg(target_os = "linux")]
+    // if env::var_os("ORT_DYLIB_PATH").is_none() {
+    //     return Err(ModelError::MissingOrtDylibPath);
+    // }
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if use_gpu {
@@ -60,7 +75,7 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         // We only do this on Linux as Apple's CoreML EP does need to fallback
         // to the CPU for some operators of the ONNX runtime.
         #[cfg(target_os = "linux")]
-        {
+        if !allow_cpu_fallback {
             builder = builder.with_disable_cpu_fallback()?;
         }
 
@@ -148,4 +163,16 @@ pub trait Model {
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError>;
+}
+
+pub trait FusionModel {
+    /// Returns `(probs, fusion_embedding)`.
+    fn predict(
+        &mut self,
+        tempo_x: &ndarray::Array3<f32>,
+        tempo_pad_mask: &ndarray::Array2<bool>,
+        tempo_global: &ndarray::Array2<f32>,
+        metadata: &Array<f32, Dim<[usize; 2]>>,
+        image: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<(Vec<f32>, Vec<f32>), ModelError>;
 }
