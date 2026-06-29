@@ -49,6 +49,7 @@ mod tests {
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
                 password_last_changed_at: None,
+                groq_api_key_encrypted: None,
             };
 
             let babamul_users_collection: mongodb::Collection<
@@ -2747,6 +2748,7 @@ mod tests {
             password_reset_token_hash: None,
             password_reset_token_expires_at: None,
             password_last_changed_at: None,
+            groq_api_key_encrypted: None,
         })
         .await
         .unwrap();
@@ -2814,6 +2816,7 @@ mod tests {
             password_reset_token_hash: None,
             password_reset_token_expires_at: None,
             password_last_changed_at: None,
+            groq_api_key_encrypted: None,
         })
         .await
         .unwrap();
@@ -2858,6 +2861,7 @@ mod tests {
             password_last_changed_at: Some(
                 now - config.babamul.password_reset_cooldown_minutes as i64 * 30,
             ),
+            groq_api_key_encrypted: None,
         })
         .await
         .unwrap();
@@ -2951,6 +2955,7 @@ mod tests {
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
                 password_last_changed_at: None,
+                groq_api_key_encrypted: None,
             };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
