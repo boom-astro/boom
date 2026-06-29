@@ -585,7 +585,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .and_then(|m| m.gpu_ctx.as_ref())
                 .is_some()
             {
-                villar_inputs.push((candid, lightcurve));
+                villar_inputs.push((candid, lightcurve.clone()));
             }
 
             work_items.push(AlertWork {

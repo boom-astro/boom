@@ -235,9 +235,13 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
-                // async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
-                // async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(50)).await }
-                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(100)).await }
+                async move {
+                    con.rpop::<&str, Vec<i64>>(
+                        key,
+                        NonZero::new(worker_config.enrichment.batch_size),
+                    )
+                    .await
+                }
             },
         )
         .await
