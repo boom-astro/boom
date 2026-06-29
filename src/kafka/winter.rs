@@ -1,10 +1,19 @@
 use crate::{
-    kafka::base::{AlertConsumer, AlertProducer},
+    kafka::base::{AlertConsumer, AlertProducer, TopicGenerator},
     utils::{data::count_files_in_dir, enums::Survey},
 };
+use std::sync::Arc;
 use tracing::info;
 
 const WINTER_DEFAULT_NB_PARTITIONS: usize = 15;
+
+/// Topic name for the UTC day containing `timestamp` (seconds). Shared by
+/// [`AlertConsumer::topic_names`] and the rollover generator so both stay in
+/// sync. As of 2022-08-01 the upstream WINTER naming convention is `winter_%Y%m%d`.
+fn winter_topic_names(timestamp: i64) -> Vec<String> {
+    let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
+    vec![format!("winter_{}", date.format("%Y%m%d"))]
+}
 
 pub struct WinterAlertConsumer {
     output_queue: String,
@@ -23,15 +32,18 @@ impl WinterAlertConsumer {
 #[async_trait::async_trait]
 impl AlertConsumer for WinterAlertConsumer {
     fn topic_names(&self, timestamp: i64) -> Vec<String> {
-        // As of 2022-08-01 the upstream WINTER naming convention is `winter_%Y%m%d`.
-        let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        vec![format!("winter_{}", date.format("%Y%m%d"))]
+        winter_topic_names(timestamp)
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
     fn survey(&self) -> &'static str {
         Survey::Winter.as_str()
+    }
+    fn rollover_topics(&self) -> Option<TopicGenerator> {
+        // WINTER publishes to a new `winter_<date>` topic each UTC day, so roll
+        // over to keep consuming as the date advances.
+        Some(Arc::new(winter_topic_names))
     }
 }
 

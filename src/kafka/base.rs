@@ -393,11 +393,23 @@ pub enum ConsumerError {
     ConfigError(#[from] config::ConfigError),
 }
 
+/// Maps a UTC timestamp (seconds) to the Kafka topic name(s) for that day.
+/// Used to recompute topics when the consumer rolls over to a new day.
+pub type TopicGenerator = std::sync::Arc<dyn Fn(i64) -> Vec<String> + Send + Sync>;
+
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
     fn topic_names(&self, timestamp: i64) -> Vec<String>;
     fn output_queue(&self) -> String;
     fn survey(&self) -> &'static str;
+    /// Generator used to roll the consumer over to the next UTC day's topic(s)
+    /// while it runs. Surveys whose topic names encode the observing date (ZTF,
+    /// WINTER) override this; surveys that consume a single fixed topic (LSST)
+    /// leave it as `None` and never roll over. The returned closure must agree
+    /// with [`AlertConsumer::topic_names`] for any given timestamp.
+    fn rollover_topics(&self) -> Option<TopicGenerator> {
+        None
+    }
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
@@ -432,6 +444,13 @@ pub trait AlertConsumer: Sized {
         let config = AppConfig::from_path(config_path)?;
         let survey = self.survey();
 
+        // Only roll over to new days when topics are derived from the date. If
+        // the caller pinned an explicit topic list (e.g. `--topics-override`,
+        // used for testing/backfill), honor it verbatim and never roll over.
+        let rollover = match &topics {
+            Some(_) => None,
+            None => self.rollover_topics(),
+        };
         let topics = topics.unwrap_or_else(|| self.topic_names(timestamp));
         let kafka_config = match kafka_config {
             Some(cfg) => cfg,
@@ -458,6 +477,7 @@ pub trait AlertConsumer: Sized {
             let output_queue = self.output_queue();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
+            let rollover = rollover.clone();
             let handle = tokio::spawn(async move {
                 let result = consumer(
                     &i.to_string(),
@@ -469,6 +489,7 @@ pub trait AlertConsumer: Sized {
                     &kafka_config,
                     exit_on_eof,
                     survey,
+                    rollover,
                 )
                 .await;
                 if let Err(error) = result {
@@ -557,49 +578,15 @@ pub async fn consumer(
     survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
     survey: &'static str,
+    // When `Some`, the consumer rolls over to the next UTC day's topic(s) once
+    // the current day's topic is drained and the clock has passed midnight UTC.
+    // `None` keeps the consumer pinned to its initial topic(s) for its lifetime.
+    rollover: Option<TopicGenerator>,
 ) -> Result<(), ConsumerError> {
     let server = survey_consumer_config.server.clone();
     let group_id = survey_consumer_config.group_id.clone();
     let username = survey_consumer_config.username.clone();
     let password = survey_consumer_config.password.clone();
-
-    let topics = if exit_on_eof {
-        // if exit_on_eof is true, let's only consume from the topics that have messages, and exit if they are all empty
-        let mut non_empty_topics = vec![];
-        for topic in &topics {
-            let nb_messages = count_messages(&server, topic)?;
-            match nb_messages {
-                Some(0) => {
-                    info!(
-                        "No messages available in topic {}, skipping it for consumer {}",
-                        topic, id
-                    );
-                }
-                Some(_) => {
-                    debug!(
-                        "Topic {} has messages, including it for consumer {}",
-                        topic, id
-                    );
-                    non_empty_topics.push(*topic);
-                }
-                None => {
-                    info!("Topic {} not found, skipping it for consumer {}", topic, id);
-                }
-            }
-        }
-        if non_empty_topics.is_empty() {
-            info!(
-                "No messages available in any topic, exiting consumer {}",
-                id
-            );
-            return Ok(());
-        }
-        non_empty_topics
-    } else {
-        // otherwise, we want to consume from all topics and never exit, even if they are empty at the beginning
-        debug!("exit_on_eof is false, consuming from all topics indefinitely");
-        topics
-    };
 
     let mut client_config = ClientConfig::new();
     client_config
@@ -626,77 +613,6 @@ pub async fn consumer(
         .create()
         .inspect_err(as_error!("failed to create consumer"))?;
 
-    // Subscribe to topic(s) - broker will handle partition assignment
-    consumer
-        .subscribe(&topics)
-        .inspect_err(as_error!("failed to subscribe to topics"))?;
-
-    // Wait for initial assignment
-    debug!("Waiting for partition assignment...");
-
-    // Poll once to trigger rebalance and get assignment
-    loop {
-        match consumer.poll(KAFKA_TIMEOUT_SECS) {
-            Some(Ok(_msg)) => {
-                debug!("Received initial message, seeking to timestamp...");
-                // Now seek all assigned partitions to the target timestamp
-                seek_to_timestamp(&consumer, timestamp * 1000)?;
-                break;
-            }
-            Some(Err(e)) => {
-                if exit_on_eof {
-                    if let rdkafka::error::KafkaError::MessageConsumption(
-                        rdkafka::error::RDKafkaErrorCode::UnknownTopicOrPartition,
-                    ) = e
-                    {
-                        info!("Topic or partition unknown, exiting consumer {}", id);
-                        return Ok(());
-                    }
-                }
-                error!("Error during initial poll: {:?}", e);
-                // sleep and retry
-                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
-            }
-            None => {
-                debug!("No message received yet, polling again...");
-                // sleep and retry
-                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
-            }
-        }
-    }
-
-    // OTel attributes informed by https://opentelemetry.io/docs/specs/semconv/messaging/kafka/
-    let consumer_attrs = [
-        KeyValue::new("messaging.system", "kafka"),
-        KeyValue::new("messaging.destination.name", topics.join(",")),
-        KeyValue::new("messaging.consumer.group.name", group_id.to_string()),
-        KeyValue::new("messaging.operation.name", "poll"),
-        KeyValue::new("messaging.operation.type", "receive"),
-        KeyValue::new("messaging.client.id", id.to_string()),
-        KeyValue::new("survey", survey),
-    ];
-    let ok_attrs: Vec<KeyValue> = consumer_attrs
-        .iter()
-        .cloned()
-        .chain([KeyValue::new("status", "ok")])
-        .collect();
-    let input_error_attrs: Vec<KeyValue> = consumer_attrs
-        .iter()
-        .cloned()
-        .chain([
-            KeyValue::new("status", "error"),
-            KeyValue::new("reason", "kafka_poll"),
-        ])
-        .collect();
-    let output_error_attrs: Vec<KeyValue> = consumer_attrs
-        .iter()
-        .cloned()
-        .chain([
-            KeyValue::new("status", "error"),
-            KeyValue::new("reason", "kafka_send"),
-        ])
-        .collect();
-
     let mut con = config
         .build_redis()
         .await
@@ -706,66 +622,204 @@ pub async fn consumer(
     // start timer
     let start = std::time::Instant::now();
 
-    debug!("Starting Kafka consumer loop...");
+    // `day_ts` is UTC midnight (seconds) of the day whose topic(s) we are
+    // currently consuming, and `current_topics` the topic name(s) for that day.
+    // When `rollover` is set, both advance once the day's topic is drained and
+    // the clock passes into a later UTC day (see the `None` poll branch).
+    let mut day_ts = timestamp;
+    let mut current_topics: Vec<String> = topics.iter().map(|s| s.to_string()).collect();
 
-    // Process the rest normally
-    loop {
-        if max_in_queue > 0 && total % 1000 == 0 {
-            loop {
-                let nb_in_queue = con
-                    .llen::<&str, usize>(&output_queue)
-                    .await
-                    .inspect_err(as_error!("failed to get queue length"))?;
-                if nb_in_queue >= max_in_queue {
-                    info!(
-                        "{} (limit: {}) items in queue, sleeping...",
-                        nb_in_queue, max_in_queue
-                    );
-                    tokio::time::sleep(core::time::Duration::from_millis(500)).await;
-                    continue;
+    'day: loop {
+        // When exiting on EOF, only subscribe to topics that already have
+        // messages, and exit if none do. Otherwise subscribe to every topic and
+        // run indefinitely, even if they start out empty.
+        let active_topics: Vec<String> = if exit_on_eof {
+            let mut non_empty_topics = vec![];
+            for topic in &current_topics {
+                match count_messages(&server, topic)? {
+                    Some(0) => {
+                        info!(
+                            "No messages available in topic {}, skipping it for consumer {}",
+                            topic, id
+                        );
+                    }
+                    Some(_) => {
+                        debug!(
+                            "Topic {} has messages, including it for consumer {}",
+                            topic, id
+                        );
+                        non_empty_topics.push(topic.clone());
+                    }
+                    None => {
+                        info!("Topic {} not found, skipping it for consumer {}", topic, id);
+                    }
                 }
-                break;
+            }
+            if non_empty_topics.is_empty() {
+                info!(
+                    "No messages available in any topic, exiting consumer {}",
+                    id
+                );
+                return Ok(());
+            }
+            non_empty_topics
+        } else {
+            debug!("exit_on_eof is false, consuming from all topics indefinitely");
+            current_topics.clone()
+        };
+        let active_refs: Vec<&str> = active_topics.iter().map(|s| s.as_str()).collect();
+
+        // Subscribe to topic(s) - broker will handle partition assignment
+        consumer
+            .subscribe(&active_refs)
+            .inspect_err(as_error!("failed to subscribe to topics"))?;
+
+        // Wait for initial assignment
+        debug!("Waiting for partition assignment...");
+
+        // Poll once to trigger rebalance and get assignment
+        loop {
+            match consumer.poll(KAFKA_TIMEOUT_SECS) {
+                Some(Ok(_msg)) => {
+                    debug!("Received initial message, seeking to timestamp...");
+                    // Now seek all assigned partitions to the target timestamp
+                    seek_to_timestamp(&consumer, day_ts * 1000)?;
+                    break;
+                }
+                Some(Err(e)) => {
+                    if exit_on_eof {
+                        if let rdkafka::error::KafkaError::MessageConsumption(
+                            rdkafka::error::RDKafkaErrorCode::UnknownTopicOrPartition,
+                        ) = e
+                        {
+                            info!("Topic or partition unknown, exiting consumer {}", id);
+                            return Ok(());
+                        }
+                    }
+                    error!("Error during initial poll: {:?}", e);
+                    // sleep and retry
+                    tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+                }
+                None => {
+                    debug!("No message received yet, polling again...");
+                    // sleep and retry
+                    tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+                }
             }
         }
-        match consumer.poll(KAFKA_TIMEOUT_SECS) {
-            Some(Ok(message)) => {
-                let payload = message.payload().unwrap_or_default();
-                con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
-                    .await
-                    .inspect_err(|error| {
-                        log_error!(error, "failed to push message to queue");
-                        ALERT_PROCESSED.add(1, &output_error_attrs);
-                    })?;
-                trace!("Pushed message to redis");
-                ALERT_PROCESSED.add(1, &ok_attrs);
-                total += 1;
-                if total % 1000 == 0 {
-                    info!(
-                        "Consumer {} pushed {} items since {:?}",
-                        id,
-                        total,
-                        start.elapsed()
-                    );
-                }
-                if total == 1 {
-                    info!("Consumer received first message, continuing...");
-                }
-            }
-            Some(Err(e)) => {
-                error!("Error while consuming from Kafka, retrying: {}", e);
-                ALERT_PROCESSED.add(1, &input_error_attrs);
-                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
-                continue;
-            }
-            None => {
-                debug!("No message available");
-                if exit_on_eof {
-                    info!("No more messages, exiting consumer {}", id);
+
+        // OTel attributes informed by https://opentelemetry.io/docs/specs/semconv/messaging/kafka/
+        let consumer_attrs = [
+            KeyValue::new("messaging.system", "kafka"),
+            KeyValue::new("messaging.destination.name", active_topics.join(",")),
+            KeyValue::new("messaging.consumer.group.name", group_id.to_string()),
+            KeyValue::new("messaging.operation.name", "poll"),
+            KeyValue::new("messaging.operation.type", "receive"),
+            KeyValue::new("messaging.client.id", id.to_string()),
+            KeyValue::new("survey", survey),
+        ];
+        let ok_attrs: Vec<KeyValue> = consumer_attrs
+            .iter()
+            .cloned()
+            .chain([KeyValue::new("status", "ok")])
+            .collect();
+        let input_error_attrs: Vec<KeyValue> = consumer_attrs
+            .iter()
+            .cloned()
+            .chain([
+                KeyValue::new("status", "error"),
+                KeyValue::new("reason", "kafka_poll"),
+            ])
+            .collect();
+        let output_error_attrs: Vec<KeyValue> = consumer_attrs
+            .iter()
+            .cloned()
+            .chain([
+                KeyValue::new("status", "error"),
+                KeyValue::new("reason", "kafka_send"),
+            ])
+            .collect();
+
+        debug!("Starting Kafka consumer loop...");
+
+        // Process the rest normally
+        loop {
+            if max_in_queue > 0 && total % 1000 == 0 {
+                loop {
+                    let nb_in_queue = con
+                        .llen::<&str, usize>(&output_queue)
+                        .await
+                        .inspect_err(as_error!("failed to get queue length"))?;
+                    if nb_in_queue >= max_in_queue {
+                        info!(
+                            "{} (limit: {}) items in queue, sleeping...",
+                            nb_in_queue, max_in_queue
+                        );
+                        tokio::time::sleep(core::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
                     break;
+                }
+            }
+            match consumer.poll(KAFKA_TIMEOUT_SECS) {
+                Some(Ok(message)) => {
+                    let payload = message.payload().unwrap_or_default();
+                    con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
+                        .await
+                        .inspect_err(|error| {
+                            log_error!(error, "failed to push message to queue");
+                            ALERT_PROCESSED.add(1, &output_error_attrs);
+                        })?;
+                    trace!("Pushed message to redis");
+                    ALERT_PROCESSED.add(1, &ok_attrs);
+                    total += 1;
+                    if total % 1000 == 0 {
+                        info!(
+                            "Consumer {} pushed {} items since {:?}",
+                            id,
+                            total,
+                            start.elapsed()
+                        );
+                    }
+                    if total == 1 {
+                        info!("Consumer received first message, continuing...");
+                    }
+                }
+                Some(Err(e)) => {
+                    error!("Error while consuming from Kafka, retrying: {}", e);
+                    ALERT_PROCESSED.add(1, &input_error_attrs);
+                    tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                None => {
+                    debug!("No message available");
+                    if exit_on_eof {
+                        info!("No more messages, exiting consumer {}", id);
+                        return Ok(());
+                    }
+                    // The current day's topic is drained. If rollover is enabled
+                    // and the UTC clock has moved into a later day, switch to that
+                    // day's topic(s). Switching only on an empty poll guarantees
+                    // the previous day is fully consumed first, and keeps a single
+                    // topic-set subscribed at a time (cf. the docker-compose note
+                    // about one group id per topic).
+                    if let Some(generate_topics) = &rollover {
+                        let today = chrono::Utc::now().date_naive();
+                        let current_day = chrono::DateTime::from_timestamp(day_ts, 0)
+                            .unwrap()
+                            .date_naive();
+                        if today > current_day {
+                            day_ts = today.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+                            current_topics = generate_topics(day_ts);
+                            info!(
+                                "Consumer {} rolling over from {} to {} (topics: {:?})",
+                                id, current_day, today, current_topics
+                            );
+                            continue 'day;
+                        }
+                    }
                 }
             }
         }
     }
-
-    Ok(())
 }
