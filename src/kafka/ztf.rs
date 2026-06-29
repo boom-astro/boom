@@ -1,10 +1,11 @@
 use crate::{
-    kafka::base::{AlertConsumer, AlertProducer},
+    kafka::base::{AlertConsumer, AlertProducer, TopicGenerator},
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::{ProgramId, Survey},
     },
 };
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tracing::{info, instrument};
 
@@ -13,6 +14,17 @@ const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 pub struct ZtfAlertConsumer {
     output_queue: String,
     program_ids: Vec<ProgramId>,
+}
+
+/// Topic name(s) for the given program ID(s) on the UTC day containing
+/// `timestamp` (seconds). Shared by [`AlertConsumer::topic_names`] and the
+/// rollover generator so both stay in sync.
+fn ztf_topic_names(program_ids: &[ProgramId], timestamp: i64) -> Vec<String> {
+    let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
+    program_ids
+        .iter()
+        .map(|program_id| format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id))
+        .collect()
 }
 
 impl ZtfAlertConsumer {
@@ -33,17 +45,21 @@ impl ZtfAlertConsumer {
 #[async_trait::async_trait]
 impl AlertConsumer for ZtfAlertConsumer {
     fn topic_names(&self, timestamp: i64) -> Vec<String> {
-        let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        self.program_ids
-            .iter()
-            .map(|program_id| format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id))
-            .collect()
+        ztf_topic_names(&self.program_ids, timestamp)
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
     fn survey(&self) -> &'static str {
         Survey::Ztf.as_str()
+    }
+    fn rollover_topics(&self) -> Option<TopicGenerator> {
+        // ZTF publishes to a new `ztf_<date>_programid<n>` topic each UTC day,
+        // so roll over to keep consuming as the date advances.
+        let program_ids = self.program_ids.clone();
+        Some(Arc::new(move |timestamp| {
+            ztf_topic_names(&program_ids, timestamp)
+        }))
     }
 }
 
