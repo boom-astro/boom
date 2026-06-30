@@ -24,7 +24,7 @@ use opentelemetry::{
 };
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 // NOTE: Global instruments are defined here because reusing instruments is
@@ -258,19 +258,15 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             continue;
         }
 
-        info!(queue = %input_queue, n = candids.len(), "popped candids from queue");
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
         let processed_alerts: Vec<String> = enrichment_worker
             .process_alerts(&candids)
             .await
-            .inspect_err(|e| {
-                warn!(queue = %input_queue, error = %e, "process_alerts failed");
+            .inspect_err(|_| {
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
-
-        info!(queue = %input_queue, n_in = candids.len(), n_out = processed_alerts.len(), "batch enriched");
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;
