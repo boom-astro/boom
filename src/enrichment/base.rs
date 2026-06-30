@@ -265,8 +265,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         let processed_alerts: Vec<String> = enrichment_worker
             .process_alerts(&candids)
             .await
-            .inspect_err(|e| {
-                warn!(queue = %input_queue, error = %e, "process_alerts failed");
+            .inspect_err(|_| {
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
