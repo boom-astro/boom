@@ -3,7 +3,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     fetch_alerts,
-    models::{AcaiModel, BtsBotModel, Model, SharedModels},
+    models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
@@ -20,6 +20,10 @@ use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
 use tracing::{instrument, trace, warn};
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+use villar_pso::gpu::{GpuBatchData, SourceData};
+#[cfg(all(feature = "gpu", target_os = "macos"))]
+use villar_pso::gpu_metal::{GpuBatchData, SourceData};
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -362,6 +366,46 @@ pub struct ZtfAlertProperties {
     pub multisurvey_photstats: Option<PerBandProperties>,
 }
 
+/// Class probability output of the CIDER fusion model.
+/// Fields are ordered to match the ONNX model's output index (0–7).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+pub struct CiderClassProbs {
+    #[serde(rename = "AGN-like")]
+    pub agn_like: f32,
+    #[serde(rename = "Accreting WD Var")]
+    pub accreting_wd_var: f32,
+    #[serde(rename = "Other Stellar Var")]
+    pub other_stellar_var: f32,
+    #[serde(rename = "TDE")]
+    pub tde: f32,
+    #[serde(rename = "Ia-like SN")]
+    pub ia_like_sn: f32,
+    #[serde(rename = "Stripped Envelope SN")]
+    pub stripped_envelope_sn: f32,
+    #[serde(rename = "H-rich CCSN")]
+    pub h_rich_ccsn: f32,
+    #[serde(rename = "Superluminous SN")]
+    pub superluminous_sn: f32,
+}
+
+impl CiderClassProbs {
+    fn from_probs(p: &[f32]) -> Option<Self> {
+        if p.len() < 8 {
+            return None;
+        }
+        Some(Self {
+            agn_like: p[0],
+            accreting_wd_var: p[1],
+            other_stellar_var: p[2],
+            tde: p[3],
+            ia_like_sn: p[4],
+            stripped_envelope_sn: p[5],
+            h_rich_ccsn: p[6],
+            superluminous_sn: p[7],
+        })
+    }
+}
+
 /// ZTF alert ML classifier scores
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
@@ -371,6 +415,10 @@ pub struct ZtfAlertClassifications {
     pub acai_o: f32,
     pub acai_b: f32,
     pub btsbot: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cider_fusion: Option<CiderClassProbs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fusion_embedding: Option<Vec<f32>>,
 }
 
 /// Per-alert intermediate data used during enrichment processing.
@@ -381,6 +429,7 @@ struct AlertWork {
     all_bands_properties: AllBandsProperties,
     cutouts: AlertCutout,
     alert: ZtfAlertForEnrichment,
+    lightcurve: Vec<PhotometryMag>,
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -390,10 +439,30 @@ pub struct ZtfEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
-    /// Shared ONNX models (loaded once, shared across all enrichment workers via Arc).
+    /// Shared ONNX models (loaded once, shared across all enrichment workers
+    /// via Arc). On Linux+`gpu` this also owns the per-device CUDA stream and
+    /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
+    /// Alerts per batch — also the fixed ONNX inference shape (see
+    /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
+    batch_size: usize,
+}
+
+#[cfg(feature = "gpu")]
+fn to_villar_photometry(p: &PhotometryMag) -> Option<villar_pso::PhotometryMag> {
+    let band = match p.band {
+        Band::G => villar_pso::Band::G,
+        Band::R => villar_pso::Band::R,
+        _ => return None,
+    };
+    Some(villar_pso::PhotometryMag {
+        time: p.time,
+        mag: p.mag,
+        mag_err: p.mag_err,
+        band,
+    })
 }
 
 #[async_trait::async_trait]
@@ -427,6 +496,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             None => Some(SharedModels::load(None)?),
         };
 
+        let batch_size = config
+            .workers
+            .get(&Survey::Ztf)
+            .ok_or(EnrichmentWorkerError::WorkerConfigMissing(Survey::Ztf))?
+            .enrichment
+            .batch_size;
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -437,6 +513,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             models,
             babamul,
             gpu_enabled: config.gpu.enabled,
+            batch_size,
         })
     }
 
@@ -491,13 +568,26 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
 
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
+        #[cfg(feature = "gpu")]
+        let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-            let (properties, all_bands_properties, programid, _lightcurve) =
+            // Compute numerical and boolean features from lightcurve and candidate analysis
+            let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
+            #[cfg(feature = "gpu")]
+            if self
+                .models
+                .as_ref()
+                .and_then(|m| m.gpu_ctx.as_ref())
+                .is_some()
+            {
+                villar_inputs.push((candid, lightcurve.clone()));
+            }
+
             work_items.push(AlertWork {
                 candid,
                 programid,
@@ -505,6 +595,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 all_bands_properties,
                 cutouts,
                 alert,
+                lightcurve,
             });
         }
 
@@ -549,6 +640,96 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // GPU batch Villar light curve fitting — only when SharedModels was
+        // loaded with a GPU device (i.e. config.gpu.enabled is true).
+        // Otherwise `villar_inputs` is empty and we skip the entire block.
+        #[cfg(feature = "gpu")]
+        if let Some(gpu_ctx) = self.models.as_ref().and_then(|m| m.gpu_ctx.as_ref()) {
+            // Document whose keys match a successful fit's keys but with all values NaN.
+            // Written whenever a fit can't be produced (bad photometry or GPU failure).
+            let nan_set_doc = {
+                let mut d = doc! { "villar_fit.reduced_chi2": f64::NAN };
+                for filt in villar_pso::FILTERS {
+                    for pname in villar_pso::PARAM_NAMES {
+                        d.insert(format!("villar_fit.{}_{}", pname, filt), f64::NAN);
+                    }
+                }
+                d
+            };
+
+            let alert_collection = &self.alert_collection;
+            let build_update = |candid: i64, set_doc: Document| {
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(alert_collection.namespace())
+                        .filter(doc! { "_id": candid })
+                        .update(doc! { "$set": set_doc })
+                        .build(),
+                )
+            };
+
+            // Preprocess each lightcurve; split into fittable sources and
+            // NaN-update-only candids that failed preprocessing.
+            let mut villar_updates: Vec<WriteModel> = Vec::new();
+            let mut fittable: Vec<(i64, SourceData)> = Vec::new();
+            for (candid, lc) in &villar_inputs {
+                let villar_lc: Vec<villar_pso::PhotometryMag> =
+                    lc.iter().filter_map(to_villar_photometry).collect();
+                match villar_pso::preprocess_from_photometry(&villar_lc) {
+                    Ok(preproc) => fittable.push((
+                        *candid,
+                        SourceData {
+                            name: candid.to_string(),
+                            data: preproc,
+                        },
+                    )),
+                    Err(e) => {
+                        trace!(candid, "skipping Villar fit: {}", e);
+                        villar_updates.push(build_update(*candid, nan_set_doc.clone()));
+                    }
+                }
+            }
+
+            // Run GPU batch fit on the fittable sources.
+            if !fittable.is_empty() {
+                let (candids, sources): (Vec<i64>, Vec<SourceData>) = fittable.into_iter().unzip();
+                let source_refs: Vec<&SourceData> = sources.iter().collect();
+                let pso_config = villar_pso::PsoConfig::default();
+
+                let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
+
+                match batch_result.and_then(|batch| {
+                    gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
+                }) {
+                    Ok(results) => {
+                        for (result, candid) in results.iter().zip(candids) {
+                            let mut set_doc = doc! {
+                                "villar_fit.reduced_chi2": result.reduced_chi2,
+                            };
+                            for (key, val) in &result.params_unnorm.to_named_map() {
+                                set_doc.insert(format!("villar_fit.{}", key), *val);
+                            }
+                            villar_updates.push(build_update(candid, set_doc));
+                        }
+                    }
+                    Err(e) => {
+                        warn!("GPU Villar batch fitting failed: {}", e);
+                        villar_updates.extend(
+                            candids
+                                .into_iter()
+                                .map(|c| build_update(c, nan_set_doc.clone())),
+                        );
+                    }
+                }
+            }
+
+            if !villar_updates.is_empty() {
+                if let Err(e) = self.client.bulk_write(villar_updates).await {
+                    warn!("failed to write Villar fit results: {}", e);
+                }
+            }
+        }
 
         // Send to Babamul for batch processing
         if let Some(babamul) = self.babamul.as_ref() {
@@ -632,6 +813,8 @@ impl ZtfEnrichmentWorker {
 
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
+        // Snapshot ZTF-only lightcurve before any cross-survey extension; cider was trained on ZTF only
+        let ztf_lightcurve = lightcurve.clone();
 
         // Compute multisurvey photstats (including LSST if available, other surveys can be added later)
         let mut has_matches = false;
@@ -672,7 +855,7 @@ impl ZtfEnrichmentWorker {
             },
             all_bands_properties,
             programid,
-            lightcurve,
+            ztf_lightcurve,
         ))
     }
 
@@ -684,7 +867,7 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
-            return Self::classify_gpu_batch(models, work_items);
+            return self.classify_gpu_batch(models, work_items);
         }
 
         Self::classify_per_item(models, work_items)
@@ -724,6 +907,23 @@ impl ZtfEnrichmentWorker {
                     .lock()
                     .unwrap()
                     .predict(&btsbot_metadata, &triplet)?;
+
+                let cider_result = (|| -> Result<(CiderClassProbs, Vec<f32>), ModelError> {
+                    let mut m = models.cider.lock().unwrap();
+                    let meta = m.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
+                    let img = m.get_triplet(&[&item.cutouts])?;
+                    let (tx, tpm, tg) = m.photometry_inputs(item.lightcurve.clone())?;
+                    let (probs, embedding) = m.predict(&tx, &tpm, &tg, &meta, &img)?;
+                    let cls = CiderClassProbs::from_probs(&probs).ok_or(
+                        ModelError::MissingFeature("cider: unexpected output length"),
+                    )?;
+                    Ok((cls, embedding))
+                })()
+                .map_err(|e| {
+                    warn!("cider inference failed for candid {}: {}", item.candid, e);
+                })
+                .ok();
+
                 Some(ZtfAlertClassifications {
                     acai_h: acai_h_scores[0],
                     acai_n: acai_n_scores[0],
@@ -731,6 +931,8 @@ impl ZtfEnrichmentWorker {
                     acai_o: acai_o_scores[0],
                     acai_b: acai_b_scores[0],
                     btsbot: btsbot_scores[0],
+                    cider_fusion: cider_result.as_ref().map(|(cls, _)| cls.clone()),
+                    fusion_embedding: cider_result.map(|(_, emb)| emb),
                 })
             } else {
                 warn!(
@@ -745,6 +947,7 @@ impl ZtfEnrichmentWorker {
     }
 
     fn classify_gpu_batch(
+        &self,
         models: &SharedModels,
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
@@ -797,61 +1000,127 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        let mut triplet = ndarray::Array::zeros((selected_indices.len(), 63, 63, 3));
-        let mut metadata = ndarray::Array::zeros((selected_indices.len(), 25));
-        let mut btsbot_metadata = ndarray::Array::zeros((selected_indices.len(), 25));
+        // Cider batch — runs once on all selected items; failure is non-fatal.
+        let n_sel = selected_indices.len();
+        let cider_batch: Option<(Vec<f32>, Vec<f32>)> =
+            (|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
+                let cider_alerts: Vec<&ZtfAlertForEnrichment> = selected_indices
+                    .iter()
+                    .map(|&i| &work_items[i].alert)
+                    .collect();
+                let cider_cutouts: Vec<&AlertCutout> = selected_indices
+                    .iter()
+                    .map(|&i| &work_items[i].cutouts)
+                    .collect();
+                let cider_props: Vec<&AllBandsProperties> = selected_indices
+                    .iter()
+                    .map(|&i| &work_items[i].all_bands_properties)
+                    .collect();
 
-        for (row, idx) in selected_indices.iter().enumerate() {
-            let tpos = *triplet_pos.get(idx).expect("triplet position missing");
-            let apos = *acai_pos.get(idx).expect("acai position missing");
-            let bpos = *bts_pos.get(idx).expect("bts position missing");
+                let mut cider = models.cider.lock().unwrap();
+                let cider_meta = cider.get_metadata(&cider_alerts, &cider_props)?;
+                let cider_image = cider.get_triplet(&cider_cutouts)?;
 
-            triplet
-                .slice_mut(ndarray::s![row, .., .., ..])
-                .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
-            metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
-            btsbot_metadata
-                .row_mut(row)
-                .assign(&bts_metadata_all.row(bpos));
-        }
+                let phot: Vec<_> = selected_indices
+                    .iter()
+                    .map(|&i| cider.photometry_inputs(work_items[i].lightcurve.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
 
-        let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
-        let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
-        let btsbot_scores = models
-            .btsbot
-            .lock()
-            .unwrap()
-            .predict(&btsbot_metadata, &triplet)?;
+                let tx_views: Vec<_> = phot.iter().map(|(x, _, _)| x.view()).collect();
+                let tpm_views: Vec<_> = phot.iter().map(|(_, m, _)| m.view()).collect();
+                let tg_views: Vec<_> = phot.iter().map(|(_, _, g)| g.view()).collect();
 
-        let expected = selected_indices.len();
-        for (name, got) in [
-            ("acai_h", acai_h_scores.len()),
-            ("acai_n", acai_n_scores.len()),
-            ("acai_v", acai_v_scores.len()),
-            ("acai_o", acai_o_scores.len()),
-            ("acai_b", acai_b_scores.len()),
-            ("btsbot", btsbot_scores.len()),
-        ] {
-            if got != expected {
-                return Err(EnrichmentWorkerError::ConfigurationError(format!(
-                    "model {} returned {} scores for {} inputs",
-                    name, got, expected
-                )));
+                let tx = ndarray::concatenate(ndarray::Axis(0), &tx_views)?;
+                let tpm = ndarray::concatenate(ndarray::Axis(0), &tpm_views)?;
+                let tg = ndarray::concatenate(ndarray::Axis(0), &tg_views)?;
+
+                cider.predict(&tx, &tpm, &tg, &cider_meta, &cider_image)
+            })()
+            .map_err(|e| {
+                warn!("cider batch inference failed: {}", e);
+            })
+            .ok();
+        let cider_n_cls = cider_batch
+            .as_ref()
+            .map(|(p, _)| p.len() / n_sel)
+            .unwrap_or(0);
+        let cider_emb_dim = cider_batch
+            .as_ref()
+            .map(|(_, e)| e.len() / n_sel)
+            .unwrap_or(0);
+
+        // Run ACAI/BTSBot inference in fixed-size chunks so ORT always sees the same
+        // input shape (`self.batch_size`). The final chunk is zero-padded
+        // up to the fixed size; padding rows produce scores that are ignored.
+        for (chunk_idx, chunk) in selected_indices.chunks(self.batch_size).enumerate() {
+            let chunk_start = chunk_idx * self.batch_size;
+            let mut triplet = ndarray::Array::zeros((self.batch_size, 63, 63, 3));
+            let mut metadata = ndarray::Array::zeros((self.batch_size, 25));
+            let mut btsbot_metadata = ndarray::Array::zeros((self.batch_size, 25));
+
+            for (row, idx) in chunk.iter().enumerate() {
+                let tpos = *triplet_pos.get(idx).expect("triplet position missing");
+                let apos = *acai_pos.get(idx).expect("acai position missing");
+                let bpos = *bts_pos.get(idx).expect("bts position missing");
+
+                triplet
+                    .slice_mut(ndarray::s![row, .., .., ..])
+                    .assign(&triplet_all.slice(ndarray::s![tpos, .., .., ..]));
+                metadata.row_mut(row).assign(&acai_metadata_all.row(apos));
+                btsbot_metadata
+                    .row_mut(row)
+                    .assign(&bts_metadata_all.row(bpos));
             }
-        }
 
-        for (batch_idx, &item_idx) in selected_indices.iter().enumerate() {
-            results[item_idx] = Some(ZtfAlertClassifications {
-                acai_h: acai_h_scores[batch_idx],
-                acai_n: acai_n_scores[batch_idx],
-                acai_v: acai_v_scores[batch_idx],
-                acai_o: acai_o_scores[batch_idx],
-                acai_b: acai_b_scores[batch_idx],
-                btsbot: btsbot_scores[batch_idx],
-            });
+            let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
+            let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
+            let btsbot_scores = models
+                .btsbot
+                .lock()
+                .unwrap()
+                .predict(&btsbot_metadata, &triplet)?;
+
+            for (name, got) in [
+                ("acai_h", acai_h_scores.len()),
+                ("acai_n", acai_n_scores.len()),
+                ("acai_v", acai_v_scores.len()),
+                ("acai_o", acai_o_scores.len()),
+                ("acai_b", acai_b_scores.len()),
+                ("btsbot", btsbot_scores.len()),
+            ] {
+                if got != self.batch_size {
+                    return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                        "model {} returned {} scores for {} padded inputs",
+                        name, got, self.batch_size
+                    )));
+                }
+            }
+
+            // Map only the real rows back; padding rows (chunk.len()..) are dropped.
+            for (batch_idx, &item_idx) in chunk.iter().enumerate() {
+                let sel_idx = chunk_start + batch_idx;
+                let cider_fusion = cider_batch.as_ref().and_then(|(probs, _)| {
+                    CiderClassProbs::from_probs(
+                        &probs[sel_idx * cider_n_cls..(sel_idx + 1) * cider_n_cls],
+                    )
+                });
+                let fusion_embedding = cider_batch.as_ref().map(|(_, emb)| {
+                    emb[sel_idx * cider_emb_dim..(sel_idx + 1) * cider_emb_dim].to_vec()
+                });
+                results[item_idx] = Some(ZtfAlertClassifications {
+                    acai_h: acai_h_scores[batch_idx],
+                    acai_n: acai_n_scores[batch_idx],
+                    acai_v: acai_v_scores[batch_idx],
+                    acai_o: acai_o_scores[batch_idx],
+                    acai_b: acai_b_scores[batch_idx],
+                    btsbot: btsbot_scores[batch_idx],
+                    cider_fusion,
+                    fusion_embedding,
+                });
+            }
         }
 
         Ok(results)

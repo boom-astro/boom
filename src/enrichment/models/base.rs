@@ -32,7 +32,7 @@ pub enum ModelError {
 /// GPU usage is controlled by the `BOOM_GPU__ENABLED` environment variable (default: `"true"`).
 /// When `device_id` is `Some(id)`, that CUDA device is used; otherwise device 0.
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
-    load_model_on_device(path, None)
+    load_model_on_device(path, None, std::ptr::null_mut())
 }
 
 fn env_truthy(value: &str) -> bool {
@@ -42,17 +42,50 @@ fn env_truthy(value: &str) -> bool {
     )
 }
 
-pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Session, ModelError> {
+/// Load an ONNX model on a specific device. On Linux+CUDA, `cuda_stream` (a
+/// `cudaStream_t` cast to `*mut c_void`) lets the session share its compute
+/// stream with other CUDA work — pass `std::ptr::null_mut()` to let ORT
+/// allocate its own stream. The stream argument is ignored on macOS.
+///
+/// # Safety
+/// When non-null, `cuda_stream` must be a valid `cudaStream_t` belonging to
+/// `device_id`'s device, and must outlive the returned [`Session`].
+pub fn load_model_on_device(
+    path: &str,
+    device_id: Option<i32>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    cuda_stream: *mut std::ffi::c_void,
+) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, cuda_stream, false)
+}
+
+/// Like [`load_model_on_device`] but allows CPU fallback for models whose ops
+/// are not fully covered by the CUDA execution provider (e.g. CIDER).
+pub fn load_model_on_device_with_cpu_fallback(
+    path: &str,
+    device_id: Option<i32>,
+) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, std::ptr::null_mut(), true)
+}
+
+fn load_model_on_device_inner(
+    path: &str,
+    device_id: Option<i32>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    cuda_stream: *mut std::ffi::c_void,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    allow_cpu_fallback: bool,
+) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
     let use_gpu = env::var("BOOM_GPU__ENABLED")
         .map(|v| env_truthy(&v))
         .unwrap_or(true);
 
-    #[cfg(target_os = "linux")]
-    if env::var_os("ORT_DYLIB_PATH").is_none() {
-        return Err(ModelError::MissingOrtDylibPath);
-    }
+    // #[cfg(target_os = "linux")]
+    // if env::var_os("ORT_DYLIB_PATH").is_none() {
+    //     return Err(ModelError::MissingOrtDylibPath);
+    // }
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if use_gpu {
@@ -60,18 +93,39 @@ pub fn load_model_on_device(path: &str, device_id: Option<i32>) -> Result<Sessio
         // We only do this on Linux as Apple's CoreML EP does need to fallback
         // to the CPU for some operators of the ONNX runtime.
         #[cfg(target_os = "linux")]
-        {
+        if !allow_cpu_fallback {
             builder = builder.with_disable_cpu_fallback()?;
         }
 
         #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let dev = device_id.unwrap_or(0);
 
+        #[cfg(target_os = "linux")]
+        let cuda_ep = {
+            // `with_conv_max_workspace(false)` caps the cuDNN conv
+            // algorithm-search workspace at 32 MB, shrinking the per-shape
+            // scratch buffers the dynamic batch dimension would otherwise grab.
+            //
+            // NOTE: `arena_extend_strategy = SameAsRequested` was tried here
+            // and removed. With the dynamic-batch models its exact-sized
+            // extensions wreck BFC arena reuse, so GPU memory climbs
+            // monotonically every batch and OOMs. The default `kNextPowerOfTwo`
+            // allocates reusable power-of-two blocks and the arena stabilizes.
+            // .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+            let mut ep = ort::ep::CUDAExecutionProvider::default()
+                .with_device_id(dev)
+                .with_conv_max_workspace(false);
+            if !cuda_stream.is_null() {
+                // Safety: caller guarantees the stream is valid for `dev`
+                // and outlives the session (see fn-level safety comment).
+                ep = unsafe { ep.with_compute_stream(cuda_stream as *mut ()) };
+            }
+            ep.build()
+        };
+
         builder = builder.with_execution_providers([
             #[cfg(target_os = "linux")]
-            ort::ep::CUDAExecutionProvider::default()
-                .with_device_id(dev)
-                .build(),
+            cuda_ep,
             #[cfg(target_os = "macos")]
             ort::ep::CoreMLExecutionProvider::default().build(),
         ])?;
@@ -148,4 +202,16 @@ pub trait Model {
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError>;
+}
+
+pub trait FusionModel {
+    /// Returns `(probs, fusion_embedding)`.
+    fn predict(
+        &mut self,
+        tempo_x: &ndarray::Array3<f32>,
+        tempo_pad_mask: &ndarray::Array2<bool>,
+        tempo_global: &ndarray::Array2<f32>,
+        metadata: &Array<f32, Dim<[usize; 2]>>,
+        image: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<(Vec<f32>, Vec<f32>), ModelError>;
 }
