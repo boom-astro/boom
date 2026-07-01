@@ -11,12 +11,14 @@ services:
       dockerfile: Dockerfile
       args:
         BOOM_API__DOMAIN: ${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}
+        BOOM_SANDBOX_API__DOMAIN: ${BOOM_SANDBOX_API__DOMAIN:-${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}}
         BOOM_KAFKA__DOMAIN: ${DOMAIN?Variable not set}:9093
         VITE_PRERELEASE_MODE: ${VITE_PRERELEASE_MODE:-false}
         VITE_PUBLIC_POSTHOG_KEY: ${VITE_PUBLIC_POSTHOG_KEY?Variable not set}
         VITE_PUBLIC_POSTHOG_HOST: ${VITE_PUBLIC_POSTHOG_HOST?Variable not set}
     environment:
       BOOM_API__DOMAIN: ${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}
+      BOOM_SANDBOX_API__DOMAIN: ${BOOM_SANDBOX_API__DOMAIN:-${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}}
       BOOM_KAFKA__DOMAIN: ${DOMAIN?Variable not set}:9093
       VITE_PRERELEASE_MODE: ${VITE_PRERELEASE_MODE:-false}
       VITE_PUBLIC_POSTHOG_KEY: ${VITE_PUBLIC_POSTHOG_KEY?Variable not set}

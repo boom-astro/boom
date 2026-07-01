@@ -1,5 +1,8 @@
 // Always use the same-origin proxy; production should map /api to the backend via the web server
 const API_BASE = "/api/babamul";
+// Production should map /api-sandbox to the filter sandbox backend via the web server.
+// these are only used in the filter testing UI and should not require auth.
+const SANDBOX_API_BASE = "/api-sandbox";
 
 export type TokenRecord = {
   access_token: string;
@@ -472,6 +475,84 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
   return { results, message };
 }
 
+// --- Filter Testing (public, no auth required) ---
+
+export type FilterTestParams = {
+  pipeline: Record<string, unknown>[];
+  survey: string;
+  permissions: Record<string, number[]>;
+  start_jd?: number;
+  end_jd?: number;
+  limit?: number;
+};
+
+export type FilterTestCountResult = {
+  count: number;
+  pipeline: unknown[];
+};
+
+export async function fetchFilterTestCount(params: FilterTestParams): Promise<FilterTestCountResult> {
+  const res = await fetch(`${SANDBOX_API_BASE}/filters/test/count`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Filter count failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<FilterTestCountResult>(body, { count: 0, pipeline: [] });
+}
+
+export async function fetchFilterTest(params: FilterTestParams): Promise<Record<string, unknown>[]> {
+  const res = await fetch(`${SANDBOX_API_BASE}/filters/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Filter test failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const result = unwrapData<{ results?: unknown[] }>(body, { results: [] });
+  const resultsArray = result && result.results;
+  return Array.isArray(resultsArray) ? (resultsArray as Record<string, unknown>[]) : [];
+}
+
+export async function fetchBoomSchema(survey: string): Promise<AvroSchema> {
+  const url = `${SANDBOX_API_BASE}/filters/schemas/${encodeURIComponent(survey).toUpperCase()}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch BOOM schema failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<AvroSchema>(body, {} as AvroSchema);
+}
+
+/**
+ * Fetch total alert count for a JD window (empty pipeline).
+ * Used by FilterHealthPanel to compute pass rate.
+ */
+export async function fetchTotalAlertCount(
+  survey: string,
+  startJd: number,
+  endJd: number,
+  permissions: Record<string, number[]>,
+): Promise<number> {
+  const params: FilterTestParams = {
+    pipeline: [{ "$match": {} }, { "$project": { "objectId": 1 } }],
+    survey,
+    permissions,
+    start_jd: startJd,
+    end_jd: endJd,
+  };
+  const result = await fetchFilterTestCount(params);
+  return result.count;
+}
+
 export default {
   login,
   logout,
@@ -485,4 +566,9 @@ export default {
   fetchObjCutouts,
   fetchStats,
   fetchCollectionStats,
+  fetchTopics,
+  fetchTotalAlertCount,
+  fetchFilterTestCount,
+  fetchFilterTest,
+  fetchBoomSchema,
 };

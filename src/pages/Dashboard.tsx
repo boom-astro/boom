@@ -7,7 +7,7 @@ import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
+import api, { CollectionEntry, NightlyStat, type TopicInfo } from "@/lib/api";
 import { SURVEYS, type Survey } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
@@ -90,7 +90,7 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    fetchTopics()
+    api.fetchTopics()
       .then(setTopics)
       .catch((e) => setTopicsError(e instanceof Error ? e.message : "Failed to fetch topics"))
       .finally(() => setTopicsLoading(false));
