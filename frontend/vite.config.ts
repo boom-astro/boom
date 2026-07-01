@@ -33,6 +33,15 @@ export default defineConfig(({mode}) => {
   // loadEnv reads .env files
   const env = loadEnv(mode, process.cwd(), "")
 
+  // Strip trailing slashes so `target + rewritten path` never yields a double slash.
+  const stripSlash = (s: string) => s.replace(/\/+$/, '')
+  const apiTarget = stripSlash(env.VITE_API_PROXY_TARGET || 'http://localhost:4000')
+  // Sandbox dev target: explicit VITE_SANDBOX_API_PROXY_TARGET wins, then the
+  // runtime/prod BOOM_SANDBOX_API__DOMAIN, then fall back to the main API.
+  const sandboxTarget = stripSlash(
+    env.VITE_SANDBOX_API_PROXY_TARGET || env.BOOM_SANDBOX_API__DOMAIN || apiTarget
+  )
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -105,9 +114,15 @@ export default defineConfig(({mode}) => {
       },
       // Dev proxy to avoid CORS when backend runs on localhost:4000
       proxy: {
+        // Sandbox proxy must be listed before /api so the more-specific prefix wins
+        '/api-sandbox': {
+          target: sandboxTarget,
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => path.replace(/^\/api-sandbox/, ''),
+        },
         '/api': {
-          // let's have the target be configurable via env var
-          target: env.VITE_API_PROXY_TARGET || 'http://localhost:4000',
+          target: apiTarget,
           changeOrigin: true,
           secure: false,
           rewrite: (path) => path.replace(/^\/api/, ''),

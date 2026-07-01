@@ -9,6 +9,7 @@ import {
   IconPackage,
   IconNotebook,
   IconBook,
+  IconFilter,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from "@/components/nav-documents"
@@ -37,6 +38,11 @@ const data = {
       title: "Dashboard",
       url: "/dashboard",
       icon: IconChartBar,
+    },
+    {
+      title: "Filters",
+      url: "/filters",
+      icon: IconFilter,
     },
   ],
   navSecondary: [
