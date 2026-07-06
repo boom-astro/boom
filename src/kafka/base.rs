@@ -17,7 +17,7 @@ use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
     config::ClientConfig,
-    consumer::{BaseConsumer, Consumer},
+    consumer::{BaseConsumer, CommitMode, Consumer},
     error::{KafkaError, KafkaResult},
     message::Message,
     producer::{FutureProducer, FutureRecord, Producer},
@@ -604,12 +604,37 @@ fn position_partitions(
         return Ok(());
     }
     let resolved = consumer.offsets_for_times(to_resolve, KAFKA_TIMEOUT_SECS)?;
+    // Persist the resolved start/skip position for each uncommitted partition.
+    // With the default (eager) assignor, discovering the next day's topic revokes
+    // and reassigns everything; committing here means an old skipped topic resumes
+    // from its end (stays skipped) rather than resetting to `earliest` and
+    // replaying, and today's topic resumes from its start.
+    let mut to_commit = TopicPartitionList::new();
     for elem in resolved.elements() {
         let offset = match elem.offset() {
-            rdkafka::Offset::Offset(offset) => rdkafka::Offset::Offset(offset),
-            _ => rdkafka::Offset::End,
+            rdkafka::Offset::Offset(offset) => offset,
+            // No message at/after the timestamp (an old or empty topic): resolve
+            // the end offset numerically so it can be committed and skipped.
+            _ => {
+                consumer
+                    .fetch_watermarks(elem.topic(), elem.partition(), KAFKA_TIMEOUT_SECS)?
+                    .1
+            }
         };
-        consumer.seek(elem.topic(), elem.partition(), offset, KAFKA_TIMEOUT_SECS)?;
+        consumer.seek(
+            elem.topic(),
+            elem.partition(),
+            rdkafka::Offset::Offset(offset),
+            KAFKA_TIMEOUT_SECS,
+        )?;
+        to_commit.add_partition_offset(
+            elem.topic(),
+            elem.partition(),
+            rdkafka::Offset::Offset(offset),
+        )?;
+    }
+    if to_commit.count() > 0 {
+        consumer.commit(&to_commit, CommitMode::Sync)?;
     }
     Ok(())
 }
@@ -712,12 +737,14 @@ pub async fn consumer(
         .set("enable.auto.offset.store", "false");
 
     if !exit_on_eof {
-        // Long-running consumer: commit stored offsets so restarts/rebalances
-        // resume in place (no replay), and use cooperative-sticky so discovering
-        // the next day's topic only adds its partitions instead of revoking all.
+        // Long-running consumer: commit stored offsets so restarts and rebalances
+        // resume in place instead of replaying. We deliberately keep the default
+        // (eager) assignment strategy: switching a live consumer group to
+        // cooperative-sticky is an incompatible rebalance protocol, and members
+        // already in the group on the eager protocol reject the join with
+        // InconsistentGroupProtocol.
         client_config
             .set("enable.auto.commit", "true")
-            .set("partition.assignment.strategy", "cooperative-sticky")
             // How quickly a newly-created daily topic is discovered and joined.
             .set("topic.metadata.refresh.interval.ms", "10000");
     }
