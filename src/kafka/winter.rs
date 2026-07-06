@@ -27,6 +27,11 @@ impl AlertConsumer for WinterAlertConsumer {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         vec![format!("winter_{}", date.format("%Y%m%d"))]
     }
+    fn topic_patterns(&self) -> Vec<String> {
+        // Regex matching any date — librdkafka auto-joins new daily topics.
+        // librdkafka's matcher is POSIX/Thompson-NFA: use `[0-9]+`, not `\d`.
+        vec![r"^winter_[0-9]+$".to_string()]
+    }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
