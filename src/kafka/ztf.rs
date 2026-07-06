@@ -44,12 +44,17 @@ impl AlertConsumer for ZtfAlertConsumer {
         // ^ztf_[0-9]+_programid(1|2)$ — librdkafka auto-joins new daily topics.
         // NB: librdkafka's matcher is POSIX/Thompson-NFA, so only basic
         // constructs are used (no `\d`, no `{n}` bounded repetition).
-        let ids = self
-            .program_ids
-            .iter()
-            .map(|program_id| program_id.to_string())
-            .collect::<Vec<_>>()
-            .join("|");
+        let ids = if self.program_ids.is_empty() {
+            // Empty selection would otherwise yield `programid()`, matching
+            // nothing; fall back to any program id.
+            "[0-9]+".to_string()
+        } else {
+            self.program_ids
+                .iter()
+                .map(|program_id| program_id.to_string())
+                .collect::<Vec<_>>()
+                .join("|")
+        };
         vec![format!(r"^ztf_[0-9]+_programid({})$", ids)]
     }
     fn output_queue(&self) -> String {

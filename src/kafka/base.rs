@@ -402,10 +402,8 @@ pub trait AlertConsumer: Sized {
     /// `^` are interpreted by librdkafka as regular expressions, so the consumer
     /// auto-discovers each new day's topic (e.g. `ztf_20260629_programid1`) and
     /// rolls over on its own without restarting. Surveys with a single static
-    /// topic (e.g. LSST) return literal topic names instead.
-    ///
-    /// Defaults to the regex form `^<survey>_<8 digits>...$`; overridden per
-    /// survey where the topic layout differs.
+    /// topic (e.g. LSST) return literal topic names instead. Each survey
+    /// implements this per its topic layout.
     fn topic_patterns(&self) -> Vec<String>;
     fn output_queue(&self) -> String;
     fn survey(&self) -> &'static str;
@@ -564,20 +562,22 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
     Ok(())
 }
 
-// Position freshly-assigned partitions for the long-running consumer: those with
-// a committed offset resume from it; the rest are resolved by `timestamp_ms`
+// Position the given `targets` partitions for the long-running consumer: those
+// with a committed offset resume from it; the rest are resolved by `timestamp_ms`
 // (an old day's topic has nothing at/after it -> seek to end/skip; today's and
-// any newly-created daily topic -> its start). Committed partitions are never
-// re-sought, so this is safe to run on every (re)assignment.
-fn seek_resume_or_skip(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<()> {
-    let assignment = consumer.assignment()?;
-    if assignment.count() == 0 {
+// any newly-created daily topic -> its start).
+fn position_partitions(
+    consumer: &BaseConsumer,
+    targets: &TopicPartitionList,
+    timestamp_ms: i64,
+) -> KafkaResult<()> {
+    if targets.count() == 0 {
         return Ok(());
     }
     let committed = consumer.committed(KAFKA_TIMEOUT_SECS)?;
 
     let mut to_resolve = TopicPartitionList::new();
-    for elem in assignment.elements() {
+    for elem in targets.elements() {
         match committed
             .find_partition(elem.topic(), elem.partition())
             .map(|c| c.offset())
@@ -610,6 +610,36 @@ fn seek_resume_or_skip(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResul
             _ => rdkafka::Offset::End,
         };
         consumer.seek(elem.topic(), elem.partition(), offset, KAFKA_TIMEOUT_SECS)?;
+    }
+    Ok(())
+}
+
+// Position only partitions that have appeared in the assignment since the last
+// call, recording them in `positioned`. Positioning each partition exactly once
+// (rather than re-seeking the whole assignment whenever it changes) means a
+// still-active partition is never rewound to its lagging committed offset, and a
+// same-size membership swap (which a count check would miss) is still handled.
+// A genuinely-new daily topic is correctly picked up here; an old retained topic
+// re-assigned mid-run is skipped. (A brand-new partition consumed between poll
+// and this check would be rewound once here — a bounded, idempotent replay.)
+fn reposition_new_partitions(
+    consumer: &BaseConsumer,
+    timestamp_ms: i64,
+    positioned: &mut std::collections::HashSet<(String, i32)>,
+) -> KafkaResult<()> {
+    let assignment = consumer.assignment()?;
+    let mut fresh = TopicPartitionList::new();
+    for elem in assignment.elements() {
+        if !positioned.contains(&(elem.topic().to_string(), elem.partition())) {
+            fresh.add_partition_offset(elem.topic(), elem.partition(), rdkafka::Offset::Invalid)?;
+        }
+    }
+    if fresh.count() == 0 {
+        return Ok(());
+    }
+    position_partitions(consumer, &fresh, timestamp_ms)?;
+    for elem in fresh.elements() {
+        positioned.insert((elem.topic().to_string(), elem.partition()));
     }
     Ok(())
 }
@@ -715,6 +745,9 @@ pub async fn consumer(
     // Wait for initial assignment
     debug!("Waiting for partition assignment...");
 
+    // Partitions already positioned (prod path only); see reposition_new_partitions.
+    let mut positioned: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
+
     // Poll once to trigger rebalance and get assignment
     loop {
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
@@ -725,7 +758,7 @@ pub async fn consumer(
                     seek_to_timestamp(&consumer, timestamp * 1000)?;
                 } else {
                     // Resume committed partitions; skip old / start today otherwise.
-                    seek_resume_or_skip(&consumer, timestamp * 1000)?;
+                    reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
                 }
                 break;
             }
@@ -794,24 +827,14 @@ pub async fn consumer(
 
     debug!("Starting Kafka consumer loop...");
 
-    // Track the assignment size so we reposition when it grows: discovering the
-    // next day's topic (or a late cooperative assignment) brings in new
-    // partitions, and seek_resume_or_skip skips any old retained topic among them
-    // while leaving committed partitions in place.
-    let mut assignment_count = consumer.assignment().map(|a| a.count()).unwrap_or(0);
-
     // Process the rest normally
     loop {
-        if !exit_on_eof {
-            let count = consumer
-                .assignment()
-                .map(|a| a.count())
-                .unwrap_or(assignment_count);
-            if count != assignment_count {
-                debug!("assignment changed ({assignment_count} -> {count}), repositioning");
-                seek_resume_or_skip(&consumer, timestamp * 1000)?;
-                assignment_count = count;
-            }
+        // Pick up newly-assigned partitions (e.g. the next day's topic rolling
+        // over). Kept off the per-message hot path: checked once per 1000
+        // messages and whenever the poll goes idle (rollover happens in the
+        // quiet gap between nights, so the idle check catches it promptly).
+        if !exit_on_eof && total % 1000 == 0 {
+            reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
         }
         if max_in_queue > 0 && total % 1000 == 0 {
             loop {
@@ -873,6 +896,8 @@ pub async fn consumer(
                     info!("No more messages, exiting consumer {}", id);
                     break;
                 }
+                // Idle: catch a topic that has just rolled over.
+                reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
             }
         }
     }
