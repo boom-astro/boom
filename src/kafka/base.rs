@@ -852,10 +852,32 @@ pub async fn consumer(
     // start timer
     let start = std::time::Instant::now();
 
+    // Emit a periodic "still alive" line so low-volume surveys (e.g. WINTER,
+    // which may push far fewer than the every-1000 progress log) visibly report
+    // progress instead of looking stalled. Also confirms the loop is polling
+    // even when idle between nights.
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut last_heartbeat = std::time::Instant::now();
+    let mut total_at_last_heartbeat = 0;
+
     debug!("Starting Kafka consumer loop...");
 
     // Process the rest normally
     loop {
+        if !exit_on_eof && last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            let since = total - total_at_last_heartbeat;
+            info!(
+                "Consumer {} alive: {} messages pushed to '{}' ({} in the last {:?}, {:?} total)",
+                id,
+                total,
+                output_queue,
+                since,
+                last_heartbeat.elapsed(),
+                start.elapsed(),
+            );
+            last_heartbeat = std::time::Instant::now();
+            total_at_last_heartbeat = total;
+        }
         // Pick up newly-assigned partitions (e.g. the next day's topic rolling
         // over). Kept off the per-message hot path: checked once per 1000
         // messages and whenever the poll goes idle (rollover happens in the

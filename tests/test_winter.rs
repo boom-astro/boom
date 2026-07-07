@@ -28,6 +28,44 @@ fn test_sanitize_winter_avro_is_readable() {
     assert!(apache_avro::Reader::new(&fixed2[..]).is_ok());
 }
 
+#[test]
+fn test_winter_candidate_missing_field_deserializes() {
+    // Some upstream WINTER packets omit the candidate `field` entirely. That must
+    // deserialize (with `field` defaulting) rather than failing the whole alert
+    // with "missing field `field`". We simulate it by dropping `field` from the
+    // decoded record, which is exactly the shape the strict serde path sees.
+    use apache_avro::types::Value;
+    let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
+    let fixed = sanitize_winter_avro(&raw).unwrap();
+    let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
+    let mut value = reader.into_iter().next().unwrap().unwrap();
+
+    // Baseline: with `field` present it must still parse.
+    apache_avro::from_value::<WinterRawAvroAlert>(&value).expect("baseline should parse");
+
+    // Drop `field` from the nested candidate record.
+    if let Value::Record(top) = &mut value {
+        let candidate = top
+            .iter_mut()
+            .find(|(k, _)| k == "candidate")
+            .map(|(_, v)| v)
+            .expect("candidate field");
+        if let Value::Record(fields) = candidate {
+            let before = fields.len();
+            fields.retain(|(k, _)| k != "field");
+            assert_eq!(before - 1, fields.len(), "expected to drop `field`");
+        } else {
+            panic!("candidate is not a record");
+        }
+    } else {
+        panic!("alert is not a record");
+    }
+
+    let alert: WinterRawAvroAlert =
+        apache_avro::from_value(&value).expect("candidate missing `field` should still parse");
+    assert_eq!(alert.candidate.field, 0, "absent `field` defaults to 0");
+}
+
 #[tokio::test]
 async fn test_process_winter_alert() {
     let mut alert_worker = winter_alert_worker().await;
