@@ -848,7 +848,7 @@ pub async fn consumer(
         .await
         .inspect_err(as_error!("failed to connect to redis"))?;
 
-    let mut total = 0;
+    let mut total: u64 = 0;
     // start timer
     let start = std::time::Instant::now();
 
@@ -858,7 +858,7 @@ pub async fn consumer(
     // even when idle between nights.
     const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let mut last_heartbeat = std::time::Instant::now();
-    let mut total_at_last_heartbeat = 0;
+    let mut total_at_last_heartbeat: u64 = 0;
 
     debug!("Starting Kafka consumer loop...");
 
