@@ -727,6 +727,13 @@ impl FilterWorker for ZtfFilterWorker {
                 )
                 .await?;
 
+                // If we have output documents, we need to process them
+                // and create filter results for each document (which contain annotations)
+                // however, if the array is empty, there's nothing to do
+                if out_documents.is_empty() {
+                    continue;
+                }
+
                 info!(
                     "{}/{} ZTF alerts with programid {} passed filter {}",
                     out_documents.len(),
@@ -734,13 +741,6 @@ impl FilterWorker for ZtfFilterWorker {
                     programid,
                     filter.id,
                 );
-
-                // If we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
-                // however, if the array is empty, there's nothing to do
-                if out_documents.is_empty() {
-                    continue;
-                }
 
                 let now_ts = chrono::Utc::now().timestamp_millis() as f64;
 
