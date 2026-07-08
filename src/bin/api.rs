@@ -113,7 +113,10 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::stats::get_kafka_stats)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
-                    .service(routes::babamul::tokens::delete_token),
+                    .service(routes::babamul::tokens::delete_token)
+                    .service(routes::babamul::llm::post_llm_filter)
+                    .service(routes::babamul::llm::put_groq_key)
+                    .service(routes::babamul::llm::delete_groq_key),
             )
         }
 

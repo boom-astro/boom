@@ -569,6 +569,13 @@ pub struct BabamulConfig {
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
+    /// Default Groq API key used for natural-language filter generation when a
+    /// user has not saved their own key. Set via BOOM_BABAMUL__GROQ_API_KEY.
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+    /// Groq model used for natural-language filter generation.
+    #[serde(default = "default_groq_model")]
+    pub groq_model: String,
 }
 
 impl Default for BabamulConfig {
@@ -578,6 +585,8 @@ impl Default for BabamulConfig {
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
+            groq_api_key: None,
+            groq_model: default_groq_model(),
         }
     }
 }
@@ -588,6 +597,10 @@ fn default_babamul_retention_days() -> u32 {
 
 fn default_password_reset_cooldown_minutes() -> u32 {
     15
+}
+
+fn default_groq_model() -> String {
+    "llama-3.3-70b-versatile".to_string()
 }
 
 #[derive(Deserialize, Debug, Clone)]
