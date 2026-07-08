@@ -259,10 +259,13 @@ pub trait AlertProducer {
                     topic_name,
                 );
             }
-            // The topic and data directory are inconsistent. Delete the topic
-            // to start fresh:
-            warn!("recreating topic {}", topic_name);
-            delete_topic(&self.server_url(), &topic_name).await?;
+            // The topic and data directory are inconsistent.
+            // NOTE: We intentionally skip delete_topic here because Kafka
+            // deletes topics asynchronously, causing a race condition where
+            // initialize_topic later sees a ghost topic with 0 partitions.
+            // Instead, we let initialize_topic handle it after downloading.
+            // warn!("recreating topic {}", topic_name);
+            // delete_topic(&self.server_url(), &topic_name).await?;
         }
 
         match self.download_alerts_from_archive().await {
