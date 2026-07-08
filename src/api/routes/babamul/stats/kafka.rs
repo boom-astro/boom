@@ -34,6 +34,14 @@ pub struct KafkaTopicStat {
     pub retention_days: u32,
 }
 
+/// Realtime alert metrics from OTel: survey name, current alert count, and timestamp when gathered.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RealtimeAlertMetrics {
+    pub survey: String,
+    pub n_alerts: u32,
+    pub gathered_at: i64, // unix timestamp in seconds
+}
+
 /// List Babamul Kafka topics with their current message counts.
 ///
 /// Returns all `babamul.*` topics with the number of messages currently
