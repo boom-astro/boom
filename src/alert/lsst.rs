@@ -1318,6 +1318,7 @@ impl AlertWorker for LsstAlertWorker {
         let dec = candidate.dia_source.dec;
 
         let ss_source = avro_alert.ss_source.take();
+        let ss_source_present = ss_source.is_some();
         let designation = ss_source.as_ref().and_then(|s| s.designation.clone());
 
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
@@ -1409,7 +1410,7 @@ impl AlertWorker for LsstAlertWorker {
         // The designation is only known once a diaSource is linked to an ssObject; keep it
         // current on the aux doc independent of whichever branch above ran, and regardless of
         // any ZTF cross-match (an LSST-only or ZTF-only ssObject is a normal outcome).
-        if ss_object_id.is_some() {
+        if ss_source_present {
             self.alert_aux_collection
                 .update_one(
                     doc! { "_id": &object_id },
