@@ -7,6 +7,19 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use std::env;
 use tracing::instrument;
 
+const CUTOUT_CHANNELS: usize = 3; // science, template, difference
+const CUTOUT_HEIGHT: usize = 63;
+const CUTOUT_WIDTH: usize = 63;
+
+fn cutout_to_hw_array(cutout: &[f32]) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
+    // `prepare_triplet` returns a flattened cutout in row-major order (H, then W).
+    // Rebuild the 2D view explicitly as (height, width) before placing it in NCHW.
+    Ok(Array::from_shape_vec(
+        (CUTOUT_HEIGHT, CUTOUT_WIDTH),
+        cutout.to_vec(),
+    )?)
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum ModelError {
     #[error("failed to access document field")]
@@ -92,11 +105,14 @@ pub trait Model {
     fn new(path: &str) -> Result<Self, ModelError>
     where
         Self: Sized;
+
+    /// Build NCHW triplet tensors (N, CUTOUT_CHANNELS, CUTOUT_HEIGHT, CUTOUT_WIDTH) from the cutouts.
     #[instrument(skip_all, err)]
     fn get_triplet(
         alert_cutouts: &[&AlertCutout],
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        let mut triplets = Array::zeros((alert_cutouts.len(), 63, 63, 3));
+        let n = alert_cutouts.len();
+        let mut triplets = Array::zeros((n, CUTOUT_CHANNELS, CUTOUT_HEIGHT, CUTOUT_WIDTH));
         for i in 0..alert_cutouts.len() {
             let (cutout_science, cutout_template, cutout_difference) =
                 prepare_triplet(alert_cutouts[i])?;
@@ -104,38 +120,46 @@ pub trait Model {
                 .iter()
                 .enumerate()
             {
-                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
-                let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
+                let mut slice = triplets.slice_mut(ndarray::s![i, j, .., ..]);
+                let cutout_array = cutout_to_hw_array(cutout)?;
                 slice.assign(&cutout_array);
             }
         }
         Ok(triplets)
     }
 
-    /// Build triplets for all valid cutouts and return the original indices kept.
-    /// Invalid cutouts are skipped.
+    /// Build NCHW triplet tensors (N, CUTOUT_CHANNELS, CUTOUT_HEIGHT, CUTOUT_WIDTH) for all valid cutouts and
+    /// return the original indices kept. Invalid cutouts are skipped.
     fn get_triplet_indexed(
         alert_cutouts: &[&AlertCutout],
     ) -> Result<(Vec<usize>, Array<f32, Dim<[usize; 4]>>), ModelError> {
         let mut kept_indices: Vec<usize> = Vec::new();
-        let mut kept_triplets: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = Vec::new();
+        let mut kept_triplets: Vec<[Vec<f32>; CUTOUT_CHANNELS]> = Vec::new();
 
         for (idx, cutout) in alert_cutouts.iter().enumerate() {
             if let Ok((science, template, difference)) = prepare_triplet(cutout) {
                 kept_indices.push(idx);
-                kept_triplets.push((science.to_vec(), template.to_vec(), difference.to_vec()));
+                kept_triplets.push([science, template, difference]);
             }
         }
 
         if kept_indices.is_empty() {
-            return Ok((kept_indices, Array::zeros((0, 63, 63, 3))));
+            return Ok((
+                kept_indices,
+                Array::zeros((0, CUTOUT_CHANNELS, CUTOUT_HEIGHT, CUTOUT_WIDTH)),
+            ));
         }
 
-        let mut triplets = Array::zeros((kept_indices.len(), 63, 63, 3));
-        for (i, (science, template, difference)) in kept_triplets.into_iter().enumerate() {
-            for (j, cutout) in [science, template, difference].iter().enumerate() {
-                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
-                let cutout_array = Array::from_shape_vec((63, 63), cutout.clone())?;
+        let mut triplets = Array::zeros((
+            kept_indices.len(),
+            CUTOUT_CHANNELS,
+            CUTOUT_HEIGHT,
+            CUTOUT_WIDTH,
+        ));
+        for (i, triplet) in kept_triplets.into_iter().enumerate() {
+            for (j, cutout) in triplet.iter().enumerate() {
+                let mut slice = triplets.slice_mut(ndarray::s![i, j, .., ..]);
+                let cutout_array = cutout_to_hw_array(cutout)?;
                 slice.assign(&cutout_array);
             }
         }
