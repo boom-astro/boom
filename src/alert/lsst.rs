@@ -1409,11 +1409,14 @@ impl AlertWorker for LsstAlertWorker {
         // The designation is only known once a diaSource is linked to an ssObject; keep it
         // current on the aux doc independent of whichever branch above ran, and regardless of
         // any ZTF cross-match (an LSST-only or ZTF-only ssObject is a normal outcome).
-        if let Some(designation) = &designation {
+        if ss_object_id.is_some() {
             self.alert_aux_collection
                 .update_one(
                     doc! { "_id": &object_id },
-                    doc! { "$set": { "designation": designation } },
+                    match &designation {
+                        Some(designation) => doc! { "$set": { "designation": designation } },
+                        None => doc! { "$unset": { "designation": "" } },
+                    },
                 )
                 .await
                 .inspect_err(as_error!())?;
@@ -1683,12 +1686,18 @@ mod tests {
             ("eclBeta".to_string(), Value::Double(20.0)),
             ("galLon".to_string(), Value::Double(30.0)),
             ("galLat".to_string(), Value::Double(40.0)),
-            ("elongation".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "elongation".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
             (
                 "phaseAngle".to_string(),
                 Value::Union(1, Box::new(Value::Float(12.5))),
             ),
-            ("topoRange".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "topoRange".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
             (
                 "topoRangeRate".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
@@ -1709,8 +1718,14 @@ mod tests {
                 "ephDec".to_string(),
                 Value::Union(1, Box::new(Value::Double(5.0))),
             ),
-            ("ephVmag".to_string(), Value::Union(0, Box::new(Value::Null))),
-            ("ephRate".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "ephVmag".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephRate".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
             (
                 "ephRateRa".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
@@ -1719,7 +1734,10 @@ mod tests {
                 "ephRateDec".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
             ),
-            ("ephOffset".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "ephOffset".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
             (
                 "ephOffsetRa".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
@@ -1736,9 +1754,18 @@ mod tests {
                 "ephOffsetCrossTrack".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
             ),
-            ("helio_x".to_string(), Value::Union(0, Box::new(Value::Null))),
-            ("helio_y".to_string(), Value::Union(0, Box::new(Value::Null))),
-            ("helio_z".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "helio_x".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_y".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_z".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
             (
                 "helio_vx".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
@@ -1758,9 +1785,18 @@ mod tests {
             ("topo_x".to_string(), Value::Union(0, Box::new(Value::Null))),
             ("topo_y".to_string(), Value::Union(0, Box::new(Value::Null))),
             ("topo_z".to_string(), Value::Union(0, Box::new(Value::Null))),
-            ("topo_vx".to_string(), Value::Union(0, Box::new(Value::Null))),
-            ("topo_vy".to_string(), Value::Union(0, Box::new(Value::Null))),
-            ("topo_vz".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "topo_vx".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "topo_vy".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "topo_vz".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
             (
                 "topo_vtot".to_string(),
                 Value::Union(0, Box::new(Value::Null)),
