@@ -41,11 +41,13 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let token = create_admin_token(&database).await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::filters::post_filter)
                 .service(routes::filters::get_filter),

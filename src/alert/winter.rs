@@ -726,7 +726,15 @@ impl AlertWorker for WinterAlertWorker {
                 .await
                 .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Winter,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
             let obj = WinterObject {
                 object_id: object_id.clone(),
                 prv_candidates,
