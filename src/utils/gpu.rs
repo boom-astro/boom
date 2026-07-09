@@ -1,8 +1,13 @@
+// The entire module body is gated on `target_os = "linux"` (nvidia-smi / CUDA
+// validation only runs there), so these imports are only used on Linux. Gate
+// them too, otherwise non-Linux dev builds warn about unused imports.
+#[cfg(target_os = "linux")]
 use crate::{
     conf::AppConfig,
     enrichment::models::{BtsBotModel, Model},
     utils::enums::Survey,
 };
+#[cfg(target_os = "linux")]
 use tracing::info;
 
 #[cfg(target_os = "linux")]
