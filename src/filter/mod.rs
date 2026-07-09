@@ -1,5 +1,6 @@
 mod base;
 mod lsst;
+mod winter;
 mod ztf;
 
 pub use base::{
@@ -13,5 +14,6 @@ pub use base::{
 use base::{parse_programid_candid_tuple, update_aliases_index_multiple, Classification};
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed};
 pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
+pub use winter::{build_winter_filter_pipeline, WinterFilterWorker};
 use ztf::{build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed};
 pub use ztf::{build_ztf_filter_pipeline, ZtfFilterWorker};

@@ -3,15 +3,10 @@ name: Deploy to production
 concurrency: production
 
 on:
-  release:
-    types:
-      - published
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      version:
-        description: "Version to deploy (tag, branch, or commit SHA)"
+      tag_ref:
         required: true
-        default: "main"
         type: string
 
 jobs:
@@ -20,34 +15,148 @@ jobs:
     runs-on:
       - self-hosted
       - production
+    permissions:
+      contents: read
     env:
       ENVIRONMENT: production
       DOMAIN: ${{ vars.DOMAIN }}
+      BOOM_CONFIG_PATH: ${{ vars.BOOM_CONFIG_PATH }}
+      BOOM_DATA_MONGODB_PATH: ${{ vars.BOOM_DATA_MONGODB_PATH }}
+      BOOM_DATA_VALKEY_PATH: ${{ vars.BOOM_DATA_VALKEY_PATH }}
+      BOOM_DATA_KAFKA_PATH: ${{ vars.BOOM_DATA_KAFKA_PATH }}
+      BOOM_CUTOUTS_MONGO_VOLUME: ${{ vars.BOOM_DATA_CUTOUTS_MONGODB_PATH }}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
+      # Toggles babamul on without editing config.yaml — compose injects it into
+      # the api and schedulers. Other babamul settings (webapp_url, etc.) and the
+      # admin username/email are read from config/prod/<deployment>/config.yaml
+      # and don't need env vars here.
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
-      BOOM_BABAMUL__WEBAPP_URL: ${{ vars.BOOM_BABAMUL__WEBAPP_URL }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
-      BOOM_API__AUTH__ADMIN_USERNAME: ${{ vars.BOOM_API__AUTH__ADMIN_USERNAME }}
-      BOOM_API__AUTH__ADMIN_EMAIL: ${{ vars.BOOM_API__AUTH__ADMIN_EMAIL }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
+      # Frontend (web app) settings — WEBAPP_DOMAIN sets the host the SPA is
+      # served on (compose defaults to DOMAIN); the VITE_* values are baked into
+      # the static bundle at build time by frontend/Dockerfile. All optional;
+      # compose supplies defaults when the GitHub vars are unset.
+      WEBAPP_DOMAIN: ${{ vars.WEBAPP_DOMAIN }}
+      VITE_PRERELEASE_MODE: ${{ vars.VITE_PRERELEASE_MODE }}
+      VITE_PUBLIC_POSTHOG_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
+      VITE_PUBLIC_POSTHOG_HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
       STACK_NAME: boom
       PROMETHEUS_USER: ${{ vars.PROMETHEUS_USER }}
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
       KAFKA_ADMIN_PASSWORD: ${{ secrets.KAFKA_ADMIN_PASSWORD }}
       KAFKA_READONLY_PASSWORD: ${{ secrets.KAFKA_READONLY_PASSWORD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      GRAFANA_ADMIN_USER: ${{ vars.GRAFANA_ADMIN_USER }}
+      GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+      BOOM_KAFKA__CONSUMER__LSST__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__LSST__GROUP_ID }}
+      BOOM_KAFKA__CONSUMER__LSST__USERNAME: ${{ vars.BOOM_KAFKA__CONSUMER__LSST__USERNAME }}
+      BOOM_KAFKA__CONSUMER__LSST__PASSWORD: ${{ secrets.BOOM_KAFKA__CONSUMER__LSST__PASSWORD }}
+      BOOM_KAFKA__CONSUMER__ZTF__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
+      BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID }}
+      # WINTER shares ZTF's broker (same host, unauthenticated/no SASL), so its
+      # consumer reuses BOOM_KAFKA__CONSUMER__ZTF__SERVER rather than a duplicate
+      # variable. The group ID is its own value: it's the lever that lets a
+      # broker-reachable attacker join our group and steal/skip partitions, so
+      # it's injected here rather than committed to this public repo (the
+      # config.yaml winter value is an example, not the real prod group). The
+      # real fix is broker-side ACLs on WINTER's end.
+      BOOM_KAFKA__CONSUMER__WINTER__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
+      BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID }}
+      KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST }}
       SMTP_SERVER: ${{ vars.SMTP_SERVER }}
-      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}
+      BOOM_API_RATE_LIMIT_AVERAGE: ${{ vars.BOOM_API_RATE_LIMIT_AVERAGE }}
+      BOOM_API_RATE_LIMIT_BURST: ${{ vars.BOOM_API_RATE_LIMIT_BURST }}
+      BOOM_API_RATE_LIMIT_PERIOD: ${{ vars.BOOM_API_RATE_LIMIT_PERIOD }}
+      # GPU is OFF on this machine for now. Set explicitly because the model
+      # loader (src/enrichment/models/base.rs) reads BOOM_GPU__ENABLED straight
+      # from the environment and DEFAULTS TO TRUE when unset — config.gpu.enabled
+      # does not gate it. To switch GPUs on later, set the BOOM_GPU__ENABLED
+      # (true) and BOOM_GPU__DEVICE_IDS (e.g. "0,1") repository variables; no code
+      # change needed. Keep config/prod/<deployment>/config.yaml's gpu.enabled in
+      # sync so the scheduler's GPU-pool path agrees with the model loader.
+      BOOM_GPU__ENABLED: ${{ vars.BOOM_GPU__ENABLED || 'false' }}
+      BOOM_GPU__DEVICE_IDS: ${{ vars.BOOM_GPU__DEVICE_IDS || '0' }}
     steps:
+      - name: Require maintain/admin actor permissions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const username = context.actor;
+
+            let permission;
+            let roleName;
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner,
+                repo,
+                username,
+              });
+              permission = data.permission;
+              roleName = data.role_name;
+            } catch (error) {
+              core.setFailed(
+                `Unable to determine permissions for actor '${username}'. ${error.message}`
+              );
+              return;
+            }
+
+            const allowedRoles = new Set(["maintain", "admin"]);
+            const normalizedRole = (roleName || "").toLowerCase();
+            const normalizedPermission = (permission || "").toLowerCase();
+
+            const isAllowed =
+              allowedRoles.has(normalizedRole) || normalizedPermission === "admin";
+
+            if (!isAllowed) {
+              core.setFailed(
+                `Actor '${username}' has repository role '${normalizedRole || normalizedPermission || "unknown"}'. ` +
+                  "Deploy requires 'maintain' or 'admin'."
+              );
+              return;
+            }
+
+            core.info(
+              `Actor '${username}' authorized with role '${normalizedRole || normalizedPermission}'.`
+            );
+      - name: Validate and normalize deployment tag
+        id: deploy_tag
+        env:
+          RAW_DEPLOY_REF: ${{ inputs.tag_ref }}
+        run: |
+          set -euo pipefail
+
+          ref="$RAW_DEPLOY_REF"
+          if [[ "$ref" == refs/tags/v* ]]; then
+            tag_ref="$ref"
+            tag_name="${ref#refs/tags/}"
+          elif [[ "$ref" == v* ]]; then
+            tag_name="$ref"
+            tag_ref="refs/tags/$tag_name"
+          else
+            echo "Only tags matching 'v*' are allowed for deployment. Received: $ref" >&2
+            exit 1
+          fi
+
+          echo "Deploying tag: $tag_name"
+          echo "tag_ref=$tag_ref" >> "$GITHUB_OUTPUT"
+      - name: Setup Git LFS
+        run: |
+          git lfs install
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.inputs.version || github.ref }}
+          ref: ${{ steps.deploy_tag.outputs.tag_ref }}
+          lfs: true
       - run: >
           docker compose --profile prod
           -f docker-compose.yaml build
       - run: >
           docker compose --profile prod
-          -f docker-compose.yaml up -d
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml up -d

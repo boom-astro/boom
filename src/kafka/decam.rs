@@ -26,11 +26,18 @@ impl AlertConsumer for DecamAlertConsumer {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         vec![format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)]
     }
+    fn topic_patterns(&self) -> Vec<String> {
+        // Regex matching any date and program id — librdkafka auto-joins new
+        // daily topics. (DECAM only produces programid1 today, but this keeps
+        // the consumer from being pinned to it.) librdkafka's matcher is
+        // POSIX/Thompson-NFA: use `[0-9]+`, not `\d`.
+        vec![r"^decam_[0-9]+_programid[0-9]+$".to_string()]
+    }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
-    fn survey(&self) -> Survey {
-        Survey::Decam
+    fn survey(&self) -> &'static str {
+        Survey::Decam.as_str()
     }
 }
 

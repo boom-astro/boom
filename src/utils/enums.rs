@@ -13,19 +13,32 @@ pub enum Survey {
     Lsst,
     #[serde(alias = "decam")]
     Decam,
+    #[serde(alias = "winter", alias = "wntr")]
+    Winter,
 }
 
 impl Survey {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Survey::Ztf => "ZTF",
+            Survey::Lsst => "LSST",
+            Survey::Decam => "DECAM",
+            Survey::Winter => "WINTER",
+        }
+    }
+
     /// Observatory UTC offset in hours.
     ///
-    /// - ZTF   (Palomar, CA, USA)       : UTC−7
-    /// - LSST  (Cerro Pachón, CL, Chile): UTC−3
-    /// - DECam (Cerro Tololo, CL, Chile): UTC−4
+    /// - ZTF    (Palomar, CA, USA)       : UTC−7
+    /// - LSST   (Cerro Pachón, CL, Chile): UTC−3
+    /// - DECam  (Cerro Tololo, CL, Chile): UTC−4
+    /// - WINTER (Palomar, CA, USA)       : UTC−7
     pub fn observatory_utc_offset(&self) -> f64 {
         match self {
             Survey::Ztf => -7.0,
             Survey::Lsst => -3.0,
             Survey::Decam => -4.0,
+            Survey::Winter => -7.0,
         }
     }
 
@@ -68,11 +81,7 @@ impl Survey {
 
 impl std::fmt::Display for Survey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Survey::Ztf => write!(f, "ZTF"),
-            Survey::Lsst => write!(f, "LSST"),
-            Survey::Decam => write!(f, "DECAM"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

@@ -133,6 +133,10 @@ services:
     command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public"]
     environment:
       RUST_LOG: error,boom=debug
+      # No OTel collector runs in the throughput compose. Skipping SDK init
+      # avoids the per-span/per-metric OTel work and the failing exporter
+      # retries to localhost:4317 — both showed up as ~8% throughput loss.
+      OTEL_SDK_DISABLED: "true"
     depends_on:
       producer:
         condition: service_completed_successfully
@@ -155,7 +159,8 @@ services:
       - /app/scheduler
       - ztf
     environment:
-      RUST_LOG: error,boom=debug
+      RUST_LOG: error,boom=debug,scheduler=info
+      OTEL_SDK_DISABLED: "true"
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
     networks:

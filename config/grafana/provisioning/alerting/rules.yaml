@@ -1,0 +1,304 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: infrastructure
+    folder: boom
+    interval: 1m
+    rules:
+      - uid: disk-fills-in-24h
+        title: Disk will fill within 24 hours
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 21600  # 6h linear regression window
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # Returns predicted available bytes 24h from now (negative => projected to fill).
+              # The threshold step below fires when this is < 0.
+              expr: |
+                predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 24*60*60)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.instance }} {{ $labels.mountpoint }} is projected to fill within 24h'
+          description: 'predict_linear over 6h shows the filesystem hitting 0 bytes within the next 24h.'
+
+      - uid: container-restart-flapping
+        title: Container is flapping (restarted >3 times in 1h)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                sum by (name) (changes(container_start_time_seconds{name!=""}[1h])) > 3
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Container {{ $labels.name }} restarted >3 times in the last hour'
+          description: 'The container start_time has rolled over more than 3 times in the past hour, indicating crash-loop behavior.'
+
+      - uid: cpu-throttling
+        title: Container is being CPU-throttled
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                sum by (name) (rate(container_cpu_cfs_throttled_seconds_total{name!=""}[5m]))
+                  / clamp_min(sum by (name) (rate(container_cpu_cfs_periods_total{name!=""}[5m])), 1)
+                  > 0.25
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.name }} CPU-throttled >25% of CFS periods'
+          description: 'The container is being throttled against its CPU quota; consider raising the cpu limit or rebalancing the workload.'
+
+      - uid: otel-collector-dropped-metrics
+        title: OTel Collector is dropping metric points
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) > 0
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: OTel Collector exporter is failing to send metric points
+          description: 'Check otel-collector logs and the downstream Prometheus OTLP receiver for errors.'
+
+  - orgId: 1
+    name: pipeline
+    folder: boom
+    interval: 1m
+    rules:
+      - uid: valkey-queue-backed-up
+        title: Valkey alert queue is not draining
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # min_over_time means the queue's low-water mark over the last 30m is
+              # still above the threshold: even at its emptiest it never drained,
+              # i.e. a consumer is absent or can't keep up. A transient spike that
+              # drains within 30m won't trip this.
+              expr: |
+                max by (key) (min_over_time(redis_key_size{key=~".*_queue.*"}[30m])) > 50000
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # The 30m min_over_time window already requires the queue to have stayed
+        # backed up continuously, so a short "for" is enough to debounce.
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Valkey queue {{ $labels.key }} stayed above 50k for 30m (not draining)'
+          description: 'A worker pool is not draining its upstream queue. Check scheduler logs/traces and worker health.'
+
+      - uid: scheduler-worker-pool-degraded
+        title: Scheduler worker pool degraded (dead workers)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # Number of configured workers that are not currently live, per
+              # survey/worker_type. > 0 means workers have crashed and the
+              # supervisor has not (or can no longer) respawn them. The `for`
+              # below is longer than the supervisor's restart backoff so a
+              # transient crash that self-heals does not page.
+              expr: |
+                max by (survey, worker_type) (scheduler_worker_total)
+                  - max by (survey, worker_type) (scheduler_worker_live)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.survey }} {{ $labels.worker_type }} worker pool degraded'
+          description: 'One or more {{ $labels.survey }} {{ $labels.worker_type }} workers have died and not been respawned (the scheduler''s supervisor gives up after repeated rapid crashes). The corresponding Valkey queue will stop draining. Check scheduler logs for "{{ $labels.worker_type }} worker failed" and the attached error.'

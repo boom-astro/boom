@@ -48,7 +48,12 @@ services:
       BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_CUTOUTS_STORAGE__PASSWORD:?BOOM_CUTOUTS_STORAGE__PASSWORD must be set}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo-cutouts
-  consumer-ztf:
+  # Prod splits the ZTF consumer by programid (see docker-compose.yaml).
+  consumer-ztf-public:
+    <<: *mongo_cutouts_env
+  consumer-ztf-partnership:
+    <<: *mongo_cutouts_env
+  consumer-ztf-caltech:
     <<: *mongo_cutouts_env
   consumer-lsst:
     <<: *mongo_cutouts_env
@@ -56,3 +61,10 @@ services:
     <<: *mongo_cutouts_env
   scheduler-lsst:
     <<: *mongo_cutouts_env
+  # Dev-only single ZTF consumer, defined in docker-compose.override.yaml.
+  # Gated to the dev profile so it isn't an orphan (no image/build) in prod,
+  # where the *-public/-partnership/-caltech services above apply instead.
+  consumer-ztf:
+    <<: *mongo_cutouts_env
+    profiles:
+      - dev

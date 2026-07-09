@@ -32,8 +32,9 @@ BOOM runs on macOS and Linux. You'll need:
 - `Docker` and `docker compose`: used to run the database, cache/task queue, and `Kafka`;
 - `Rust` (a systems programming language) `>= 1.55.0`;
 - `tar`: used to extract archived alerts for testing purposes.
+- `git-lfs`: required to pull the large files (e.g. ML models) tracked via Git LFS.
 - `libssl`, `libsasl2`: required for some Rust crates that depend on native libraries for secure connections and authentication.
-- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX Runtime setup](#linux-onnx-runtime-setup) section below for details.
+- On Linux, you **need** to set `ORT_DYLIB_PATH` to a local ONNX Runtime shared library before running BOOM (for both CPU-only and GPU builds). See the [Linux ONNX runtime setup](#onnx-runtime-setup) section below for details.
 
 **Note:** On Linux, BOOM will fail to start with a clear error if `ORT_DYLIB_PATH` is not set. This is a hard requirement due to ONNX Runtime's dynamic loading behavior. The process will not run without it.
 
@@ -57,7 +58,7 @@ BOOM runs on macOS and Linux. You'll need:
   sudo apt install build-essential pkg-config libssl-dev libsasl2-dev -y
   ```
 
-- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [GPU inference](#gpu-inference-linux) subsection below for more details.
+- If you want to use GPU hardware acceleration for enrichment, you need to have the appropriate NVIDIA drivers installed, along with CUDA and cuDNN. See the [Linux GPU inference](#gpu-inference) subsection below for more details.
 
 ## Setup
 
@@ -72,8 +73,7 @@ by copying it to `.env`:
 cp .env.example .env
 ```
 
-**Note:** Do not commit `.env` to Git or use the example values
-in production.
+**Note:** Do not commit `.env` to Git or use the example values in production.
 
 #### Email configuration (for notifications)
 
@@ -222,7 +222,7 @@ docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3-external.yaml
 
 ### Linux only
 
-#### ONNX runtime setup {#linux-onnx-runtime-setup}
+#### ONNX runtime setup
 
 On Linux, BOOM links to the ONNX Runtime shared library at process start via `ORT_DYLIB_PATH`. This is required regardless of whether you use GPU inference or not. You must set this variable before running any BOOM binary natively.
 
@@ -245,7 +245,7 @@ ls .venv/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.*
 
 You must export `ORT_DYLIB_PATH` in each shell where you run BOOM natively on Linux, or add it once to your shell's configuration file (e.g., `.bashrc` or `.zshrc`) and source it.
 
-#### GPU inference {#gpu-inference-linux}
+#### GPU inference
 
 For GPU inference on Linux you need, in addition to the above:
 
@@ -278,35 +278,39 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
 
 ### Start services for local development
 
-Bring up the local dev stack with:
+1. Install lfs and pull the large files:
+    ```bash
+    git lfs install
+    git lfs pull
+    ```
+2. Bring up the local dev stack:
 
-```bash
-make dev
-```
+- With docker, using the provided `docker-compose.yaml` and `docker-compose.override.yaml` files:
+  ```bash
+  make dev
+  ```
+  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, the
+  `frontend` web app with the Vite dev server (hot module reload), plus the supporting Docker services
+  they need.
+  This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
+  To check if the containers are running and healthy, run `docker ps`.
 
-This starts `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
-the supporting Docker services they need.
+  Once the stack is up:
+  - The web app is served at [http://localhost:5173](http://localhost:5173)
+  - The API is served at [http://localhost:4000](http://localhost:4000)
 
-## Running BOOM
+  The frontend lives in [`frontend/`](frontend/) (React + TypeScript + Vite). Editing files under
+  `frontend/src` triggers a live rebuild in the container — no restart needed. The dev server proxies
+  `/api` requests to the `api` service, so the full stack works locally out of the box.
 
-### Local dev pipeline (recommended)
+  **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
-For local development, use:
+3. Delete existing ZTF Kafka topics and produce alerts for testing:
 
-```bash
-make dev
-```
-
-This brings up the hot-reloading API, ZTF consumer, and ZTF scheduler.
-
-To produce alerts for testing, run:
-
-```bash
-make delete-produce-ztf
-```
-
-If you change the producer date or program, make sure the consumer is reading
-the same topic date/program combination.
+    ```bash
+    make delete-produce-ztf
+    ```
+   _If you change the producer date or program, make sure the consumer is reading the same topic date/program combination._
 
 ### Alert Production (not required for production use)
 
@@ -368,6 +372,38 @@ For example, to process ZTF alerts, you can run:
 cargo run --release --bin scheduler ztf
 ```
 
+## Running BOOM in production
+
+### Using Docker
+
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, `scheduler-lsst`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
+
+Bring up the full prod stack with:
+
+```bash
+docker compose --profile prod up -d
+```
+
+Or start individual services:
+
+```bash
+docker compose --profile prod up -d consumer-ztf scheduler-ztf
+```
+
+To run a one-shot operational task, override the service's command with `docker compose run`. This is typically used for database migrations such as `migrate_fp_flux` and `migrate_snr`:
+
+```bash
+docker compose --profile prod run --rm scheduler-ztf /app/migrate_fp_flux
+docker compose --profile prod run --rm scheduler-ztf /app/migrate_snr
+```
+
+To tail logs or open a shell in a running container:
+
+```bash
+docker compose logs -f scheduler-ztf
+docker compose exec scheduler-ztf /bin/bash
+```
+
 The scheduler prints a variety of messages to your terminal, e.g.:
 
 - At the start you should see a bunch of `Processed alert with candid: <alert_candid>, queueing for classification` messages, which means that the fake alert worker is picking up on the alerts, processed them, and is queueing them for classification.
@@ -413,6 +449,40 @@ As a more complete example, the following sets the logging level to DEBUG, with 
 
 ```bash
 RUST_LOG=debug,ort=warn BOOM_SPAN_EVENTS=new,close cargo run --bin scheduler -- ztf
+```
+
+## Running Benchmark
+
+This repository includes a benchmark to test the system and get an idea of the time it takes to process a certain number of alerts.
+This benchmark uses Docker to build the image and run the benchmark.
+The steps to run the benchmark are as follows:
+
+### Download Data
+
+Download the ZTF alerts auxiliary data dump
+
+```
+mkdir -p ./data/alerts
+```
+
+**For Linux:**
+```
+wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+```
+**For macOS:**
+```
+curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+```
+
+Download the NED catalog for crossmatching.
+```
+uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+```
+
+### Start Benchmark
+Using Docker:
+```bash
+uv run tests/throughput/run.py
 ```
 
 ## Contributing

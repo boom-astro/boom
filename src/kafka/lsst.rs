@@ -29,10 +29,15 @@ impl AlertConsumer for LsstAlertConsumer {
             vec!["lsst-alerts-v11".to_string()]
         }
     }
+    fn topic_patterns(&self) -> Vec<String> {
+        // LSST uses a single static topic (not date-partitioned), so there is
+        // nothing to roll over: subscribe to the literal topic name.
+        self.topic_names(0)
+    }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
     }
-    fn survey(&self) -> Survey {
-        Survey::Lsst
+    fn survey(&self) -> &'static str {
+        Survey::Lsst.as_str()
     }
 }
