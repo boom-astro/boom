@@ -86,7 +86,7 @@ services:
       - boom
     restart: always
   broker:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: broker
     networks:
       - boom
@@ -143,7 +143,7 @@ services:
       # Uncomment to enable TLS passthrough (requires EXTERNAL listener to use SSL)
       # - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.tls.passthrough=true
   kafka-acl-init:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: kafka-acl-init
     depends_on:
       broker:
