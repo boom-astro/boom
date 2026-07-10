@@ -1,4 +1,4 @@
-ARG KAFKA_VERSION=4.1.1
+ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
 FROM rust:slim-trixie AS base
@@ -53,7 +53,7 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 FROM debian:trixie-slim AS app
 
-ARG KAFKA_VERSION=4.1.1
+ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
 RUN apt-get update && \
