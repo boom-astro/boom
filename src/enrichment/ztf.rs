@@ -501,7 +501,16 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             let (properties, all_bands_properties, programid, _lightcurve) =
-                self.get_alert_properties(&alert).await?;
+                match self.get_alert_properties(&alert).await {
+                    Ok(v) => v,
+                    // No usable photometry: skip this alert (leave it un-enriched)
+                    // rather than aborting the whole batch, so the queue keeps draining.
+                    Err(EnrichmentWorkerError::EmptyLightcurve(candid)) => {
+                        warn!("skipping candid {candid}: empty lightcurve after filtering");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
             work_items.push(AlertWork {
                 candid,
                 programid,
@@ -552,7 +561,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }
         }
 
-        let _ = self.client.bulk_write(updates).await?.modified_count;
+        // `updates` can be empty if every alert in the batch was skipped (e.g.
+        // all had empty lightcurves); bulk_write rejects an empty operation list.
+        if !updates.is_empty() {
+            let _ = self.client.bulk_write(updates).await?.modified_count;
+        }
 
         // Send to Babamul for batch processing
         if let Some(babamul) = self.babamul.as_ref() {
@@ -633,6 +646,15 @@ impl ZtfEnrichmentWorker {
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
+
+        // Alerts whose photometry filters down to nothing (common when
+        // reprocessing historical alerts that predate the SNR fields) cannot be
+        // meaningfully enriched: peak/faintest/rate features are undefined and
+        // the ML metadata would be computed from placeholder zeros. Signal the
+        // caller to skip this alert rather than write garbage scores.
+        if lightcurve.is_empty() {
+            return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
+        }
 
         prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
