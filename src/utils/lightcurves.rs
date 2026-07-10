@@ -263,8 +263,8 @@ pub fn analyze_photometry(
         );
     }
 
-    let stationary = sorted_photometry.len() > 0
-        && (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
+    // The empty case returned early above, so the slice is non-empty here.
+    let stationary = (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
 
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;

@@ -509,7 +509,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     // rather than aborting the whole batch, so the queue keeps draining.
                     // Detail is logged per-candid at DEBUG; the per-batch total is
                     // summarized at WARN below to avoid flooding logs at backfill scale.
-                    Err(EnrichmentWorkerError::EmptyLightcurve(candid)) => {
+                    Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
                         skipped_empty_lightcurve += 1;
                         debug!(candid, "skipping alert: empty lightcurve after filtering");
                         continue;
@@ -661,6 +661,8 @@ impl ZtfEnrichmentWorker {
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
+        prepare_photometry(&mut lightcurve);
+
         // Alerts whose photometry filters down to nothing (common when
         // reprocessing historical alerts that predate the SNR fields) cannot be
         // meaningfully enriched: peak/faintest/rate features are undefined and
@@ -669,8 +671,6 @@ impl ZtfEnrichmentWorker {
         if lightcurve.is_empty() {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
-
-        prepare_photometry(&mut lightcurve);
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
         // Compute multisurvey photstats (including LSST if available, other surveys can be added later)
