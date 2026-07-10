@@ -79,6 +79,12 @@ pub struct WinterCandidate {
     pub progname: String,
     pub programid: i32,
     pub isdiffpos: bool,
+    // Not all upstream WINTER packets carry `field`; tolerate its absence
+    // rather than failing the whole alert (missing field `field`). It stays a
+    // plain `i32` (not `Option`) because the writer schema types it as a bare
+    // `int` when present — an `Option` would make the deserializer demand a
+    // union and reject that. `#[serde(default)]` fills 0 only when it's absent.
+    #[serde(default)]
     pub field: i32,
     pub ra: f64,
     pub dec: f64,
@@ -194,6 +200,7 @@ pub struct WinterPrvCandidate {
     pub jd: f64,
     pub fid: i32,
     pub isdiffpos: bool,
+    #[serde(default)]
     pub fieldid: i32,
     pub ra: f64,
     pub dec: f64,

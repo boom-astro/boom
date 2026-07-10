@@ -316,3 +316,177 @@ async fn test_produce_when_data_does_not_exist() {
         .unwrap();
     assert_eq!(message_count, limit);
 }
+
+/// Poll the redis output queue until every payload in `expected` has been seen,
+/// returning the full set of payloads observed (so callers can also assert that
+/// unwanted payloads are absent). Panics on timeout.
+async fn wait_for_payloads(
+    con: &mut redis::aio::MultiplexedConnection,
+    queue: &str,
+    expected: &[String],
+    timeout: std::time::Duration,
+) -> std::collections::HashSet<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let items: Vec<Vec<u8>> = con.lrange(queue, 0, -1).await.unwrap_or_default();
+        let seen: std::collections::HashSet<String> = items
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .collect();
+        if expected.iter().all(|e| seen.contains(e)) {
+            return seen;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for {expected:?}; saw {seen:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+// End-to-end test of the self-rollover consumer: the long-running consumer
+// subscribes to a topic *pattern* and must (a) skip an old retained topic's
+// messages on cold start, (b) consume the current day's messages, and (c)
+// auto-discover and consume the *next* day's topic created while it is running,
+// all without restarting. Requires a local Kafka broker + redis.
+//
+// The consumer runs on its own dedicated OS thread + runtime (see below) so its
+// blocking rdkafka `poll` can't starve this test driver's runtime.
+#[tokio::test]
+async fn test_consumer_rolls_over_and_skips_old() {
+    use boom::conf::{AppConfig, KafkaConsumerConfig};
+    use boom::kafka::{consumer, delete_topic, initialize_topic};
+    use rdkafka::config::ClientConfig;
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+    use std::time::Duration;
+
+    let server = "localhost:9092";
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // Unique, regex-safe prefix so the pattern matches only this test's topics.
+    let prefix = format!("rollovertest{now_ms}");
+    let pattern = format!("^{prefix}_[0-9]+$");
+    let output_queue = format!("{prefix}_queue");
+    let group_id = format!("{prefix}_group");
+    let topic_day1 = format!("{prefix}_20260628");
+    let topic_day2 = format!("{prefix}_20260629");
+
+    let app_config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let mut con = app_config.build_redis().await.unwrap();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", server)
+        .create()
+        .unwrap();
+
+    // Day 1 topic: one stale message (10 days old, lowest offset) then fresh ones.
+    initialize_topic(server, &topic_day1, 1).await.unwrap();
+    let stale_ms = now_ms - 10 * 24 * 60 * 60 * 1000;
+    producer
+        .send(
+            FutureRecord::to(topic_day1.as_str())
+                .payload("stale")
+                .key("k")
+                .timestamp(stale_ms),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    let fresh: Vec<String> = (0..5).map(|i| format!("fresh-{i}")).collect();
+    for p in &fresh {
+        producer
+            .send(
+                FutureRecord::to(topic_day1.as_str())
+                    .payload(p.as_str())
+                    .key("k")
+                    .timestamp(now_ms),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Start the long-running consumer. Cold-start timestamp = 1h ago, so the
+    // 10-day-old "stale" message is skipped while the fresh ones are consumed.
+    let cold_start_ts = now_ms / 1000 - 3600;
+    let kafka_cfg = KafkaConsumerConfig {
+        server: server.to_string(),
+        group_id,
+        schema_registry: None,
+        schema_github_fallback_url: None,
+        username: None,
+        password: None,
+    };
+    // Run the consumer on its own OS thread + runtime so its blocking rdkafka
+    // `poll` doesn't starve the test driver's runtime (this mirrors prod, where
+    // each consumer process owns its runtime). Dropping the runtime when the
+    // stop signal arrives aborts the consumer.
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let consumer_thread = {
+        let config = app_config.clone();
+        let oq = output_queue.clone();
+        let pat = pattern.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.spawn(async move {
+                let _ = consumer(
+                    "0",
+                    vec![pat],
+                    &oq,
+                    0,
+                    cold_start_ts,
+                    &config,
+                    &kafka_cfg,
+                    false,
+                    "WINTER",
+                )
+                .await;
+            });
+            let _ = stop_rx.recv();
+            // Force shutdown rather than waiting on the consumer's in-flight
+            // blocking `poll` (its worker thread is abandoned and dies with the
+            // process).
+            rt.shutdown_timeout(std::time::Duration::from_secs(1));
+        })
+    };
+
+    // (b)+(a): fresh messages arrive; the stale one is skipped.
+    let seen = wait_for_payloads(&mut con, &output_queue, &fresh, Duration::from_secs(40)).await;
+    assert!(
+        !seen.contains("stale"),
+        "stale (pre-window) message should have been skipped"
+    );
+
+    // (c): create the next day's topic *after* the consumer is running and
+    // produce to it. The consumer must auto-discover it without a restart.
+    initialize_topic(server, &topic_day2, 1).await.unwrap();
+    let newday: Vec<String> = (0..4).map(|i| format!("newday-{i}")).collect();
+    for p in &newday {
+        producer
+            .send(
+                FutureRecord::to(topic_day2.as_str())
+                    .payload(p.as_str())
+                    .key("k")
+                    .timestamp(now_ms),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+
+    let expected: Vec<String> = fresh.iter().chain(newday.iter()).cloned().collect();
+    let seen = wait_for_payloads(&mut con, &output_queue, &expected, Duration::from_secs(60)).await;
+    assert!(
+        !seen.contains("stale"),
+        "stale message must never be consumed"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = consumer_thread.join();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+    let _ = delete_topic(server, &topic_day1).await;
+    let _ = delete_topic(server, &topic_day2).await;
+}

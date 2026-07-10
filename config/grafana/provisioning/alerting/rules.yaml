@@ -200,7 +200,7 @@ groups:
     interval: 1m
     rules:
       - uid: valkey-queue-backed-up
-        title: Valkey alert queue is growing unboundedly
+        title: Valkey alert queue is not draining
         condition: C
         data:
           - refId: A
@@ -210,8 +210,12 @@ groups:
             datasourceUid: prometheus
             model:
               refId: A
+              # min_over_time means the queue's low-water mark over the last 30m is
+              # still above the threshold: even at its emptiest it never drained,
+              # i.e. a consumer is absent or can't keep up. A transient spike that
+              # drains within 30m won't trip this.
               expr: |
-                max by (key) (redis_key_size{key=~".*_queue.*"}) > 50000
+                max by (key) (min_over_time(redis_key_size{key=~".*_queue.*"}[30m])) > 50000
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -236,13 +240,15 @@ groups:
                     params: []
                     type: last
                   type: query
-        for: 15m
+        # The 30m min_over_time window already requires the queue to have stayed
+        # backed up continuously, so a short "for" is enough to debounce.
+        for: 5m
         noDataState: OK
         execErrState: Error
         labels:
           severity: warning
         annotations:
-          summary: 'Valkey queue {{ $labels.key }} > 50k entries'
+          summary: 'Valkey queue {{ $labels.key }} stayed above 50k for 30m (not draining)'
           description: 'A worker pool is not draining its upstream queue. Check scheduler logs/traces and worker health.'
 
       - uid: scheduler-worker-pool-degraded
