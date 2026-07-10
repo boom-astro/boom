@@ -50,7 +50,7 @@ jobs:
         echo "Installed ONNX Runtime at: ${ORT_LIB}"
     - name: Install Kafka CLI tools
       run: |
-        KAFKA_VERSION=4.1.2
+        KAFKA_VERSION=4.3.1
         SCALA_VERSION=2.13
         sudo apt-get update && sudo apt-get install -y --no-install-recommends \
             libsasl2-2 ca-certificates openjdk-25-jre-headless curl bash tar
