@@ -19,7 +19,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -494,6 +494,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
 
+        let batch_size = alerts.len();
+        let mut skipped_empty_lightcurve = 0usize;
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         for alert in alerts {
             let candid = alert.candid;
@@ -505,8 +507,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     Ok(v) => v,
                     // No usable photometry: skip this alert (leave it un-enriched)
                     // rather than aborting the whole batch, so the queue keeps draining.
+                    // Detail is logged per-candid at DEBUG; the per-batch total is
+                    // summarized at WARN below to avoid flooding logs at backfill scale.
                     Err(EnrichmentWorkerError::EmptyLightcurve(candid)) => {
-                        warn!("skipping candid {candid}: empty lightcurve after filtering");
+                        skipped_empty_lightcurve += 1;
+                        debug!(candid, "skipping alert: empty lightcurve after filtering");
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -519,6 +524,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 cutouts,
                 alert,
             });
+        }
+
+        if skipped_empty_lightcurve > 0 {
+            warn!(
+                skipped = skipped_empty_lightcurve,
+                enriched = work_items.len(),
+                batch_size,
+                "skipped alerts with empty lightcurves during enrichment"
+            );
         }
 
         // Run ML classification using shared models

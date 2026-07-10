@@ -605,6 +605,30 @@ mod tests {
     }
 
     #[test]
+    fn test_analyze_photometry_empty_lightcurve() {
+        // Regression: an empty lightcurve must not panic (it previously indexed
+        // `[0]` unconditionally). It should return neutral defaults with no
+        // per-band properties and stationary = false.
+        let data: Vec<PhotometryMag> = Vec::new();
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
+
+        assert_eq!(stationary, false);
+        assert!(results.g.is_none());
+        assert!(results.r.is_none());
+        assert!(results.i.is_none());
+        assert!(results.z.is_none());
+        assert!(results.y.is_none());
+        assert!(results.u.is_none());
+        assert!(results.j.is_none());
+        assert!(results.h.is_none());
+        assert!(results.k.is_none());
+        assert_eq!(all_bands_props.peak_jd, 0.0);
+        assert_eq!(all_bands_props.peak_mag, 0.0);
+        assert_eq!(all_bands_props.first_jd, 0.0);
+        assert_eq!(all_bands_props.last_jd, 0.0);
+    }
+
+    #[test]
     fn test_analyze_photometry() {
         // Test case 1: only one data point
         let mut data = vec![PhotometryMag {
