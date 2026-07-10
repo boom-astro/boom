@@ -21,8 +21,8 @@ pub use winter::{
     WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
 };
 pub use ztf::{
-    deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist,
-    PrvCandidate, ZtfAlert, ZtfAlertWorker, ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject,
-    ZtfPrvCandidate, ZtfRawAvroAlert, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE,
-    ZTF_LSST_XMATCH_RADIUS,
+    deserialize_candidate, deserialize_cutout_as_bytes, deserialize_fp_hists,
+    deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist, PrvCandidate,
+    ZtfAlert, ZtfAlertWorker, ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject, ZtfPrvCandidate,
+    ZtfRawAvroAlert, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS,
 };
