@@ -19,9 +19,28 @@ pub async fn create_index(
     index: Document,
     unique: bool,
 ) -> Result<(), CreateIndexError> {
+    create_partial_index(collection, index, unique, None).await
+}
+
+#[instrument(
+    skip(collection, index, partial_filter),
+    fields(collection = collection.name()),
+    err
+)]
+pub async fn create_partial_index(
+    collection: &Collection<Document>,
+    index: Document,
+    unique: bool,
+    partial_filter: Option<Document>,
+) -> Result<(), CreateIndexError> {
     let index_model = IndexModel::builder()
         .keys(index)
-        .options(IndexOptions::builder().unique(unique).build())
+        .options(
+            IndexOptions::builder()
+                .unique(unique)
+                .partial_filter_expression(partial_filter)
+                .build(),
+        )
         .build();
     collection.create_index(index_model).await?;
     Ok(())
@@ -115,7 +134,13 @@ pub async fn initialize_survey_indexes(
         let index = doc! {
             "designation": 1,
         };
-        create_index(&alerts_aux_collection, index, false).await?;
+        create_partial_index(
+            &alerts_aux_collection,
+            index,
+            false,
+            Some(doc! { "designation": { "$exists": true } }),
+        )
+        .await?;
     }
 
     Ok(())
