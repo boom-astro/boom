@@ -1127,13 +1127,18 @@ impl LsstAlertWorker {
         fp_hists: &Vec<LsstForcedPhot>,
         survey_matches: &Option<LsstAliases>,
         now: f64,
+        designation: Option<&str>,
     ) -> Result<(), AlertError> {
+        let mut lc_set_update = doc! {
+            "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+            "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
+        };
+        if let Some(designation) = designation {
+            lc_set_update.insert("designation", designation);
+        }
         Self::db_only_aux_update(
             object_id,
-            doc! {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
-            },
+            lc_set_update,
             survey_matches,
             now,
             &self.alert_aux_collection,
@@ -1150,6 +1155,7 @@ impl LsstAlertWorker {
         survey_matches: &Option<LsstAliases>,
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
+        designation: Option<&str>,
     ) -> Result<(), AlertError> {
         let current_version = existing_alert_aux.version;
 
@@ -1169,15 +1175,28 @@ impl LsstAlertWorker {
         Self::add_to_push_aux_update(&mut push_updates, "prv_candidates", prepared_prv_candidates);
         Self::add_to_push_aux_update(&mut push_updates, "fp_hists", prepared_fp_hists);
 
-        Self::finalize_aux_update(
-            object_id,
-            push_updates,
-            survey_matches,
-            current_version,
-            now,
-            &self.alert_aux_collection,
-        )
-        .await
+        // finalize_aux_update always builds a document shaped like `{ "$set": {...} }`
+        // (see make_filter_doc_aux_update in base.rs), so it's safe to reach in and add
+        // the LSST-only `designation` field to that same $set instead of doing a second
+        // update_one just for it.
+        let mut update_doc =
+            Self::make_filter_doc_aux_update(push_updates, survey_matches, current_version, now);
+        if let Some(designation) = designation {
+            update_doc
+                .get_document_mut("$set")
+                .expect("make_filter_doc_aux_update always includes $set")
+                .insert("designation", designation);
+        }
+
+        let find_doc = Self::make_find_doc_aux_update(object_id, current_version);
+        let update_result = self
+            .alert_aux_collection
+            .update_one(find_doc, update_doc)
+            .await?;
+        if update_result.matched_count == 0 {
+            return Err(AlertError::ConcurrentAuxUpdate(object_id.to_string()));
+        }
+        Ok(())
     }
 
     #[instrument(
@@ -1192,6 +1211,7 @@ impl LsstAlertWorker {
         survey_matches: &Option<LsstAliases>,
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
+        designation: Option<&str>,
     ) -> Result<(), AlertError> {
         match self
             .update_aux_inner(
@@ -1201,6 +1221,7 @@ impl LsstAlertWorker {
                 survey_matches,
                 now,
                 existing_alert_aux,
+                designation,
             )
             .await
         {
@@ -1212,8 +1233,15 @@ impl LsstAlertWorker {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
                     _ => error!(error = %e),
                 }
-                self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
-                    .await
+                self.update_aux_fallback(
+                    object_id,
+                    prv_candidates,
+                    fp_hists,
+                    survey_matches,
+                    now,
+                    designation,
+                )
+                .await
             }
         }
     }
@@ -1359,7 +1387,14 @@ impl AlertWorker for LsstAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
+        // The designation is only known once a diaSource is linked to an ssObject; keep it
+        // current independent of whichever branch below runs, and regardless of any ZTF
+        // cross-match (an LSST-only or ZTF-only ssObject is a normal outcome). Fold the $set
+        // into the aux insert/update itself rather than issuing a separate round trip: a fresh
+        // insert already carries the designation, and an existing-doc update can carry it in
+        // the same `$set` as the lightcurve/aliases update.
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+        let existing_alert_aux_present = existing_alert_aux.is_some();
 
         if let Some(existing) = existing_alert_aux {
             self.update_aux(
@@ -1369,6 +1404,7 @@ impl AlertWorker for LsstAlertWorker {
                 &survey_matches,
                 now,
                 &existing,
+                designation.as_deref(),
             )
             .await
             .inspect_err(as_error!())?;
@@ -1399,6 +1435,7 @@ impl AlertWorker for LsstAlertWorker {
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
+                    designation.as_deref(),
                 )
                 .await
                 .inspect_err(as_error!())?;
@@ -1407,17 +1444,15 @@ impl AlertWorker for LsstAlertWorker {
             }
         }
 
-        // The designation is only known once a diaSource is linked to an ssObject; keep it
-        // current on the aux doc independent of whichever branch above ran, and regardless of
-        // any ZTF cross-match (an LSST-only or ZTF-only ssObject is a normal outcome).
-        if ss_source_present {
+        // The only case not covered by the folded-in `$set` above is clearing a designation
+        // (no designation on this alert's ss_source) on a doc that already existed before this
+        // alert: a fresh insert never has the field set in the first place, so there's nothing
+        // to unset there.
+        if ss_source_present && designation.is_none() && existing_alert_aux_present {
             self.alert_aux_collection
                 .update_one(
                     doc! { "_id": &object_id },
-                    match &designation {
-                        Some(designation) => doc! { "$set": { "designation": designation } },
-                        None => doc! { "$unset": { "designation": "" } },
-                    },
+                    doc! { "$unset": { "designation": "" } },
                 )
                 .await
                 .inspect_err(as_error!())?;
@@ -1508,6 +1543,7 @@ mod tests {
                 survey_matches,
                 Time::now().to_jd(),
                 existing_aux,
+                None,
             )
             .await
             .unwrap();
@@ -1882,6 +1918,68 @@ mod tests {
 
         let second = worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(second, ProcessAlertStatus::Exists(candid));
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_folds_in_designation() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, _bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        let existing_aux = load_aux(&worker, &object_id).await;
+        worker
+            .update_aux(
+                &object_id,
+                &vec![],
+                &vec![],
+                &Some(LsstAliases::default()),
+                Time::now().to_jd(),
+                &existing_aux,
+                Some("2008 AB"),
+            )
+            .await
+            .unwrap();
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(aux.designation, Some("2008 AB".to_string()));
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_fallback_folds_in_designation() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, _bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        worker
+            .update_aux_fallback(
+                &object_id,
+                &vec![],
+                &vec![],
+                &Some(LsstAliases::default()),
+                Time::now().to_jd(),
+                Some("2010 XY"),
+            )
+            .await
+            .unwrap();
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(aux.designation, Some("2010 XY".to_string()));
 
         drop_alert_from_collections(candid, &Survey::Lsst)
             .await
