@@ -284,6 +284,38 @@ crossmatch:
         discovery_jd: 1
         internal_names: 1
       max_results: 3
+    - catalog: DESI_DR1
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    - catalog: LS_DR10_PHOTOZ
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z_phot"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        ra_err: 1
+        dec_err: 1
+        z_phot: 1
+        z_phot_err: 1
+        photo_z_type: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0
@@ -436,6 +468,38 @@ crossmatch:
         discovery_jd: 1
         internal_names: 1
       max_results: 3
+    - catalog: DESI_DR1
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    - catalog: LS_DR10_PHOTOZ
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z_phot"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        ra_err: 1
+        dec_err: 1
+        z_phot: 1
+        z_phot_err: 1
+        photo_z_type: 1
   decam: []
   winter:
     - catalog: PS1_DR1
